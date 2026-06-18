@@ -1,0 +1,90 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://agentic-portfolio/base-template/harness.schema.json",
+  "title": "SDLC harness config",
+  "description": "Project policy the SDLC engines read from planning/harness.json. The harness (engine code) carries the mechanism; this file carries the project facts (validation commands, whether a UI-test stage exists, ports/routes). If the file is absent, the engines fall back to the spec's `## Validation Commands` section and disable the UI-test stage — they ship no stack defaults. MVP shape: validation.checks[] + uiTest.enabled (and its enabled-only fields).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Editor hint pointing at this schema (e.g. ../.claude/workflows/harness.schema.json)."
+    },
+    "stack": {
+      "type": "string",
+      "description": "Informational label only (e.g. 'rust', 'python-fastapi', 'nextjs'). Not consumed by engine logic."
+    },
+    "_comment": {
+      "type": "string",
+      "description": "Free-form note for humans editing the file. Ignored by the engines."
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The always-run validation suite the Test stage executes, in order.",
+      "properties": {
+        "checks": {
+          "type": "array",
+          "description": "Ordered checks run top-to-bottom in the Test stage.",
+          "items": { "$ref": "#/$defs/check" }
+        }
+      },
+      "required": ["checks"]
+    },
+    "uiTest": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional UI smoke-test stage. enabled:false makes the whole stage a no-op (verdict SKIPPED). The remaining fields are read only when enabled.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the pipeline runs a UI smoke check. Non-web projects set false."
+        },
+        "devServerCommand": {
+          "type": "string",
+          "description": "Command that starts the dev server (e.g. 'npm run dev')."
+        },
+        "readySignal": {
+          "type": "string",
+          "description": "Substring in the dev-server output that signals readiness (e.g. 'Ready in')."
+        },
+        "port": {
+          "type": "integer",
+          "description": "Base port the dev server listens on. In parallel task runs the engine uses port + taskNumber (hardcoded behavior)."
+        },
+        "routes": {
+          "type": "array",
+          "description": "Routes to smoke-check once the server is ready (e.g. ['/', '/about']).",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["enabled"]
+    }
+  },
+  "required": ["validation", "uiTest"],
+  "$defs": {
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Short identifier for the check (e.g. 'fmt', 'clippy', 'test')."
+        },
+        "command": {
+          "type": "string",
+          "description": "Shell command to run (e.g. 'cargo test')."
+        },
+        "purpose": {
+          "type": "string",
+          "description": "One-line description of what the check gates. For the authoritative test command, say so here."
+        },
+        "gates": {
+          "type": "boolean",
+          "description": "Whether this check's failure blocks the review verdict. Replaces the old hardcoded 'jest is authoritative' rule."
+        }
+      },
+      "required": ["name", "command", "purpose", "gates"]
+    }
+  }
+}
