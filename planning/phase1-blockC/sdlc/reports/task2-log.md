@@ -5,7 +5,7 @@
 **Verdict:** PASS
 **Date:** 2026-06-19
 **Branch:** phase1-blockc-task2
-**Applied:** false
+**Applied:** true
 
 ---
 

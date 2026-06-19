@@ -6,8 +6,8 @@ description: Current state and progress tracker for markdown-engine-validator.
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-19 — phase1-blockC in progress (Tasks 1–1 complete; Tasks 2–7 next — add validate module with serde structs and per-file validation functions)
-**Current focus:** phase1-blockC — Task 2: Define and validate the `ModuleMeta` struct (`FileKind::LearnModuleJson`)
+**Last updated:** 2026-06-19 — phase1-blockC in progress (Tasks 1–2 complete; Tasks 3–7 next — define and validate path metadata.json struct)
+**Current focus:** phase1-blockC — Task 3: Define and validate path `metadata.json` (`FileKind::PathMetadataJson`)
 
 ---
 
@@ -30,7 +30,7 @@ description: Current state and progress tracker for markdown-engine-validator.
 | Block | What | Status | Notes |
 |---|---|---|---|
 | Block B | Crawl & classify | Done | `walkdir` + `Corpus`; filename conventions; 16 tests (7 unit + 7 integration + 2 smoke) |
-| Block C | Frontmatter & JSON struct validation | In progress | Task 1 done: `src/meta.rs` module added; re-exported from `lib.rs`; read/parse failures surface as error-severity Diagnostics. Tasks 2–7 remain. |
+| Block C | Frontmatter & JSON struct validation | In progress | Tasks 1–2 done: `src/meta.rs` module added; `ModuleMeta` struct with full field/enum/format validation for `LearnModuleJson` files. Tasks 3–7 remain. |
 | Block D | Cross-file integrity | Not started | Anchor-slice, pair existence, ID coherence, callout types |
 | Block E | pt-BR parity & reporter polish | Not started | Locale mirror checks; ANSI + `--json` output |
 
