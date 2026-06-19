@@ -1,0 +1,146 @@
+{
+  "blockId": "phase1-blockB",
+  "additiveFiles": [],
+  "tasks": {
+    "1": {
+      "num": 1,
+      "title": "Define classification + corpus types",
+      "dependsOn": [],
+      "evidence": "First task; creates the new crawl module and core types with no upstream consumers.",
+      "filesCreated": [
+        "src/crawl.rs"
+      ],
+      "filesModified": []
+    },
+    "2": {
+      "num": 2,
+      "title": "Classify files during the walk",
+      "dependsOn": [
+        1
+      ],
+      "evidence": "'classify(root, entry_path) -> Option<ContentFile>' and 'crawl(root) -> (Corpus, Vec<Diagnostic>)' consume the FileKind/ContentFile/Corpus/Locale types defined in Task 1.",
+      "filesCreated": [],
+      "filesModified": [
+        "src/crawl.rs"
+      ]
+    },
+    "3": {
+      "num": 3,
+      "title": "Port the filename-convention checks (validateFileName)",
+      "dependsOn": [
+        1,
+        2
+      ],
+      "evidence": "'Implement check_filename(&ContentFile) -> Vec<Diagnostic>' uses ContentFile from Task 1; and 'check_filename is referenced here but defined in Step 3; stub it' in Task 2's crawl driver — Task 3 replaces that stub.",
+      "filesCreated": [],
+      "filesModified": [
+        "src/crawl.rs"
+      ]
+    },
+    "4": {
+      "num": 4,
+      "title": "Build the corpus and wire into validate()",
+      "dependsOn": [
+        1,
+        2,
+        3
+      ],
+      "evidence": "'pub use crawl::{ContentFile, Corpus, FileKind, Locale, crawl};' and 'let (_corpus, diagnostics) = crawl::crawl(root);' — wires the module and calls the crawl entry from Task 2, the types from Task 1, with filename diags from Task 3.",
+      "filesCreated": [],
+      "filesModified": [
+        "src/lib.rs"
+      ]
+    },
+    "5": {
+      "num": 5,
+      "title": "Tests against fixtures",
+      "dependsOn": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "evidence": "'use mev::{crawl, FileKind, Locale};' and asserts on diags from check_filename and on corpus.get(...) — exercises Tasks 1-3 via the public API re-exported in Task 4; also 'empty_tree_produces_clean_report must still pass now that validate crawls'.",
+      "filesCreated": [
+        "tests/crawl.rs"
+      ],
+      "filesModified": []
+    },
+    "6": {
+      "num": 6,
+      "title": "Validate",
+      "dependsOn": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "evidence": "'Run the full gate suite' (cargo fmt/clippy/test/build) validates the complete implementation and the tests added in Task 5.",
+      "filesCreated": [],
+      "filesModified": []
+    }
+  },
+  "waves": [
+    {
+      "label": "Wave 1",
+      "parallel": false,
+      "tasks": [
+        1
+      ],
+      "mergeOrder": [
+        1
+      ]
+    },
+    {
+      "label": "Wave 2",
+      "parallel": false,
+      "tasks": [
+        2
+      ],
+      "mergeOrder": [
+        2
+      ]
+    },
+    {
+      "label": "Wave 3",
+      "parallel": false,
+      "tasks": [
+        3
+      ],
+      "mergeOrder": [
+        3
+      ]
+    },
+    {
+      "label": "Wave 4",
+      "parallel": false,
+      "tasks": [
+        4
+      ],
+      "mergeOrder": [
+        4
+      ]
+    },
+    {
+      "label": "Wave 5",
+      "parallel": false,
+      "tasks": [
+        5
+      ],
+      "mergeOrder": [
+        5
+      ]
+    },
+    {
+      "label": "Wave 6",
+      "parallel": false,
+      "tasks": [
+        6
+      ],
+      "mergeOrder": [
+        6
+      ]
+    }
+  ]
+}
