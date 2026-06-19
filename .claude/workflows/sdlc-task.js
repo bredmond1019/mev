@@ -1751,13 +1751,7 @@ STEP 2 — Write the workflow report: ${worktreePath}/${workflowReport}
   |---|---|---|---|---|
   ${stageTable}
 
-  ## Token Metrics
-  Per-stage attribution (promptTok = injected input estimate; outTok = output-token delta,
-  "—" when no +Nk budget target was set; filesReadKb = stage-reported ingestion estimate).
-
-  | Stage | Model | promptTok | outTok | filesReadKb |
-  |---|---|---|---|---|
-  ${metricsTable}
+  (The ## Token Metrics section is appended verbatim in STEP 2b — do NOT write it here.)
 
   ## Key Findings
   [what was implemented, notable decisions, content/bilingual-parity notes]
@@ -1774,6 +1768,20 @@ STEP 2 — Write the workflow report: ${worktreePath}/${workflowReport}
   ## Next Step
   To merge this task into main and apply status/log updates:
     /clean-worktree ${branchName}
+
+STEP 2b — Append the Token Metrics section to the report you just wrote. Run this EXACTLY as written
+(a literal heredoc append). Do NOT retype, summarize, reorder, or omit the table — it is
+machine-generated telemetry and must land verbatim:
+  cd ${worktreePath} && cat >> ${workflowReport} <<'METRICS_EOF'
+
+## Token Metrics
+Per-stage attribution (promptTok = injected input estimate; outTok = output-token delta, "—" when no
++Nk budget target was set; filesReadKb = stage-reported ingestion estimate).
+
+| Stage | Model | promptTok | outTok | filesReadKb |
+|---|---|---|---|---|
+${metricsTable}
+METRICS_EOF
 
 STEP 3 — Commit the report files. Never use git add -A or git add .
 
