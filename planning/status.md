@@ -6,8 +6,8 @@ description: Current state and progress tracker for markdown-engine-validator.
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-18 — Phase 0 Block A complete (Rust scaffold)
-**Current focus:** Phase 1, Block B — Crawl & classify
+**Last updated:** 2026-06-19 — phase1-blockC in progress (Tasks 1–1 complete; Tasks 2–7 next — add validate module with serde structs and per-file validation functions)
+**Current focus:** phase1-blockC — Task 2: Define and validate the `ModuleMeta` struct (`FileKind::LearnModuleJson`)
 
 ---
 
@@ -29,8 +29,8 @@ description: Current state and progress tracker for markdown-engine-validator.
 ### Phase 1 — Core: learn-module validation
 | Block | What | Status | Notes |
 |---|---|---|---|
-| Block B | Crawl & classify | Not started | `walkdir` + `Corpus`; filename conventions |
-| Block C | Frontmatter & JSON struct validation | Not started | Strict `ModuleMeta`; path metadata; MDX YAML |
+| Block B | Crawl & classify | Done | `walkdir` + `Corpus`; filename conventions; 16 tests (7 unit + 7 integration + 2 smoke) |
+| Block C | Frontmatter & JSON struct validation | In progress | Task 1 done: `src/meta.rs` module added; re-exported from `lib.rs`; read/parse failures surface as error-severity Diagnostics. Tasks 2–7 remain. |
 | Block D | Cross-file integrity | Not started | Anchor-slice, pair existence, ID coherence, callout types |
 | Block E | pt-BR parity & reporter polish | Not started | Locale mirror checks; ANSI + `--json` output |
 
