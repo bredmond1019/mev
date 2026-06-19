@@ -6,8 +6,8 @@ description: Current state and progress tracker for markdown-engine-validator.
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-18 — Project initialized
-**Current focus:** Phase 0, Block A — Foundation setup
+**Last updated:** 2026-06-18 — Phase 0 Block A complete (Rust scaffold)
+**Current focus:** Phase 1, Block B — Crawl & classify
 
 ---
 
@@ -24,9 +24,15 @@ description: Current state and progress tracker for markdown-engine-validator.
 ### Phase 0 — Foundation
 | Block | What | Status | Notes |
 |---|---|---|---|
-| Block A | Foundation setup | Not started | Initialize codebase and planning infrastructure |
+| Block A | Foundation setup | Done | Rust binary `mev` scaffolded; clap CLI + `Diagnostic`/`Report` lib; smoke tests; all four harness gates green |
 
-<!-- Add one sub-table per phase as the plan is fleshed out. -->
+### Phase 1 — Core: learn-module validation
+| Block | What | Status | Notes |
+|---|---|---|---|
+| Block B | Crawl & classify | Not started | `walkdir` + `Corpus`; filename conventions |
+| Block C | Frontmatter & JSON struct validation | Not started | Strict `ModuleMeta`; path metadata; MDX YAML |
+| Block D | Cross-file integrity | Not started | Anchor-slice, pair existence, ID coherence, callout types |
+| Block E | pt-BR parity & reporter polish | Not started | Locale mirror checks; ANSI + `--json` output |
 
 ---
 

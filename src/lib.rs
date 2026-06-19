@@ -1,0 +1,90 @@
+//! markdown-engine-validator (`mev`) — parses, validates, and (later) compiles the
+//! MDX/Markdown content for learn-agentic-ai.com.
+//!
+//! Phase 0 lays the testable skeleton: a CLI surface and the `Diagnostic` type that every
+//! future check emits. Validation logic arrives in Phase 1 (see `planning/master-plan.md`).
+
+use std::path::PathBuf;
+
+/// Severity of a single finding. Drives the process exit code: any [`Severity::Error`]
+/// makes a run fail (exit 1); warnings are reported but do not fail the run (exit 0).
+/// This mirrors the error/warning split of the site's existing `scripts/validate-content.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+/// A single validation finding. Every check produces `Diagnostic`s; only the reporter prints.
+#[derive(Debug, Clone)]
+pub struct Diagnostic {
+    pub severity: Severity,
+    /// File the finding concerns, relative to the content root where possible.
+    pub file: PathBuf,
+    /// In-file locator (e.g. `metadata.title`, `sections[2].id`) or empty for whole-file findings.
+    pub locator: String,
+    pub message: String,
+}
+
+impl Diagnostic {
+    pub fn error(
+        file: impl Into<PathBuf>,
+        locator: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            severity: Severity::Error,
+            file: file.into(),
+            locator: locator.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn warning(
+        file: impl Into<PathBuf>,
+        locator: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            severity: Severity::Warning,
+            file: file.into(),
+            locator: locator.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// Outcome of a validation run: the findings plus whether they constitute a failure.
+#[derive(Debug, Default)]
+pub struct Report {
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl Report {
+    pub fn error_count(&self) -> usize {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .count()
+    }
+
+    pub fn warning_count(&self) -> usize {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .count()
+    }
+
+    /// A run fails when any error-severity diagnostic is present.
+    pub fn is_failure(&self) -> bool {
+        self.error_count() > 0
+    }
+}
+
+/// Validate the content tree rooted at `root`.
+///
+/// Phase 0 stub: crawl/parse/validate land in Phase 1. For now this returns an empty (passing)
+/// report so the CLI surface and exit-code plumbing are real and testable.
+pub fn validate(_root: &std::path::Path) -> anyhow::Result<Report> {
+    Ok(Report::default())
+}

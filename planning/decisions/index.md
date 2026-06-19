@@ -13,6 +13,8 @@ file**, append-only — never edit a settled decision; supersede it with a new o
 
 - [D1: Initial OKF Scaffold](./D1-initial-okf.md) — Project initialized on the standard OKF
   documentation structure.
+- [D2: Validator Scope & Sequence](./D2-scope-and-sequence.md) — Learn-first, validator-first,
+  superset of the site's `validate-content.ts`; summaries/transcripts out of scope.
 
 <!-- Add a row per decision as they are made. Record new ones with /log-decision-style atomic
-     files (D2, D3, …). -->
+     files (D3, D4, …). -->
