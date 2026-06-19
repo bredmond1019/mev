@@ -1150,7 +1150,7 @@ EMOJI CHECK — Emoji prohibition (universal harness gate — always runs last):
   Files modified by THIS TASK vs main (hard FAIL if emoji found):
   cd ${worktreePath} && python3 - <<'PYEOF'
 import subprocess, re, sys, os
-EMOJI = re.compile(r'[\U0001F300-\U0001FAFF\U00002600-\U000027BF]')
+EMOJI = re.compile(r'[\\U0001F300-\\U0001FAFF\\U00002600-\\U000027BF]')
 changed = subprocess.run(['git','diff','main..HEAD','--name-only'], capture_output=True, text=True).stdout.splitlines()
 md_files = [f for f in changed if f.endswith(('.md','.mdx')) and os.path.isfile(f)]
 hits = []
