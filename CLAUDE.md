@@ -30,11 +30,21 @@ None known at initialization.
 ## Build / test / run
 
 ```bash
-# Replace with this project's actual commands.
-# <install>
-# <build>
-# <test>
-# <run>
+# install — toolchain only (Rust 1.95+); deps fetch on first build
+rustup show
+
+# build  — release binary at target/release/mev
+cargo build --release
+
+# test   — unit + integration (tests/); AUTHORITATIVE for the review verdict
+cargo test
+
+# lint/format gates (must pass before review)
+cargo fmt --check
+cargo clippy -- -D warnings
+
+# run    — validate the learn-ai content tree (defaults to ../learn-ai/content/learn)
+cargo run -- validate ../learn-ai/content/learn
 ```
 
 > The SDLC pipeline reads its validation suite from `planning/harness.json` (not from this

@@ -10,24 +10,32 @@ A Rust CLI tool that parses, validates, and compiles MDX/Markdown lessons for le
 
 ## Prerequisites
 
-<!-- What must be installed (runtime, package manager, services). -->
+- Rust 1.95+ (`rustup show`). No other runtime — dependencies fetch on first build.
+- A checkout of the `learn-ai` site as a sibling directory (the content lives there); the
+  validator points at `../learn-ai/content/learn` by default.
 
 ## Setup
 
 ```bash
-# Numbered steps from zero to running.
+git clone <this repo> && cd markdown-engine-validator
+cargo build --release    # produces target/release/mev
 ```
 
 ## Running locally
 
 ```bash
-# The exact commands from CLAUDE.md.
+# Validate the learn-ai content tree (path is optional; this is the default)
+cargo run -- validate ../learn-ai/content/learn
+# or the built binary:
+./target/release/mev validate ../learn-ai/content/learn
 ```
 
 ## Tests
 
 ```bash
-# One-liner to run the test suite.
+cargo test
+# Full gate suite (what the SDLC pipeline runs):
+cargo fmt --check && cargo clippy -- -D warnings && cargo test && cargo build --release
 ```
 
 ## Directory map
@@ -36,7 +44,9 @@ A Rust CLI tool that parses, validates, and compiles MDX/Markdown lessons for le
 markdown-engine-validator/
 ├── .claude/        ← Claude Code commands + SDLC workflow engines
 ├── planning/       ← context, status, master-plan, harness.json, decisions/, <concept>/
-└── <source dirs>
+├── src/            ← lib.rs (Diagnostic/Report core) + main.rs (clap CLI)
+├── tests/          ← integration tests + fixtures
+└── Cargo.toml
 ```
 
 ## Documentation
