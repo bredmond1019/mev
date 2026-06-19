@@ -2,7 +2,11 @@
 //! MDX/Markdown content for learn-agentic-ai.com.
 //!
 //! Phase 0 lays the testable skeleton: a CLI surface and the `Diagnostic` type that every
-//! future check emits. Validation logic arrives in Phase 1 (see `planning/master-plan.md`).
+//! future check emits. Phase 1, Block B adds content-tree crawl + classification (see
+//! `planning/master-plan.md`).
+
+mod crawl;
+pub use crawl::{ContentFile, Corpus, FileKind, Locale, crawl};
 
 use std::path::PathBuf;
 
@@ -83,8 +87,9 @@ impl Report {
 
 /// Validate the content tree rooted at `root`.
 ///
-/// Phase 0 stub: crawl/parse/validate land in Phase 1. For now this returns an empty (passing)
-/// report so the CLI surface and exit-code plumbing are real and testable.
-pub fn validate(_root: &std::path::Path) -> anyhow::Result<Report> {
-    Ok(Report::default())
+/// Block B: crawl + classify + filename conventions. Struct/cross-file checks land in C–E,
+/// each consuming the `Corpus` returned by [`crawl`].
+pub fn validate(root: &std::path::Path) -> anyhow::Result<Report> {
+    let (_corpus, diagnostics) = crawl::crawl(root);
+    Ok(Report { diagnostics })
 }
