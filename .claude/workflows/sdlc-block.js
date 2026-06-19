@@ -295,6 +295,30 @@ const PLAYWRIGHT_FIX_SCHEMA = {
 }
 
 // ================================================================
+// TOKEN TELEMETRY (Phase A — additive, no behavior change)
+//
+// Per-stage attribution of injected-prompt size and output-token delta for THIS engine's own
+// orchestration agents (preflight/analyze/write-plan/teardown/triage/merge/playwright/report).
+// `budget.spent()` is a shared pool, so outTok attributes cleanly only for the SEQUENTIAL stages
+// (preflight, analyze, merge, report); the parallel runTask fan-out is each a child /sdlc-task
+// whose OWN per-stage metrics carry the truth, so we only roll up an aggregate here. `agent`
+// stays importable for any call we deliberately want untraced.
+// ================================================================
+const metrics = []
+async function tracedAgent(prompt, opts = {}) {
+  const before = (typeof budget !== 'undefined' && budget.spent) ? budget.spent() : 0
+  const r = await agent(prompt, opts)
+  const after = (typeof budget !== 'undefined' && budget.spent) ? budget.spent() : 0
+  metrics.push({
+    label: opts.label || 'agent',
+    model: opts.model || 'session',
+    promptTokEst: Math.round(prompt.length / 4),
+    outTok: after - before > 0 ? after - before : null,
+  })
+  return r
+}
+
+// ================================================================
 // Pure helpers — waves & failure blast-radius are computed in CODE
 // ================================================================
 
@@ -372,10 +396,29 @@ const HARNESS_CONFIG_SCHEMA = {
               items: {
                 type: 'object',
                 properties: {
+                  kind:    { type: 'string', description: 'command (default) | baseline-diff | count-delta | warning-scan | forbidden-pattern-scan' },
                   name:    { type: 'string' },
                   command: { type: 'string' },
                   purpose: { type: 'string' },
-                  gates:   { type: 'boolean' }
+                  gates:   { type: 'boolean' },
+                  baselineCommand: { type: 'string', description: 'baseline-diff only' },
+                  compareKeys:     { type: 'array', items: { type: 'string' }, description: 'baseline-diff only' },
+                  countPattern:    { type: 'string', description: 'count-delta only' },
+                  failOn:          { type: 'string', description: 'count-delta only: decrease | zero-or-decrease' },
+                  warningPatterns: { type: 'array', items: { type: 'string' }, description: 'warning-scan only' },
+                  rules: {
+                    type: 'array',
+                    description: 'forbidden-pattern-scan only',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        id:               { type: 'string' },
+                        pattern:          { type: 'string' },
+                        paths:            { type: 'string' },
+                        allowlistPattern: { type: 'string' }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -400,7 +443,7 @@ const HARNESS_CONFIG_SCHEMA = {
 // Spawn the micro-loader agent and return the parsed config (or null). Wired into the Playwright
 // stage in P4; defined here so the loader path exists from P1. No stack defaults on absence.
 async function loadHarnessConfig() {
-  const result = await agent(`
+  const result = await tracedAgent(`
 You are the harness-config loader for the SDLC pipeline. Your ONLY job is to read the project's
 validation-policy file and return it as structured data. Do not run any checks or modify anything.
 
@@ -411,8 +454,11 @@ STEP 2 — Decide:
   - "__HARNESS_ABSENT__" (file missing) → present=false, omit config.
   - File printed but NOT valid JSON → present=false, notes="harness.json present but invalid JSON: <reason>".
   - File printed and valid JSON → present=true, and copy the parsed object into "config", keeping ONLY
-    these fields when present: stack; validation.checks[] ({name, command, purpose, gates});
-    uiTest ({enabled, devServerCommand, readySignal, port, routes[]}). Ignore any other fields.
+    these fields when present: stack; validation.checks[] (each: {kind, name, command, purpose, gates}
+    plus any kind-specific fields that are present — baselineCommand, compareKeys[], countPattern,
+    failOn, warningPatterns[], rules[] ({id, pattern, paths, allowlistPattern})); uiTest ({enabled,
+    devServerCommand, readySignal, port, routes[]}). Preserve kind-specific fields verbatim; ignore any
+    other fields.
 
 Return your findings using the StructuredOutput tool.
 `, { label: 'harness-config', schema: HARNESS_CONFIG_SCHEMA, model: 'haiku' })
@@ -444,7 +490,7 @@ function renderUiTestPrompt(cfg, port) {
 phase('Pre-flight')
 log('Pre-flight: verifying clean tree and committed spec...')
 
-const preflight = await agent(`
+const preflight = await tracedAgent(`
 You are the pre-flight agent for a spec-level SDLC orchestration. You run from the MAIN repo root
 (CWD = the main checkout, on main). Your job: guarantee the working tree is clean AND the spec for
 "${blockId}" is committed, so the downstream merge step (which requires a clean tree) never blocks
@@ -522,7 +568,7 @@ log(`Pre-flight OK — spec ${preflight.action}${preflight.commitHash ? ` (${pre
 phase('Analyze')
 log('Analyzing spec: scouting completed tasks and resolving the dependency graph...')
 
-const analysis = await agent(`
+const analysis = await tracedAgent(`
 You are the analysis agent for a spec-level SDLC orchestration. You run from the MAIN repo root.
 
 Spec:         ${blockId}
@@ -661,7 +707,7 @@ if (analysis.planExists && Array.isArray(analysis.waves) && analysis.waves.lengt
     waves
   }, null, 2)
 
-  await agent(`
+  await tracedAgent(`
 You run from the MAIN repo root. Write this exact JSON to ${planFile} (create parent dirs if needed)
 and commit it. Do not alter the content.
 
@@ -706,7 +752,7 @@ const outcomes = []             // { taskNum, status, branchName, worktreePath, 
 const passedBranches = []       // ready-to-merge: { taskNum, branchName, worktreePath }
 
 async function teardownBranch(branchName, worktreePath) {
-  await agent(`
+  await tracedAgent(`
 You run from the MAIN repo root. Tear down a failed-attempt worktree so retries don't accumulate.
 Run, ignoring errors:
   git worktree remove "${worktreePath}" --force 2>/dev/null || true
@@ -738,7 +784,7 @@ async function runTask(taskNum, resume = false) {
       previousFailureReasons: prevReasons
     }, null, 2)
 
-    const triage = await agent(`
+    const triage = await tracedAgent(`
 You are the failure-triage agent for a spec orchestration. A single task's /sdlc-task pipeline did
 NOT pass. /sdlc-task already ran up to 3 internal fix passes before returning, so a genuine, repeated
 acceptance-criteria failure is unlikely to be fixed by another clean-slate run.
@@ -884,7 +930,7 @@ for (let wi = 0; wi < waves.length; wi++) {
     phase(`Merge ${wi + 1}`)
     for (const p of toMerge) {
       log(`Merging task ${p.taskNum} (branch: ${p.branchName})...`)
-      const m = await agent(`
+      const m = await tracedAgent(`
 You are the merge agent. You run from the MAIN repo root (CWD = the main checkout, on main).
 Merge branch "${p.branchName}" (task ${p.taskNum}) into main using a SELECTIVE-UNION strategy.
 
@@ -981,7 +1027,7 @@ if (hasMergedTasks && harnessCfg?.uiTest?.enabled) {
   for (let attempt = 1; attempt <= MAX_PLAYWRIGHT_ATTEMPTS; attempt++) {
     log(`Playwright: attempt ${attempt}/${MAX_PLAYWRIGHT_ATTEMPTS}...`)
 
-    const pw = await agent(`
+    const pw = await tracedAgent(`
 You are the Playwright verification agent. You run from the MAIN repo root.
 
 GOAL: Run live browser checks against the dev server to confirm that the merged work for
@@ -1044,7 +1090,7 @@ Return using StructuredOutput:
     if (attempt < MAX_PLAYWRIGHT_ATTEMPTS) {
       log(`Playwright: running targeted fix agent (attempt ${attempt})...`)
 
-      const fix = await agent(`
+      const fix = await tracedAgent(`
 You are a targeted regression-fix agent. A live Playwright browser sweep found failures after
 the "${blockId}" spec was merged to main. Make the minimal surgical fix directly on main,
 commit it, and return so Playwright can re-verify on the next attempt.
@@ -1146,7 +1192,7 @@ const playwrightEscalation = playwrightFailed
   ? `\n- **Playwright verification FAILED** — the live browser sweep found regressions after all merges.\n    - See the Playwright Verification section above for per-check details.\n    - To fix: run \`/playwright --scope full\` locally to reproduce, then \`/sdlc-task ${blockId} <N>\` or \`/fix\` to patch the regression.`
   : ''
 
-const reportResult = await agent(`
+const reportResult = await tracedAgent(`
 You are the finalize/report agent for the spec orchestration. You run from the MAIN repo root.
 
 Spec: ${blockId}
@@ -1205,6 +1251,14 @@ ${escalationBlock}${playwrightEscalation}
 Return using StructuredOutput: reportFile="${blockReport}", overallVerdict="${overall}",
 statusUpdated (true if status.md was updated), nextFocus (the Current focus string you wrote), notes.
 `, { label: 'report', schema: REPORT_SCHEMA, phase: 'Report', model: 'sonnet' })
+
+// ----------------------------------------------------------------
+// Token-telemetry roll-up (Phase A). Covers only this engine's own orchestration agents;
+// each task's per-stage detail lives in its own /sdlc-task workflow report.
+// ----------------------------------------------------------------
+const totalOut = metrics.reduce((s, m) => s + (m.outTok || 0), 0)
+const worstByPrompt = [...metrics].sort((a, b) => b.promptTokEst - a.promptTokEst).slice(0, 3)
+log(`Token roll-up (orchestrator stages): total outTok=${totalOut || '—'} | worst 3 by injected prompt: ${worstByPrompt.map(m => `${m.label} (~${m.promptTokEst} tok)`).join(', ') || 'none'}`)
 
 // ----------------------------------------------------------------
 // Final console summary

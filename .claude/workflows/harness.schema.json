@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://agentic-portfolio/base-template/harness.schema.json",
   "title": "SDLC harness config",
-  "description": "Project policy the SDLC engines read from planning/harness.json. The harness (engine code) carries the mechanism; this file carries the project facts (validation commands, whether a UI-test stage exists, ports/routes). If the file is absent, the engines fall back to the spec's `## Validation Commands` section and disable the UI-test stage — they ship no stack defaults. MVP shape: validation.checks[] + uiTest.enabled (and its enabled-only fields).",
+  "description": "Project policy the SDLC engines read from planning/harness.json. The harness (engine code) carries the mechanism; this file carries the project facts (validation commands, whether a UI-test stage exists, ports/routes). If the file is absent, the engines fall back to the spec's `## Validation Commands` section and disable the UI-test stage — they ship no stack defaults. Shape: validation.checks[] (each a plain command or one of the richer kinds — baseline-diff / count-delta / warning-scan / forbidden-pattern-scan) + uiTest.enabled (and its enabled-only fields). The richer kinds keep all stack-specific commands and patterns here; the engine only carries the interpretation mechanism.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -66,14 +66,21 @@
     "check": {
       "type": "object",
       "additionalProperties": false,
+      "description": "One validation check. With no `kind` (or kind:'command') it is a plain command gated on exit code — the original shape. The richer kinds add engine-interpreted semantics while keeping every stack-specific command/pattern in this file.",
       "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["command", "baseline-diff", "count-delta", "warning-scan", "forbidden-pattern-scan"],
+          "default": "command",
+          "description": "How the engine runs this check. Omit (or 'command') for a plain exit-code gate. 'baseline-diff': snapshot a baseline at worktree creation and fail only on net-new items. 'count-delta': extract an integer and fail when it regresses vs the previous task. 'warning-scan': run a command (its exit code gates) and record matches of warningPatterns in its output, with severity per `gates`. 'forbidden-pattern-scan': grep source for patterns that must not appear."
+        },
         "name": {
           "type": "string",
-          "description": "Short identifier for the check (e.g. 'fmt', 'clippy', 'test')."
+          "description": "Short identifier for the check (e.g. 'fmt', 'clippy', 'test', 'net-new-lint')."
         },
         "command": {
           "type": "string",
-          "description": "Shell command to run (e.g. 'cargo test')."
+          "description": "Shell command to run. Required for all kinds except forbidden-pattern-scan. For baseline-diff this produces the CURRENT snapshot (same format as baselineCommand). For count-delta / warning-scan it is the command whose output is parsed / scanned."
         },
         "purpose": {
           "type": "string",
@@ -81,10 +88,89 @@
         },
         "gates": {
           "type": "boolean",
-          "description": "Whether this check's failure blocks the review verdict. Replaces the old hardcoded 'jest is authoritative' rule."
+          "description": "Whether this check's failure blocks the review verdict. Replaces the old hardcoded 'jest is authoritative' rule. For warning-scan, gates:false reports matches as WARN; gates:true fails on any match."
+        },
+        "baselineCommand": {
+          "type": "string",
+          "description": "baseline-diff only: run once at worktree creation to capture the pre-task baseline artifact. Must emit the same format as `command` (e.g. a JSON array of violation objects)."
+        },
+        "compareKeys": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "baseline-diff only: the object fields whose tuple identifies a result item. The check fails on items in the current output whose key-tuple is absent from the baseline (net-new only); pre-existing items are ignored."
+        },
+        "countPattern": {
+          "type": "string",
+          "description": "count-delta only: a grep -E (ERE) pattern matching the line that carries the count; the engine extracts the first integer on the matched line (e.g. '[0-9]+ tests? collected')."
+        },
+        "failOn": {
+          "type": "string",
+          "enum": ["decrease", "zero-or-decrease"],
+          "description": "count-delta only: fail when the count drops below the previous task's recorded count ('decrease'), or also when it fails to increase ('zero-or-decrease'). First task / no prior record → the check is SKIPPED."
+        },
+        "warningPatterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "warning-scan only: grep -E (ERE) patterns matched against the command's combined stdout+stderr. Every match is recorded in the report; gating follows `gates`."
+        },
+        "rules": {
+          "type": "array",
+          "description": "forbidden-pattern-scan only: source patterns that must NOT appear. Any rule that matches is a violation.",
+          "items": { "$ref": "#/$defs/rule" }
         }
       },
-      "required": ["name", "command", "purpose", "gates"]
+      "required": ["name", "purpose", "gates"],
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "baseline-diff" } }, "required": ["kind"] },
+          "then": { "required": ["command", "baselineCommand", "compareKeys"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "count-delta" } }, "required": ["kind"] },
+          "then": { "required": ["command", "countPattern", "failOn"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "warning-scan" } }, "required": ["kind"] },
+          "then": { "required": ["command", "warningPatterns"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "forbidden-pattern-scan" } }, "required": ["kind"] },
+          "then": { "required": ["rules"] }
+        },
+        {
+          "if": {
+            "anyOf": [
+              { "not": { "required": ["kind"] } },
+              { "properties": { "kind": { "const": "command" } } }
+            ]
+          },
+          "then": { "required": ["command"] }
+        }
+      ]
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A forbidden-pattern-scan rule: source matching `pattern` (minus `allowlistPattern`) is a violation.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Short identifier for the rule (e.g. 'f-string-in-logging')."
+        },
+        "pattern": {
+          "type": "string",
+          "description": "A grep -E (ERE) pattern searched across the project's source."
+        },
+        "paths": {
+          "type": "string",
+          "description": "Optional path scope for the grep (e.g. 'app/'). Defaults to the whole worktree."
+        },
+        "allowlistPattern": {
+          "type": "string",
+          "description": "Optional grep -E pattern; matching lines are excluded as legitimate exceptions."
+        }
+      },
+      "required": ["id", "pattern"]
     }
   }
 }
