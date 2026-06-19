@@ -1192,6 +1192,16 @@ const playwrightEscalation = playwrightFailed
   ? `\n- **Playwright verification FAILED** — the live browser sweep found regressions after all merges.\n    - See the Playwright Verification section above for per-check details.\n    - To fix: run \`/playwright --scope full\` locally to reproduce, then \`/sdlc-task ${blockId} <N>\` or \`/fix\` to patch the regression.`
   : ''
 
+// Token-telemetry roll-up (Phase A) — computed here (before the Report agent) so it can be appended
+// verbatim to the block report. Covers only this engine's own orchestration agents; each task's
+// per-stage detail lives in its own /sdlc-task workflow report.
+const blockMetricsTable = metrics.map(m => {
+  const out = m.outTok != null ? String(m.outTok) : '—'
+  return `| ${m.label} | ${m.model} | ${m.promptTokEst} | ${out} |`
+}).join('\n')
+const totalOut = metrics.reduce((s, m) => s + (m.outTok || 0), 0)
+const worstByPrompt = [...metrics].sort((a, b) => b.promptTokEst - a.promptTokEst).slice(0, 3)
+
 const reportResult = await tracedAgent(`
 You are the finalize/report agent for the spec orchestration. You run from the MAIN repo root.
 
@@ -1228,7 +1238,23 @@ ${escalationBlock}${playwrightEscalation}
    Completed tasks are detected on main and skipped; escalated tasks are retried.
    ${playwrightFailed ? `Playwright failed — fix the regression first, then re-promote to production.` : ''}
 
-2. Apply log + status ONCE (the per-task logs deferred these). The merged branches each carry a
+2. Append the orchestrator token roll-up to ${blockReport}. Run EXACTLY as written (a literal heredoc
+   append) — do NOT retype, summarize, or omit it; this is machine-generated telemetry:
+   cat >> ${blockReport} <<'ROLLUP_EOF'
+
+## Token Roll-up (orchestrator stages)
+Attribution for THIS engine's own agents (preflight / analyze / merge / triage / report). Each task's
+full per-stage detail lives in its own task<N>-workflow.md. promptTok = injected input estimate;
+outTok = output-token delta ("—" when no +Nk budget target was set).
+
+**Total orchestrator outTok:** ${totalOut || '—'}
+
+| Stage | Model | promptTok | outTok |
+|---|---|---|---|
+${blockMetricsTable}
+ROLLUP_EOF
+
+3. Apply log + status ONCE (the per-task logs deferred these). The merged branches each carry a
    planning/${blockId}/sdlc/reports/task<N>-log.md committed on main with "Applied: false".
    For EACH merged task N in ${JSON.stringify(mergedTaskNums)} (ascending):
      - cat ${reportsDir}/task${'${N}'}-log.md
@@ -1243,7 +1269,7 @@ ${escalationBlock}${playwrightEscalation}
    Apply each merged task's "## status.md — *" sections from its log where present. Do NOT apply
    status/log for escalated or skipped tasks.
 
-3. Commit:
+4. Commit:
    git add ${blockReport} log.md planning/status.md ${reportsDir}/task*-log.md
    git commit -m "chore: spec orchestration report + status for ${blockId}"
    git log --oneline -1
@@ -1253,11 +1279,8 @@ statusUpdated (true if status.md was updated), nextFocus (the Current focus stri
 `, { label: 'report', schema: REPORT_SCHEMA, phase: 'Report', model: 'sonnet' })
 
 // ----------------------------------------------------------------
-// Token-telemetry roll-up (Phase A). Covers only this engine's own orchestration agents;
-// each task's per-stage detail lives in its own /sdlc-task workflow report.
+// Console echo of the roll-up (computed above; also persisted to the block report by the Report agent).
 // ----------------------------------------------------------------
-const totalOut = metrics.reduce((s, m) => s + (m.outTok || 0), 0)
-const worstByPrompt = [...metrics].sort((a, b) => b.promptTokEst - a.promptTokEst).slice(0, 3)
 log(`Token roll-up (orchestrator stages): total outTok=${totalOut || '—'} | worst 3 by injected prompt: ${worstByPrompt.map(m => `${m.label} (~${m.promptTokEst} tok)`).join(', ') || 'none'}`)
 
 // ----------------------------------------------------------------
