@@ -176,6 +176,7 @@ const STAGE_SCHEMA = {
     success:        { type: 'boolean' },
     filesModified:  { type: 'array', items: { type: 'string' } },
     commitHash:     { type: 'string' },
+    filesReadKb:    { type: 'number', description: 'Telemetry (optional): sum of bytes of all files this stage cat/Read, divided by 1024.' },
     notes:          { type: 'string' }
   }
 }
@@ -201,6 +202,7 @@ const REVIEW_SCHEMA = {
     verdict:         { type: 'string', enum: ['PASS', 'FAIL', 'PARTIAL'] },
     failureReasons:  { type: 'array', items: { type: 'string' } },
     unmetCriteria:   { type: 'array', items: { type: 'string' } },
+    filesReadKb:     { type: 'number', description: 'Telemetry (optional): sum of bytes of all files this stage cat/Read, divided by 1024.' },
     notes:           { type: 'string' }
   }
 }
@@ -283,6 +285,42 @@ function withModel(base, model) {
 }
 
 // ----------------------------------------------------------------
+// TOKEN TELEMETRY (Phase A — additive, no behavior change)
+//
+// Per-stage attribution of injected-prompt size and output-token delta. The runtime cannot
+// see a subagent's INTERNAL context (the `cat` outputs land inside the spawned agent, invisible
+// here), so JS-side we measure only the injected prompt and the budget delta. The read-heavy
+// stages self-report a `filesReadKb` ingestion estimate via the schema (folded in at the call
+// site). `agent` stays importable for any call we deliberately want untraced.
+//
+//   promptTokEst — injected input only (~prompt.length / 4)
+//   outTok       — output-token delta from the shared budget pool; null when no +Nk target is set.
+//                  Attributes cleanly only for SEQUENTIAL stages — which is this engine's whole
+//                  pipeline. (sdlc-block's parallel fan-out is handled by each child's own metrics.)
+// ----------------------------------------------------------------
+const metrics = []
+async function tracedAgent(prompt, opts = {}) {
+  const before = (typeof budget !== 'undefined' && budget.spent) ? budget.spent() : 0
+  const r = await agent(prompt, opts)
+  const after = (typeof budget !== 'undefined' && budget.spent) ? budget.spent() : 0
+  metrics.push({
+    label: opts.label || 'agent',
+    model: opts.model || 'session',
+    promptTokEst: Math.round(prompt.length / 4),
+    outTok: after - before > 0 ? after - before : null,
+  })
+  return r
+}
+
+// Fold a stage's self-reported `filesReadKb` (A2) into the metrics entry the wrapper just pushed.
+// Safe to call immediately after the awaited tracedAgent call — that entry is always metrics[last].
+function recordFilesRead(result) {
+  if (result && result.filesReadKb != null && metrics.length) {
+    metrics[metrics.length - 1].filesReadKb = result.filesReadKb
+  }
+}
+
+// ----------------------------------------------------------------
 // HARNESS CONFIG — mechanism/policy split (see planning/harness.json)
 //
 // The engine ships NO stack defaults. A project declares its validation policy in
@@ -312,10 +350,29 @@ const HARNESS_CONFIG_SCHEMA = {
               items: {
                 type: 'object',
                 properties: {
+                  kind:    { type: 'string', description: 'command (default) | baseline-diff | count-delta | warning-scan | forbidden-pattern-scan' },
                   name:    { type: 'string' },
                   command: { type: 'string' },
                   purpose: { type: 'string' },
-                  gates:   { type: 'boolean' }
+                  gates:   { type: 'boolean' },
+                  baselineCommand: { type: 'string', description: 'baseline-diff only' },
+                  compareKeys:     { type: 'array', items: { type: 'string' }, description: 'baseline-diff only' },
+                  countPattern:    { type: 'string', description: 'count-delta only' },
+                  failOn:          { type: 'string', description: 'count-delta only: decrease | zero-or-decrease' },
+                  warningPatterns: { type: 'array', items: { type: 'string' }, description: 'warning-scan only' },
+                  rules: {
+                    type: 'array',
+                    description: 'forbidden-pattern-scan only',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        id:               { type: 'string' },
+                        pattern:          { type: 'string' },
+                        paths:            { type: 'string' },
+                        allowlistPattern: { type: 'string' }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -342,7 +399,7 @@ const HARNESS_CONFIG_SCHEMA = {
 // cwd: optional working-directory prefix (the worktree path) for the cat command.
 async function loadHarnessConfig(cwd) {
   const prefix = cwd ? `cd ${cwd} && ` : ''
-  const result = await agent(`
+  const result = await tracedAgent(`
 You are the harness-config loader for the SDLC pipeline. Your ONLY job is to read the project's
 validation-policy file and return it as structured data. Do not run any checks or modify anything.
 
@@ -353,14 +410,43 @@ STEP 2 — Decide:
   - "__HARNESS_ABSENT__" (file missing) → present=false, omit config.
   - File printed but NOT valid JSON → present=false, notes="harness.json present but invalid JSON: <reason>".
   - File printed and valid JSON → present=true, and copy the parsed object into "config", keeping ONLY
-    these fields when present: stack; validation.checks[] ({name, command, purpose, gates});
-    uiTest ({enabled, devServerCommand, readySignal, port, routes[]}). Ignore any other fields.
+    these fields when present: stack; validation.checks[] (each: {kind, name, command, purpose, gates}
+    plus any kind-specific fields that are present — baselineCommand, compareKeys[], countPattern,
+    failOn, warningPatterns[], rules[] ({id, pattern, paths, allowlistPattern})); uiTest ({enabled,
+    devServerCommand, readySignal, port, routes[]}). Preserve kind-specific fields verbatim; ignore any
+    other fields.
 
 Return your findings using the StructuredOutput tool.
 `, { label: 'harness-config', schema: HARNESS_CONFIG_SCHEMA, model: 'haiku' })
 
   if (!result || !result.present || !result.config) return null
   return result.config
+}
+
+// Snapshot baseline artifacts for any `baseline-diff` checks at worktree creation (pre-implement),
+// so the Test stage can diff current output against the pre-task state and fail only on net-new
+// items. Resume-safe: only writes a baseline that does not already exist. No-op when no baseline-diff
+// checks are configured. The engine ships no stack defaults — baselineCommand comes from harness.json.
+async function snapshotBaselines(cfg, cwd) {
+  const checks = (cfg?.validation?.checks || []).filter(c => c.kind === 'baseline-diff' && c.baselineCommand)
+  if (!checks.length) return
+  const pre = cwd ? `cd ${cwd} && ` : ''
+  const steps = checks.map(c => {
+    const slug = (c.name || 'check').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+    const path = `${reportsDir}/${taskPrefix}${slug}-baseline.json`
+    return `Baseline "${c.name}" -> ${path}:
+  ${pre}mkdir -p ${reportsDir}
+  ${pre}[ -f ${path} ] && echo "BASELINE EXISTS (kept): ${path}" || { ${c.baselineCommand} > ${path} 2>/dev/null; echo "BASELINE WRITTEN: ${path}"; }`
+  }).join('\n\n')
+  await tracedAgent(`
+You are the baseline-snapshot agent for the SDLC pipeline. Capture the pre-task baseline for each
+baseline-diff validation check, in the worktree, BEFORE any implementation runs. Run each block
+exactly as written. Do NOT modify source. Existing baselines are kept (resume-safe).
+
+${steps}
+
+Return using StructuredOutput: done=true, and note which baselines were written vs already present.
+`, { label: 'baseline-snapshot', schema: { type: 'object', required: ['done'], properties: { done: { type: 'boolean' }, notes: { type: 'string' } } }, model: 'haiku' })
 }
 
 // Render the inner project-validation check list for the Test stage from harness config.
@@ -384,10 +470,99 @@ from the spec instead:
   }
   return checks.map((c, i) => {
     const n = i + 1
+    const kind = c.kind || 'command'
+    const slug = (c.name || `check${n}`).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
     const gate = c.gates
       ? 'GATING — a failure here blocks the review verdict'
       : 'non-gating — informational; a failure here does not block the verdict'
-    return `CHECK ${n} — ${c.name} (${c.purpose}) [${gate}]:
+    const header = `CHECK ${n} — ${c.name} (${c.purpose}) [${gate}]`
+
+    // --- baseline-diff: fail only on items absent from the worktree-creation baseline ---
+    if (kind === 'baseline-diff') {
+      const baselinePath = `${reportsDir}/${taskPrefix}${slug}-baseline.json`
+      const currentPath = `/tmp/${stem}-${slug}-current.json`
+      const keysLiteral = JSON.stringify(c.compareKeys || [])
+      return `${header} — baseline-diff (fail ONLY on net-new items vs the baseline snapshotted at worktree creation):
+  ${pre}${c.command} > ${currentPath} 2>/dev/null; true
+  ${pre}python3 << 'PYEOF'
+import json, sys
+baseline_path = '${baselinePath}'
+current_path  = '${currentPath}'
+keys = ${keysLiteral}
+try:
+    b = json.load(open(baseline_path, encoding='utf-8'))
+except Exception as e:
+    print(f'WARNING: could not load baseline ({e}) — treating all current items as pre-existing'); b = []
+try:
+    c = json.load(open(current_path, encoding='utf-8'))
+except Exception:
+    c = []
+def k(v): return tuple(str(v.get(x, '')) for x in keys) if isinstance(v, dict) else (str(v),)
+seen = set(k(v) for v in b)
+new = [v for v in c if k(v) not in seen]
+if new:
+    print(f'NET-NEW ({len(new)} introduced by this task, absent from baseline):')
+    for v in new[:20]: print('  ' + json.dumps(v)[:200])
+    sys.exit(1)
+print(f'CHECK ${n} PASSED: no net-new items (baseline {len(b)}, current {len(c)})'); sys.exit(0)
+PYEOF
+  echo "CHECK${n}_EXIT:$?"`
+    }
+
+    // --- count-delta: extract an integer and fail when it regresses vs the previous task ---
+    if (kind === 'count-delta') {
+      const prevReport = taskNumber > 1 ? `${reportsDir}/task${taskNumber - 1}-test.md` : ''
+      const failRule = c.failOn === 'zero-or-decrease'
+        ? 'FAIL if delta <= 0 (count must strictly increase)'
+        : 'FAIL if delta < 0 (count must not decrease)'
+      const prevStep = prevReport
+        ? `  Read the previous task's recorded count:
+    ${pre}grep -oE 'COUNT\\[${slug}\\]: [0-9]+' ${prevReport} | head -1 || echo "NO_PREV_COUNT"
+  If NO_PREV_COUNT (previous report has no marker), treat this check as SKIP — delta unknown, do not fail.`
+        : `  This is task 1 — there is no previous task. Treat this check as SKIP (no delta to compare).`
+      return `${header} — count-delta (${c.failOn}):
+  ${pre}${c.command}
+  Extract the current count: the first integer on the line matching the ERE /${c.countPattern}/.
+${prevStep}
+  Compute delta = current - previous. ${failRule}.
+  IMPORTANT: write the marker line "COUNT[${slug}]: <current>" verbatim into the test report (any
+  section) so the NEXT task can read it. Record the delta and the pass/fail in this check's row.
+  echo "CHECK${n}_EXIT:0  (set to 1 only if the rule above fails; SKIP counts as pass)"`
+    }
+
+    // --- warning-scan: run a command (exit code gates) and record matches of warningPatterns ---
+    if (kind === 'warning-scan') {
+      const outPath = `/tmp/${stem}-${slug}.out`
+      const alternation = (c.warningPatterns || []).map(p => `(${p})`).join('|')
+      const patternSeverity = c.gates
+        ? 'Because gates:true, a pattern match ALSO FAILS this check.'
+        : 'Because gates:false, pattern matches are informational WARN entries — they do NOT fail the check (but DO record them).'
+      return `${header} — warning-scan (run the command, gate on its exit code, then scan its output):
+  ${pre}${c.command} > ${outPath} 2>&1; echo "CMD_EXIT:$?"
+  ${pre}grep -nE '${alternation}' ${outPath} && echo "WARNINGS_FOUND" || echo "NO_WARNINGS"
+  Pass/fail: this check FAILS if CMD_EXIT is non-zero (the command itself failed). Record every matched
+  warning line in this check's row/notes. ${patternSeverity}
+  Set the exit marker accordingly:
+  echo "CHECK${n}_EXIT:<0 if CMD_EXIT==0 and not failed-by-pattern, else 1>"`
+    }
+
+    // --- forbidden-pattern-scan: source greps that must find NO matches ---
+    if (kind === 'forbidden-pattern-scan') {
+      const ruleLines = (c.rules || []).map(r => {
+        const paths = r.paths || '.'
+        const allow = r.allowlistPattern ? ` | grep -vE '${r.allowlistPattern}'` : ''
+        return `  Rule "${r.id}":
+    ${pre}grep -rnE '${r.pattern}' ${paths}${allow} && echo "RULE ${r.id}: MATCHED (violation)" || echo "RULE ${r.id}: clean"`
+      }).join('\n')
+      return `${header} — forbidden-pattern scan (every rule below must find NO matches):
+${ruleLines}
+  This check PASSES only if EVERY rule reports "clean". If any rule MATCHED, the check FAILS and the
+  matched lines are violations — list them in this check's row.
+  echo "CHECK${n}_EXIT:0  (set to 1 if any rule MATCHED, else 0)"`
+    }
+
+    // --- command (default): plain exit-code gate (unchanged behavior) ---
+    return `${header}:
   ${pre}${c.command}
   echo "CHECK${n}_EXIT:$?"`
   }).join('\n\n')
@@ -423,7 +598,7 @@ const stageResults = []
 phase('Worktree')
 log(`Setting up worktree for ${stem}${resumeMode ? ' (resume mode — reuse existing worktree if present)' : ''}...`)
 
-const setupResult = await agent(`
+const setupResult = await tracedAgent(`
 You are the worktree setup agent. Your job is to create (or locate) an isolated git worktree
 for this pipeline run. All bash commands run from the MAIN REPO ROOT (your current CWD).
 
@@ -537,7 +712,7 @@ const W = `
 // ================================================================
 phase('Scout')
 
-const scout = await agent(`${W}
+const scout = await tracedAgent(`${W}
 You are the pipeline scout for the SDLC workflow system.
 
 Target:
@@ -624,7 +799,7 @@ if (currentStage === 'generate-tasks') {
   phase('Plan')
   log('Spec file not found — running generate-tasks...')
 
-  const genResult = await agent(`${W}
+  const genResult = await tracedAgent(`${W}
 You need to generate the task spec for "${blockId}".
 
 Spec file to create: ${specFile}
@@ -683,6 +858,8 @@ const harnessCfg = await loadHarnessConfig(worktreePath)
 log(harnessCfg
   ? `Harness config loaded: ${(harnessCfg.validation?.checks || []).length} validation check(s); uiTest ${harnessCfg.uiTest?.enabled ? 'enabled' : 'disabled'}.`
   : 'No planning/harness.json — validation falls back to the spec; UI-test disabled.')
+// Capture pre-task baselines for any baseline-diff checks (resume-safe; no-op when none configured).
+await snapshotBaselines(harnessCfg, worktreePath)
 
 // ================================================================
 // PHASES 3–5: IMPLEMENT → (FIX →) TEST → REVIEW (with retry loop)
@@ -696,7 +873,7 @@ while (['implement', 'fix', 'test', 'review', 'ui-test'].includes(currentStage) 
     phase('Implement')
     log('Running implement...')
 
-    const implResult = await agent(`${W}
+    const implResult = await tracedAgent(`${W}
 You are the implementation agent for the SDLC pipeline.
 
 Target:
@@ -799,8 +976,11 @@ Return using StructuredOutput:
   success: true if implementation completed without critical errors
   filesModified: array of source files created or modified
   commitHash: 7-character short hash from git log --oneline -1
+  filesReadKb: telemetry — before returning, sum the byte size of every file you cat/Read this
+    stage (cd ${worktreePath} && wc -c <each file>), divide the total by 1024, and report the number.
   notes: one-line summary
 `, { label: 'implement', schema: STAGE_SCHEMA, phase: 'Implement' })
+    recordFilesRead(implResult)
 
     if (!implResult) {
       log('Implement agent returned null — aborting pipeline')
@@ -827,7 +1007,7 @@ Return using StructuredOutput:
     const fixModel = (ESCALATION_MODEL && fixPass === MAX_REVIEW_ATTEMPTS) ? ESCALATION_MODEL : MODEL.fix
     if (fixModel !== MODEL.fix) log(`Final fix pass — escalating model to ${fixModel}.`)
 
-    const fixResult = await agent(`${W}
+    const fixResult = await tracedAgent(`${W}
 You are the fix agent for the SDLC pipeline. Make targeted fixes for the failures identified
 in the last review — NOT a full re-implementation.
 
@@ -910,8 +1090,11 @@ Return using StructuredOutput:
   success: true if fixes applied and validation passed
   filesModified: files changed this pass only
   commitHash: 7-character short hash
+  filesReadKb: telemetry — before returning, sum the byte size of every file you cat/Read this
+    stage (cd ${worktreePath} && wc -c <each file>), divide the total by 1024, and report the number.
   notes: one-line summary of what was fixed
 `, withModel({ label: `fix-${fixPass}`, schema: STAGE_SCHEMA, phase: 'Fix' }, fixModel))
+    recordFilesRead(fixResult)
 
     if (!fixResult) {
       log('Fix agent returned null — aborting pipeline')
@@ -933,7 +1116,7 @@ Return using StructuredOutput:
     phase('Test')
     log('Running the project validation suite...')
 
-    const testResult = await agent(`${W}
+    const testResult = await tracedAgent(`${W}
 You are the test agent for the SDLC pipeline. Run the project's validation suite (from
 planning/harness.json, or the spec fallback) plus the universal emoji gate, in the worktree.
 
@@ -951,6 +1134,13 @@ PRE-FLIGHT — Verify all top-level tracked directories exist in this sparse-che
 
 Run EVERY check below IN ORDER. Capture full output (stdout + stderr) for each.
 All commands run from the worktree root (each is already prefixed with cd ${worktreePath}).
+
+Most checks are plain commands that pass iff their exit code is 0. Some checks carry their OWN
+pass/fail logic, described inline in the check block (baseline-diff = fail only on net-new items;
+count-delta = fail on a count regression, SKIP when there is no previous task; warning-scan = record
+pattern matches, gating per the [GATING/non-gating] label; forbidden-pattern scan = fail if any rule
+matched). Honor each block's stated logic. A check marked [non-gating] or resolved to SKIP does NOT
+block the verdict.
 
 ${renderCheckList(harnessCfg, { cwd: worktreePath })}
 
@@ -1002,10 +1192,13 @@ Format:
 
 Return using StructuredOutput:
   reportFile: "${testReport}"
-  allPassed: true only if EVERY check passed (each exit code 0, emoji gate clean)
-  passCount: integer count of checks that passed
+  allPassed: true only if every GATING check passed and the emoji gate is clean. [non-gating] checks
+    and SKIPPED checks (e.g. count-delta on task 1) never set allPassed false on their own — but DO
+    record their result.
+  passCount: integer count of checks that passed (count SKIPPED as passed)
   failCount: integer count of checks that failed
-  failedTests: array of test_name strings for failed checks
+  failedTests: array of test_name strings for checks that failed (include non-gating failures here too,
+    flagged as non-gating, so they surface in the report even though they do not block the verdict)
   notes: one-line summary
 `, withModel({ label: 'test', schema: TEST_SCHEMA, phase: 'Test' }, MODEL.test))
 
@@ -1035,7 +1228,7 @@ Return using StructuredOutput:
     const reviewModel = (ESCALATION_MODEL && reviewAttempts === MAX_REVIEW_ATTEMPTS) ? ESCALATION_MODEL : MODEL.review
     if (reviewModel !== MODEL.review) log(`Final review attempt — escalating model to ${reviewModel}.`)
 
-    const reviewResult = await agent(`${W}
+    const reviewResult = await tracedAgent(`${W}
 You are the review agent for the SDLC pipeline. Verify the implementation against the spec.
 
 Target:
@@ -1131,8 +1324,11 @@ Return using StructuredOutput:
   verdict: "PASS", "FAIL", or "PARTIAL"
   failureReasons: array of strings (empty if PASS)
   unmetCriteria: array of criterion texts that were NOT_MET or PARTIAL (empty if PASS)
+  filesReadKb: telemetry — before returning, sum the byte size of every file you cat/Read this
+    stage (cd ${worktreePath} && wc -c <each file>), divide the total by 1024, and report the number.
   notes: one-line summary
 `, withModel({ label: `review-${reviewAttempts}`, schema: REVIEW_SCHEMA, phase: 'Review' }, reviewModel))
+    recordFilesRead(reviewResult)
 
     if (!reviewResult) {
       log(`Review agent returned null (attempt ${reviewAttempts}) — treating as FAIL`)
@@ -1171,7 +1367,7 @@ Return using StructuredOutput:
       const devPort = (harnessCfg.uiTest.port ?? 3000) + taskNumber
       const ui = renderUiTestPrompt(harnessCfg, devPort)
 
-      const uitestResult = await agent(`${W}
+      const uitestResult = await tracedAgent(`${W}
 You are the UI test agent for the SDLC pipeline. Run a quick live browser smoke check using
 playwright-cli to catch visual/runtime regressions that the validation suite cannot catch.
 
@@ -1289,7 +1485,7 @@ if (currentStage === 'document') {
   phase('Document')
   log('Running document stage...')
 
-  const docResult = await agent(`${W}
+  const docResult = await tracedAgent(`${W}
 You are the documentation agent for the SDLC pipeline. Surgically patch docs/ in the worktree.
 
 Target:
@@ -1394,7 +1590,7 @@ log(`Wrap-up. Final verdict: ${finalVerdict}. Pipeline: ${stageResultsSummary}`)
 // ----------------------------------------------------------------
 log('Writing task log (status/log deferred to merge time)...')
 
-const logResult = await agent(`${W}
+const logResult = await tracedAgent(`${W}
 You are the task-log agent for the SDLC pipeline.
 
 Your job is to write a structured task log file that records what status.md and log.md
@@ -1503,7 +1699,16 @@ const stageTable = stageResults.map(r => {
   return `| ${label} | ${status} | ${file} | ${commit} | ${notes} |`
 }).join('\n')
 
-const finalizeResult = await agent(`${W}
+// Token-telemetry table (Phase A). The finalize agent's own line is absent — this table is
+// built before it runs — which is fine: finalize is a cheap, fixed Haiku stage.
+const metricsTable = metrics.map(m => {
+  const out  = m.outTok != null ? String(m.outTok) : '—'
+  const read = m.filesReadKb != null ? `${Math.round(m.filesReadKb)} KB` : '—'
+  return `| ${m.label} | ${m.model} | ${m.promptTokEst} | ${out} | ${read} |`
+}).join('\n')
+log(`Token metrics (stage | model | promptTok | outTok | filesReadKb):\n${metricsTable}`)
+
+const finalizeResult = await tracedAgent(`${W}
 You are the finalize agent for the SDLC pipeline.
 
 IMPORTANT: Do NOT modify planning/status.md or log.md. Those are applied at merge time.
@@ -1545,6 +1750,14 @@ STEP 2 — Write the workflow report: ${worktreePath}/${workflowReport}
   | Stage | Status | Report | Commit | Notes |
   |---|---|---|---|---|
   ${stageTable}
+
+  ## Token Metrics
+  Per-stage attribution (promptTok = injected input estimate; outTok = output-token delta,
+  "—" when no +Nk budget target was set; filesReadKb = stage-reported ingestion estimate).
+
+  | Stage | Model | promptTok | outTok | filesReadKb |
+  |---|---|---|---|---|
+  ${metricsTable}
 
   ## Key Findings
   [what was implemented, notable decisions, content/bilingual-parity notes]
