@@ -6,7 +6,9 @@
 //! `planning/master-plan.md`).
 
 mod crawl;
+mod meta;
 pub use crawl::{ContentFile, Corpus, FileKind, Locale, crawl};
+pub use meta::validate_file;
 
 use std::path::PathBuf;
 
