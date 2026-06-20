@@ -1367,13 +1367,13 @@ Instructions:
    [git log --oneline -5 output — shows the commits made during this pipeline run]
    \`\`\`
 
-8. If the implement report's "Decisions and Trade-offs" section contains any settled choices, mention them in your notes — but do NOT edit DECISIONS.md yourself (that is a manual step).
+8. If the implement report's "Decisions and Trade-offs" section contains any settled choices, mention them in your notes — but do NOT edit planning/decisions/ yourself (that is a manual step).
 
 Return your result using the StructuredOutput tool:
   statusUpdated: true if status.md was successfully updated
   devlogUpdated: true if log.md was successfully updated
   nextFocus: the new "Current focus" value written to status.md
-  notes: any settled decisions that should be added to DECISIONS.md
+  notes: any settled decisions that should be added to planning/decisions/
 `, withModel({ label: 'log-work', schema: WRAPUP_SCHEMA, phase: 'Wrap-up' }, MODEL.logWork))
 
 if (wrapupResult) {
@@ -1481,7 +1481,7 @@ Return your result using the StructuredOutput tool:
   workflowReportFile: "${workflowReport}"
   commitMessage: "chore: wrap up ${stem}"
   commitHash: the 7-character short hash from git log --oneline -1
-  notes: any follow-up items (decisions to add to DECISIONS.md, NEEDS_REVIEW doc flags)
+  notes: any follow-up items (decisions to add to planning/decisions/, NEEDS_REVIEW doc flags)
 `, withModel({ label: 'finalize', schema: FINALIZE_SCHEMA, phase: 'Wrap-up' }, MODEL.finalize))
 
 if (finalizeResult) {
