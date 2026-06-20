@@ -8,10 +8,13 @@
 //!   ([`validate_file`]), and the read step ([`read_content`]) — surfacing IO/read failures
 //!   as `error`-severity [`Diagnostic`]s rather than panicking, so one unreadable file never
 //!   aborts the whole run.
-//! - **Task 2 (this commit):** deserialize `FileKind::LearnModuleJson` into a strict
+//! - **Task 2:** deserialize `FileKind::LearnModuleJson` into a strict
 //!   [`ModuleFile`] / [`ModuleMeta`] and emit a precise-locator [`Diagnostic`] for every missing
 //!   required field, bad enum value, or malformed format.
-//! - **Tasks 3-4:** add the path `metadata.json` struct and real-YAML MDX frontmatter parsing.
+//! - **Task 3 (this commit):** deserialize `FileKind::PathMetadataJson` into [`PathMeta`] and
+//!   emit a precise-locator [`Diagnostic`] for every missing required field or bad `level` enum
+//!   value. `level` is validated case-insensitively so live capitalised values are accepted.
+//! - **Task 4:** add real-YAML MDX frontmatter parsing.
 //! - **Task 5:** wire [`validate_file`] into `validate()` so the diagnostics reach the `Report`.
 
 use serde::Deserialize;
@@ -44,7 +47,8 @@ pub fn validate_file(cf: &ContentFile) -> Vec<Diagnostic> {
 
     match cf.kind {
         FileKind::LearnModuleJson => validate_module_json(cf, &contents),
-        // PathMetadataJson (Task 3) and ModuleMdx (Task 4) checks land in later tasks.
+        FileKind::PathMetadataJson => validate_path_metadata_json(cf, &contents),
+        // ModuleMdx (Task 4) checks land in a later task.
         _ => Vec::new(),
     }
 }
@@ -226,6 +230,102 @@ fn validate_module_section(
             format!("type must be content|quiz|exercise|project|assessment: {type_}"),
         ));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Path `metadata.json` structs (`FileKind::PathMetadataJson`)
+// ---------------------------------------------------------------------------
+
+/// A path-level `metadata.json` file.
+///
+/// Every required field is modelled as `Option` so each absence yields its own diagnostic.
+/// Extra live keys (`difficulty`, `totalDuration`, `author`, `prerequisites`, `outcomes`,
+/// `resources`) are tolerated — `deny_unknown_fields` is deliberately not used.
+#[derive(Debug, Deserialize)]
+pub struct PathMeta {
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub level: Option<String>,
+    pub duration: Option<String>,
+    pub version: Option<String>,
+    #[serde(rename = "lastUpdated")]
+    pub last_updated: Option<String>,
+    pub topics: Option<Vec<serde_json::Value>>,
+    pub modules: Option<Vec<serde_json::Value>>,
+}
+
+/// Validate a path `metadata.json`: strict required-field and `level`/`duration` format checks.
+///
+/// A JSON parse failure yields a single whole-file `error` diagnostic; otherwise every missing
+/// required field and bad `level` enum value becomes its own precise-locator diagnostic.
+/// Never panics, never aborts the run.
+///
+/// `level` is validated case-insensitively: live files use capitalised values
+/// (`"Intermediate"`, `"Beginner"`, `"Advanced"`), so the check lowercases the value before
+/// comparing it to the allowed set — consistent with the TS validator's behaviour.
+pub(crate) fn validate_path_metadata_json(cf: &ContentFile, contents: &str) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+
+    let meta: PathMeta = match serde_json::from_str(contents) {
+        Ok(m) => m,
+        Err(e) => {
+            return vec![Diagnostic::error(
+                cf.rel.clone(),
+                "",
+                format!("invalid path metadata JSON: {e}"),
+            )];
+        }
+    };
+
+    require_str(cf, "id", &meta.id, &mut diags);
+    require_str(cf, "title", &meta.title, &mut diags);
+    require_str(cf, "description", &meta.description, &mut diags);
+    require_str(cf, "level", &meta.level, &mut diags);
+    require_str(cf, "duration", &meta.duration, &mut diags);
+    require_str(cf, "version", &meta.version, &mut diags);
+    require_str(cf, "lastUpdated", &meta.last_updated, &mut diags);
+    if meta.topics.is_none() {
+        diags.push(missing(cf, "topics"));
+    }
+    if meta.modules.is_none() {
+        diags.push(missing(cf, "modules"));
+    }
+
+    // Validate `level` enum (case-insensitive).
+    if let Some(level) = non_empty(&meta.level)
+        && !is_valid_level(level)
+    {
+        diags.push(Diagnostic::error(
+            cf.rel.clone(),
+            "level",
+            format!("level must be beginner|intermediate|advanced (case-insensitive): {level}"),
+        ));
+    }
+
+    // Validate `duration` format.
+    if let Some(duration) = non_empty(&meta.duration)
+        && !is_valid_duration(duration)
+    {
+        diags.push(Diagnostic::error(
+            cf.rel.clone(),
+            "duration",
+            format!("duration must match ^\\d+\\s+(minutes?|hours?)$: {duration}"),
+        ));
+    }
+
+    diags
+}
+
+/// `true` if `s` is a valid path-level `level` value (case-insensitive).
+///
+/// Live `metadata.json` files use capitalised forms (`"Intermediate"`, `"Beginner"`,
+/// `"Advanced"`), so the check lowercases before comparing.
+fn is_valid_level(s: &str) -> bool {
+    matches!(
+        s.to_lowercase().as_str(),
+        "beginner" | "intermediate" | "advanced"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -583,6 +683,168 @@ mod tests {
         }
     }
 
+    // --- path `metadata.json` validation (Task 3) ---
+
+    /// A fully-valid path `metadata.json` body (all required fields, valid values), carrying
+    /// extra keys the live files use to confirm they are tolerated.
+    fn good_path_metadata_json() -> String {
+        r#"{
+          "id": "mcp-fundamentals",
+          "title": "MCP Fundamentals",
+          "description": "A learning path covering MCP from the ground up.",
+          "level": "Intermediate",
+          "duration": "4 hours",
+          "version": "1.0.0",
+          "lastUpdated": "2025-06-20",
+          "topics": ["mcp", "agents"],
+          "modules": ["intro-to-mcp", "advanced-mcp"],
+          "author": "Brandon J. Redmond",
+          "totalDuration": 240,
+          "prerequisites": [],
+          "outcomes": ["Understand MCP"],
+          "resources": []
+        }"#
+        .to_string()
+    }
+
+    fn path_meta_cf() -> ContentFile {
+        content_file(
+            PathBuf::from("/unused"),
+            "paths/mcp-fundamentals/metadata.json",
+            FileKind::PathMetadataJson,
+        )
+    }
+
+    #[test]
+    fn good_path_metadata_is_clean() {
+        let diags = validate_path_metadata_json(&path_meta_cf(), &good_path_metadata_json());
+        assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
+    }
+
+    #[test]
+    fn path_metadata_level_case_insensitive_lowercase() {
+        let body = good_path_metadata_json().replace("\"Intermediate\"", "\"intermediate\"");
+        let diags = validate_path_metadata_json(&path_meta_cf(), &body);
+        assert!(
+            diags.is_empty(),
+            "lowercase level should be valid, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn path_metadata_level_case_insensitive_capitalized() {
+        let body = good_path_metadata_json().replace("\"Intermediate\"", "\"Beginner\"");
+        let diags = validate_path_metadata_json(&path_meta_cf(), &body);
+        assert!(
+            diags.is_empty(),
+            "capitalized level should be valid, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn path_metadata_bad_level_emits_locator() {
+        let body = good_path_metadata_json().replace("\"Intermediate\"", "\"Expert\"");
+        let diags = validate_path_metadata_json(&path_meta_cf(), &body);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].locator, "level");
+        assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn path_metadata_missing_level_emits_locator() {
+        let body = good_path_metadata_json().replace("\"level\": \"Intermediate\",\n", "");
+        let diags = validate_path_metadata_json(&path_meta_cf(), &body);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].locator, "level");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].message, "missing required field");
+    }
+
+    #[test]
+    fn path_metadata_missing_modules_emits_locator() {
+        let body = good_path_metadata_json()
+            .replace("\"modules\": [\"intro-to-mcp\", \"advanced-mcp\"],\n", "");
+        let diags = validate_path_metadata_json(&path_meta_cf(), &body);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].locator, "modules");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].message, "missing required field");
+    }
+
+    #[test]
+    fn path_metadata_missing_topics_emits_locator() {
+        let body = good_path_metadata_json().replace("\"topics\": [\"mcp\", \"agents\"],\n", "");
+        let diags = validate_path_metadata_json(&path_meta_cf(), &body);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].locator, "topics");
+        assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn path_metadata_malformed_duration_emits_locator() {
+        let body = good_path_metadata_json().replace("\"4 hours\"", "\"a few hours\"");
+        let diags = validate_path_metadata_json(&path_meta_cf(), &body);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].locator, "duration");
+        assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn path_metadata_invalid_json_emits_whole_file_error() {
+        let diags = validate_path_metadata_json(&path_meta_cf(), "{ not valid json ");
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].locator, "");
+        assert!(
+            diags[0].message.starts_with("invalid path metadata JSON:"),
+            "unexpected message: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn path_metadata_all_required_fields_reported_when_empty() {
+        let body = r#"{}"#;
+        let diags = validate_path_metadata_json(&path_meta_cf(), body);
+        let got = locators(&diags);
+        for expected in [
+            "id",
+            "title",
+            "description",
+            "level",
+            "duration",
+            "version",
+            "lastUpdated",
+            "topics",
+            "modules",
+        ] {
+            assert!(
+                got.contains(&expected.to_string()),
+                "missing locator {expected} in {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_file_dispatches_path_metadata_json() {
+        let dir = temp_dir("dispatch-path-meta");
+        let path = dir.join("metadata.json");
+        std::fs::write(&path, good_path_metadata_json().as_bytes()).unwrap();
+
+        let cf = content_file(
+            path,
+            "paths/mcp-fundamentals/metadata.json",
+            FileKind::PathMetadataJson,
+        );
+        let diags = validate_file(&cf);
+        assert!(
+            diags.is_empty(),
+            "good path metadata should have no diagnostics, got: {diags:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // --- helper unit tests ---
 
     #[test]
@@ -618,5 +880,20 @@ mod tests {
         assert!(!is_valid_module_type("lecture"));
         assert!(is_valid_section_type("quiz"));
         assert!(!is_valid_section_type("video"));
+    }
+
+    #[test]
+    fn level_helper_case_insensitive() {
+        assert!(is_valid_level("beginner"));
+        assert!(is_valid_level("intermediate"));
+        assert!(is_valid_level("advanced"));
+        // Capitalised live values must be accepted.
+        assert!(is_valid_level("Beginner"));
+        assert!(is_valid_level("Intermediate"));
+        assert!(is_valid_level("Advanced"));
+        // Invalid values.
+        assert!(!is_valid_level("expert"));
+        assert!(!is_valid_level("Expert"));
+        assert!(!is_valid_level(""));
     }
 }
