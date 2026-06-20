@@ -59,6 +59,24 @@
         }
       },
       "required": ["enabled"]
+    },
+    "breakdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional task-decomposition policy. Once the spec exists, the engines assess each task against a universal coarseness heuristic and, per `mode`, recommend or auto-generate a /breakdown before implementing. Absent → mode 'recommend' (advisory) with complexityThreshold 3. The heuristic is mechanism in the engines; only mode/threshold are project policy.",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["recommend", "auto", "off"],
+          "default": "recommend",
+          "description": "recommend: log a breakdown recommendation for coarse tasks and proceed (no file written). auto: generate breakdown.md for the flagged tasks before implementing them (block: committed on main before the waves; standalone task: in its worktree). off: skip the assessment entirely."
+        },
+        "complexityThreshold": {
+          "type": "integer",
+          "default": 3,
+          "description": "A task that creates/modifies MORE than this many distinct files is a breakdown candidate (the file-count signal). Multi-concern / multi-layer tasks are flagged regardless of count."
+        }
+      }
     }
   },
   "required": ["validation", "uiTest"],

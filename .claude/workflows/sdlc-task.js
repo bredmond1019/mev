@@ -20,7 +20,8 @@
 // PIPELINE STAGES (in order)
 //   Worktree   → auto-create (or suffix-increment) isolated git worktree
 //   Scout      → detect current stage from report files
-//   Plan       → generate task spec (skipped if spec already exists)
+//   Plan       → generate task spec (if missing) + breakdown assessment (standalone runs; recommend/auto/off
+//                per planning/harness.json breakdown.mode — skipped under /sdlc-block, which assesses once)
 //   Implement  → execute the task from spec
 //   Fix        → targeted fixes for FAIL/PARTIAL review (up to 3 attempts)
 //   Test       → run the project's validation suite from planning/harness.json (+ universal emoji gate)
@@ -75,7 +76,7 @@ export const meta = {
   phases: [
     { title: 'Worktree',   detail: 'Auto-create (or suffix-increment) git worktree for isolated execution' },
     { title: 'Scout',      detail: 'Determine current pipeline stage from report files' },
-    { title: 'Plan',       detail: 'Generate task spec (only if spec file does not yet exist)' },
+    { title: 'Plan',       detail: 'Generate task spec (if missing) and assess whether a coarse task needs breakdown first' },
     { title: 'Implement',  detail: 'Execute the task' },
     { title: 'Fix',        detail: 'Targeted fixes for FAIL/PARTIAL review' },
     { title: 'Test',       detail: "Run the project's validation suite (from planning/harness.json) in the worktree" },
@@ -103,6 +104,9 @@ const taskNumber = parts.length > 1 ? parseInt(parts[1], 10) : null
 // --resume: reuse an EXISTING worktree for this task (set by /sdlc-block when a prior run was
 // interrupted after implement completed) instead of suffix-incrementing into a fresh duplicate.
 const resumeMode = parts.includes('--resume')
+// Set by /sdlc-block: it runs the breakdown assessment ONCE at the spec level (Analyze stage), so the
+// per-task engine must NOT re-assess — that would duplicate the work across every parallel task.
+const underBlock = parts.includes('--under-block')
 
 if (taskNumber === null || isNaN(taskNumber)) {
   log(`ERROR: Task number is required but not provided (got: "${rawArgs}").`)
@@ -240,21 +244,33 @@ const UI_TEST_SCHEMA = {
   }
 }
 
+const BREAKDOWN_ASSESS_SCHEMA = {
+  type: 'object',
+  required: ['alreadyExists', 'recommendBreakdown'],
+  properties: {
+    alreadyExists:      { type: 'boolean', description: 'true if breakdown.md already has a "### Step N:" section for this task — assessment is then a no-op' },
+    recommendBreakdown: { type: 'boolean', description: 'true if the task is coarse enough to benefit from /breakdown into atomic sub-steps' },
+    reason:             { type: 'string', description: 'one sentence: which heuristic signal fired (or why no breakdown is needed)' },
+    fileCount:          { type: 'integer', description: 'distinct files the task creates/modifies' }
+  }
+}
+
 // ----------------------------------------------------------------
 // MODEL TIERING — the primary token lever for this pipeline.
 //
 // Principle: match the model to the work. Opus earns its cost on PLANNING; Haiku handles the
 // purely-mechanical stages; Sonnet handles the judgment work in between.
-//   • Opus   — generate-tasks (authors the spec; fallback path only)
-//   • Haiku  — scout / test / finalize. Each is a fixed procedure with no real judgment:
+//   • Opus   — generate-tasks (authors the spec; fallback path only) and breakdown-gen (authors
+//              atomic sub-steps for a coarse task in auto mode). Both are PLANNING.
+//   • Haiku  — worktree-setup / scout / test / task-log / finalize. Each is a fixed procedure with
+//              no real judgment: worktree-setup follows an exact free-name + sparse-checkout recipe,
 //              scout is a deterministic file-existence decision tree, test runs the project's
-//              validation suite and reads exit codes (review re-runs the gating checks anyway), and finalize
-//              just fills a JS-precomputed table and runs scripted git adds.
-//   • Sonnet — implement / fix / review / document / task-log. A sharp spec + breakdown makes
+//              validation suite and reads exit codes (review re-runs the gating checks anyway),
+//              task-log fills a rigid template (all values pre-bracketed) plus a one-paragraph
+//              summary, and finalize just fills a JS-precomputed table and runs scripted git adds.
+//   • Sonnet — implement / fix / review / document / breakdown-assess. A sharp spec + breakdown makes
 //              these well-scoped enough that Sonnet does them reliably. (Review is gated by an
 //              authoritative fresh-test run, and fix failures escalate rather than silently ship.)
-//   • Sonnet — worktree-setup stays here too: scripted, but it runs once and a failure aborts the
-//              whole pipeline, so the tiny Haiku saving isn't worth the blast radius.
 //
 // Note: the REAL planning usually happens upstream in the /generate-tasks and /breakdown
 // SKILLS (run those on an Opus session). The generate-tasks stage below is only a fallback
@@ -264,17 +280,21 @@ const UI_TEST_SCHEMA = {
 // Valid values: 'haiku' | 'sonnet' | 'opus' | undefined (inherit session model).
 // ----------------------------------------------------------------
 const MODEL = {
-  worktreeSetup: 'sonnet',   // scripted git, but runs once per task and a failure aborts the whole
-                             //   pipeline (high blast radius) — not worth Haiku's risk for the tiny saving
+  worktreeSetup: 'haiku',    // scripted git following an exact free-name recipe + sparse-checkout; recipe-
+                             //   following, not judgment. A failure aborts the run, but that is a reliability
+                             //   property haiku meets — the recipe is deterministic (re-tiered, D11).
   scout:         'haiku',    // deterministic decision tree: ls a few files, apply a fixed 7-rule order
   generateTasks: 'opus',     // PLANNING — authors the spec that drives everything (fallback path)
+  breakdownAssess: 'sonnet', // judges whether a single task is too coarse — light judgment, same tier as review
+  breakdownGen:  'opus',     // PLANNING — authors atomic sub-steps for a flagged task (auto mode only)
   implement:     'sonnet',   // writes content/code + tests against a scoped spec/breakdown
   fix:           'sonnet',   // targeted fixes; failures escalate, never silently ship
   test:          'haiku',    // runs the project's validation suite, reads exit codes; review re-runs the gating checks
   review:        'sonnet',   // verify criteria; gated by an authoritative fresh run of the gating checks
   uiTest:        'sonnet',   // live browser smoke checks (when uiTest.enabled); needs judgment to interpret results
   document:      'sonnet',   // surgical doc patches, gated on PASS
-  taskLog:       'sonnet',   // authors the human-facing log prose + status lines — keep the quality
+  taskLog:       'haiku',    // fills a rigid template (all values pre-bracketed) + a one-paragraph summary;
+                             //   the generative surface is small enough for haiku (re-tiered, D11)
   finalize:      'haiku',    // assembles a JS-precomputed table + scripted git add; can't break the pipeline
 }
 
@@ -387,6 +407,13 @@ const HARNESS_CONFIG_SCHEMA = {
             port:             { type: 'integer' },
             routes:           { type: 'array', items: { type: 'string' } }
           }
+        },
+        breakdown: {
+          type: 'object',
+          properties: {
+            mode:                { type: 'string', description: 'recommend (default) | auto | off' },
+            complexityThreshold: { type: 'integer' }
+          }
         }
       }
     },
@@ -413,8 +440,8 @@ STEP 2 — Decide:
     these fields when present: stack; validation.checks[] (each: {kind, name, command, purpose, gates}
     plus any kind-specific fields that are present — baselineCommand, compareKeys[], countPattern,
     failOn, warningPatterns[], rules[] ({id, pattern, paths, allowlistPattern})); uiTest ({enabled,
-    devServerCommand, readySignal, port, routes[]}). Preserve kind-specific fields verbatim; ignore any
-    other fields.
+    devServerCommand, readySignal, port, routes[]}); breakdown ({mode, complexityThreshold}). Preserve
+    kind-specific fields verbatim; ignore any other fields.
 
 Return your findings using the StructuredOutput tool.
 `, { label: 'harness-config', schema: HARNESS_CONFIG_SCHEMA, model: 'haiku' })
@@ -860,6 +887,91 @@ log(harnessCfg
   : 'No planning/harness.json — validation falls back to the spec; UI-test disabled.')
 // Capture pre-task baselines for any baseline-diff checks (resume-safe; no-op when none configured).
 await snapshotBaselines(harnessCfg, worktreePath)
+
+// ================================================================
+// BREAKDOWN ASSESSMENT — should this task be decomposed before implementing?
+//
+// Assess Task N against a universal coarseness heuristic and act per the project's breakdown policy
+// (planning/harness.json → breakdown.mode; default 'recommend'). Runs ONLY when:
+//   • we are about to implement fresh (currentStage === 'implement'), AND
+//   • this is a STANDALONE run — NOT under /sdlc-block (which assesses once at the spec level), AND
+//   • mode !== 'off'.
+// Because a standalone run has exactly one worktree, writing breakdown.md here is conflict-free; the
+// agent itself no-ops if a "### Step N:" section already exists. 'recommend' logs and proceeds;
+// 'auto' generates the sub-steps before implementing. Advisory by default — it never blocks.
+// ================================================================
+const breakdownMode = harnessCfg?.breakdown?.mode || 'recommend'
+const breakdownThreshold = harnessCfg?.breakdown?.complexityThreshold ?? 3
+if (currentStage === 'implement' && !underBlock && breakdownMode !== 'off') {
+  phase('Plan')
+  log(`Breakdown assessment for task ${taskNumber} (mode=${breakdownMode})...`)
+
+  const assess = await tracedAgent(`${W}
+You are the breakdown-assessment agent. Decide whether Task ${taskNumber} of this spec is too COARSE
+to implement directly and would benefit from a /breakdown into atomic sub-steps first.
+
+STEP 1 — If a breakdown already covers this task, do nothing:
+  cd ${worktreePath} && ls ${breakdownFile} 2>/dev/null && grep -q "### Step ${taskNumber}:" ${breakdownFile} && echo "HAS_STEP" || echo "NO_STEP"
+  If the last line is "HAS_STEP": return alreadyExists=true, recommendBreakdown=false, and STOP.
+
+STEP 2 — Read Task ${taskNumber} from the spec:
+  cd ${worktreePath} && cat ${specFile}
+  Focus on the "### ${taskNumber}." section and the Acceptance Criteria that apply to it.
+
+STEP 3 — Apply the coarseness heuristic. Task ${taskNumber} is a BREAKDOWN CANDIDATE when ANY hold:
+  - it creates or modifies MORE than ${breakdownThreshold} distinct files; OR
+  - it bundles multiple separable concerns (e.g. "implement X AND refactor Y AND add Z"); OR
+  - it spans multiple layers/modules (e.g. data model + API + UI); OR
+  - it carries a large acceptance-criteria set covering independently-testable units.
+  A single focused change over a small file set is NOT a candidate.
+
+Return using StructuredOutput: alreadyExists, recommendBreakdown, reason (one sentence naming the
+signal that fired, or why none did), fileCount (distinct files the task touches).
+`, withModel({ label: 'breakdown-assess', schema: BREAKDOWN_ASSESS_SCHEMA, phase: 'Plan' }, MODEL.breakdownAssess))
+
+  if (assess?.alreadyExists) {
+    log(`Task ${taskNumber}: breakdown already present — skipping assessment.`)
+  } else if (assess?.recommendBreakdown) {
+    if (breakdownMode === 'auto') {
+      log(`Task ${taskNumber}: coarse (${assess.reason}) — auto-generating breakdown (mode=auto)...`)
+      const gen = await tracedAgent(`${W}
+You are the breakdown-generation agent (auto mode). Author atomic sub-steps for Task ${taskNumber} so
+the implement stage executes a granular plan instead of a coarse one. Do NOT implement anything and do
+NOT modify ${specFile}.
+
+1. Read the task and the real source it will touch (so sub-steps name actual paths/symbols):
+   cd ${worktreePath} && cat ${specFile}   (focus on "### ${taskNumber}.")
+   Read the files that section references before writing sub-steps.
+
+2. Write (create the file, or append this task's section) ${breakdownFile}:
+
+   ### Step ${taskNumber}: <task title>
+   - ${taskNumber}.1 <atomic action — exact file path + symbol + what to write/change>
+   - ${taskNumber}.2 <...>
+   **Verify:** <a concrete command/check after each logical group of sub-steps>
+
+   Each sub-step is a SINGLE atomic action naming exact file paths and function/component names.
+   tasks.md stays authoritative for scope/acceptance criteria; breakdown.md is authoritative for HOW.
+
+3. Commit just the breakdown:
+   cd ${worktreePath} && git add ${breakdownFile} && git commit -m "docs: breakdown for ${stem}"
+   cd ${worktreePath} && git log --oneline -1
+
+Return using StructuredOutput: reportFile="${breakdownFile}", success, filesModified, commitHash, notes.
+`, withModel({ label: 'breakdown-gen', schema: STAGE_SCHEMA, phase: 'Plan' }, MODEL.breakdownGen))
+      if (gen?.success) {
+        log(`Breakdown written: ${breakdownFile} — implement will use its sub-steps.`)
+        stageResults.push({ stage: 'breakdown', ...gen })
+      } else {
+        log(`Breakdown generation did not complete — implementing from tasks.md only.`)
+      }
+    } else {
+      log(`Task ${taskNumber}: RECOMMENDATION — consider /breakdown before implementing (${assess.reason}). breakdown.mode=recommend, so proceeding with tasks.md as-is.`)
+    }
+  } else if (assess) {
+    log(`Task ${taskNumber}: breakdown not needed (${assess.reason || 'task is appropriately scoped'}).`)
+  }
+}
 
 // ================================================================
 // PHASES 3–5: IMPLEMENT → (FIX →) TEST → REVIEW (with retry loop)

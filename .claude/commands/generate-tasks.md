@@ -45,7 +45,16 @@ $ARGUMENTS — the spec's `planning/` directory name (its phase-dotted slug),
    ```
    (Use the normalized directory slug, e.g. `chore: add spec for <spec-slug>`.)
 
-8. Report the path written and suggest the next step:
+8. **Decomposition assessment.** Before reporting, evaluate each task you just wrote against the
+   coarseness heuristic and recommend which (if any) warrant a `/breakdown` first. A task is a
+   breakdown candidate when ANY hold: it creates/modifies more than `breakdown.complexityThreshold`
+   distinct files (`planning/harness.json`; default 3), OR it bundles multiple separable concerns
+   ("implement X AND refactor Y AND add Z"), OR it spans multiple layers (data model + API + UI), OR
+   it carries a large acceptance-criteria set covering independently-testable units. List the flagged
+   task numbers with a one-line reason in the report (the SDLC engines apply the same heuristic at run
+   time per `breakdown.mode`, so this is the authoring-time preview of that decision).
+
+9. Report the path written and suggest the next step:
    "Spec written and committed to planning/phaseN-blockX/tasks.md. Run `/breakdown planning/phaseN-blockX/tasks.md` to decompose into atomic sub-steps."
 
 ## Context / Files to Read
@@ -94,9 +103,14 @@ $ARGUMENTS — the spec's `planning/` directory name (its phase-dotted slug),
 
 ## Report
 
-Output the path to the file created and the next-step options:
+Output the path to the file created, the decomposition assessment, and the next-step options:
 ```
 planning/<spec-slug>/tasks.md
+
+Decomposition assessment:
+  <"All tasks appropriately scoped." OR a list like:>
+  - Task 3 — touches 6 files across model + API + UI; recommend /breakdown
+  - Task 5 — bundles two separable concerns; recommend /breakdown
 
 Next (optional — decompose into atomic sub-steps):
   /breakdown planning/<spec-slug>/tasks.md
