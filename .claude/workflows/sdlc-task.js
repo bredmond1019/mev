@@ -107,6 +107,11 @@ const resumeMode = parts.includes('--resume')
 // Set by /sdlc-block: it runs the breakdown assessment ONCE at the spec level (Analyze stage), so the
 // per-task engine must NOT re-assess — that would duplicate the work across every parallel task.
 const underBlock = parts.includes('--under-block')
+// Set by /sdlc-block ONLY when this task runs in a parallel batch with concurrent siblings (batch
+// width > 1). Output-token telemetry (outTok) is a shared-pool delta — under concurrent siblings it
+// measures the whole batch's burn, not this task's, so we mark it non-isolated rather than reporting a
+// misleading number. promptTok and filesReadKb stay per-agent and accurate. See decisions/D12.
+const parallelWave = parts.includes('--parallel-wave')
 
 if (taskNumber === null || isNaN(taskNumber)) {
   log(`ERROR: Task number is required but not provided (got: "${rawArgs}").`)
@@ -316,7 +321,10 @@ function withModel(base, model) {
 //   promptTokEst — injected input only (~prompt.length / 4)
 //   outTok       — output-token delta from the shared budget pool; null when no +Nk target is set.
 //                  Attributes cleanly only for SEQUENTIAL stages — which is this engine's whole
-//                  pipeline. (sdlc-block's parallel fan-out is handled by each child's own metrics.)
+//                  pipeline when run solo. BUT when /sdlc-block runs this task in a parallel batch
+//                  (--parallel-wave), the pool is shared with concurrent sibling tasks, so the delta
+//                  is contaminated; we render it as "— (parallel)" at report time rather than report a
+//                  misleading number (the runtime exposes no per-agent output count). See D12.
 // ----------------------------------------------------------------
 const metrics = []
 async function tracedAgent(prompt, opts = {}) {
@@ -918,12 +926,17 @@ STEP 2 — Read Task ${taskNumber} from the spec:
   cd ${worktreePath} && cat ${specFile}
   Focus on the "### ${taskNumber}." section and the Acceptance Criteria that apply to it.
 
-STEP 3 — Apply the coarseness heuristic. Task ${taskNumber} is a BREAKDOWN CANDIDATE when ANY hold:
-  - it creates or modifies MORE than ${breakdownThreshold} distinct files; OR
+STEP 3 — Apply the coarseness heuristic. The real predictor of decomposition value is SEPARABLE
+  STRUCTURE, not raw file count. Task ${taskNumber} is a BREAKDOWN CANDIDATE when ANY hold:
   - it bundles multiple separable concerns (e.g. "implement X AND refactor Y AND add Z"); OR
   - it spans multiple layers/modules (e.g. data model + API + UI); OR
-  - it carries a large acceptance-criteria set covering independently-testable units.
-  A single focused change over a small file set is NOT a candidate.
+  - it carries a large acceptance-criteria set covering several INDEPENDENTLY-testable units; OR
+  - it touches MORE than ${breakdownThreshold} distinct files AND those files are HETEROGENEOUS
+    (different shapes/roles, or spanning more than one concern/layer above). File count is a
+    CONTRIBUTING signal here, never a trigger on its own.
+  HOMOGENEITY DISCOUNT — do NOT flag on file count alone when the many files are the SAME shape serving
+  ONE concern (e.g. a content path's metadata file + N near-identical lesson/module pairs, or N
+  parallel fixtures). A single focused change over a small file set is also NOT a candidate.
 
 Return using StructuredOutput: alreadyExists, recommendBreakdown, reason (one sentence naming the
 signal that fired, or why none did), fileCount (distinct files the task touches).
@@ -1868,10 +1881,16 @@ const stageTable = stageResults.map(r => {
 // Token-telemetry table (Phase A). The finalize agent's own line is absent — this table is
 // built before it runs — which is fine: finalize is a cheap, fixed Haiku stage.
 const metricsTable = metrics.map(m => {
-  const out  = m.outTok != null ? String(m.outTok) : '—'
+  // Under a parallel wave the shared-pool delta is contaminated by concurrent siblings (D12) — mark
+  // it non-isolated instead of reporting a misleading number. promptTok/filesReadKb stay accurate.
+  const out  = parallelWave ? '— (parallel)' : (m.outTok != null ? String(m.outTok) : '—')
   const read = m.filesReadKb != null ? `${Math.round(m.filesReadKb)} KB` : '—'
   return `| ${m.label} | ${m.model} | ${m.promptTokEst} | ${out} | ${read} |`
 }).join('\n')
+// Legend caveat: only present when outTok was suppressed for parallel contamination.
+const metricsCaveat = parallelWave
+  ? '\n\n> **outTok suppressed ("— (parallel)").** This task ran in a parallel wave under /sdlc-block; outTok is a shared-pool delta contaminated by concurrent sibling tasks, so a per-stage number would mislead. promptTok and filesReadKb are per-agent and accurate. See decisions/D12.'
+  : ''
 log(`Token metrics (stage | model | promptTok | outTok | filesReadKb):\n${metricsTable}`)
 
 const finalizeResult = await tracedAgent(`${W}
@@ -1942,7 +1961,7 @@ machine-generated telemetry and must land verbatim:
 
 ## Token Metrics
 Per-stage attribution (promptTok = injected input estimate; outTok = output-token delta, "—" when no
-+Nk budget target was set; filesReadKb = stage-reported ingestion estimate).
++Nk budget target was set; filesReadKb = stage-reported ingestion estimate).${metricsCaveat}
 
 | Stage | Model | promptTok | outTok | filesReadKb |
 |---|---|---|---|---|

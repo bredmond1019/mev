@@ -634,15 +634,20 @@ STEP 3 — Build the dependency graph. For EACH task determine:
   safe; wrongly marking an in-place-edited source file additive is not.
 
 STEP 3b — Breakdown assessment. For EACH task, decide whether it is too COARSE to implement directly
-  and would benefit from a /breakdown into atomic sub-steps. Set recommendBreakdown=true (with a
-  one-sentence breakdownReason naming the signal) when ANY of these hold:
-    - the task creates or modifies MORE than ${breakdownThreshold} distinct files (use the
-      filesCreated + filesModified you just computed); OR
+  and would benefit from a /breakdown into atomic sub-steps. The real predictor of decomposition value
+  is SEPARABLE STRUCTURE, not raw file count. Set recommendBreakdown=true (with a one-sentence
+  breakdownReason naming the signal) when ANY of these hold:
     - it bundles multiple separable concerns (e.g. "implement X AND refactor Y AND add Z"); OR
     - it spans multiple layers/modules (e.g. data model + API + UI); OR
-    - it carries a large acceptance-criteria set covering independently-testable units.
-  A single focused change over a small file set is NOT a candidate (recommendBreakdown=false). This is
-  ASSESSMENT ONLY — do not write any breakdown file; the orchestrator acts on these flags per policy.
+    - it carries a large acceptance-criteria set covering several INDEPENDENTLY-testable units; OR
+    - it touches MORE than ${breakdownThreshold} distinct files (filesCreated + filesModified) AND
+      those files are HETEROGENEOUS — different shapes/roles, or spanning more than one concern/layer
+      above. File count is a CONTRIBUTING signal here, never a trigger on its own.
+  HOMOGENEITY DISCOUNT — do NOT flag on file count alone when the many files are the SAME shape serving
+    ONE concern (e.g. a content path's metadata file + N near-identical lesson/module pairs, or N
+    parallel fixtures): decomposition yields little there. A single focused change over a small file set
+    is also NOT a candidate (recommendBreakdown=false). This is ASSESSMENT ONLY — do not write any
+    breakdown file; the orchestrator acts on these flags per policy.
 
 STEP 4 — Resume scout: find tasks already completed on MAIN:
   ls ${reportsDir}/task*-workflow.md 2>/dev/null || echo "NONE"
@@ -779,12 +784,20 @@ if (selectedTasks) {
 // parallel worktree inherits the SAME file (no shared-file merge conflict, the D9 class of bug). Each
 // /sdlc-task is later invoked with --under-block so it does NOT re-assess. mode 'off' skips this.
 // ================================================================
+// D10 telemetry — capture the assessment outcome so the Report stage can PERSIST it. Previously the
+// recommend-mode recommendation was log()-only: it streamed to the live run and then vanished, leaving
+// no durable trace in block-workflow.md. `action`: off | none | recommend | auto. `committed`: the
+// breakdown.md commit hash (or true/false) when action==='auto'.
+const breakdownAssessment = { mode: breakdownMode, threshold: breakdownThreshold, flagged: [], action: 'off', committed: null }
 if (breakdownMode !== 'off') {
   const flagged = Object.values(taskMap).filter(t =>
     t.recommendBreakdown && !doneTasks.has(t.num) && (!selectedTasks || selectedTasks.has(t.num)))
+  breakdownAssessment.flagged = flagged.map(t => ({ num: t.num, title: t.title, reason: t.breakdownReason || 'coarse' }))
   if (!flagged.length) {
+    breakdownAssessment.action = 'none'
     log(`Breakdown: no tasks flagged as coarse (mode=${breakdownMode}).`)
   } else if (breakdownMode === 'auto') {
+    breakdownAssessment.action = 'auto'
     log(`Breakdown (auto): generating sub-steps for ${flagged.length} coarse task(s): ${flagged.map(t => t.num).join(', ')}...`)
     const stepList = flagged.map(t => `  - Task ${t.num} (${t.title}): ${t.breakdownReason || 'coarse'}`).join('\n')
     const gen = await tracedAgent(`
@@ -819,10 +832,12 @@ ${stepList}
 
 Return using StructuredOutput: reportFile="${breakdownFile}", success, filesModified, commitHash, notes.
 `, { label: 'breakdown-gen', schema: { type: 'object', required: ['success'], properties: { reportFile: { type: 'string' }, success: { type: 'boolean' }, filesModified: { type: 'array', items: { type: 'string' } }, commitHash: { type: 'string' }, notes: { type: 'string' } } }, phase: 'Analyze', model: 'opus' })  // breakdown-gen is PLANNING — keep on Opus
+    breakdownAssessment.committed = gen?.success ? (gen.commitHash || true) : false
     if (gen?.success) log(`Breakdown committed${gen.commitHash ? ` (${gen.commitHash})` : ''} — worktrees will inherit it.`)
     else log(`Breakdown generation did not complete — tasks will implement from tasks.md only.`)
   } else {
     // recommend mode — surface the recommendation; proceed without writing anything.
+    breakdownAssessment.action = 'recommend'
     log(`Breakdown recommendation (mode=recommend): ${flagged.length} task(s) look coarse. Consider running`)
     log(`  /breakdown ${tasksFile}`)
     log(`before this block, or set breakdown.mode:"auto" in planning/harness.json. Flagged:`)
@@ -849,7 +864,7 @@ Return the final worktree list as plain text.
 `, { label: `teardown-${branchName}`, phase: 'Analyze', model: 'haiku' })
 }
 
-async function runTask(taskNum, resume = false) {
+async function runTask(taskNum, resume = false, parallelWave = false) {
   let prevReasons = null
   for (let attempt = 1; attempt <= MAX_TASK_ATTEMPTS; attempt++) {
     // Only the FIRST attempt resumes an existing worktree; a clean-slate retry must start fresh
@@ -857,8 +872,11 @@ async function runTask(taskNum, resume = false) {
     const resumeArg = (resume && attempt === 1) ? ' --resume' : ''
     // --under-block: the block already ran the breakdown assessment once (Analyze) and acted on it
     // above, so the per-task engine must NOT re-assess.
+    // --parallel-wave: this task shares the budget pool with concurrent siblings, so its per-stage
+    // outTok telemetry is contaminated; the per-task engine renders it as non-isolated. See D12.
+    const parallelArg = parallelWave ? ' --parallel-wave' : ''
     log(`Task ${taskNum}: attempt ${attempt}/${MAX_TASK_ATTEMPTS} via /sdlc-task${resumeArg}...`)
-    const r = await workflow('sdlc-task', `${blockId} ${taskNum}${resumeArg} --under-block`)
+    const r = await workflow('sdlc-task', `${blockId} ${taskNum}${resumeArg} --under-block${parallelArg}`)
 
     if (r && r.finalVerdict === 'PASS') {
       return { taskNum, status: 'pass', branchName: r.branchName, worktreePath: r.worktreePath, finalVerdict: 'PASS', attempts: attempt }
@@ -993,7 +1011,8 @@ for (let wi = 0; wi < waves.length; wi++) {
     for (let k = 0; k < runnable.length; k += MAX_WAVE_WIDTH) {
       const batch = runnable.slice(k, k + MAX_WAVE_WIDTH)
       if (batch.length < runnable.length) log(`${waveLabel}: batch [${batch.join(', ')}]`)
-      const batchResults = await parallel(batch.map(t => () => runTask(t, resumeTasks.has(t))))
+      // batch.length > 1 → concurrent siblings share the budget pool → per-task outTok is contaminated (D12).
+      const batchResults = await parallel(batch.map(t => () => runTask(t, resumeTasks.has(t), batch.length > 1)))
       waveOutcomes.push(...batchResults.filter(Boolean))
     }
   } else {
@@ -1289,6 +1308,26 @@ const blockMetricsTable = metrics.map(m => {
 const totalOut = metrics.reduce((s, m) => s + (m.outTok || 0), 0)
 const worstByPrompt = [...metrics].sort((a, b) => b.promptTokEst - a.promptTokEst).slice(0, 3)
 
+// D10 — Breakdown assessment summary, built deterministically here so the Report agent appends it
+// verbatim (like the token roll-up). Makes recommend-mode recommendations durable in block-workflow.md.
+const breakdownSection = (() => {
+  const ba = breakdownAssessment
+  if (ba.mode === 'off') return `_Skipped — \`breakdown.mode\` is "off" in planning/harness.json._`
+  if (!ba.flagged.length) return `**Mode:** ${ba.mode} · **threshold:** >${ba.threshold} files. No tasks flagged as coarse.`
+  const rows = ba.flagged.map(f => `| ${f.num} | ${f.title || '—'} | ${f.reason} |`).join('\n')
+  const action = ba.action === 'auto'
+    ? (ba.committed ? `Auto mode — generated and committed \`breakdown.md\`${typeof ba.committed === 'string' ? ` (${ba.committed})` : ''} on main before the waves; every worktree inherited it.`
+                    : `Auto mode — breakdown generation did NOT complete; tasks implemented from tasks.md only.`)
+    : `Recommend mode — no file written. Consider running \`/breakdown ${tasksFile}\` before this block, or set \`breakdown.mode:"auto"\` in planning/harness.json.`
+  return `**Mode:** ${ba.mode} · **threshold:** >${ba.threshold} files · **${ba.flagged.length} task(s) flagged coarse.**
+
+| Task | Title | Coarseness signal |
+|---|---|---|
+${rows}
+
+**Action taken:** ${action}`
+})()
+
 const reportResult = await tracedAgent(`
 You are the finalize/report agent for the spec orchestration. You run from the MAIN repo root.
 
@@ -1325,14 +1364,24 @@ ${escalationBlock}${playwrightEscalation}
    Completed tasks are detected on main and skipped; escalated tasks are retried.
    ${playwrightFailed ? `Playwright failed — fix the regression first, then re-promote to production.` : ''}
 
-2. Append the orchestrator token roll-up to ${blockReport}. Run EXACTLY as written (a literal heredoc
-   append) — do NOT retype, summarize, or omit it; this is machine-generated telemetry:
+2. Append the breakdown assessment, then the orchestrator token roll-up, to ${blockReport}. Run BOTH
+   appends EXACTLY as written (literal heredocs) — do NOT retype, summarize, reorder, or omit them;
+   these are machine-generated. First the breakdown assessment:
+   cat >> ${blockReport} <<'BREAKDOWN_EOF'
+
+## Breakdown Assessment (D10)
+${breakdownSection}
+BREAKDOWN_EOF
+
+   Then the token roll-up:
    cat >> ${blockReport} <<'ROLLUP_EOF'
 
 ## Token Roll-up (orchestrator stages)
 Attribution for THIS engine's own agents (preflight / analyze / merge / triage / report). Each task's
 full per-stage detail lives in its own task<N>-workflow.md. promptTok = injected input estimate;
-outTok = output-token delta ("—" when no +Nk budget target was set).
+outTok = output-token delta ("—" when no +Nk budget target was set). These orchestrator stages run
+sequentially, so their outTok is clean. NOTE: per-task outTok for tasks that ran in a PARALLEL wave is
+shared-pool-contaminated and is reported there as "— (parallel)" rather than a misleading number (D12).
 
 **Total orchestrator outTok:** ${totalOut || '—'}
 
@@ -1397,6 +1446,7 @@ return {
   escalated: escalated.map(o => ({ taskNum: o.taskNum, finalVerdict: o.finalVerdict, worktreePath: o.worktreePath, branchName: o.branchName, reviewReport: o.reviewReport, reasons: o.reasons, triage: o.triage })),
   skipped: skipped.map(o => o.taskNum),
   playwright: { verdict: playwrightVerdict, checks: playwrightChecks, fixNotes: playwrightFixNotes },
+  breakdown: breakdownAssessment,
   blockReport: reportResult?.reportFile || blockReport,
   resumeCommand: `/sdlc-block ${blockId}`,
   outcomes
