@@ -89,9 +89,14 @@ impl Report {
 
 /// Validate the content tree rooted at `root`.
 ///
-/// Block B: crawl + classify + filename conventions. Struct/cross-file checks land in C–E,
-/// each consuming the `Corpus` returned by [`crawl`].
+/// Block B: crawl + classify + filename conventions.
+/// Block C: struct and frontmatter validation — each file in the [`Corpus`] is dispatched to
+/// [`meta::validate_file`], which checks required fields, enum values, and format constraints.
+/// All diagnostics (filename + struct/frontmatter) are collected into the returned [`Report`].
 pub fn validate(root: &std::path::Path) -> anyhow::Result<Report> {
-    let (_corpus, diagnostics) = crawl::crawl(root);
+    let (corpus, mut diagnostics) = crawl::crawl(root);
+    for cf in &corpus.files {
+        diagnostics.extend(meta::validate_file(cf));
+    }
     Ok(Report { diagnostics })
 }
