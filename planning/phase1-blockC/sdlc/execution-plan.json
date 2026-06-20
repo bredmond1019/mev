@@ -1,0 +1,178 @@
+{
+  "blockId": "phase1-blockC",
+  "additiveFiles": [],
+  "tasks": {
+    "1": {
+      "num": 1,
+      "title": "Add a validate (struct/frontmatter) module",
+      "dependsOn": [],
+      "evidence": "",
+      "filesCreated": [
+        "src/meta.rs"
+      ],
+      "filesModified": [
+        "src/lib.rs"
+      ],
+      "recommendBreakdown": false
+    },
+    "2": {
+      "num": 2,
+      "title": "Define and validate the ModuleMeta struct (FileKind::LearnModuleJson)",
+      "dependsOn": [
+        1
+      ],
+      "evidence": "Task 1 adds 'src/meta.rs ... holding the serde structs and the per-file validation functions'; Task 2 defines the ModuleMeta struct and its validation inside that module.",
+      "filesCreated": [],
+      "filesModified": [
+        "src/meta.rs"
+      ],
+      "recommendBreakdown": false
+    },
+    "3": {
+      "num": 3,
+      "title": "Define and validate path metadata.json (FileKind::PathMetadataJson)",
+      "dependsOn": [
+        1
+      ],
+      "evidence": "Task 1 creates src/meta.rs 'holding the serde structs and the per-file validation functions'; Task 3 adds the path metadata struct/validator into that module.",
+      "filesCreated": [],
+      "filesModified": [
+        "src/meta.rs"
+      ],
+      "recommendBreakdown": false
+    },
+    "4": {
+      "num": 4,
+      "title": "Parse and validate MDX frontmatter as real YAML (FileKind::ModuleMdx)",
+      "dependsOn": [
+        1,
+        2
+      ],
+      "evidence": "Task 4: 'Validate difficulty enum and duration format the same way as the JSON path (factor the shared checks into helpers).' — the JSON-path enum/format helpers are introduced in Task 2; both edit src/meta.rs created by Task 1.",
+      "filesCreated": [],
+      "filesModified": [
+        "src/meta.rs"
+      ],
+      "recommendBreakdown": false
+    },
+    "5": {
+      "num": 5,
+      "title": "Wire the checks into validate()",
+      "dependsOn": [
+        2,
+        3,
+        4
+      ],
+      "evidence": "Task 5: 'iterate corpus.files and dispatch each file to the matching validator by kind' — consumes the per-kind validators built in Tasks 2 (LearnModuleJson), 3 (PathMetadataJson), and 4 (ModuleMdx).",
+      "filesCreated": [],
+      "filesModified": [
+        "src/lib.rs"
+      ],
+      "recommendBreakdown": false
+    },
+    "6": {
+      "num": 6,
+      "title": "Tests against fixtures",
+      "dependsOn": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "evidence": "Task 6 asserts diagnostics for module .json, metadata.json, and .mdx broken cases (Tasks 2/3/4) end-to-end through validate() (Task 5): 'a good module .json + metadata.json + .mdx ... -> zero error diagnostics' and per-case broken variants.",
+      "filesCreated": [
+        "tests/meta.rs"
+      ],
+      "filesModified": [],
+      "recommendBreakdown": false
+    },
+    "7": {
+      "num": 7,
+      "title": "Validate",
+      "dependsOn": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "evidence": "Task 7: 'Run the Validation Commands listed below and confirm all pass' — runs the full gate suite over all prior tasks' output.",
+      "filesCreated": [],
+      "filesModified": [],
+      "recommendBreakdown": false
+    }
+  },
+  "waves": [
+    {
+      "label": "Wave 1",
+      "parallel": false,
+      "tasks": [
+        1
+      ],
+      "mergeOrder": [
+        1
+      ]
+    },
+    {
+      "label": "Wave 2",
+      "parallel": false,
+      "tasks": [
+        2
+      ],
+      "mergeOrder": [
+        2
+      ]
+    },
+    {
+      "label": "Wave 3",
+      "parallel": false,
+      "tasks": [
+        3
+      ],
+      "mergeOrder": [
+        3
+      ]
+    },
+    {
+      "label": "Wave 4",
+      "parallel": false,
+      "tasks": [
+        4
+      ],
+      "mergeOrder": [
+        4
+      ]
+    },
+    {
+      "label": "Wave 5",
+      "parallel": false,
+      "tasks": [
+        5
+      ],
+      "mergeOrder": [
+        5
+      ]
+    },
+    {
+      "label": "Wave 6",
+      "parallel": false,
+      "tasks": [
+        6
+      ],
+      "mergeOrder": [
+        6
+      ]
+    },
+    {
+      "label": "Wave 7",
+      "parallel": false,
+      "tasks": [
+        7
+      ],
+      "mergeOrder": [
+        7
+      ]
+    }
+  ]
+}
