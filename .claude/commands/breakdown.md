@@ -48,6 +48,11 @@ $ARGUMENTS — path to the task spec to break down (e.g. `planning/<spec-slug>/t
 6. After each logical group of sub-steps (not only at the end), add an inline **Verify** check:
    a single command or observation that confirms the group succeeded before moving on.
 
+   **Disjoint file ownership:** as you name exact paths, watch for the same existing file being
+   edited under two different spec **steps** that could run as parallel tasks. If you find one, flag
+   it in **Notes** — either the steps are sequentially dependent (say so) or the shared file should be
+   append-only. An undeclared overlap between parallel tasks escalates the whole block at merge.
+
 7. Write the breakdown to `planning/<block-dir>/breakdown.md` — same directory as the spec, named `breakdown.md`.
 
 8. Return only the path to the file created.

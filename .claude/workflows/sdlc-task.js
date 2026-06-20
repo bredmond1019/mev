@@ -214,7 +214,7 @@ const LOG_SCHEMA = {
     logFile:    { type: 'string' },
     applied:    { type: 'boolean' },
     nextFocus:  { type: 'string', description: 'The Current focus string written to the log file' },
-    notes:      { type: 'string', description: 'Any decisions that should be added to DECISIONS.md' }
+    notes:      { type: 'string', description: 'Any decisions that should be added to planning/decisions/' }
   }
 }
 
@@ -692,19 +692,9 @@ stageResults.push({ stage: 'worktree-setup', ...setupResult, success: true })
 // ----------------------------------------------------------------
 // Build the worktree path injection header — prepended to EVERY agent prompt
 // ----------------------------------------------------------------
-const W = `
-╔══════════════════════════════════════════════════════════════════╗
-║  WORKING DIRECTORY: ${worktreePath}
-║
-║  You are in a git worktree — NOT the main repo.
-║  Shell state does NOT persist between Bash tool calls.
-║  START EVERY Bash tool call with:
-║    cd ${worktreePath} &&
-║
-║  "repo root" = ${worktreePath}
-║  Run all build/test/validation commands from the repo root.
-║  Relative paths (planning/...) resolve from: ${worktreePath}
-╚══════════════════════════════════════════════════════════════════╝
+const W = `WORKTREE (not the main repo). repo root = ${worktreePath}
+Shell state does NOT persist between Bash calls — START EVERY Bash call with: cd ${worktreePath} &&
+Run all build/test/validation from the repo root; relative paths (planning/...) resolve from there.
 `
 
 // ================================================================
@@ -785,6 +775,16 @@ let currentStage = scout.startStage
 let reviewAttempts = 0
 const MAX_REVIEW_ATTEMPTS = 3
 let lastReviewResult = null
+// B1: hand-off context carried structurally between stages so review/fix do NOT re-ingest the
+// upstream prose reports. The review gate stays authoritative — it re-runs gating checks fresh
+// and reads real source; these fields only tell it WHERE to look and what the prior stage claimed.
+let lastImplReport = null   // implement OR fix result (fix overwrites the implement-report slot)
+let lastTestReport = null   // most recent test result
+
+// Render a structured hand-off field as prompt-safe text (arrays → bullet list, empty → "none").
+const handoff = (v) => Array.isArray(v)
+  ? (v.length ? v.map((x) => `     - ${x}`).join('\n') : '     (none)')
+  : (v === undefined || v === null || v === '' ? '(none)' : String(v))
 
 // STAGED MODEL ESCALATION — the FINAL fix pass and FINAL review attempt before the loop
 // gives up run on a stronger model. The common path stays on Sonnet (MODEL.fix/review);
@@ -919,6 +919,26 @@ Instructions:
    from planning/harness.json, or the spec's ## Validation Commands):
    cd ${worktreePath} && <each validation command from the spec> 2>&1 | tail -20
 
+5.5. SELF-CHECK — completeness gate (do this BEFORE writing the report or committing):
+   Re-read the in-scope "## Acceptance Criteria" for Task ${taskNumber}. For EACH criterion, open the
+   actual file(s) and confirm it is FULLY satisfied by your changes — do not assume from memory.
+   In particular:
+   (a) NO placeholder/stub bodies remain on any code path a criterion requires — e.g.
+       \`todo!()\`/\`unimplemented!()\`/\`unreachable!()\`, \`raise NotImplementedError\`,
+       \`throw new Error('not implemented')\`, empty \`pass\`-only bodies, or \`TODO\`/\`FIXME\` markers
+       in required paths. Sanity-grep ONLY the files the in-scope criteria require (the deliverable
+       files and the source paths those criteria name) — NOT every changed file — so the gate never
+       pushes you to edit files outside this task's scope. Build that path list from the criteria, then:
+         cd ${worktreePath} && grep -nE 'todo!\\(|unimplemented!\\(|unreachable!\\(|NotImplementedError|not implemented|FIXME' <those paths> 2>/dev/null
+       A stub in a file no in-scope criterion requires is OUT OF SCOPE — leave it for its owning task.
+   (b) EVERY deliverable file a criterion names actually exists at the stated path (e.g. a required
+       \`.env.example\`, config file, or fixture) — \`ls\` it.
+   (c) EVERY criterion that says "unit-tested"/"covered by a test" has a real, hermetic test that
+       exercises that path — not just a compiling stub.
+   If ANY criterion is not fully met, FIX IT NOW and re-run step 5 before proceeding. Do NOT write the
+   report or return \`success: true\` with a known gap — an unmet criterion shipped here costs a full
+   review-fail loop downstream.
+
 6. Write the implementation report:
    Absolute path: ${worktreePath}/${implementReport}
 
@@ -940,13 +960,15 @@ Instructions:
    ## Validation Output
    **Commands run:**
    \`\`\`
-   [commands]
+   [one line per command]
    \`\`\`
-   **Results:**
+   **Result:** PASSED / FAILED
+   On FAIL only, paste the failing command's last 20 lines (\`... 2>&1 | tail -20\`). On PASS, do NOT
+   paste stdout — the Test stage is the authoritative full-output capture, and downstream stages re-run
+   the gating checks fresh.
    \`\`\`
-   [actual output]
+   [failing tail -20 — omit this block entirely when PASSED]
    \`\`\`
-   Status: PASSED / FAILED
 
    ## Decisions and Trade-offs
    [non-obvious choices]
@@ -988,6 +1010,7 @@ Return using StructuredOutput:
       break
     }
     stageResults.push({ stage: 'implement', ...implResult })
+    lastImplReport = implResult
     if (!implResult.success) {
       log('Implement reported failure — aborting pipeline')
       break
@@ -1027,12 +1050,18 @@ GATE CHECKS (do these first):
 
 Instructions:
 
-1. Read the review report:
-   cd ${worktreePath} && cat ${reviewReport}
-   Extract: failing criteria, Issues Found section, Fresh Test Results.
+1. Failures to address (structured hand-off from the review — do NOT re-read ${reviewReport}):
+   Review verdict: ${handoff(lastReviewResult?.verdict)}
+   Criteria NOT_MET / PARTIAL (fix every one):
+${handoff(lastReviewResult?.unmetCriteria)}
+   Failure reasons / issues found:
+${handoff(lastReviewResult?.failureReasons)}
+   (The full review report is at ${reviewReport} — read it ONLY if a failure above is ambiguous.)
 
-2. Read the prior implement report:
-   cd ${worktreePath} && cat ${implementReport}
+2. Prior implementation context (structured hand-off — do NOT re-read ${implementReport}):
+   Files touched so far:
+${handoff(lastImplReport?.filesModified)}
+   Prior note: ${handoff(lastImplReport?.notes)}
 
 3. If a breakdown file exists, check the relevant sub-steps for original intent:
    Run: cd ${worktreePath} && ls ${breakdownFile} 2>/dev/null && echo EXISTS || echo MISSING
@@ -1046,6 +1075,17 @@ Instructions:
 5. Run the Validation Commands from the spec:
    cd ${worktreePath} && cat ${specFile} | grep -A 20 "## Validation Commands"
    Then run those commands.
+
+5.5. SELF-CHECK — completeness gate (do this BEFORE writing the report or committing):
+   For EACH criterion the review flagged (step 1), open the actual file and confirm it is now FULLY
+   satisfied — do not assume from your own diff. In particular: NO stub remains on a required path
+   (\`todo!()\`/\`unimplemented!()\`/\`unreachable!()\`, \`raise NotImplementedError\`,
+   \`throw new Error('not implemented')\`, empty \`pass\` bodies, \`TODO\`/\`FIXME\`), every named
+   deliverable file exists, and every "unit-tested" criterion has a real hermetic test. Quick grep —
+   scope it to the files the FLAGGED criteria require, not every changed file:
+     cd ${worktreePath} && grep -nE 'todo!\\(|unimplemented!\\(|unreachable!\\(|NotImplementedError|not implemented|FIXME' <the flagged criteria's paths> 2>/dev/null
+   If any flagged criterion is still not met, fix it NOW and re-run step 5 — returning with a known
+   remaining gap just burns another review-fail loop.
 
 6. Overwrite the implement report at: ${worktreePath}/${implementReport}
 
@@ -1068,8 +1108,9 @@ Instructions:
    [IMPORTANT: include ALL files from prior implement report PLUS newly touched files]
 
    ## Validation Output
-   [commands and actual output]
-   Status: PASSED / FAILED
+   [commands run, one per line] — Status: PASSED / FAILED
+   On FAIL only, paste the failing command's last 20 lines; on PASS, do not paste stdout (the Test
+   stage is the authoritative full-output capture).
 
    ## git diff --stat
    \`\`\`
@@ -1102,6 +1143,7 @@ Return using StructuredOutput:
       break
     }
     stageResults.push({ stage: 'fix', attempt: fixPass, ...fixResult })
+    lastImplReport = fixResult   // fix overwrites the implement-report slot
     if (!fixResult.success) {
       log(`Fix pass ${fixPass} reported failure — aborting pipeline`)
       break
@@ -1189,6 +1231,9 @@ Format:
 \`\`\`json
 [array of {test_name, passed, execution_command, test_purpose, error}]
 \`\`\`
+For each entry: a PASSED check stores \`error: ""\` (empty — never paste passing stdout); a FAILED
+check stores ONLY the last 20 lines of its failing output in \`error\`. Review re-runs the gating
+checks fresh, so the full passing transcript is never read downstream.
 
 Return using StructuredOutput:
   reportFile: "${testReport}"
@@ -1204,8 +1249,10 @@ Return using StructuredOutput:
 
     if (!testResult) {
       log('Test agent returned null — recording failure, continuing to review')
+      lastTestReport = { allPassed: false, passCount: 0, failCount: 0, failedTests: ['test agent returned null'] }
       stageResults.push({ stage: 'test', attempt: reviewAttempts + 1, allPassed: false, success: false, notes: 'Agent returned null' })
     } else {
+      lastTestReport = testResult
       stageResults.push({ stage: 'test', attempt: reviewAttempts + 1, ...testResult, success: testResult.allPassed })
       if (!testResult.allPassed) {
         log(`Test failures (${testResult.failCount}): ${(testResult.failedTests || []).join(', ')}`)
@@ -1246,11 +1293,18 @@ Instructions:
    cd ${worktreePath} && cat ${specFile}
    Extract the COMPLETE "## Acceptance Criteria" section.
 
-2. Read the implement report:
-   cd ${worktreePath} && cat ${implementReport}
+2. Implementation hand-off (structured — do NOT re-read ${implementReport}; this is its summary):
+   Files modified by the implementation:
+${handoff(lastImplReport?.filesModified)}
+   Commit: ${handoff(lastImplReport?.commitHash)}
+   Implementer's note: ${handoff(lastImplReport?.notes)}
+   Use the files-modified list to know WHERE to look — you verify against real source (step 5),
+   not against this self-report. (Full report at ${implementReport} only if a claim is ambiguous.)
 
-3. Read the test report:
-   cd ${worktreePath} && cat ${testReport}
+3. Test hand-off (structured — do NOT re-read ${testReport}; you re-run the checks yourself next):
+   All gating checks passed: ${handoff(lastTestReport?.allPassed)}
+   Passed: ${handoff(lastTestReport?.passCount)}   Failed: ${handoff(lastTestReport?.failCount)}
+   Failed checks: ${handoff(lastTestReport?.failedTests)}
 
 4. Run FRESH authoritative checks (this result determines the verdict, not the test report):
    Re-run each GATING validation check — those whose test_purpose in the test report (${testReport})
@@ -1673,7 +1727,7 @@ Return using StructuredOutput:
   logFile: "${logFile}"
   applied: false
   nextFocus: the exact Current Focus Line string you wrote to the log
-  notes: any settled decisions that should be added to DECISIONS.md
+  notes: any settled decisions that should be added to planning/decisions/
 `, withModel({ label: 'task-log', schema: LOG_SCHEMA, phase: 'Wrap-up' }, MODEL.taskLog))
 
 if (logResult) {
@@ -1818,7 +1872,7 @@ Return using StructuredOutput:
   workflowReportFile: "${workflowReport}"
   commitMessage: "chore: wrap up ${stem}"
   commitHash: 7-character short hash from git log --oneline -1
-  notes: any follow-up items (DECISIONS.md entries, NEEDS_REVIEW doc flags)
+  notes: any follow-up items (planning/decisions/ entries, NEEDS_REVIEW doc flags)
 `, withModel({ label: 'finalize', schema: FINALIZE_SCHEMA, phase: 'Wrap-up' }, MODEL.finalize))
 
 if (finalizeResult) {
