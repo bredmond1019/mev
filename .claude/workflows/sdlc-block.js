@@ -77,7 +77,7 @@ export const meta = {
   description: 'Orchestrate a full spec through dependency-ordered waves of parallel /sdlc-task pipelines, with bounded retries, failure triage, escalation, and ordered merges.',
   whenToUse: 'When driving a spec (a tasks.md) to completion across many parallel tasks. Optional task range, e.g. /sdlc-block <spec-slug> 1-7. Usage: /sdlc-block <spec-slug>',
   phases: [
-    { title: 'Pre-flight', detail: 'Commit (or generate) the spec and guarantee a clean main tree before any merge', model: 'opus' },
+    { title: 'Pre-flight', detail: 'Commit (or generate) the spec and guarantee a clean main tree before any merge', model: 'sonnet' },
     { title: 'Analyze',    detail: 'Resume-scout main, load or generate the dependency-ordered execution plan' },
     { title: 'Wave',       detail: 'Run wave tasks via /sdlc-task with retry + triage; escalate major failures' },
     { title: 'Merge',      detail: 'Merge passing branches in order (additive union only; else escalate)' },
@@ -201,7 +201,9 @@ const ANALYZE_SCHEMA = {
           dependsOn:     { type: 'array', items: { type: 'integer' }, description: 'Task numbers this task logically depends on' },
           filesCreated:  { type: 'array', items: { type: 'string' } },
           filesModified: { type: 'array', items: { type: 'string' }, description: 'Existing shared files this task edits' },
-          evidence:      { type: 'string', description: 'Quote(s) from tasks.md/breakdown.md establishing each dependsOn edge' }
+          evidence:      { type: 'string', description: 'Quote(s) from tasks.md/breakdown.md establishing each dependsOn edge' },
+          recommendBreakdown: { type: 'boolean', description: 'true if this task is coarse enough to benefit from /breakdown into atomic sub-steps (see the coarseness heuristic in STEP 3b)' },
+          breakdownReason:    { type: 'string', description: 'one sentence: which coarseness signal fired (only when recommendBreakdown)' }
         }
       }
     },
@@ -433,6 +435,13 @@ const HARNESS_CONFIG_SCHEMA = {
             port:             { type: 'integer' },
             routes:           { type: 'array', items: { type: 'string' } }
           }
+        },
+        breakdown: {
+          type: 'object',
+          properties: {
+            mode:                { type: 'string', description: 'recommend (default) | auto | off' },
+            complexityThreshold: { type: 'integer' }
+          }
         }
       }
     },
@@ -457,8 +466,8 @@ STEP 2 — Decide:
     these fields when present: stack; validation.checks[] (each: {kind, name, command, purpose, gates}
     plus any kind-specific fields that are present — baselineCommand, compareKeys[], countPattern,
     failOn, warningPatterns[], rules[] ({id, pattern, paths, allowlistPattern})); uiTest ({enabled,
-    devServerCommand, readySignal, port, routes[]}). Preserve kind-specific fields verbatim; ignore any
-    other fields.
+    devServerCommand, readySignal, port, routes[]}); breakdown ({mode, complexityThreshold}). Preserve
+    kind-specific fields verbatim; ignore any other fields.
 
 Return your findings using the StructuredOutput tool.
 `, { label: 'harness-config', schema: HARNESS_CONFIG_SCHEMA, model: 'haiku' })
@@ -548,7 +557,7 @@ STEP 3 — Ensure the spec exists and is committed:
 If spec generation fails for any reason, return ready=false, action="aborted", reason=<what failed>.
 
 Return using StructuredOutput: ready, action, reason, dirtyFiles, commitHash.
-`, { label: 'pre-flight', schema: PREFLIGHT_SCHEMA, phase: 'Pre-flight', model: 'opus' })  // generate path is PLANNING — keep on Opus
+`, { label: 'pre-flight', schema: PREFLIGHT_SCHEMA, phase: 'Pre-flight', model: 'sonnet' })  // dominant path is trivial scripted git (commit/clean); the rare SPEC_MISSING generate path is a fallback-of-a-fallback, so opus is not worth paying on every run. Re-tiered opus->sonnet (D11).
 
 if (!preflight || !preflight.ready) {
   const why = preflight?.reason || 'pre-flight agent returned null'
@@ -561,6 +570,13 @@ if (!preflight || !preflight.ready) {
   return { error: 'Pre-flight failed', reason: why, dirtyFiles: preflight?.dirtyFiles || [], blockId }
 }
 log(`Pre-flight OK — spec ${preflight.action}${preflight.commitHash ? ` (${preflight.commitHash})` : ''}.`)
+
+// Load the project's policy once, up front (mechanism/policy split — see planning/harness.json).
+// Reused by: the Analyze breakdown assessment (threshold), the breakdown gate below, and the
+// post-merge Playwright sweep (uiTest). null when absent/invalid → breakdown defaults to 'recommend'.
+const harnessCfg = await loadHarnessConfig()
+const breakdownMode = harnessCfg?.breakdown?.mode || 'recommend'
+const breakdownThreshold = harnessCfg?.breakdown?.complexityThreshold ?? 3
 
 // ================================================================
 // PHASE 0: ANALYZE — resume-scout + load/generate the execution plan
@@ -616,6 +632,17 @@ STEP 3 — Build the dependency graph. For EACH task determine:
   one task: if unsure whether one of THOSE is additive, LEAVE IT OUT (treat as exclusive).
   For dependsOn edges: if unsure whether an edge exists, INCLUDE it. Over-serializing logical deps is
   safe; wrongly marking an in-place-edited source file additive is not.
+
+STEP 3b — Breakdown assessment. For EACH task, decide whether it is too COARSE to implement directly
+  and would benefit from a /breakdown into atomic sub-steps. Set recommendBreakdown=true (with a
+  one-sentence breakdownReason naming the signal) when ANY of these hold:
+    - the task creates or modifies MORE than ${breakdownThreshold} distinct files (use the
+      filesCreated + filesModified you just computed); OR
+    - it bundles multiple separable concerns (e.g. "implement X AND refactor Y AND add Z"); OR
+    - it spans multiple layers/modules (e.g. data model + API + UI); OR
+    - it carries a large acceptance-criteria set covering independently-testable units.
+  A single focused change over a small file set is NOT a candidate (recommendBreakdown=false). This is
+  ASSESSMENT ONLY — do not write any breakdown file; the orchestrator acts on these flags per policy.
 
 STEP 4 — Resume scout: find tasks already completed on MAIN:
   ls ${reportsDir}/task*-workflow.md 2>/dev/null || echo "NONE"
@@ -745,6 +772,65 @@ if (selectedTasks) {
 }
 
 // ================================================================
+// BREAKDOWN GATE — recommend or (auto mode) generate sub-steps for coarse tasks BEFORE the waves.
+//
+// The Analyze stage flagged coarse tasks (recommendBreakdown). Acting here — once, on main, before
+// any worktree is created — is what makes auto mode safe: breakdown.md is committed on main so every
+// parallel worktree inherits the SAME file (no shared-file merge conflict, the D9 class of bug). Each
+// /sdlc-task is later invoked with --under-block so it does NOT re-assess. mode 'off' skips this.
+// ================================================================
+if (breakdownMode !== 'off') {
+  const flagged = Object.values(taskMap).filter(t =>
+    t.recommendBreakdown && !doneTasks.has(t.num) && (!selectedTasks || selectedTasks.has(t.num)))
+  if (!flagged.length) {
+    log(`Breakdown: no tasks flagged as coarse (mode=${breakdownMode}).`)
+  } else if (breakdownMode === 'auto') {
+    log(`Breakdown (auto): generating sub-steps for ${flagged.length} coarse task(s): ${flagged.map(t => t.num).join(', ')}...`)
+    const stepList = flagged.map(t => `  - Task ${t.num} (${t.title}): ${t.breakdownReason || 'coarse'}`).join('\n')
+    const gen = await tracedAgent(`
+You run from the MAIN repo root. Author atomic sub-steps (a /breakdown) for the COARSE tasks below so
+each parallel /sdlc-task implements a granular plan. Write them into ${breakdownFile} and commit on main
+BEFORE any worktree is created. Do NOT implement anything and do NOT modify ${tasksFile}.
+
+Coarse tasks to break down:
+${stepList}
+
+1. Read the spec and the real source each flagged task touches:
+   cat ${tasksFile}
+   For each flagged task, read the files its "### N." section references so sub-steps name real paths/symbols.
+
+2. Write ${breakdownFile} (create it, or append a section per flagged task). For EACH flagged task N:
+   - FIRST check whether it is already covered: grep -q "### Step N:" ${breakdownFile} 2>/dev/null. If so,
+     SKIP it (a prior run wrote it) — never duplicate a section.
+   - Otherwise add:
+
+   ### Step N: <task title>
+   - N.1 <atomic action — exact file path + symbol + what to write/change>
+   - N.2 <...>
+   **Verify:** <a concrete command/check after each logical group>
+
+   Each sub-step is a SINGLE atomic action naming exact file paths and function/component names. Do NOT
+   add sections for tasks that are not in the list above. tasks.md stays authoritative for scope and
+   acceptance criteria; breakdown.md is authoritative for HOW.
+
+3. Commit on main:
+   git add ${breakdownFile} && git commit -m "docs: breakdown for ${blockId} coarse tasks" || echo "nothing to commit"
+   git log --oneline -1
+
+Return using StructuredOutput: reportFile="${breakdownFile}", success, filesModified, commitHash, notes.
+`, { label: 'breakdown-gen', schema: { type: 'object', required: ['success'], properties: { reportFile: { type: 'string' }, success: { type: 'boolean' }, filesModified: { type: 'array', items: { type: 'string' } }, commitHash: { type: 'string' }, notes: { type: 'string' } } }, phase: 'Analyze', model: 'opus' })  // breakdown-gen is PLANNING — keep on Opus
+    if (gen?.success) log(`Breakdown committed${gen.commitHash ? ` (${gen.commitHash})` : ''} — worktrees will inherit it.`)
+    else log(`Breakdown generation did not complete — tasks will implement from tasks.md only.`)
+  } else {
+    // recommend mode — surface the recommendation; proceed without writing anything.
+    log(`Breakdown recommendation (mode=recommend): ${flagged.length} task(s) look coarse. Consider running`)
+    log(`  /breakdown ${tasksFile}`)
+    log(`before this block, or set breakdown.mode:"auto" in planning/harness.json. Flagged:`)
+    for (const t of flagged) log(`  - Task ${t.num} (${t.title}): ${t.breakdownReason || 'coarse'}`)
+  }
+}
+
+// ================================================================
 // Per-task retry + triage state machine
 // ================================================================
 const badSet = new Set()        // escalated OR poisoned task numbers
@@ -769,8 +855,10 @@ async function runTask(taskNum, resume = false) {
     // Only the FIRST attempt resumes an existing worktree; a clean-slate retry must start fresh
     // (the teardown below removes the worktree, so subsequent attempts always create a new one).
     const resumeArg = (resume && attempt === 1) ? ' --resume' : ''
+    // --under-block: the block already ran the breakdown assessment once (Analyze) and acted on it
+    // above, so the per-task engine must NOT re-assess.
     log(`Task ${taskNum}: attempt ${attempt}/${MAX_TASK_ATTEMPTS} via /sdlc-task${resumeArg}...`)
-    const r = await workflow('sdlc-task', `${blockId} ${taskNum}${resumeArg}`)
+    const r = await workflow('sdlc-task', `${blockId} ${taskNum}${resumeArg} --under-block`)
 
     if (r && r.finalVerdict === 'PASS') {
       return { taskNum, status: 'pass', branchName: r.branchName, worktreePath: r.worktreePath, finalVerdict: 'PASS', attempts: attempt }
@@ -1016,9 +1104,8 @@ let playwrightFixNotes = []
 const MAX_PLAYWRIGHT_ATTEMPTS = 2
 
 const hasMergedTasks = outcomes.some(o => o.merged)
-// Load the project's validation policy (mechanism/policy split — see planning/harness.json).
-// The post-merge browser sweep runs ONLY when the project enables it; non-web projects skip it.
-const harnessCfg = await loadHarnessConfig()
+// harnessCfg was loaded once up front (after pre-flight). The post-merge browser sweep runs ONLY
+// when the project enables it; non-web projects skip it.
 if (hasMergedTasks && harnessCfg?.uiTest?.enabled) {
   phase('Playwright')
   const ui = renderUiTestPrompt(harnessCfg, harnessCfg.uiTest.port ?? 3000)
