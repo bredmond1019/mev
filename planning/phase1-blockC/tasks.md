@@ -59,6 +59,10 @@ required field, bad enum value, or malformed format.
 - Missing required field → one `error` diagnostic with locator (e.g. `level`, `modules`).
 - (Cross-referencing `modules[]` against real files is **Block D**, not here — validate structure
   and presence only.)
+- **`level` must be validated case-insensitively.** Live `metadata.json` files use capitalized
+  values (`"Intermediate"`, `"Beginner"`, `"Advanced"`); the TS validator already lowercases
+  before the enum check. Match `s.to_lowercase().as_str()` against
+  `"beginner" | "intermediate" | "advanced"` — do not reject capitalised values.
 
 ### 4. Parse and validate MDX frontmatter as real YAML (`FileKind::ModuleMdx`)
 - Extract the leading `---\n … \n---` frontmatter block (between the first two `---` fences) and
@@ -115,4 +119,11 @@ cargo build --release
 ```
 
 ## Notes
-<!-- filled in as work happens -->
+
+**`author` field (conscious omission):** `ModuleMeta` does not require `author`, matching the TS
+validator's behaviour. The JSON schema (`content/learn/schemas/module-schema.json`) lists `author`
+as required, and every live module file carries `"author": "Brandon J. Redmond"`, but since the
+goal is a superset of the TS validator (not full JSON-schema enforcement), omitting it is
+intentional and consistent. If enforcement is ever wanted, add `pub author: Option<String>` to
+`ModuleMeta` and call `require_str(cf, "metadata.author", &meta.author, diags)` in
+`validate_module_metadata` — a two-line change.
