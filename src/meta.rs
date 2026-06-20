@@ -14,7 +14,9 @@
 //! - **Task 3 (this commit):** deserialize `FileKind::PathMetadataJson` into [`PathMeta`] and
 //!   emit a precise-locator [`Diagnostic`] for every missing required field or bad `level` enum
 //!   value. `level` is validated case-insensitively so live capitalised values are accepted.
-//! - **Task 4:** add real-YAML MDX frontmatter parsing.
+//! - **Task 4 (this commit):** add real-YAML MDX frontmatter parsing — extract the leading
+//!   `---\n…\n---` block and parse it with `serde_yaml`; require `title`, `description`,
+//!   `duration`, `difficulty`, `lastUpdated`; validate `difficulty` enum and `duration` format.
 //! - **Task 5:** wire [`validate_file`] into `validate()` so the diagnostics reach the `Report`.
 
 use serde::Deserialize;
@@ -48,8 +50,7 @@ pub fn validate_file(cf: &ContentFile) -> Vec<Diagnostic> {
     match cf.kind {
         FileKind::LearnModuleJson => validate_module_json(cf, &contents),
         FileKind::PathMetadataJson => validate_path_metadata_json(cf, &contents),
-        // ModuleMdx (Task 4) checks land in a later task.
-        _ => Vec::new(),
+        FileKind::ModuleMdx => validate_module_mdx(cf, &contents),
     }
 }
 
@@ -329,6 +330,116 @@ fn is_valid_level(s: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// MDX frontmatter structs (`FileKind::ModuleMdx`)
+// ---------------------------------------------------------------------------
+
+/// The YAML frontmatter of a `.mdx` module file.
+///
+/// Every required field is modelled as `Option` so each absence yields its own diagnostic
+/// (`frontmatter.<field>`). Extra keys the live files carry are tolerated — `deny_unknown_fields`
+/// is deliberately not used.
+#[derive(Debug, Deserialize)]
+pub struct MdxFrontmatter {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub duration: Option<String>,
+    pub difficulty: Option<String>,
+    #[serde(rename = "lastUpdated")]
+    pub last_updated: Option<String>,
+}
+
+/// Extract the raw YAML text from a leading `---\n…\n---` frontmatter block.
+///
+/// Returns `None` when the file does not start with `---` (no frontmatter), or when the
+/// closing `---` fence is never found (unterminated block).
+fn extract_frontmatter(contents: &str) -> Option<&str> {
+    let rest = contents.strip_prefix("---")?;
+    // Accept `---\n` or `---\r\n` as the opening fence line.
+    let rest = rest
+        .strip_prefix('\n')
+        .or_else(|| rest.strip_prefix("\r\n"))?;
+
+    // Special case: closing fence immediately follows opening fence (empty frontmatter).
+    for empty_pat in ["---\n", "---\r\n", "---"] {
+        if rest.starts_with(empty_pat) {
+            return Some("");
+        }
+    }
+
+    // General case: find the closing `---` on its own line (preceded by a newline).
+    for end_pat in ["\n---\n", "\n---\r\n", "\n---"] {
+        if let Some(yaml_end) = rest.find(end_pat) {
+            return Some(&rest[..yaml_end]);
+        }
+    }
+
+    None
+}
+
+/// Validate a `.mdx` module file: extract the leading YAML frontmatter block, parse it with
+/// `serde_yaml`, and check required fields, `difficulty` enum, and `duration` format.
+///
+/// - No frontmatter block (missing `---` fence or unterminated block) → one `error` diagnostic.
+/// - Malformed YAML inside the block → one `error` diagnostic.
+/// - Each missing required field → one `error` diagnostic with locator `frontmatter.<field>`.
+/// - Bad `difficulty` enum or `duration` format → one `error` diagnostic per violation.
+///
+/// Never panics, never aborts the run.
+pub(crate) fn validate_module_mdx(cf: &ContentFile, contents: &str) -> Vec<Diagnostic> {
+    let yaml = match extract_frontmatter(contents) {
+        Some(y) => y,
+        None => {
+            return vec![Diagnostic::error(
+                cf.rel.clone(),
+                "frontmatter",
+                "missing or unterminated frontmatter block (expected leading --- fence)",
+            )];
+        }
+    };
+
+    let fm: MdxFrontmatter = match serde_yaml::from_str(yaml) {
+        Ok(f) => f,
+        Err(e) => {
+            return vec![Diagnostic::error(
+                cf.rel.clone(),
+                "frontmatter",
+                format!("malformed YAML in frontmatter: {e}"),
+            )];
+        }
+    };
+
+    let mut diags = Vec::new();
+
+    require_str(cf, "frontmatter.title", &fm.title, &mut diags);
+    require_str(cf, "frontmatter.description", &fm.description, &mut diags);
+    require_str(cf, "frontmatter.duration", &fm.duration, &mut diags);
+    require_str(cf, "frontmatter.difficulty", &fm.difficulty, &mut diags);
+    require_str(cf, "frontmatter.lastUpdated", &fm.last_updated, &mut diags);
+
+    if let Some(difficulty) = non_empty(&fm.difficulty)
+        && !is_valid_difficulty(difficulty)
+    {
+        diags.push(Diagnostic::error(
+            cf.rel.clone(),
+            "frontmatter.difficulty",
+            format!("difficulty must be beginner|intermediate|advanced: {difficulty}"),
+        ));
+    }
+
+    if let Some(duration) = non_empty(&fm.duration)
+        && !is_valid_duration(duration)
+    {
+        diags.push(Diagnostic::error(
+            cf.rel.clone(),
+            "frontmatter.duration",
+            format!("duration must match ^\\d+\\s+(minutes?|hours?)$: {duration}"),
+        ));
+    }
+
+    diags
+}
+
+// ---------------------------------------------------------------------------
 // Shared helpers (presence, enum, and format checks)
 // ---------------------------------------------------------------------------
 
@@ -493,14 +604,24 @@ mod tests {
     }
 
     #[test]
-    fn validate_file_mdx_is_clean_until_task4() {
-        // ModuleMdx checks land in Task 4; until then a readable .mdx is dispatched to a no-op.
-        let dir = temp_dir("readable-clean");
+    fn validate_file_dispatches_mdx_to_frontmatter_validator() {
+        // A readable .mdx with a valid frontmatter block is dispatched to validate_module_mdx.
+        // Task 4 wires the real validator; this file has only `title` so it must produce errors.
+        let dir = temp_dir("readable-partial");
         let path = dir.join("01-intro.mdx");
         std::fs::write(&path, b"---\ntitle: x\n---\nbody").unwrap();
 
         let cf = content_file(path, "paths/demo/modules/01-intro.mdx", FileKind::ModuleMdx);
-        assert!(validate_file(&cf).is_empty());
+        // Should produce errors for the missing required fields.
+        let diags = validate_file(&cf);
+        assert!(
+            !diags.is_empty(),
+            "expected diagnostics for incomplete frontmatter"
+        );
+        assert!(
+            diags.iter().all(|d| d.severity == Severity::Error),
+            "all diagnostics should be errors"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -895,5 +1016,197 @@ mod tests {
         assert!(!is_valid_level("expert"));
         assert!(!is_valid_level("Expert"));
         assert!(!is_valid_level(""));
+    }
+
+    // --- MDX frontmatter validation (Task 4) ---
+
+    /// A fully-valid `.mdx` frontmatter block (all required fields, valid enums/formats).
+    fn good_mdx_body() -> &'static str {
+        "---\ntitle: Introduction to MCP\ndescription: A short intro.\nduration: 30 minutes\ndifficulty: beginner\nlastUpdated: \"2025-06-20\"\nextra_key: tolerated\n---\n\n# Body text\n"
+    }
+
+    fn mdx_cf(path: std::path::PathBuf) -> ContentFile {
+        content_file(path, "paths/demo/modules/01-intro.mdx", FileKind::ModuleMdx)
+    }
+
+    #[test]
+    fn good_mdx_frontmatter_is_clean() {
+        let dir = temp_dir("mdx-good");
+        let path = dir.join("01-intro.mdx");
+        std::fs::write(&path, good_mdx_body()).unwrap();
+
+        let cf = mdx_cf(path);
+        let diags = validate_file(&cf);
+        assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mdx_no_frontmatter_emits_single_error() {
+        let dir = temp_dir("mdx-no-fm");
+        let path = dir.join("01-intro.mdx");
+        std::fs::write(&path, b"# Just body, no frontmatter\n").unwrap();
+
+        let cf = mdx_cf(path);
+        let diags = validate_module_mdx(&cf, "# Just body, no frontmatter\n");
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].locator, "frontmatter");
+        assert!(
+            diags[0].message.contains("missing or unterminated"),
+            "unexpected message: {}",
+            diags[0].message
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mdx_unterminated_frontmatter_emits_single_error() {
+        let contents = "---\ntitle: Foo\ndescription: Bar\n";
+        let cf = content_file(
+            PathBuf::from("/unused"),
+            "paths/demo/modules/01-intro.mdx",
+            FileKind::ModuleMdx,
+        );
+        let diags = validate_module_mdx(&cf, contents);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].locator, "frontmatter");
+    }
+
+    #[test]
+    fn mdx_malformed_yaml_emits_single_error() {
+        // Intentionally invalid YAML inside the frontmatter fences.
+        let contents = "---\ntitle: [unclosed bracket\n---\nbody\n";
+        let cf = content_file(
+            PathBuf::from("/unused"),
+            "paths/demo/modules/01-intro.mdx",
+            FileKind::ModuleMdx,
+        );
+        let diags = validate_module_mdx(&cf, contents);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].locator, "frontmatter");
+        assert!(
+            diags[0].message.contains("malformed YAML"),
+            "unexpected message: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn mdx_missing_duration_emits_locator() {
+        let contents = "---\ntitle: T\ndescription: D\ndifficulty: beginner\nlastUpdated: \"2025-06-20\"\n---\nbody\n";
+        let cf = content_file(
+            PathBuf::from("/unused"),
+            "paths/demo/modules/01-intro.mdx",
+            FileKind::ModuleMdx,
+        );
+        let diags = validate_module_mdx(&cf, contents);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].locator, "frontmatter.duration");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].message, "missing required field");
+    }
+
+    #[test]
+    fn mdx_missing_description_emits_locator() {
+        let contents = "---\ntitle: T\nduration: 30 minutes\ndifficulty: beginner\nlastUpdated: \"2025-06-20\"\n---\nbody\n";
+        let cf = content_file(
+            PathBuf::from("/unused"),
+            "paths/demo/modules/01-intro.mdx",
+            FileKind::ModuleMdx,
+        );
+        let diags = validate_module_mdx(&cf, contents);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].locator, "frontmatter.description");
+        assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn mdx_bad_difficulty_enum_emits_locator() {
+        let contents = "---\ntitle: T\ndescription: D\nduration: 30 minutes\ndifficulty: expert\nlastUpdated: \"2025-06-20\"\n---\nbody\n";
+        let cf = content_file(
+            PathBuf::from("/unused"),
+            "paths/demo/modules/01-intro.mdx",
+            FileKind::ModuleMdx,
+        );
+        let diags = validate_module_mdx(&cf, contents);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].locator, "frontmatter.difficulty");
+        assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn mdx_malformed_duration_emits_locator() {
+        let contents = "---\ntitle: T\ndescription: D\nduration: half an hour\ndifficulty: beginner\nlastUpdated: \"2025-06-20\"\n---\nbody\n";
+        let cf = content_file(
+            PathBuf::from("/unused"),
+            "paths/demo/modules/01-intro.mdx",
+            FileKind::ModuleMdx,
+        );
+        let diags = validate_module_mdx(&cf, contents);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].locator, "frontmatter.duration");
+        assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn mdx_missing_last_updated_emits_locator() {
+        let contents = "---\ntitle: T\ndescription: D\nduration: 30 minutes\ndifficulty: beginner\n---\nbody\n";
+        let cf = content_file(
+            PathBuf::from("/unused"),
+            "paths/demo/modules/01-intro.mdx",
+            FileKind::ModuleMdx,
+        );
+        let diags = validate_module_mdx(&cf, contents);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].locator, "frontmatter.lastUpdated");
+        assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn mdx_all_required_fields_missing_reports_each() {
+        let contents = "---\nextra: only\n---\nbody\n";
+        let cf = content_file(
+            PathBuf::from("/unused"),
+            "paths/demo/modules/01-intro.mdx",
+            FileKind::ModuleMdx,
+        );
+        let diags = validate_module_mdx(&cf, contents);
+        let locs: Vec<_> = diags.iter().map(|d| d.locator.as_str()).collect();
+        for expected in [
+            "frontmatter.title",
+            "frontmatter.description",
+            "frontmatter.duration",
+            "frontmatter.difficulty",
+            "frontmatter.lastUpdated",
+        ] {
+            assert!(
+                locs.contains(&expected),
+                "missing locator {expected} in {locs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_frontmatter_helper() {
+        // Normal case.
+        let body = "---\ntitle: T\n---\nbody";
+        assert_eq!(extract_frontmatter(body), Some("title: T"));
+
+        // Unterminated: returns None.
+        let unterminated = "---\ntitle: T\n";
+        assert_eq!(extract_frontmatter(unterminated), None);
+
+        // No leading fence: returns None.
+        let no_fence = "title: T\n---\n";
+        assert_eq!(extract_frontmatter(no_fence), None);
+
+        // Empty frontmatter block.
+        let empty_block = "---\n---\nbody";
+        assert_eq!(extract_frontmatter(empty_block), Some(""));
     }
 }
