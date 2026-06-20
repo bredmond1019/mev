@@ -6,8 +6,8 @@ description: Current state and progress tracker for markdown-engine-validator.
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-19 — phase1-blockC in progress (Tasks 1–2 complete; Tasks 3–7 next — define and validate path metadata.json struct)
-**Current focus:** phase1-blockC — Task 3: Define and validate path `metadata.json` (`FileKind::PathMetadataJson`)
+**Last updated:** 2026-06-20 — phase1-blockC Done (All tasks 1–7 complete; phase1-blockD next — Cross-file integrity checks)
+**Current focus:** phase1-blockD — Planned (Cross-file integrity validation)
 
 ---
 
@@ -30,7 +30,7 @@ description: Current state and progress tracker for markdown-engine-validator.
 | Block | What | Status | Notes |
 |---|---|---|---|
 | Block B | Crawl & classify | Done | `walkdir` + `Corpus`; filename conventions; 16 tests (7 unit + 7 integration + 2 smoke) |
-| Block C | Frontmatter & JSON struct validation | In progress | Tasks 1–2 done: `src/meta.rs` module added; `ModuleMeta` struct with full field/enum/format validation for `LearnModuleJson` files. Tasks 3–7 remain. |
+| Block C | Frontmatter & JSON struct validation | Done | All tasks complete (1–7): struct/frontmatter validation module (`src/meta.rs`) with serde-based deserialization; `ModuleMeta` (LearnModuleJson), PathMetadataJson, and ModuleMdx frontmatter validation with required field checks, enum validation (difficulty, type, level), format validation (kebab-case id, duration pattern); YAML frontmatter parsing with proper error handling; fixture-driven tests (good + broken variants) for all cases; all four harness gates green (fmt, clippy, test, build). |
 | Block D | Cross-file integrity | Not started | Anchor-slice, pair existence, ID coherence, callout types |
 | Block E | pt-BR parity & reporter polish | Not started | Locale mirror checks; ANSI + `--json` output |
 
