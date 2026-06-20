@@ -46,13 +46,17 @@ $ARGUMENTS — the spec's `planning/` directory name (its phase-dotted slug),
    (Use the normalized directory slug, e.g. `chore: add spec for <spec-slug>`.)
 
 8. **Decomposition assessment.** Before reporting, evaluate each task you just wrote against the
-   coarseness heuristic and recommend which (if any) warrant a `/breakdown` first. A task is a
-   breakdown candidate when ANY hold: it creates/modifies more than `breakdown.complexityThreshold`
-   distinct files (`planning/harness.json`; default 3), OR it bundles multiple separable concerns
-   ("implement X AND refactor Y AND add Z"), OR it spans multiple layers (data model + API + UI), OR
-   it carries a large acceptance-criteria set covering independently-testable units. List the flagged
-   task numbers with a one-line reason in the report (the SDLC engines apply the same heuristic at run
-   time per `breakdown.mode`, so this is the authoring-time preview of that decision).
+   coarseness heuristic and recommend which (if any) warrant a `/breakdown` first. The real predictor
+   is SEPARABLE STRUCTURE, not raw file count. A task is a breakdown candidate when ANY hold: it bundles
+   multiple separable concerns ("implement X AND refactor Y AND add Z"), OR it spans multiple layers
+   (data model + API + UI), OR it carries a large acceptance-criteria set over several independently-
+   testable units, OR it touches more than `breakdown.complexityThreshold` distinct files
+   (`planning/harness.json`; default 3) AND those files are HETEROGENEOUS (different shapes/roles or
+   spanning more than one concern/layer). Do NOT flag on file count alone when the many files are the
+   same shape serving one concern (e.g. a content path's metadata + N near-identical lesson pairs) —
+   decomposition yields little there. List the flagged task numbers with a one-line reason in the report
+   (the SDLC engines apply the same heuristic at run time per `breakdown.mode`, so this is the
+   authoring-time preview of that decision).
 
 9. Report the path written and suggest the next step:
    "Spec written and committed to planning/phaseN-blockX/tasks.md. Run `/breakdown planning/phaseN-blockX/tasks.md` to decompose into atomic sub-steps."
