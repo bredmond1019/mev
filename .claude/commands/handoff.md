@@ -1,4 +1,4 @@
-# Prepare Next Agent — Hand off an in-flight session cleanly to a fresh agent.
+# Handoff — Hand off an in-flight session cleanly to a fresh agent.
 
 Use this when the current session has grown large enough that continuing in a new context is
 better than pressing on. It creates or updates `planning/handoff.md` so the next agent can
