@@ -28,6 +28,7 @@ predictably-named output file.
 | Session Start | `/session-recap` | Briefing: recent Log entries, where you left off, next step | chat only |
 | Session Start | `/status` | Check current focus and what's in progress | chat only |
 | Session Start | `/process-tasks` | Check which specs are eligible to start | chat only |
+| Session End | `/wrap-up [note]` | Log work + commit; clean close without a handoff file | status.md, log.md, git |
 | Session End | `/handoff [note]` | Write handoff + log work + commit; hands off to a fresh session | `planning/handoff.md`, status.md, log.md, git |
 | Block Setup | `/start-block [name]` | Flip a spec to `In progress` in status.md | status.md |
 | **1 — Plan** | `/generate-tasks <name>` | Write the full task spec from the master plan | `planning/<name>/tasks.md` |
@@ -169,6 +170,11 @@ tasks are done.
 ---
 
 ## Session Orientation
+
+### `/wrap-up [note]`
+Clean session close without a handoff. Runs `/log-work` (syncs status.md + appends log entry)
+then `/commit`. Use this when you're done with a piece of work and don't need to hand off
+to a fresh agent.
 
 ### `/handoff [note]`
 Session end-of-context handoff. Writes `planning/handoff.md` (what's in flight, completed,
