@@ -322,10 +322,13 @@ sparse checkout; `/clean-worktree` **merges before delete** — fast-forward-mer
 into `main`, applies deferred STATUS/Log updates, then removes the worktree. Do **not** run
 `/clean-worktree` for `/sdlc-block` tasks — that orchestrator merges each wave for you.
 
-### `/update-docs`
-The un-gated counterpart to `/document`: scopes doc updates by a git diff range (default
-`HEAD~1` + unstaged) instead of a review verdict. Surgically patches only the doc sections that
-describe changed source; flags architecture-level changes as `NEEDS_REVIEW`.
+### `/update-docs [--patch] [--since <ref>]`
+Documentation health sweep — audits all `docs/` files and `.claude/commands/README.md` against
+the current codebase (commands, engine flags, schema fields, new decisions) and recent git
+history. Produces a structured gap report: **STALE** sections, **MISSING** coverage, **NO-DOC**
+(intentionally undocumented), and **CURRENT** (confirmed). Add `--patch` to apply surgical
+fixes for clear-cut stale sections; without it the command is read-only. The un-gated complement
+to `/document` — use for periodic doc health checks outside the pipeline.
 
 ---
 
