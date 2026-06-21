@@ -25,7 +25,7 @@
 //     feat: implement <stem>          implement agent (fix: if validation failed)
 //     fix: fix pass N for <stem>      fix agent — one commit per pass
 //     docs: update docs for <stem>    document agent
-//     chore: wrap up <stem>           finalize agent (status/log/reports)
+//     chore: wrap up <stem>           wrap-up agent (status/log/reports)
 //
 //   This ensures crash recovery: if the pipeline dies mid-run, all completed
 //   work is already in git history and visible to future agents via git log.
@@ -49,9 +49,9 @@
 //
 // MODEL TIERING (token lever — see the MODEL map below)
 //   Three tiers, matched to the work: Opus on PLANNING (generate-tasks fallback); Haiku on the
-//   purely-mechanical stages (scout, start-block, test, finalize); Sonnet on the judgment work
-//   (implement/fix/review/document/log-work). Without this map every stage inherits the SESSION
-//   model — so launching from an Opus session would run scout/test/finalize on Opus too. Tune
+//   purely-mechanical stages (scout, start-block, test); Sonnet on the judgment work
+//   (implement/fix/review/document/wrap-up). Without this map every stage inherits the SESSION
+//   model — so launching from an Opus session would run scout/test on Opus too. Tune
 //   one place: the MODEL map.
 //
 // STAGED MODEL ESCALATION (ESCALATION_MODEL)
@@ -64,7 +64,7 @@
 //   [taskN-]test.md       test agent
 //   [taskN-]review.md     review agent
 //   [taskN-]document.md   document agent
-//   [taskN-]workflow.md   finalize agent (full pipeline run summary)
+//   [taskN-]workflow.md   wrap-up agent (full pipeline run summary)
 //
 // =============================================================================
 
@@ -185,25 +185,22 @@ const REVIEW_SCHEMA = {
   }
 }
 
+// Wrap-up = log-work + finalize merged into one bookkeeping agent (D14). Unlike sdlc-task's wrap-up
+// (which only RECORDS what status/log should become, deferred to /clean-worktree merge time), this
+// runs on main with no worktree — so it edits status.md + log.md directly, then writes the workflow
+// report and commits every remaining planning file in one chore commit. Kept on Sonnet (not Haiku):
+// the human-facing status/log prose is the judgment-heavy half and stays authoritative.
 const WRAPUP_SCHEMA = {
   type: 'object',
-  required: ['statusUpdated', 'devlogUpdated'],
+  required: ['statusUpdated', 'devlogUpdated', 'workflowReportFile', 'commitMessage'],
   properties: {
-    statusUpdated: { type: 'boolean' },
-    devlogUpdated: { type: 'boolean' },
-    nextFocus: { type: 'string' },
-    notes: { type: 'string' }
-  }
-}
-
-const FINALIZE_SCHEMA = {
-  type: 'object',
-  required: ['workflowReportFile', 'commitMessage'],
-  properties: {
+    statusUpdated:      { type: 'boolean' },
+    devlogUpdated:      { type: 'boolean' },
+    nextFocus:          { type: 'string' },
     workflowReportFile: { type: 'string' },
-    commitMessage: { type: 'string' },
-    commitHash: { type: 'string' },
-    notes: { type: 'string' }
+    commitMessage:      { type: 'string' },
+    commitHash:         { type: 'string' },
+    notes:              { type: 'string' }
   }
 }
 
@@ -227,8 +224,8 @@ const UI_TEST_SCHEMA = {
 //
 // Principle (mirrors sdlc-task): match the model to the work.
 //   • Opus   — generate-tasks (authors the spec; fallback path only)
-//   • Haiku  — scout / start-block / test / finalize. Fixed procedures, no real judgment.
-//   • Sonnet — implement / fix / review / document / log-work (judgment work).
+//   • Haiku  — scout / start-block / test. Fixed procedures, no real judgment.
+//   • Sonnet — implement / fix / review / document / wrap-up (judgment work).
 //
 // To re-tier, change one value here — nothing else moves.
 // Valid values: 'haiku' | 'sonnet' | 'opus' | undefined (inherit session model).
@@ -243,8 +240,7 @@ const MODEL = {
   review:        'sonnet',   // verify criteria; gated by an authoritative fresh run of the gating checks
   uiTest:        'sonnet',   // live browser smoke checks (when uiTest.enabled); needs judgment to interpret results
   document:      'sonnet',   // surgical doc patches, gated on PASS
-  logWork:       'sonnet',   // authors the human-facing log prose + edits status — keep the quality
-  finalize:      'haiku',    // assembles a JS-precomputed table + scripted git add; can't break the pipeline
+  wrapup:        'sonnet',   // log-work + finalize merged (D14): authors the human-facing status/log prose (judgment) + writes the report + scripted git add
 }
 
 // Merge an optional model override into an agent's opts (omits the key when undefined,
@@ -323,7 +319,7 @@ STEP 2 — Decide:
     uiTest ({enabled, devServerCommand, readySignal, port, routes[]}). Ignore any other fields.
 
 Return your findings using the StructuredOutput tool.
-`, { label: 'harness-config', schema: HARNESS_CONFIG_SCHEMA, model: 'haiku' })
+`, { label: 'harness-config', schema: HARNESS_CONFIG_SCHEMA, model: 'sonnet' })
 
   if (!result || !result.present || !result.config) return null
   return result.config
@@ -1326,67 +1322,10 @@ const stageResultsSummary = stageResults
 log(`Wrap-up. Final verdict: ${finalVerdict}. Pipeline: ${stageResultsSummary}`)
 
 // ----------------------------------------------------------------
-// LOG-WORK: update status.md + append log entry
+// WRAP-UP (D14): log-work + finalize in one pass — update status.md + append log, write the
+// workflow report, then commit every remaining planning file in a single chore commit.
 // ----------------------------------------------------------------
-log('Running log-work...')
-
-const wrapupResult = await agent(`
-You are the log-work agent for the SDLC pipeline. Update status.md and append a log entry.
-
-Target:
-  Spec:            ${blockId}
-  Task:            ${taskNumber !== null ? `Task ${taskNumber}` : 'all tasks (full spec)'}
-  Final verdict:   ${finalVerdict}
-  Review attempts: ${reviewAttempts}
-  Pipeline summary: ${stageResultsSummary}
-
-Instructions:
-
-1. Read planning/status.md
-2. Read ${specFile}
-3. Read log.md (at the repo root — NOT in planning/)
-4. Run: git log --oneline -10
-   (Code and doc changes are already committed by their respective agents — git log shows the full picture)
-
-6. Update planning/status.md using the Edit tool:
-   ${taskNumber !== null
-     ? `- Task ${taskNumber} is done. Check if there are more tasks in the spec.
-        - If more tasks remain: keep spec status as "In progress", update "Current focus" to the next task.
-        - If this was the last task: flip spec status to "Done", update "Current focus" to the next spec.`
-     : `- Full spec "${blockId}" is done. Flip its Status to "Done" in the Progress Table.
-        - Update "Current focus" to the next spec or phase.`}
-   - Update "Last updated" — run: date +%Y-%m-%d
-
-7. Append a new entry to log.md (prepend at the TOP, newest entries first).
-   The entry must follow this format:
-
-   ## [YYYY-MM-DD — run date +%Y-%m-%d to get this]
-   [One paragraph: what was implemented, how the review went (${finalVerdict} verdict${reviewAttempts > 1 ? ` after ${reviewAttempts} attempts` : ''}), any notable findings, decisions made. End with: "Next: [next task or spec]."]
-
-   \`\`\`
-   [git log --oneline -5 output — shows the commits made during this pipeline run]
-   \`\`\`
-
-8. If the implement report's "Decisions and Trade-offs" section contains any settled choices, mention them in your notes — but do NOT edit planning/decisions/ yourself (that is a manual step).
-
-Return your result using the StructuredOutput tool:
-  statusUpdated: true if status.md was successfully updated
-  devlogUpdated: true if log.md was successfully updated
-  nextFocus: the new "Current focus" value written to status.md
-  notes: any settled decisions that should be added to planning/decisions/
-`, withModel({ label: 'log-work', schema: WRAPUP_SCHEMA, phase: 'Wrap-up' }, MODEL.logWork))
-
-if (wrapupResult) {
-  stageResults.push({ stage: 'log-work', ...wrapupResult, success: wrapupResult.statusUpdated && wrapupResult.devlogUpdated })
-  if (wrapupResult.notes) log(`Decisions to log: ${wrapupResult.notes}`)
-} else {
-  stageResults.push({ stage: 'log-work', success: false, notes: 'Agent returned null' })
-}
-
-// ----------------------------------------------------------------
-// FINALIZE: commit + write workflow report
-// ----------------------------------------------------------------
-log('Running finalize: commit + workflow report...')
+log('Running wrap-up: status/log update + workflow report + chore commit...')
 
 const stageTable = stageResults.map(r => {
   const label = r.stage + (r.attempt ? ` (attempt ${r.attempt})` : '')
@@ -1397,28 +1336,48 @@ const stageTable = stageResults.map(r => {
   return `| ${label} | ${status} | ${file} | ${commit} | ${notes} |`
 }).join('\n')
 
-const finalizeResult = await agent(`
-You are the finalize agent for the SDLC pipeline. Write the workflow report and make the final wrap-up commit.
-
-Context: Code, doc, and fix changes have already been committed by their respective agents during the pipeline run.
-Your job is to write the workflow report, then commit the remaining planning files (status.md, log.md,
-test/review reports, and the workflow report itself) as a single chore: commit.
+const wrapupResult = await agent(`
+You are the wrap-up agent for the SDLC pipeline. You do THREE things in one pass — update status.md,
+append a log entry, then write the workflow report — and finish by committing all the remaining
+planning files in one chore commit.
 
 Target:
-  Spec:           ${blockId}
-  Task:           ${taskNumber !== null ? `Task ${taskNumber}` : 'all tasks'}
-  Final verdict:  ${finalVerdict}
+  Spec:            ${blockId}
+  Task:            ${taskNumber !== null ? `Task ${taskNumber}` : 'all tasks (full spec)'}
+  Final verdict:   ${finalVerdict}
   Review attempts: ${reviewAttempts}
+  Pipeline summary: ${stageResultsSummary}
   Workflow report to write: ${workflowReport}
 
-Stage results so far:
-${stageResultsSummary}
+PART A — Update status.md + log (code/doc changes are already committed by their agents):
 
-STEP 1 — Get the full commit history from this pipeline run:
-  Run: git log --oneline -15
-  These are the commits made during this run (implement, fix passes, docs).
+1. Read planning/status.md
+2. Read ${specFile}
+3. Read log.md (at the repo root — NOT in planning/)
+4. Run: git log --oneline -15
+   (git log shows the full picture of commits made during this run.)
 
-STEP 2 — Write the workflow report to: ${workflowReport}
+5. Update planning/status.md using the Edit tool:
+   ${taskNumber !== null
+     ? `- Task ${taskNumber} is done. Check if there are more tasks in the spec.
+        - If more tasks remain: keep spec status as "In progress", update "Current focus" to the next task.
+        - If this was the last task: flip spec status to "Done", update "Current focus" to the next spec.`
+     : `- Full spec "${blockId}" is done. Flip its Status to "Done" in the Progress Table.
+        - Update "Current focus" to the next spec or phase.`}
+   - Update "Last updated" — run: date +%Y-%m-%d
+
+6. Append a new entry to log.md (prepend at the TOP, newest entries first):
+
+   ## [YYYY-MM-DD — run date +%Y-%m-%d to get this]
+   [One paragraph: what was implemented, how the review went (${finalVerdict} verdict${reviewAttempts > 1 ? ` after ${reviewAttempts} attempts` : ''}), any notable findings, decisions made. End with: "Next: [next task or spec]."]
+
+   \`\`\`
+   [git log --oneline -5 output — the commits made during this pipeline run]
+   \`\`\`
+
+7. If the implement report's "Decisions and Trade-offs" section contains any settled choices, mention them in your notes — but do NOT edit planning/decisions/ yourself (that is a manual step).
+
+PART B — Write the workflow report to: ${workflowReport}
 
   Use EXACTLY this format:
 
@@ -1451,7 +1410,7 @@ STEP 2 — Write the workflow report to: ${workflowReport}
   ## Commits (this pipeline run)
   [Paste the relevant lines from git log --oneline — the implement, fix, docs commits made during this run]
 
-STEP 3 — Commit the remaining planning files as a single chore: commit.
+PART C — Commit the remaining planning files as a single chore commit.
   Never use git add -A or git add . — stage files explicitly by name.
 
   Run: git status
@@ -1478,19 +1437,23 @@ STEP 3 — Commit the remaining planning files as a single chore: commit.
   Capture the short hash.
 
 Return your result using the StructuredOutput tool:
+  statusUpdated: true if status.md was successfully updated
+  devlogUpdated: true if log.md was successfully updated
+  nextFocus: the new "Current focus" value written to status.md
   workflowReportFile: "${workflowReport}"
   commitMessage: "chore: wrap up ${stem}"
   commitHash: the 7-character short hash from git log --oneline -1
-  notes: any follow-up items (decisions to add to planning/decisions/, NEEDS_REVIEW doc flags)
-`, withModel({ label: 'finalize', schema: FINALIZE_SCHEMA, phase: 'Wrap-up' }, MODEL.finalize))
+  notes: any follow-up items (settled decisions to add to planning/decisions/, NEEDS_REVIEW doc flags)
+`, withModel({ label: 'wrap-up', schema: WRAPUP_SCHEMA, phase: 'Wrap-up' }, MODEL.wrapup))
 
-if (finalizeResult) {
-  stageResults.push({ stage: 'finalize', ...finalizeResult, success: true })
-  log(`Committed: ${finalizeResult.commitMessage}`)
-  log(`Workflow report: ${finalizeResult.workflowReportFile}`)
+if (wrapupResult) {
+  stageResults.push({ stage: 'wrap-up', ...wrapupResult, success: wrapupResult.statusUpdated && wrapupResult.devlogUpdated })
+  if (wrapupResult.notes) log(`Decisions to log: ${wrapupResult.notes}`)
+  log(`Committed: ${wrapupResult.commitMessage}`)
+  log(`Workflow report: ${wrapupResult.workflowReportFile}`)
 } else {
-  stageResults.push({ stage: 'finalize', success: false, notes: 'Agent returned null' })
-  log('Finalize agent returned null — manual commit and workflow report may be needed')
+  stageResults.push({ stage: 'wrap-up', success: false, notes: 'Agent returned null' })
+  log('Wrap-up agent returned null — manual status/log update, commit, and workflow report may be needed')
 }
 
 log(`Pipeline complete. Verdict: ${finalVerdict} | Attempts: ${reviewAttempts} | Report: ${workflowReport}`)
@@ -1502,7 +1465,7 @@ return {
   finalVerdict,
   reviewAttempts,
   startStage: scout.startStage,
-  workflowReport: finalizeResult?.workflowReportFile || workflowReport,
-  commitMessage: finalizeResult?.commitMessage,
+  workflowReport: wrapupResult?.workflowReportFile || workflowReport,
+  commitMessage: wrapupResult?.commitMessage,
   stageResults
 }

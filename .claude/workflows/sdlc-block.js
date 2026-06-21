@@ -470,7 +470,7 @@ STEP 2 — Decide:
     kind-specific fields verbatim; ignore any other fields.
 
 Return your findings using the StructuredOutput tool.
-`, { label: 'harness-config', schema: HARNESS_CONFIG_SCHEMA, model: 'haiku' })
+`, { label: 'harness-config', schema: HARNESS_CONFIG_SCHEMA, model: 'sonnet' })
 
   if (!result || !result.present || !result.config) return null
   return result.config
@@ -555,6 +555,16 @@ STEP 3 — Ensure the spec exists and is committed:
     Nothing to do. Return ready=true, action="clean".
 
 If spec generation fails for any reason, return ready=false, action="aborted", reason=<what failed>.
+
+STEP 4 — Validate task structure (CASE B and CASE C only — skip when you just generated a
+  fresh spec in CASE A, whose format is already controlled):
+  grep -c '^### [0-9]' ${tasksFile} 2>/dev/null || echo "0"
+  If the count is "0" (no numbered '### N.' task headings found), override ready:
+    ready=false, action="aborted",
+    reason="tasks.md has no numbered '### N. Title' task headings — sdlc-block enumerates
+    tasks by '### N.' and cannot parse this spec. Fix: run /generate-tasks --force to
+    regenerate it, or add '### 1. Title', '### 2. Title', ... headings manually, commit,
+    then re-run /sdlc-block."
 
 Return using StructuredOutput: ready, action, reason, dirtyFiles, commitHash.
 `, { label: 'pre-flight', schema: PREFLIGHT_SCHEMA, phase: 'Pre-flight', model: 'sonnet' })  // dominant path is trivial scripted git (commit/clean); the rare SPEC_MISSING generate path is a fallback-of-a-fallback, so opus is not worth paying on every run. Re-tiered opus->sonnet (D11).
