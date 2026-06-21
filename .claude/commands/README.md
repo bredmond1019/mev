@@ -28,6 +28,7 @@ predictably-named output file.
 | Session Start | `/session-recap` | Briefing: recent Log entries, where you left off, next step | chat only |
 | Session Start | `/status` | Check current focus and what's in progress | chat only |
 | Session Start | `/process-tasks` | Check which specs are eligible to start | chat only |
+| Session End | `/handoff [note]` | Write handoff + log work + commit; hands off to a fresh session | `planning/handoff.md`, status.md, log.md, git |
 | Block Setup | `/start-block [name]` | Flip a spec to `In progress` in status.md | status.md |
 | **1 — Plan** | `/generate-tasks <name>` | Write the full task spec from the master plan | `planning/<name>/tasks.md` |
 | **1 — Plan (ad-hoc)** | `/chore` · `/feature` · `/plan <desc>` | Plan ad-hoc work from a free-text description (not a master-plan block) | `planning/<prefix>-<slug>/{tasks,plan}.md` |
@@ -168,6 +169,12 @@ tasks are done.
 ---
 
 ## Session Orientation
+
+### `/handoff [note]`
+Session end-of-context handoff. Writes `planning/handoff.md` (what's in flight, completed,
+remaining, open questions, first command for the next agent), then invokes `/log-work` and
+`/commit`. `/prime` in the next session detects the handoff file and surfaces it first.
+Delete `planning/handoff.md` once the new session has consumed it.
 
 ### `/session-recap`
 Start-of-session briefing: reads the three most recent Log entries, status.md, the current

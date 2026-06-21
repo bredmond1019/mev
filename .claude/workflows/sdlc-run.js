@@ -7,8 +7,10 @@
 // agents communicate only through report files on disk.
 //
 // USAGE
-//   /sdlc-run <spec-slug>      runs all tasks in the spec
-//   /sdlc-run <spec-slug> 2    scopes every stage to task 2 only
+//   /sdlc-run <spec-slug>                  runs all tasks in the spec
+//   /sdlc-run <spec-slug> 2                scopes every stage to task 2 only
+//   /sdlc-run <spec-slug> --from implement  skips scout; starts at the named stage
+//   /sdlc-run <spec-slug> 2 --from test    task-scoped + skip scout
 //
 // PIPELINE STAGES (in order)
 //   Scout      → detect current stage from report files + status.md + log
@@ -96,9 +98,18 @@ if (!rawArgs) {
   return { error: 'Missing required argument: spec name (e.g. "<spec-slug>" or "<spec-slug> 2")' }
 }
 
-const parts = rawArgs.split(/\s+/)
+// Parse optional --from <stage> (skips scout when the caller already knows the start stage)
+const VALID_FROM_STAGES = ['implement', 'fix', 'test', 'review', 'ui-test', 'document', 'wrap-up']
+const fromMatch = rawArgs.match(/--from\s+(\S+)/)
+const fromStage = fromMatch ? fromMatch[1] : null
+if (fromStage && !VALID_FROM_STAGES.includes(fromStage)) {
+  log(`ERROR: Unknown --from stage "${fromStage}". Valid values: ${VALID_FROM_STAGES.join(', ')}`)
+  return { error: `Invalid --from stage: ${fromStage}` }
+}
+const cleanArgs = rawArgs.replace(/--from\s+\S+/, '').trim()
+const parts = cleanArgs.split(/\s+/)
 const blockId = parts[0]
-const taskNumber = parts.length > 1 ? parseInt(parts[1], 10) : null
+const taskNumber = parts.length > 1 && !isNaN(parseInt(parts[1], 10)) ? parseInt(parts[1], 10) : null
 const specFile = `planning/${blockId}/tasks.md`
 const stem = taskNumber !== null ? `${blockId}-task${taskNumber}` : blockId
 const reportsDir = `planning/${blockId}/sdlc/reports`
@@ -380,10 +391,23 @@ const stageResults = []
 
 // ================================================================
 // PHASE 1: SCOUT — determine current pipeline stage
+//   Skipped when --from <stage> is supplied (caller already knows the state).
 // ================================================================
+let scout
+let currentStage
+
+if (fromStage) {
+  log(`--from ${fromStage} — skipping scout, starting at "${fromStage}"`)
+  scout = {
+    startStage: fromStage, specFileExists: true, blockStatus: 'In progress',
+    existingReports: [], reviewVerdict: '', currentFocus: '', lastDevlogEntry: '',
+    statusSummary: `--from ${fromStage} (scout skipped)`, discrepancies: ''
+  }
+  currentStage = fromStage
+} else {
 phase('Scout')
 
-const scout = await agent(`
+scout = await agent(`
 You are the pipeline scout for the SDLC workflow system.
 
 Target:
@@ -461,7 +485,8 @@ Instructions:
 `, withModel({ label: 'start-block', phase: 'Scout' }, MODEL.startBlock))
 }
 
-let currentStage = scout.startStage
+  currentStage = scout.startStage
+} // end scout (else)
 let reviewAttempts = 0
 const MAX_REVIEW_ATTEMPTS = 3
 let lastReviewResult = null
