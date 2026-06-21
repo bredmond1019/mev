@@ -18,8 +18,10 @@
 //   Task number is REQUIRED. For full-spec runs use /sdlc-run instead.
 //
 // PIPELINE STAGES (in order)
-//   Worktree   → auto-create (or suffix-increment) isolated git worktree
-//   Scout      → detect current stage from report files
+//   Worktree   → auto-create (or suffix-increment) isolated git worktree (also reports spec-exists +
+//                block status, so a fresh non-resume run can skip the Scout stage entirely)
+//   Scout      → detect current stage from report files (RESUME runs only; a fresh run's start stage
+//                is deterministic — generate-tasks if the spec is missing, else implement)
 //   Plan       → generate task spec (if missing) + breakdown assessment (standalone runs; recommend/auto/off
 //                per planning/harness.json breakdown.mode — skipped under /sdlc-block, which assesses once)
 //   Implement  → execute the task from spec
@@ -27,7 +29,8 @@
 //   Test       → run the project's validation suite from planning/harness.json (+ universal emoji gate)
 //   Review     → fresh validation run + acceptance criteria; verdict gates next stage
 //   Document   → surgical patches to docs/ (gates on PASS verdict)
-//   Wrap-up    → write task log file (defers status/log to merge time)
+//   Wrap-up    → write task log + workflow report, commit all reports (status/log deferred to merge
+//                time). task-log and finalize were merged into one Haiku agent — see D14.
 //
 // WHAT RUNS IN THE WORKTREE vs. MAIN
 //   Worktree branch: all code, content, doc, and report changes
@@ -57,7 +60,7 @@
 //
 // MODEL TIERING (token lever — see the MODEL map below)
 //   Three tiers: Opus earns its cost on PLANNING (generate-tasks fallback); Haiku handles the
-//   purely-mechanical stages (scout, test, finalize — fixed procedures, no judgment); Sonnet
+//   purely-mechanical stages (scout, test, wrap-up — fixed procedures, no judgment); Sonnet
 //   handles everything in between (implement/fix/review/document/task-log). Tune one place: the
 //   MODEL map. Real planning happens upstream in the /generate-tasks and /breakdown skills — run
 //   those on Opus. This matters most under /sdlc-block, which fans this pipeline out across many tasks.
@@ -75,7 +78,7 @@ export const meta = {
   whenToUse: 'When running a specific numbered task in parallel with other tasks. Task number is required. Usage: /sdlc-task <spec-slug> 2',
   phases: [
     { title: 'Worktree',   detail: 'Auto-create (or suffix-increment) git worktree for isolated execution' },
-    { title: 'Scout',      detail: 'Determine current pipeline stage from report files' },
+    { title: 'Scout',      detail: 'Determine current pipeline stage from report files (resume runs only)' },
     { title: 'Plan',       detail: 'Generate task spec (if missing) and assess whether a coarse task needs breakdown first' },
     { title: 'Implement',  detail: 'Execute the task' },
     { title: 'Fix',        detail: 'Targeted fixes for FAIL/PARTIAL review' },
@@ -83,7 +86,7 @@ export const meta = {
     { title: 'Review',     detail: 'Verify acceptance criteria; issue verdict' },
     { title: 'UI Test',    detail: 'Browser smoke check (only when planning/harness.json enables uiTest)' },
     { title: 'Document',   detail: 'Patch docs/ (gates on PASS verdict)' },
-    { title: 'Wrap-up',    detail: 'Write task log file (status/log deferred to merge time)' },
+    { title: 'Wrap-up',    detail: 'Write task log + workflow report and commit (status/log deferred to merge time)' },
   ]
 }
 
@@ -151,6 +154,10 @@ const SETUP_SCHEMA = {
     branchName:    { type: 'string', description: 'Actual branch name used (may have -2, -3 suffix if base was taken)' },
     worktreePath:  { type: 'string', description: 'Absolute path to the worktree directory' },
     wasCreated:    { type: 'boolean', description: 'true if a new worktree was created, false if it already existed' },
+    // Pipeline-start inputs — let a fresh (non-resume) run skip the scout stage entirely (the start
+    // stage is then deterministic). Only consulted when NOT resuming; on resume the scout decides.
+    specFileExists: { type: 'boolean', description: 'true if the task spec file exists in the worktree' },
+    blockStatus:    { type: 'string', description: "This spec's Status in status.md (title-case), or 'Unknown'" },
     notes:         { type: 'string' }
   }
 }
@@ -216,25 +223,20 @@ const REVIEW_SCHEMA = {
   }
 }
 
-const LOG_SCHEMA = {
+// Wrap-up = task-log + finalize merged into one bookkeeping agent (both were cheap, sequential, and
+// purely mechanical). It writes the deferred status/log content AND the workflow report, then commits
+// every report file in one chore commit. status.md / log.md themselves are still NOT touched here —
+// they are applied at merge time by /clean-worktree.
+const WRAPUP_SCHEMA = {
   type: 'object',
-  required: ['logFile', 'applied'],
+  required: ['logFile', 'workflowReportFile', 'commitMessage'],
   properties: {
-    logFile:    { type: 'string' },
-    applied:    { type: 'boolean' },
-    nextFocus:  { type: 'string', description: 'The Current focus string written to the log file' },
-    notes:      { type: 'string', description: 'Any decisions that should be added to planning/decisions/' }
-  }
-}
-
-const FINALIZE_SCHEMA = {
-  type: 'object',
-  required: ['workflowReportFile', 'commitMessage'],
-  properties: {
+    logFile:            { type: 'string' },
     workflowReportFile: { type: 'string' },
     commitMessage:      { type: 'string' },
     commitHash:         { type: 'string' },
-    notes:              { type: 'string' }
+    nextFocus:          { type: 'string', description: 'The Current focus string written to the task log file' },
+    notes:              { type: 'string', description: 'Any decisions that should be added to planning/decisions/, plus NEEDS_REVIEW doc flags' }
   }
 }
 
@@ -267,12 +269,12 @@ const BREAKDOWN_ASSESS_SCHEMA = {
 // purely-mechanical stages; Sonnet handles the judgment work in between.
 //   • Opus   — generate-tasks (authors the spec; fallback path only) and breakdown-gen (authors
 //              atomic sub-steps for a coarse task in auto mode). Both are PLANNING.
-//   • Haiku  — worktree-setup / scout / test / task-log / finalize. Each is a fixed procedure with
-//              no real judgment: worktree-setup follows an exact free-name + sparse-checkout recipe,
-//              scout is a deterministic file-existence decision tree, test runs the project's
-//              validation suite and reads exit codes (review re-runs the gating checks anyway),
-//              task-log fills a rigid template (all values pre-bracketed) plus a one-paragraph
-//              summary, and finalize just fills a JS-precomputed table and runs scripted git adds.
+//   • Haiku  — worktree-setup / scout / test / wrap-up. Each is a fixed procedure with no real
+//              judgment: worktree-setup follows an exact free-name + sparse-checkout recipe, scout is
+//              a deterministic file-existence decision tree (resume only), test runs the project's
+//              validation suite and reads exit codes (review re-runs the gating checks anyway), and
+//              wrap-up (task-log + finalize, merged in D14) fills a rigid template plus a
+//              one-paragraph summary and a JS-precomputed table, then runs scripted git adds.
 //   • Sonnet — implement / fix / review / document / breakdown-assess. A sharp spec + breakdown makes
 //              these well-scoped enough that Sonnet does them reliably. (Review is gated by an
 //              authoritative fresh-test run, and fix failures escalate rather than silently ship.)
@@ -298,9 +300,9 @@ const MODEL = {
   review:        'sonnet',   // verify criteria; gated by an authoritative fresh run of the gating checks
   uiTest:        'sonnet',   // live browser smoke checks (when uiTest.enabled); needs judgment to interpret results
   document:      'sonnet',   // surgical doc patches, gated on PASS
-  taskLog:       'haiku',    // fills a rigid template (all values pre-bracketed) + a one-paragraph summary;
-                             //   the generative surface is small enough for haiku (re-tiered, D11)
-  finalize:      'haiku',    // assembles a JS-precomputed table + scripted git add; can't break the pipeline
+  wrapup:        'haiku',    // task-log + finalize merged (D14): fills a rigid template + a one-paragraph
+                             //   summary + a JS-precomputed table, then scripted git add; can't break the
+                             //   pipeline. Small generative surface — haiku (task-log was re-tiered in D11)
 }
 
 // Merge an optional model override into an agent's opts (omits the key when undefined,
@@ -323,8 +325,9 @@ function withModel(base, model) {
 //                  Attributes cleanly only for SEQUENTIAL stages — which is this engine's whole
 //                  pipeline when run solo. BUT when /sdlc-block runs this task in a parallel batch
 //                  (--parallel-wave), the pool is shared with concurrent sibling tasks, so the delta
-//                  is contaminated; we render it as "— (parallel)" at report time rather than report a
-//                  misleading number (the runtime exposes no per-agent output count). See D12.
+//                  is contaminated and the runtime exposes no per-agent output count. Under parallel
+//                  the report's "tok" column therefore flips to an estimated INPUT cost (promptTok +
+//                  filesRead→tokens) instead of a misleading output number. See D12 + D15.
 // ----------------------------------------------------------------
 const metrics = []
 async function tracedAgent(prompt, opts = {}) {
@@ -452,7 +455,7 @@ STEP 2 — Decide:
     kind-specific fields verbatim; ignore any other fields.
 
 Return your findings using the StructuredOutput tool.
-`, { label: 'harness-config', schema: HARNESS_CONFIG_SCHEMA, model: 'haiku' })
+`, { label: 'harness-config', schema: HARNESS_CONFIG_SCHEMA, model: 'sonnet' })
 
   if (!result || !result.present || !result.config) return null
   return result.config
@@ -708,11 +711,22 @@ STEP 4 — Verify:
 STEP 5 — Compute the absolute worktree path:
   worktreePath = repoRoot + "/trees/" + branchName
 
+STEP 6 — Report the pipeline-start inputs (so a fresh run can skip the separate scout stage):
+  a. Spec file:
+       cd trees/[branchName] && ls ${specFile} 2>/dev/null && echo "SPEC_EXISTS" || echo "SPEC_MISSING"
+     Set specFileExists = true iff "SPEC_EXISTS" printed.
+  b. Block status — find this spec's row in status.md and read its Status column:
+       cd trees/[branchName] && grep -iE "${blockId}" planning/status.md | head -5
+     Set blockStatus to the title-case Status value (Not started / In progress / Done / Blocked /
+     Skipped). If no row is found, set blockStatus = "Unknown".
+
 Return your result using the StructuredOutput tool:
-  branchName:   the final chosen branch name (e.g. "${baseBranchName}" or "${baseBranchName}-2")
-  worktreePath: the ABSOLUTE path to the worktree (e.g. <repoRoot>/trees/${baseBranchName})
-  wasCreated:   true if a NEW worktree was created; false if an existing one was reused (resume mode)
-  notes:        any issues encountered
+  branchName:     the final chosen branch name (e.g. "${baseBranchName}" or "${baseBranchName}-2")
+  worktreePath:   the ABSOLUTE path to the worktree (e.g. <repoRoot>/trees/${baseBranchName})
+  wasCreated:     true if a NEW worktree was created; false if an existing one was reused (resume mode)
+  specFileExists: from STEP 6a
+  blockStatus:    from STEP 6b
+  notes:          any issues encountered
 `, withModel({ label: 'worktree-setup', schema: SETUP_SCHEMA, phase: 'Worktree' }, MODEL.worktreeSetup))
 
 if (!setupResult) {
@@ -734,10 +748,28 @@ Run all build/test/validation from the repo root; relative paths (planning/...) 
 
 // ================================================================
 // PHASE 1: SCOUT — determine current pipeline stage
+//
+// Only RESUME runs need a scout. A fresh standalone run always gets a clean, suffix-incremented
+// worktree (see the WORKTREE setup above), so none of THIS task's report files can exist yet — the
+// start stage is deterministic: generate-tasks iff the spec is missing, else implement. The setup
+// agent already reported specFileExists + blockStatus, so the non-resume path skips the scout
+// agent entirely (one fewer round-trip). On --resume we reuse an existing worktree that may be
+// partway through, so the scout's report-file decision tree is needed to find the resume point.
 // ================================================================
-phase('Scout')
-
-const scout = await tracedAgent(`${W}
+let scout
+if (!resumeMode) {
+  scout = {
+    startStage:     setupResult.specFileExists ? 'implement' : 'generate-tasks',
+    specFileExists: setupResult.specFileExists ?? true,
+    blockStatus:    setupResult.blockStatus || 'Unknown',
+    existingReports: [],
+    statusSummary:  '',
+    discrepancies:  '',
+  }
+  log(`Fresh worktree — starting from "${scout.startStage}" (scout skipped; not a resume).`)
+} else {
+  phase('Scout')
+  scout = await tracedAgent(`${W}
 You are the pipeline scout for the SDLC workflow system.
 
 Target:
@@ -788,9 +820,10 @@ STEP 8 — Note any discrepancy between log and report files.
 Return your findings using the StructuredOutput tool.
 `, withModel({ label: 'scout', schema: SCOUT_SCHEMA, phase: 'Scout' }, MODEL.scout))
 
-if (!scout) {
-  log('Scout agent failed — cannot determine pipeline state, aborting')
-  return { error: 'Scout failed', blockId, taskNumber, stem }
+  if (!scout) {
+    log('Scout agent failed — cannot determine pipeline state, aborting')
+    return { error: 'Scout failed', blockId, taskNumber, stem }
+  }
 }
 
 log(`Scout: start from "${scout.startStage}" | block status: "${scout.blockStatus}"`)
@@ -1753,7 +1786,12 @@ Return using StructuredOutput:
 }
 
 // ================================================================
-// PHASE 7: WRAP-UP — write task log (deferred status/log) + finalize
+// PHASE 7: WRAP-UP — write task log (deferred status/log) + workflow report, then commit
+//
+// task-log and finalize were merged (D14): both were cheap, sequential, purely-mechanical Haiku
+// bookkeeping with no fresh-context boundary between them. One agent now writes the deferred
+// status/log content AND the workflow report, then commits every report file in one chore commit.
+// status.md / log.md themselves are still NOT touched here — applied at merge time by /clean-worktree.
 // ================================================================
 phase('Wrap-up')
 
@@ -1764,45 +1802,70 @@ const stageResultsSummary = stageResults
 
 log(`Wrap-up. Final verdict: ${finalVerdict}. Pipeline: ${stageResultsSummary}`)
 
-// ----------------------------------------------------------------
-// TASK LOG: write deferred status/log content — do NOT touch those files
-// ----------------------------------------------------------------
-log('Writing task log (status/log deferred to merge time)...')
+// Build the stage + telemetry tables BEFORE the wrap-up agent runs (they don't depend on it). The
+// wrap-up agent's own metrics line is absent — same as the finalize line always was — which is fine:
+// it is a cheap, fixed Haiku stage.
+const stageTable = stageResults.map(r => {
+  const label  = r.stage + (r.attempt ? ` (attempt ${r.attempt})` : '')
+  const status = r.verdict ? r.verdict : (r.success ? 'completed' : 'FAILED')
+  const file   = r.reportFile || r.workflowReportFile || r.logFile || '—'
+  const commit = r.commitHash ? r.commitHash.substring(0, 7) : '—'
+  const notes  = (r.notes || '').substring(0, 60)
+  return `| ${label} | ${status} | ${file} | ${commit} | ${notes} |`
+}).join('\n')
 
-const logResult = await tracedAgent(`${W}
-You are the task-log agent for the SDLC pipeline.
+const metricsTable = metrics.map(m => {
+  // outTok is a budget.spent() delta off a SHARED pool. Under a parallel wave (D12) it is contaminated
+  // by concurrent siblings and the runtime exposes no per-agent OUTPUT count, so a per-stage output
+  // number is unrecoverable. Rather than a blank "— (parallel)" cell (D15), show the one accurate
+  // per-agent figure we DO have under parallel: an estimated INPUT cost = promptTok + filesRead→tokens
+  // (~256 tok/KB). Marked "in" so it never reads as output. Solo runs still show the real output delta.
+  const inTokEst = m.promptTokEst + (m.filesReadKb != null ? Math.round(m.filesReadKb * 256) : 0)
+  const tok  = parallelWave ? `~${inTokEst} in` : (m.outTok != null ? String(m.outTok) : '—')
+  const read = m.filesReadKb != null ? `${Math.round(m.filesReadKb)} KB` : '—'
+  return `| ${m.label} | ${m.model} | ${m.promptTokEst} | ${tok} | ${read} |`
+}).join('\n')
+// Legend caveat: present under a parallel wave, where the tok column flips from output delta to an
+// estimated input cost (D15, refines D12's presentation).
+const metricsCaveat = parallelWave
+  ? '\n\n> **Parallel wave — "tok" column shows estimated INPUT cost, not output.** This task ran in a parallel batch under /sdlc-block; output tokens come off a shared budget pool contaminated by concurrent siblings, so a per-stage output number is unrecoverable. The "~N in" values are an input estimate (promptTok + filesRead at ~256 tok/KB) and ARE per-agent and uncontaminated. promptTok and filesReadKb are also accurate. See decisions/D15 (refines D12).'
+  : ''
+log(`Token metrics (stage | model | promptTok | tok | filesReadKb):\n${metricsTable}`)
 
-Your job is to write a structured task log file that records what status.md and log.md
-should be updated to. Do NOT modify planning/status.md or log.md directly — those files
-are updated when the worktree branch is merged into main via /clean-worktree.
+log('Writing task log + workflow report and committing (status/log deferred to merge time)...')
+
+const wrapupResult = await tracedAgent(`${W}
+You are the wrap-up agent for the SDLC pipeline. You do TWO things in one pass — write the task log,
+then write the workflow report — and finish by committing all report files in one chore commit.
+
+IMPORTANT: Do NOT modify planning/status.md or log.md. Those are applied at merge time via
+/clean-worktree. The task log you write below RECORDS what they should become; the commit includes
+ONLY report files (test, review, ui-test, document reports + the task log + the workflow report).
 
 Target:
   Spec:             ${blockId}
   Task:             ${taskNumber}
   Final verdict:    ${finalVerdict}
-  Review attempts:  ${reviewAttempts}
+  Review attempts:  ${reviewAttempts} of ${MAX_REVIEW_ATTEMPTS} max
+  Pipeline started from: ${scout.startStage}
   Pipeline summary: ${stageResultsSummary}
   Branch:           ${branchName}
-  Log file:         ${logFile}
   Worktree root:    ${worktreePath}
+  Task log:         ${logFile}
+  Workflow report:  ${workflowReport}
 
-Instructions:
+STEP 1 — Gather shared facts (used by both files):
+  a. Next task title — read the spec and find the section "### ${taskNumber + 1}.":
+     cd ${worktreePath} && cat ${specFile}
+     If no task ${taskNumber + 1} exists, treat the spec as complete.
+  b. Progress-table notes format (title-case status):
+     cd ${worktreePath} && head -30 planning/status.md
+  c. Commit history for this run:
+     cd ${worktreePath} && git log --oneline main..HEAD 2>/dev/null || git log --oneline -15
+  d. Today's date:
+     date +%Y-%m-%d
 
-1. Read the spec file to identify the NEXT task after ${taskNumber}:
-   cd ${worktreePath} && cat ${specFile}
-   Look for the section "### ${taskNumber + 1}." to get the next task's title.
-   If no task ${taskNumber + 1} exists, note "spec complete".
-
-2. Read current status.md to understand the progress-table notes format (title-case status):
-   cd ${worktreePath} && head -30 planning/status.md
-
-3. Get the git log for this pipeline run:
-   cd ${worktreePath} && git log --oneline main..HEAD 2>/dev/null || git log --oneline -8
-
-4. Run to get today's date:
-   date +%Y-%m-%d
-
-5. Write the task log file: ${worktreePath}/${logFile}
+STEP 2 — Write the TASK LOG file: ${worktreePath}/${logFile}
 
    Use EXACTLY this format (fill in all bracketed values):
 
@@ -1811,7 +1874,7 @@ Instructions:
    **Spec:** ${blockId}
    **Task:** ${taskNumber}
    **Verdict:** ${finalVerdict}
-   **Date:** [today's date from step 4]
+   **Date:** [today's date from STEP 1d]
    **Branch:** ${branchName}
    **Applied:** false
 
@@ -1843,83 +1906,15 @@ Instructions:
    [One paragraph: what was implemented or tested, how review went (${finalVerdict} verdict${reviewAttempts > 1 ? ` after ${reviewAttempts} attempts` : ''}), notable findings. End with: "Next: Task ${taskNumber + 1} — [next task description]."]
 
    \`\`\`
-   [paste the git log --oneline output from step 3]
+   [paste the git log --oneline output from STEP 1c]
    \`\`\`
 
-6. Do NOT commit the log file — the finalize agent will commit it with all other reports.
-
-Return using StructuredOutput:
-  logFile: "${logFile}"
-  applied: false
-  nextFocus: the exact Current Focus Line string you wrote to the log
-  notes: any settled decisions that should be added to planning/decisions/
-`, withModel({ label: 'task-log', schema: LOG_SCHEMA, phase: 'Wrap-up' }, MODEL.taskLog))
-
-if (logResult) {
-  stageResults.push({ stage: 'task-log', ...logResult, success: true })
-  log(`Task log written: ${logFile}`)
-  if (logResult.notes) log(`Decisions to log manually: ${logResult.notes}`)
-} else {
-  stageResults.push({ stage: 'task-log', success: false, notes: 'Agent returned null' })
-  log('Task-log agent returned null — log file may need manual creation')
-}
-
-// ----------------------------------------------------------------
-// FINALIZE: workflow report + commit all reports + print merge instructions
-// ----------------------------------------------------------------
-log('Running finalize: workflow report + commit...')
-
-const stageTable = stageResults.map(r => {
-  const label  = r.stage + (r.attempt ? ` (attempt ${r.attempt})` : '')
-  const status = r.verdict ? r.verdict : (r.success ? 'completed' : 'FAILED')
-  const file   = r.reportFile || r.workflowReportFile || r.logFile || '—'
-  const commit = r.commitHash ? r.commitHash.substring(0, 7) : '—'
-  const notes  = (r.notes || '').substring(0, 60)
-  return `| ${label} | ${status} | ${file} | ${commit} | ${notes} |`
-}).join('\n')
-
-// Token-telemetry table (Phase A). The finalize agent's own line is absent — this table is
-// built before it runs — which is fine: finalize is a cheap, fixed Haiku stage.
-const metricsTable = metrics.map(m => {
-  // Under a parallel wave the shared-pool delta is contaminated by concurrent siblings (D12) — mark
-  // it non-isolated instead of reporting a misleading number. promptTok/filesReadKb stay accurate.
-  const out  = parallelWave ? '— (parallel)' : (m.outTok != null ? String(m.outTok) : '—')
-  const read = m.filesReadKb != null ? `${Math.round(m.filesReadKb)} KB` : '—'
-  return `| ${m.label} | ${m.model} | ${m.promptTokEst} | ${out} | ${read} |`
-}).join('\n')
-// Legend caveat: only present when outTok was suppressed for parallel contamination.
-const metricsCaveat = parallelWave
-  ? '\n\n> **outTok suppressed ("— (parallel)").** This task ran in a parallel wave under /sdlc-block; outTok is a shared-pool delta contaminated by concurrent sibling tasks, so a per-stage number would mislead. promptTok and filesReadKb are per-agent and accurate. See decisions/D12.'
-  : ''
-log(`Token metrics (stage | model | promptTok | outTok | filesReadKb):\n${metricsTable}`)
-
-const finalizeResult = await tracedAgent(`${W}
-You are the finalize agent for the SDLC pipeline.
-
-IMPORTANT: Do NOT modify planning/status.md or log.md. Those are applied at merge time.
-Your chore commit includes ONLY: test report, review report, document report, task log,
-and the workflow report you write here.
-
-Target:
-  Spec:            ${blockId}
-  Task:            Task ${taskNumber}
-  Final verdict:   ${finalVerdict}
-  Worktree root:   ${worktreePath}
-  Branch:          ${branchName}
-  Workflow report: ${workflowReport}
-
-Stage results so far:
-${stageResultsSummary}
-
-STEP 1 — Get the commit history from this pipeline run:
-  cd ${worktreePath} && git log --oneline -15
-
-STEP 2 — Write the workflow report: ${worktreePath}/${workflowReport}
+STEP 3 — Write the WORKFLOW REPORT: ${worktreePath}/${workflowReport}
 
   Format:
   # SDLC Workflow Report — ${blockId} Task ${taskNumber}
 
-  **Date:** [run: date +%Y-%m-%d]
+  **Date:** [today's date from STEP 1d]
   **Spec:** ${blockId}
   **Task scope:** Task ${taskNumber}
   **Pipeline started from:** ${scout.startStage}
@@ -1936,10 +1931,10 @@ STEP 2 — Write the workflow report: ${worktreePath}/${workflowReport}
   |---|---|---|---|---|
   ${stageTable}
 
-  (The ## Token Metrics section is appended verbatim in STEP 2b — do NOT write it here.)
+  (The ## Token Metrics section is appended verbatim in STEP 3b — do NOT write it here.)
 
   ## Key Findings
-  [what was implemented, notable decisions, content/bilingual-parity notes]
+  [what was implemented, notable decisions, content-parity notes]
 
   ## Files Modified
   [source files created or modified — from the implement report]
@@ -1954,21 +1949,22 @@ STEP 2 — Write the workflow report: ${worktreePath}/${workflowReport}
   To merge this task into main and apply status/log updates:
     /clean-worktree ${branchName}
 
-STEP 2b — Append the Token Metrics section to the report you just wrote. Run this EXACTLY as written
-(a literal heredoc append). Do NOT retype, summarize, reorder, or omit the table — it is
+STEP 3b — Append the Token Metrics section to the workflow report you just wrote. Run this EXACTLY as
+written (a literal heredoc append). Do NOT retype, summarize, reorder, or omit the table — it is
 machine-generated telemetry and must land verbatim:
   cd ${worktreePath} && cat >> ${workflowReport} <<'METRICS_EOF'
 
 ## Token Metrics
-Per-stage attribution (promptTok = injected input estimate; outTok = output-token delta, "—" when no
-+Nk budget target was set; filesReadKb = stage-reported ingestion estimate).${metricsCaveat}
+Per-stage attribution (promptTok = injected input estimate; tok = output-token delta on a solo run,
+"—" when no +Nk budget target was set, OR an estimated input cost "~N in" under a parallel wave where
+output isn't isolatable; filesReadKb = stage-reported ingestion estimate).${metricsCaveat}
 
-| Stage | Model | promptTok | outTok | filesReadKb |
+| Stage | Model | promptTok | tok | filesReadKb |
 |---|---|---|---|---|
 ${metricsTable}
 METRICS_EOF
 
-STEP 3 — Commit the report files. Never use git add -A or git add .
+STEP 4 — Commit the report files. Never use git add -A or git add .
 
   Run: cd ${worktreePath} && git status
   Stage ONLY report files (NOT status.md or log.md — never touch those in the worktree):
@@ -1986,7 +1982,7 @@ STEP 3 — Commit the report files. Never use git add -A or git add .
     )"
   cd ${worktreePath} && git log --oneline -1
 
-STEP 4 — Print the merge instructions EXACTLY as shown:
+STEP 5 — Print the merge instructions EXACTLY as shown:
 
   ╔══════════════════════════════════════════════════════════════════╗
   ║  Pipeline complete: ${stem}
@@ -2000,19 +1996,22 @@ STEP 4 — Print the merge instructions EXACTLY as shown:
   ╚══════════════════════════════════════════════════════════════════╝
 
 Return using StructuredOutput:
+  logFile: "${logFile}"
   workflowReportFile: "${workflowReport}"
   commitMessage: "chore: wrap up ${stem}"
   commitHash: 7-character short hash from git log --oneline -1
-  notes: any follow-up items (planning/decisions/ entries, NEEDS_REVIEW doc flags)
-`, withModel({ label: 'finalize', schema: FINALIZE_SCHEMA, phase: 'Wrap-up' }, MODEL.finalize))
+  nextFocus: the exact Current Focus Line string you wrote to the task log
+  notes: any settled decisions for planning/decisions/, plus NEEDS_REVIEW doc flags
+`, withModel({ label: 'wrap-up', schema: WRAPUP_SCHEMA, phase: 'Wrap-up' }, MODEL.wrapup))
 
-if (finalizeResult) {
-  stageResults.push({ stage: 'finalize', ...finalizeResult, success: true })
-  log(`Committed: ${finalizeResult.commitMessage}`)
-  log(`Workflow report: ${finalizeResult.workflowReportFile}`)
+if (wrapupResult) {
+  stageResults.push({ stage: 'wrap-up', ...wrapupResult, success: true })
+  log(`Task log: ${wrapupResult.logFile} | Workflow report: ${wrapupResult.workflowReportFile}`)
+  log(`Committed: ${wrapupResult.commitMessage}`)
+  if (wrapupResult.notes) log(`Follow-ups (decisions / NEEDS_REVIEW): ${wrapupResult.notes}`)
 } else {
-  stageResults.push({ stage: 'finalize', success: false, notes: 'Finalize agent returned null' })
-  log('Finalize agent returned null — manual commit may be needed')
+  stageResults.push({ stage: 'wrap-up', success: false, notes: 'Wrap-up agent returned null' })
+  log('Wrap-up agent returned null — task log / workflow report / commit may need manual creation')
 }
 
 log(`Pipeline complete. Verdict: ${finalVerdict} | Worktree: ${worktreePath} | Branch: ${branchName}`)
@@ -2029,7 +2028,7 @@ return {
   finalVerdict,
   reviewAttempts,
   startStage: scout.startStage,
-  workflowReport: finalizeResult?.workflowReportFile || workflowReport,
+  workflowReport: wrapupResult?.workflowReportFile || workflowReport,
   logFile,
   mergeCommand: `/clean-worktree ${branchName}`,
   stageResults
