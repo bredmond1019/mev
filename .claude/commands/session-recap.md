@@ -6,6 +6,17 @@ start of a coding session before doing anything else.
 
 ## Instructions
 
+0. Check for an active handoff: `ls planning/handoff.md 2>/dev/null`.
+   - If the file exists, read it and **lead the briefing** with an Active Handoff section:
+     ```
+     ## Active Handoff — <title from handoff.md>
+     <What's in flight and why.>
+     Remaining: <bullet list from "Remaining work">
+     First command: `<command from "First command after /prime">`
+     > Delete `planning/handoff.md` once this session has consumed it.
+     ```
+   - If absent, skip silently and proceed to step 1.
+
 1. Read `log.md`. Focus on the three most recent entries (identified by `## YYYY-MM-DD`
    headings). Extract: what was built or changed, any decisions made, and any explicit
    "left off at" or "next step" notes the author wrote.
@@ -54,6 +65,7 @@ Do not read any source code files. Do not run any commands. This is read-only.
 
 ## Context / Files to Read
 
+- `planning/handoff.md` (if present — check with ls first)
 - `log.md` (last 3 entries)
 - `planning/status.md`
 - `planning/<name>/tasks.md` (current block's spec, if it exists)
