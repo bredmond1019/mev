@@ -76,11 +76,15 @@ Return the subagent's result to the user.
 7. **Sync the company brain.** After status.md and log.md are confirmed:
    - Read `../docs/projects/markdown-engine-validator.md` in the company brain.
    - Update the **Current Status** date and focus line to match the new status.md state.
-   - Update the Status column in the 13-spec table for any rows that changed.
-   - Open `../README.md` and update the Quick Status section for learn-ai: the Current
-     focus line and any changed status rows.
+   - Update the Status column in this project's progress table for any rows that changed.
+   - Open `../README.md` and find the Quick Status subsection for THIS project (the `###`
+     heading matching this repo — the same project as the `docs/projects/*.md` you just
+     read). Update its Current focus line and any changed status rows.
+   - **Verify the section is THIS project's** before writing. If you cannot find a Quick
+     Status subsection that clearly belongs to this project, STOP and report it — never edit
+     another project's section, and never silently skip the sync.
    - Surgical updates only — do not rewrite sections that didn't change.
-   - If the brain docs are already in sync with status.md, skip this step silently.
+   - If the brain docs are genuinely already in sync, say so in your report (do not skip silently).
 
 ## Context / Files to Read
 
