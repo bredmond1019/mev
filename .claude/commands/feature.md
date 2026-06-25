@@ -7,12 +7,30 @@ $ARGUMENTS — description of the feature to plan.
 ## Instructions
 
 1. If `$ARGUMENTS` is not provided, stop and ask the user to describe the feature.
-2. THINK HARD about the feature's scope, design, and how it fits the existing site before writing anything.
-3. Research the codebase: read `CLAUDE.md` and any relevant docs the project keeps, then any files directly relevant to the feature.
-4. Create a plan using the Plan Format below.
-5. Choose a short descriptive slug (e.g. `add-rss-feed`, `add-search`, `add-newsletter-signup`).
-6. Create the directory `planning/feature-{descriptive-name}/` if it does not exist, then save the plan to `planning/feature-{descriptive-name}/tasks.md`.
-7. Return only the path to the file created.
+2. **Clarify gate (only when enabled).** Read `planning/harness.json` → `planning.clarify`. When it is
+   `true` **or** `$ARGUMENTS` contains `--clarify`, and the prompt is genuinely ambiguous (its scope,
+   user story, target files, or success criteria could be read more than one way), pause and ask the
+   user **2–4 targeted clarifying questions** before writing anything; fold the answers into the plan.
+   If the prompt is already unambiguous, skip the questions and proceed even when the gate is on. When
+   `planning.clarify` is absent/`false` and no `--clarify` flag is present, skip this step entirely and
+   behave exactly as before (write immediately). Strip a `--clarify` token from the prompt before using
+   it as the `prompt:` metadata value.
+3. THINK HARD about the feature's scope, design, and how it fits the existing site before writing anything.
+4. Research the codebase: read `CLAUDE.md` and any relevant docs the project keeps, then any files directly relevant to the feature.
+5. Create a plan using the Plan Format below.
+6. Choose a short descriptive slug (e.g. `add-rss-feed`, `add-search`, `add-newsletter-signup`).
+7. Create the directory `planning/feature-{descriptive-name}/` if it does not exist, then save the plan to `planning/feature-{descriptive-name}/tasks.md`.
+8. **Property self-check.** Before reporting, re-read the spec and confirm every required property
+   holds; **revise in place** if any fails, then re-check:
+   - **Every `### N.` task names ≥1 concrete file** it creates or modifies (the final Validate step is
+     exempt).
+   - **Acceptance Criteria are non-empty and observable** — each can be judged true/false.
+   - **Validation Commands are present** (or `planning/harness.json` → `validation.checks[]` supplies
+     them as the fallback).
+   - **No leftover template sentinels** — no `{{TOKEN}}`, unfilled `<placeholder>`-style angle stubs,
+     or empty bullets. Do **not** treat legitimate `<...>` in code/prose or a bare `TODO`/`TBD` inside
+     authored content as a sentinel.
+9. Return only the path to the file created.
 
 ## Codebase Structure
 
@@ -38,6 +56,8 @@ ids / package names via the `claude-api` skill, not memory), no emoji, every cha
 
 ## Metadata
 prompt: `{$ARGUMENTS}`
+status: Not started
+last-run: never
 
 ## Feature Description
 <describe the feature in detail — what it does, why it's needed, who/what benefits>
@@ -103,6 +123,10 @@ Include writing tests throughout — do not leave them to the end.
 
 ## Notes
 <dependencies, new packages needed, deferrals, future considerations, known constraints>
+
+## Amendment Log
+<!-- Append-only. Pipeline stages append one dated line here when they deviate from the spec. -->
+_No amendments yet._
 ```
 
 ## Report

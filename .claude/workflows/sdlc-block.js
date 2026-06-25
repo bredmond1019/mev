@@ -1,74 +1,66 @@
 // =============================================================================
-// sdlc-block — Spec-Level SDLC Orchestration (general, dependency-aware)
+// sdlc-block — Lean Spec-Level SDLC Orchestration ("a more powerful /sdlc-run")
 // =============================================================================
 //
-// Drives an ENTIRE spec to completion by orchestrating many parallel /sdlc-task
-// pipelines across dependency-ordered waves, merging each wave before the next begins.
-// Generic: every path derives from the spec slug, exactly like /sdlc-task. Nothing is
-// hardcoded to a specific spec.
+// Drives an ENTIRE spec to completion with a FRESH implement agent per task (deliberate per-task
+// context windows + observability — the one thing /sdlc-run lacks, since it implements all tasks in
+// one context) and ONE consolidated back-half over the integrated result. Setup is shared once per
+// block; per task runs lean (implement, + an optional localization review). Genuinely parallel waves
+// (≥2 independent tasks) use worktrees; the common sequential case runs in-place on the integration
+// branch. See decisions/D23 + D24. Generic: every path derives from the spec slug.
 //
 // USAGE
-//   /sdlc-block <spec-slug>                  run every task in the spec
-//   /sdlc-block <spec-slug> 1-7              run only tasks 1–7 (range/list selection)
-//   /sdlc-block <spec-slug> --tasks 1,3,5-7  same selection via explicit flag
+//   /sdlc-block <spec-slug>                       run every task in the spec
+//   /sdlc-block <spec-slug> 1-7                   run only tasks 1–7 (range/list selection)
+//   /sdlc-block <spec-slug> --tasks 1,3,5-7       same selection via explicit flag
+//   /sdlc-block <spec-slug> --verify-depth consolidated+review   per-task review on (default: off)
 //   /sdlc-block <spec-slug> --max-retries 2 --max-wave-width 4
 //
 //   ARGS
 //     <specSlug>          required — the planning/<specSlug>/ directory name
 //     [range]             optional 2nd positional, or --tasks — e.g. 1-7, 1,3,5, 1-3,7. Default: all.
-//     --max-retries N     total /sdlc-task attempts per task before escalation (default 2)
-//     --max-wave-width W   max full pipelines run concurrently per batch (default 3)
+//     --max-retries N     total implement attempts per task before escalation (default 2)
+//     --max-wave-width W   max worktree implements run concurrently per parallel batch (default 3)
+//     --verify-depth D    consolidated (default) | consolidated+review — per-task verification depth;
+//                         overrides planning/harness.json block.verify (D24)
 //
-// DESIGN (see docs/agentic-workflows/sdlc-orchestration.md)
-//   0. Pre-flight (NEW)
-//        - Guarantee a clean main tree with the spec committed BEFORE any wave runs.
-//        - tasks.md missing        -> generate it from master-plan (+ referenced plan) and COMMIT (Opus).
-//        - tasks.md uncommitted     -> commit it ("chore: commit spec for <slug>").
-//        - any UNRELATED file dirty -> ABORT fast, listing them (failing at second 0 beats
-//          escalating tasks mid-run when the merge step's clean-tree guard later trips).
-//        - Root cause this fixes: /generate-tasks wrote tasks.md without committing, which both
-//          blocked every merge (dirty-tree guard) and made worktrees regenerate their own spec.
-//   1. Analyze
-//        - Resume-scout: which tasks are already done on main (skip them).
-//        - Worktree resume-scout (NEW): classify each task's EXISTING worktree/branch into one of
-//          done-on-main | complete-unmerged-pass | complete-unmerged-fail | partial-post-implement |
-//          partial-pre-implement | fresh — so a re-run MERGES or RESUMES instead of duplicating.
-//        - Load planning/<specSlug>/sdlc/execution-plan.json if present & valid.
-//        - Otherwise an agent reads tasks.md + breakdown.md and emits a DEPENDENCY
-//          GRAPH WITH EVIDENCE (per task: filesCreated, filesModified, dependsOn,
-//          and the quote that establishes each edge) plus an ADDITIVE-file allow-list.
-//        - Deterministic JS computes the waves (topological layering + conflict
-//          serialization). Agent proposes the graph; CODE computes the waves.
-//        - The generated plan is written to execution-plan.json (hand-editable).
-//   2. Per wave
-//        - First consult each task's resume-state (from step 1):
-//            complete-unmerged-pass  -> route the existing branch straight to merge (NO re-run)
-//            complete-unmerged-fail  -> escalate (preserve worktree)
-//            partial-post-implement  -> resume the existing worktree in place (--resume)
-//            partial-pre-implement   -> tear down the stale worktree, then run fresh
-//            fresh / done-on-main    -> run normally / skip
-//        - Run each remaining task via workflow('sdlc-task', ...) with a RETRY + TRIAGE loop:
-//            PASS                          -> merge it
-//            RETRYABLE (infra/transient)   -> clean-slate re-run (up to MAX attempts)
-//            MAJOR (structural / stuck)    -> ESCALATE: preserve worktree, surface to user
-//        - Escalation poisons ONLY the dependent subtree (computed from the graph);
-//          independent tasks keep running.
-//   3. Merge (per wave, in task-number order)
-//        - Plain git merge first; on conflict, union-merge ONLY if every conflicted
-//          file is on the additive allow-list, else abort + escalate that task.
-//        - status.md / log.md are NEVER touched inside worktrees.
-//   4. Report
-//        - Write block-workflow.md, apply log entries + a SINGLE authoritative
-//          status.md update (spec done/partial, focus -> next spec), and print
-//          escalations with their worktree paths + the resume command.
+// DESIGN
+//   0. Pre-flight — guarantee a clean integration tree with the spec committed (generate/commit it;
+//        abort fast on unrelated dirt; D16/D19 structure + thin-spec guards) before any task runs.
+//   1. Analyze — resume-scout; load planning/<specSlug>/sdlc/execution-plan.json if present & valid
+//        (D22; authored by /generate-tasks), else an Opus agent emits the dependency graph and CODE
+//        computes the dependency-ordered waves. SHARED SETUP ONCE (D23): harness config loaded once,
+//        baseline snapshot captured once (only when a D6 baseline-diff check needs it).
+//   2. Per wave (lean — implement only, + an optional localization review; D23):
+//        - width-1 wave  -> run the task IN PLACE on the integration branch (no worktree, no merge).
+//          The pre-task HEAD is captured; a failed implement is `git reset --hard`'d back before retry.
+//        - width-≥2 wave -> isolate each task in a worktree via /sdlc-task --implement-only, then merge
+//          passing branches in task order (additive-union only; else escalate). True concurrent writers.
+//        - RETRY + TRIAGE per task: RETRYABLE -> clean-slate retry; MAJOR/exhausted -> ESCALATE.
+//          Escalation poisons ONLY the dependent subtree; independent tasks keep running.
+//   3. Consolidated back-half (D24) — ONLY when the block is complete (no escalations/skips): seed a
+//        spec-level implement report from the per-task reports, then run ONE
+//        test -> review -> fix -> (ui-test) -> document -> wrap-up over the integrated tree via
+//        workflow('sdlc-run', '<slug> --from test'). Its wrap-up owns status.md / log.md / the spec
+//        Amendment Log (D18). The consolidated review is AUTHORITATIVE; any per-task review is only a
+//        localization map. Replaces the old per-task back-half (~113k tokens × N -> 1×).
+//   4. Report — write the block-level report (per-task outcomes + escalations + breakdown assessment +
+//        token roll-up + back-half verdict). It does NOT touch status/log (the back-half owns those).
+//
+//   block.verify (planning/harness.json) / --verify-depth:
+//     consolidated         (default) — per task: implement + the D8 completeness self-check only.
+//     consolidated+review            — per task: + one review pass (a localization map; non-gating).
 //
 // RESUMPTION
-//   Re-run /sdlc-block <specSlug>. Git is the source of truth: a task is "done" if its
-//   taskN-workflow.md is committed on main. Done tasks are skipped; escalated tasks are
-//   retried (after you fix the blocker or edit execution-plan.json). An interrupted run is
-//   handled WITHOUT duplicating work: a task whose worktree completed PASS but never merged
-//   is merged as-is; one interrupted after implement is resumed in place; one interrupted
-//   before implement is torn down and re-run fresh (see the Analyze resume-scout, step 1).
+//   Re-run /sdlc-block <specSlug>. A task's implement commit on the integration branch (its
+//   taskN-implement.md) marks it landed -> skipped on re-run. Escalated tasks are retried after you fix
+//   the blocker (or edit execution-plan.json). The consolidated back-half re-runs once every task has
+//   landed. Leftover worktrees from a parallel wave are reconciled by the Analyze resume-scout.
+//
+// NOTE — the consolidated back-half runs on the integration branch. When that branch is `main`, the
+//   universal emoji gate (which diffs `main..HEAD`) has no diff base and no-ops; the per-stage gating
+//   checks still run. Running the block on a dedicated integration branch off main restores emoji
+//   gating end-to-end and is the documented follow-up (D23/D24 "Reconsider if").
 //
 // =============================================================================
 
@@ -77,12 +69,12 @@ export const meta = {
   description: 'Orchestrate a full spec through dependency-ordered waves of parallel /sdlc-task pipelines, with bounded retries, failure triage, escalation, and ordered merges.',
   whenToUse: 'When driving a spec (a tasks.md) to completion across many parallel tasks. Optional task range, e.g. /sdlc-block <spec-slug> 1-7. Usage: /sdlc-block <spec-slug>',
   phases: [
-    { title: 'Pre-flight', detail: 'Commit (or generate) the spec and guarantee a clean main tree before any merge', model: 'sonnet' },
-    { title: 'Analyze',    detail: 'Resume-scout main, load or generate the dependency-ordered execution plan' },
-    { title: 'Wave',       detail: 'Run wave tasks via /sdlc-task with retry + triage; escalate major failures' },
-    { title: 'Merge',      detail: 'Merge passing branches in order (additive union only; else escalate)' },
-    { title: 'Playwright', detail: 'Live browser sweep after all merges; fix regressions before reporting' },
-    { title: 'Report',     detail: 'Write spec report, apply status/log once, surface escalations' },
+    { title: 'Pre-flight', detail: 'Commit (or generate) the spec and guarantee a clean integration tree before any task runs', model: 'sonnet' },
+    { title: 'Analyze',    detail: 'Resume-scout, load or generate the dependency-ordered execution plan, snapshot baselines once' },
+    { title: 'Wave',       detail: 'Lean implement (+ optional review) per task — in-place for width-1 waves, worktrees only for width-≥2 — with retry + triage' },
+    { title: 'Merge',      detail: 'Merge worktree branches in order for parallel waves (additive union only; else escalate)' },
+    { title: 'Back-half',  detail: 'One consolidated test → review → fix → document → wrap-up over the integrated tree (via /sdlc-run --from test)' },
+    { title: 'Report',     detail: 'Write the block-level report and surface escalations (status/log owned by the back-half)' },
   ]
 }
 
@@ -126,6 +118,18 @@ function parseRange(spec) {
 const MAX_TASK_ATTEMPTS = Math.max(1, flag('--max-retries', 2))                 // total sdlc-task runs per task
 const MAX_WAVE_WIDTH    = Math.max(1, flag('--max-wave-width', DEFAULT_MAX_WAVE_WIDTH)) // pipelines per batch
 
+// --verify-depth (D24): per-task verification depth for the lean runner. CLI overrides the project's
+// planning/harness.json `block.verify`. Resolved AFTER the harness config loads (see verifyDepth below).
+//   consolidated         (default) — per task: implement + the D8 completeness self-check only.
+//   consolidated+review  — per task: implement → one review pass (a localization map for the single
+//                          consolidated back-half). Both depths run exactly ONE consolidated back-half.
+const VALID_VERIFY_DEPTHS = ['consolidated', 'consolidated+review']
+const verifyDepthFlag = flagStr('--verify-depth')
+if (verifyDepthFlag && !VALID_VERIFY_DEPTHS.includes(verifyDepthFlag)) {
+  log(`ERROR: unknown --verify-depth "${verifyDepthFlag}". Valid values: ${VALID_VERIFY_DEPTHS.join(', ')}.`)
+  return { error: 'Invalid --verify-depth', verifyDepthFlag, blockId }
+}
+
 // Optional task selection: `--tasks 1-7` OR a positional range as the 2nd token (`/sdlc-block <spec-slug> 1-7`).
 // Defaults to ALL tasks in the spec.
 const rangeSpec = flagStr('--tasks') || (tokens[1] && !tokens[1].startsWith('--') ? tokens[1] : null)
@@ -145,6 +149,13 @@ const breakdownFile = `${blockDir}/breakdown.md`
 const reportsDir  = `${blockDir}/sdlc/reports`
 const planFile    = `${blockDir}/sdlc/execution-plan.json`
 const blockReport = `${reportsDir}/block-workflow.md`
+const stateFile   = `${blockDir}/sdlc/sdlc-block-state.json`  // D28 cross-invocation resume breadcrumb (gitignored)
+
+// D28 — in-engine per-task resume state, persisted to ${stateFile} after each task lands/escalates.
+// Keyed by task number; values { status, commit, branch, worktreePath }. status ∈
+// pending | merged | escalated | skipped. Seeded from a prior run's breadcrumb (if any) so a
+// re-invoked block skips re-running landed tasks and re-triaging escalated limbo worktrees.
+const taskState = {}
 
 log(`Spec: ${blockId} | plan: ${planFile}`)
 log(`Max attempts/task: ${MAX_TASK_ATTEMPTS} | max wave width: ${MAX_WAVE_WIDTH}`)
@@ -262,39 +273,17 @@ const REPORT_SCHEMA = {
   }
 }
 
-const PLAYWRIGHT_SCHEMA = {
+// D28 — block-state breadcrumb I/O schemas.
+const STATE_LOAD_SCHEMA = {
   type: 'object',
-  required: ['verdict', 'checks'],
+  required: ['exists'],
   properties: {
-    verdict: { type: 'string', enum: ['PASS', 'WARN', 'FAIL'] },
-    checks: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['check', 'scope', 'result'],
-        properties: {
-          check:  { type: 'string' },
-          scope:  { type: 'string' },
-          result: { type: 'string', enum: ['PASS', 'FAIL', 'WARN'] },
-          notes:  { type: 'string' }
-        }
-      }
-    },
-    failureSummary: { type: 'string', description: 'If FAIL: what failed, error text, likely root cause' },
-    serverStarted:  { type: 'boolean', description: 'true if this agent started the dev server (so it should also stop it)' }
-  }
+    exists:    { type: 'boolean', description: 'true if a valid sdlc-block-state.json was read' },
+    startedAt: { type: 'string',  description: 'the file\'s started_at value, or "" when absent' },
+    tasks:     { type: 'object',  description: 'the per-task status map (taskNum -> {status,...}), or {} when absent', additionalProperties: true },
+  },
 }
-
-const PLAYWRIGHT_FIX_SCHEMA = {
-  type: 'object',
-  required: ['fixed', 'commitHash'],
-  properties: {
-    fixed:          { type: 'boolean' },
-    commitHash:     { type: 'string' },
-    changesSummary: { type: 'string' },
-    notes:          { type: 'string', description: 'If fixed=false: exactly what the user must do to resolve the failure manually' }
-  }
-}
+const STATE_WRITE_SCHEMA = { type: 'object', required: ['written'], properties: { written: { type: 'boolean' } } }
 
 // ================================================================
 // TOKEN TELEMETRY (Phase A — additive, no behavior change)
@@ -442,6 +431,12 @@ const HARNESS_CONFIG_SCHEMA = {
             mode:                { type: 'string', description: 'recommend (default) | auto | off' },
             complexityThreshold: { type: 'integer' }
           }
+        },
+        block: {
+          type: 'object',
+          properties: {
+            verify: { type: 'string', description: 'consolidated (default) | consolidated+review — lean runner per-task verification depth (D24)' }
+          }
         }
       }
     },
@@ -466,8 +461,8 @@ STEP 2 — Decide:
     these fields when present: stack; validation.checks[] (each: {kind, name, command, purpose, gates}
     plus any kind-specific fields that are present — baselineCommand, compareKeys[], countPattern,
     failOn, warningPatterns[], rules[] ({id, pattern, paths, allowlistPattern})); uiTest ({enabled,
-    devServerCommand, readySignal, port, routes[]}); breakdown ({mode, complexityThreshold}). Preserve
-    kind-specific fields verbatim; ignore any other fields.
+    devServerCommand, readySignal, port, routes[]}); breakdown ({mode, complexityThreshold});
+    block ({verify}). Preserve kind-specific fields verbatim; ignore any other fields.
 
 Return your findings using the StructuredOutput tool.
 `, { label: 'harness-config', schema: HARNESS_CONFIG_SCHEMA, model: 'sonnet' })
@@ -476,15 +471,73 @@ Return your findings using the StructuredOutput tool.
   return result.config
 }
 
-// Render the post-merge browser-sweep prompt parts from harness config. Called ONLY when
-// cfg.uiTest.enabled. Interpolates the MVP fields (devServerCommand / readySignal / port / routes).
-function renderUiTestPrompt(cfg, port) {
-  const ui = cfg.uiTest
-  const routes = (Array.isArray(ui.routes) && ui.routes.length) ? ui.routes : ['/']
-  const ready = ui.readySignal || 'ready'
-  const devCmd = ui.devServerCommand || 'echo "ERROR: uiTest.enabled but devServerCommand missing in planning/harness.json" && false'
-  const routeList = routes.join('  ')
-  return { routes, routeList, ready, devCmd, port }
+// D23 — shared setup, once per block. Snapshot the pre-block baseline for each D6 baseline-diff check
+// on the integration branch, BEFORE any task implements, so the consolidated back-half (run by
+// /sdlc-run --from test) can diff the integrated tree against the pre-block state and fail only on
+// net-new items. Block-level (no taskPrefix); resume-safe (an existing baseline is kept). No-op when
+// no baseline-diff checks are configured. The engine ships no stack defaults — baselineCommand comes
+// from harness.json. NOTE: the consolidated back-half consumes these baselines once /sdlc-run reaches
+// D6 richer-check parity (the back-half-completeness follow-up); until then this is a harmless no-op
+// for the common command-kind suites that the lean runner targets first.
+async function snapshotBlockBaselines(cfg) {
+  const checks = (cfg?.validation?.checks || []).filter(c => c.kind === 'baseline-diff' && c.baselineCommand)
+  if (!checks.length) return
+  const steps = checks.map(c => {
+    const slug = (c.name || 'check').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+    const path = `${reportsDir}/${slug}-baseline.json`
+    return `Baseline "${c.name}" -> ${path}:
+  mkdir -p ${reportsDir}
+  [ -f ${path} ] && echo "BASELINE EXISTS (kept): ${path}" || { ${c.baselineCommand} > ${path} 2>/dev/null; echo "BASELINE WRITTEN: ${path}"; }`
+  }).join('\n\n')
+  await tracedAgent(`
+You are the baseline-snapshot agent for the spec orchestration. You run from the MAIN repo root (the
+integration branch). Capture the pre-block baseline for each baseline-diff validation check, ONCE,
+BEFORE any task implements. Run each block exactly as written. Do NOT modify source. Existing baselines
+are kept (resume-safe).
+
+${steps}
+
+After capturing all baselines, commit any newly written files so the integration tree stays clean
+for the downstream merge step (an untracked baseline file blocks every worktree merge):
+  git add ${reportsDir}/
+  git commit -m "chore: sdlc baseline snapshot for ${blockId}" 2>/dev/null || echo "nothing to commit"
+
+Return using StructuredOutput: done=true, and note which baselines were written vs already present.
+`, { label: 'baseline-snapshot', schema: { type: 'object', required: ['done'], properties: { done: { type: 'boolean' }, notes: { type: 'string' } } }, phase: 'Analyze', model: 'haiku' })
+}
+
+// D28 — persist the per-task resume breadcrumb. Writes the WHOLE taskState map each time (preserving
+// started_at), via a cheap Haiku agent since the workflow runtime has no filesystem access or
+// Date.now(). Best-effort: a failed write logs a warning and NEVER aborts the run. The file is
+// gitignored (runtime state, regenerated every run) so it does not churn commits or conflict under a
+// parallel wave's merges. Mirrors D27's recordPhaseState pattern (sdlc-run), task-level instead of phase.
+async function writeBlockState(phaseLabel = 'Analyze') {
+  const tasksJson = JSON.stringify(taskState, null, 2)
+  const r = await tracedAgent(`
+You maintain the SDLC block's persistent task-state breadcrumb. Overwrite a single JSON file — do NOT
+run any checks, edit code, or commit anything.
+
+STEP 1 — current UTC timestamp + preserved start time:
+  NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  cat ${stateFile} 2>/dev/null || echo "__NO_STATE__"
+  If that file already exists and contains a "started_at" value, REUSE it verbatim for started_at
+  below. Otherwise set started_at = the NOW value.
+
+STEP 2 — ensure the directory exists:
+  mkdir -p ${blockDir}/sdlc
+
+STEP 3 — write ${stateFile} with EXACTLY this JSON (valid JSON only: double quotes, no trailing
+commas, no markdown fences). Substitute <STARTED_AT> (preserved or NOW) and <NOW> from STEP 1:
+{
+  "spec_slug": ${JSON.stringify(blockId)},
+  "started_at": "<STARTED_AT>",
+  "updated_at": "<NOW>",
+  "tasks": ${tasksJson}
+}
+
+Use the Write tool to write ${stateFile}. Then return via StructuredOutput (written=true on success).
+`, { label: 'state-write', schema: STATE_WRITE_SCHEMA, phase: phaseLabel, model: 'haiku' })
+  if (!r || !r.written) log('(state) could not persist block task-state — continuing')
 }
 
 // ================================================================
@@ -566,6 +619,32 @@ STEP 4 — Validate task structure (CASE B and CASE C only — skip when you jus
     regenerate it, or add '### 1. Title', '### 2. Title', ... headings manually, commit,
     then re-run /sdlc-block."
 
+STEP 4b — Validate spec CONTENT properties (CASE B and CASE C only; D19). A spec can be
+  structurally valid (has '### N.' headings) yet substantively empty and waste pipeline tokens.
+  Abort ONLY on the high-confidence thin-spec signals below. CRITICAL — avoid false-positive
+  aborts: a blocked valid spec is far costlier than a missed thin one. Match ONLY the scaffold
+  sentinels named here. Do NOT abort on a bare 'TODO'/'TBD' in authored prose, and do NOT treat
+  any '<...>' as a placeholder (legitimate in generics like 'Vec<T>', prose like 'the <concept>
+  folder', and globs). The Amendment Log's '_No amendments yet._' is the CORRECT resting state —
+  never flag it.
+  Run these greps and read the spec to judge:
+    a) Unfilled scaffold tokens — grep -n '{{' ${tasksFile}  (the {{TOKEN}} form). Any hit → thin.
+    b) Acceptance Criteria empty — the '## Acceptance Criteria' section has no '- ' bullet with
+       real content (only blank, or only a literal seed like '- <Observable, checkable condition'
+       copied verbatim from the template). → thin.
+    c) Validation absent — the '## Validation Commands' block is empty/only template comments AND
+       planning/harness.json does not exist. If
+       harness.json exists, validation is satisfied regardless of this section. → thin only when both missing.
+    d) A '### N.' task (other than the final Validate step) whose body names NO file, path, or
+       concrete artifact to create/modify — i.e. you cannot tell what it touches. Judge by reading;
+       flag only when genuinely contentless, not when a path is implied.
+  If ANY of (a)-(d) holds, override ready:
+    ready=false, action="aborted",
+    reason="tasks.md is structurally valid but substantively thin: <name the specific failures,
+    e.g. 'unfilled {{TOKEN}} on line N', 'Acceptance Criteria empty', 'task 3 names no files'>.
+    Fix: flesh out the spec (run /generate-tasks --force to regenerate, or edit + commit), then
+    re-run /sdlc-block."
+
 Return using StructuredOutput: ready, action, reason, dirtyFiles, commitHash.
 `, { label: 'pre-flight', schema: PREFLIGHT_SCHEMA, phase: 'Pre-flight', model: 'sonnet' })  // dominant path is trivial scripted git (commit/clean); the rare SPEC_MISSING generate path is a fallback-of-a-fallback, so opus is not worth paying on every run. Re-tiered opus->sonnet (D11).
 
@@ -581,12 +660,59 @@ if (!preflight || !preflight.ready) {
 }
 log(`Pre-flight OK — spec ${preflight.action}${preflight.commitHash ? ` (${preflight.commitHash})` : ''}.`)
 
+// ----------------------------------------------------------------
+// BLOCK STATE (D28): load the cross-invocation resume breadcrumb, if any. A prior run writes
+// sdlc-block-state.json after each task lands/escalates; reading it here lets a re-invoked block skip
+// re-running landed tasks and re-triaging escalated limbo worktrees. Absent/invalid file → first-run
+// behavior (full Analyze from scratch). Best-effort: a load failure just means no resume hint.
+// The state file AUGMENTS, never replaces, Analyze's committed-report resume scout (see D28 / D27): the
+// dependency graph still comes from Analyze (or D22's execution-plan.json), this only short-circuits the
+// merged/escalated classification that otherwise costs a triage wave.
+// ----------------------------------------------------------------
+const loadedState = await tracedAgent(`
+You run from the MAIN repo root. Read the SDLC block resume breadcrumb if it exists — do NOT run any
+checks, edit code, or commit anything.
+
+  cat ${stateFile} 2>/dev/null || echo "__NO_STATE__"
+
+If the output is "__NO_STATE__", or the file is empty or not valid JSON: return exists=false,
+startedAt="", tasks={}.
+Otherwise parse it as JSON and return exists=true, startedAt = its "started_at" value (verbatim),
+tasks = its "tasks" object verbatim (the per-task status map, keyed by task number).
+
+Return using StructuredOutput: exists, startedAt, tasks.
+`, { label: 'load-state', schema: STATE_LOAD_SCHEMA, phase: 'Pre-flight', model: 'haiku' })
+
+if (loadedState?.exists && loadedState.tasks && typeof loadedState.tasks === 'object') {
+  for (const [num, st] of Object.entries(loadedState.tasks)) {
+    if (st && typeof st === 'object' && st.status) taskState[num] = st
+  }
+  const pMerged = Object.entries(taskState).filter(([, v]) => v.status === 'merged').map(([k]) => k)
+  const pEsc    = Object.entries(taskState).filter(([, v]) => v.status === 'escalated').map(([k]) => k)
+  log(`Block state breadcrumb loaded: ${Object.keys(taskState).length} task(s) recorded${pMerged.length ? ` — merged: ${pMerged.join(', ')}` : ''}${pEsc.length ? ` | escalated: ${pEsc.join(', ')}` : ''}. Re-run will skip these.`)
+} else {
+  log('No block state breadcrumb (sdlc-block-state.json) — treating as a first run.')
+}
+
 // Load the project's policy once, up front (mechanism/policy split — see planning/harness.json).
 // Reused by: the Analyze breakdown assessment (threshold), the breakdown gate below, and the
 // post-merge Playwright sweep (uiTest). null when absent/invalid → breakdown defaults to 'recommend'.
 const harnessCfg = await loadHarnessConfig()
 const breakdownMode = harnessCfg?.breakdown?.mode || 'recommend'
 const breakdownThreshold = harnessCfg?.breakdown?.complexityThreshold ?? 3
+
+// Resolve the lean runner's per-task verification depth (D24): CLI --verify-depth wins, else
+// planning/harness.json block.verify, else "consolidated" (the cheap default — per-task review off).
+const verifyDepth = verifyDepthFlag || harnessCfg?.block?.verify || 'consolidated'
+const perTaskReview = verifyDepth === 'consolidated+review'
+log(`Verify depth: ${verifyDepth} (per-task review ${perTaskReview ? 'ON' : 'off'}; one consolidated back-half either way).`)
+
+// D23 — shared setup, ONCE per block (not once per task). The harness config is already loaded above.
+// Capture pre-block baselines for any D6 baseline-diff checks now, before any task implements, so the
+// consolidated back-half can diff the integrated tree against the pre-block state and fail only on
+// net-new items. No-op when no baseline-diff checks are configured (the common case). The block runs
+// on the integration branch at the repo root, so the snapshot has no worktree prefix and no taskPrefix.
+await snapshotBlockBaselines(harnessCfg)
 
 // ================================================================
 // PHASE 0: ANALYZE — resume-scout + load/generate the execution plan
@@ -606,10 +732,22 @@ Reports dir:  ${reportsDir}
 GOAL: produce a dependency graph for every task, list which tasks are already done, and report
 whether a hand-written execution plan already exists.
 
-STEP 1 — Check for an existing plan:
-  cat ${planFile} 2>/dev/null && echo "PLAN_EXISTS" || echo "NO_PLAN"
-  If it exists and is valid JSON with a "waves" array, set planExists=true and return its
-  "tasks" graph and "waves" and "additiveFiles" VERBATIM (do not re-derive). Skip to STEP 4.
+STEP 1 — Check for an existing execution plan and VALIDATE it (D22). /generate-tasks may have already
+  authored planning/${blockId}/sdlc/execution-plan.json (the dependency graph), so the common case can
+  skip the expensive graph derivation in STEP 3. But a prompt authored it, so do NOT trust it — validate:
+    cat ${planFile} 2>/dev/null && echo "PLAN_EXISTS" || echo "NO_PLAN"
+    grep -n '^### [0-9]' ${tasksFile}   (the current task headings)
+  Treat the plan as VALID only if ALL hold:
+    (i)   it parses as JSON;
+    (ii)  it has a "tasks" object (keyed by task number) and an "additiveFiles" array
+          (the execution-plan.schema.json shape; a "waves" array is optional);
+    (iii) its task set EXACTLY matches the current tasks.md '### N.' headings — same COUNT and same
+          numbering. If tasks.md was edited after the plan was authored (a task added/removed/renumbered),
+          the plan is STALE.
+  If VALID: set planExists=true and return its "tasks" graph and "additiveFiles" (and "waves" if present)
+    VERBATIM — do NOT re-derive the graph. Skip STEP 3 and STEP 3b; still do STEP 4 and STEP 5.
+  If ABSENT, malformed, or STALE: set planExists=false and derive the graph yourself (STEP 2, 3, 3b). A
+    stale plan loaded blindly would fan out the wrong waves — rejecting it is cheaper than the error.
 
 STEP 2 — Read the spec and (if present) the breakdown:
   cat ${tasksFile}
@@ -659,9 +797,16 @@ STEP 3b — Breakdown assessment. For EACH task, decide whether it is too COARSE
     is also NOT a candidate (recommendBreakdown=false). This is ASSESSMENT ONLY — do not write any
     breakdown file; the orchestrator acts on these flags per policy.
 
-STEP 4 — Resume scout: find tasks already completed on MAIN:
-  ls ${reportsDir}/task*-workflow.md 2>/dev/null || echo "NONE"
-  For each task N with a task${'${N}'}-workflow.md present ON MAIN, read its Final Verdict; if PASS, add N to doneTasks.
+STEP 4 — Resume scout: find tasks already LANDED on the integration branch (so a re-run does not
+  re-implement them and duplicate commits). The lean runner marks a task landed by committing its
+  per-task implement report — there is no per-task workflow.md anymore (one consolidated back-half
+  writes the spec-level workflow.md at the end).
+  ls ${reportsDir}/task*-implement.md ${reportsDir}/task*-workflow.md 2>/dev/null || echo "NONE"
+  Add task N to doneTasks when EITHER is committed on the integration branch:
+    - task${'${N}'}-implement.md exists (lean: its implement landed — skip re-implement), OR
+    - task${'${N}'}-workflow.md exists with a PASS Final Verdict (a legacy full-pipeline run).
+  (doneTasks here means "implement already landed"; the consolidated back-half still verifies the whole
+  integrated tree at the end regardless.)
 
 STEP 5 — Worktree resume scout: classify each task's EXISTING worktree/branch so the orchestrator
   can MERGE or RESUME instead of re-running (this prevents duplicate worktrees on a re-run).
@@ -696,7 +841,8 @@ Return using StructuredOutput:
   resumeStates: one entry per task (STEP 5)
   additiveFiles: shared files safe to union-merge
   tasks:        the dependency graph (one entry per task, with evidence)
-  waves:        ONLY if planExists — the loaded wave structure
+  waves:        ONLY if the loaded plan contained a "waves" array — return it verbatim. Omit it when the
+                plan had none or you derived the graph fresh (the engine computes waves deterministically).
   notes:        anything notable (ambiguous deps, suspected cycles)
 `, { label: 'analyze', schema: ANALYZE_SCHEMA, phase: 'Analyze', model: 'opus' })  // dependency analysis is PLANNING — keep on Opus
 
@@ -716,6 +862,22 @@ const doneTasks = new Set(analysis.doneTasks || [])
 const resumeByTask = {}
 for (const rs of (analysis.resumeStates || [])) resumeByTask[rs.num] = rs
 function resumeStateFor(n) { return resumeByTask[n] || { num: n, state: 'fresh' } }
+
+// D28 — augment Analyze's git-derived resume sets with the persisted block state (authoritative,
+// ADDITIVE-only — it never removes a task Analyze found). A task a prior run recorded 'merged' is added
+// to doneTasks (skip it); one recorded 'escalated' is forced to complete-unmerged-fail so the wave loop
+// escalates it directly instead of re-deriving its limbo worktree through a triage wave (the dominant
+// re-run cost in the F3 validation run). Committed reports remain the primary signal; this only fills
+// the gap for limbo worktrees whose state is not yet on the integration branch.
+for (const [num, st] of Object.entries(taskState)) {
+  const n = Number(num)
+  if (st.status === 'merged') {
+    doneTasks.add(n)
+  } else if (st.status === 'escalated' && !doneTasks.has(n)) {
+    const prev = resumeByTask[n] || {}
+    resumeByTask[n] = { num: n, state: 'complete-unmerged-fail', branchName: st.branch || prev.branchName || null, worktreePath: st.worktreePath || prev.worktreePath || null, verdict: st.verdict || prev.verdict || 'FAIL' }
+  }
+}
 
 if (Object.keys(taskMap).length === 0) {
   log('Analysis produced no tasks — aborting.')
@@ -874,55 +1036,285 @@ Return the final worktree list as plain text.
 `, { label: `teardown-${branchName}`, phase: 'Analyze', model: 'haiku' })
 }
 
-async function runTask(taskNum, resume = false, parallelWave = false) {
-  let prevReasons = null
-  for (let attempt = 1; attempt <= MAX_TASK_ATTEMPTS; attempt++) {
-    // Only the FIRST attempt resumes an existing worktree; a clean-slate retry must start fresh
-    // (the teardown below removes the worktree, so subsequent attempts always create a new one).
-    const resumeArg = (resume && attempt === 1) ? ' --resume' : ''
-    // --under-block: the block already ran the breakdown assessment once (Analyze) and acted on it
-    // above, so the per-task engine must NOT re-assess.
-    // --parallel-wave: this task shares the budget pool with concurrent siblings, so its per-stage
-    // outTok telemetry is contaminated; the per-task engine renders it as non-isolated. See D12.
-    const parallelArg = parallelWave ? ' --parallel-wave' : ''
-    log(`Task ${taskNum}: attempt ${attempt}/${MAX_TASK_ATTEMPTS} via /sdlc-task${resumeArg}...`)
-    const r = await workflow('sdlc-task', `${blockId} ${taskNum}${resumeArg} --under-block${parallelArg}`)
+// ----------------------------------------------------------------
+// Per-task schemas for the lean in-place path (D23). The implement agent mirrors sdlc-task's implement
+// stage (incl. the D8 completeness self-check) — INLINED here, not reused, because honoring D23's
+// "shared setup once" requires running implement as a direct agent() call that shares this block's
+// already-loaded harness config rather than a sub-workflow that re-runs its own setup per task. The
+// optional per-task review mirrors sdlc-task's review and is a LOCALIZATION MAP only — never a gate.
+// ----------------------------------------------------------------
+const INPLACE_STAGE_SCHEMA = {
+  type: 'object',
+  required: ['reportFile', 'success'],
+  properties: {
+    reportFile:    { type: 'string' },
+    success:       { type: 'boolean' },
+    filesModified: { type: 'array', items: { type: 'string' } },
+    commitHash:    { type: 'string' },
+    notes:         { type: 'string' }
+  }
+}
+const INPLACE_REVIEW_SCHEMA = {
+  type: 'object',
+  required: ['reportFile', 'verdict'],
+  properties: {
+    reportFile:     { type: 'string' },
+    verdict:        { type: 'string', enum: ['PASS', 'FAIL', 'PARTIAL'] },
+    failureReasons: { type: 'array', items: { type: 'string' } },
+    unmetCriteria:  { type: 'array', items: { type: 'string' } },
+    notes:          { type: 'string' }
+  }
+}
 
-    if (r && r.finalVerdict === 'PASS') {
-      return { taskNum, status: 'pass', branchName: r.branchName, worktreePath: r.worktreePath, finalVerdict: 'PASS', attempts: attempt }
-    }
+// Roll the integration branch back to a captured pre-task SHA (D23 in-place failure recovery). A
+// worktree gave throwaway isolation; in-place does not, so a half-applied failed task must be undone
+// before the next in-place task (or a clean-slate retry) runs on the shared branch.
+async function rollbackInPlace(preSha, taskNum) {
+  if (!preSha) { log(`Task ${taskNum}: no pre-task SHA captured — cannot auto-rollback; inspect the integration branch.`); return }
+  log(`Task ${taskNum}: rolling the integration branch back to ${preSha} (pre-task state)...`)
+  await tracedAgent(`
+You run from the MAIN repo root (the integration branch). A lean in-place task failed and left the
+branch in a half-applied state. Reset it to the captured pre-task commit so the next task starts clean.
+Run exactly:
+  git reset --hard ${preSha}
+  git clean -fd
+  git log --oneline -1
+Return the final HEAD line as plain text.
+`, { label: `rollback-${taskNum}`, phase: 'Analyze', model: 'haiku' })
+}
 
-    // Classify the failure before deciding to retry
-    const failBlob = JSON.stringify({
-      finalVerdict: r?.finalVerdict ?? 'NULL_RESULT',
-      reviewAttempts: r?.reviewAttempts,
-      stageResults: r?.stageResults,
-      previousFailureReasons: prevReasons
-    }, null, 2)
-
-    const triage = await tracedAgent(`
-You are the failure-triage agent for a spec orchestration. A single task's /sdlc-task pipeline did
-NOT pass. /sdlc-task already ran up to 3 internal fix passes before returning, so a genuine, repeated
-acceptance-criteria failure is unlikely to be fixed by another clean-slate run.
+// Triage a per-task failure into RETRYABLE (clean-slate retry) vs MAJOR (escalate). Shared by both
+// the in-place and worktree paths. `resultBlob` is a JSON summary of what the attempt produced.
+async function triageFailure(taskNum, attempt, resultBlob) {
+  return tracedAgent(`
+You are the failure-triage agent for a spec orchestration. A single task did NOT pass. The lean block
+runs each task's implement (plus the D8 completeness self-check, and optionally one review pass) before
+returning, so a genuine, repeated structural failure is unlikely to be fixed by another clean-slate run.
 
 Task: ${blockId} task ${taskNum}, attempt ${attempt} of ${MAX_TASK_ATTEMPTS}.
-Pipeline result:
-${failBlob}
+Attempt result:
+${resultBlob}
 
 Classify:
-  RETRYABLE — transient/infra (NULL_RESULT, worktree-setup crash, agent died, NOT_REACHED), OR the
-              failing criteria CHANGED from the previous attempt (it is making progress).
-  MAJOR     — the SAME acceptance criteria failed again, OR the failure is structural (references a
-              missing upstream symbol/dependency, wrong wave ordering, or otherwise needs a human to
-              re-plan or fix the blocker). When unsure, prefer MAJOR — escalation is cheap, a wasted
-              clean-slate retry is not.
+  RETRYABLE — transient/infra (NULL_RESULT, agent died, NOT_REACHED), OR the failure CHANGED from the
+              previous attempt (it is making progress).
+  MAJOR     — the SAME failure again, OR it is structural (references a missing upstream symbol/
+              dependency, wrong wave ordering, or otherwise needs a human to re-plan or fix the
+              blocker). When unsure, prefer MAJOR — escalation is cheap, a wasted retry is not.
 
 Return using StructuredOutput: class, reason, sameCriteriaAsBefore.
 `, { label: `triage-${taskNum}-${attempt}`, schema: TRIAGE_SCHEMA, phase: 'Analyze', model: 'sonnet' })
+}
 
-    const reasons = (r?.stageResults || [])
-      .filter(s => s.stage === 'review')
-      .flatMap(s => s.unmetCriteria || s.failureReasons || [])
+// D23 — run ONE task IN-PLACE on the integration branch: no worktree, no merge. Implement (+ the D8
+// self-check, always) and, when block.verify is consolidated+review, one review pass (a localization
+// map — NOT a gate; the consolidated back-half is authoritative). The implement's own success (D8
+// gate) decides whether the task's work stays on the branch; a failed implement is rolled back to the
+// captured pre-task SHA before any retry/escalation.
+async function runTaskInPlace(taskNum, waveLabel) {
+  const implementReport = `${reportsDir}/task${taskNum}-implement.md`
+  const reviewReport    = `${reportsDir}/task${taskNum}-review.md`
+  const stem = `${blockId}-task${taskNum}`
+
+  // Capture the pre-task HEAD so a failed in-place attempt can be rolled back (D23).
+  const snap = await tracedAgent(`
+You run from the MAIN repo root (the integration branch). Print the current HEAD short SHA so a failed
+in-place task can be rolled back to this exact state. Run: git rev-parse --short HEAD
+Return using StructuredOutput: sha=<the short hash>.
+`, { label: `snap-${taskNum}`, schema: { type: 'object', required: ['sha'], properties: { sha: { type: 'string' } } }, phase: waveLabel, model: 'haiku' })
+  const preSha = snap?.sha || null
+
+  let prevReason = null
+  for (let attempt = 1; attempt <= MAX_TASK_ATTEMPTS; attempt++) {
+    log(`Task ${taskNum}: in-place implement attempt ${attempt}/${MAX_TASK_ATTEMPTS} on the integration branch...`)
+
+    const impl = await tracedAgent(`
+You are the implementation agent for the lean spec orchestration. You run IN PLACE on the MAIN repo
+root (the integration branch) — there is NO worktree. Implement ONLY Task ${taskNum} of this spec.
+
+Target:
+  Spec:            ${blockId}
+  Task:            Task ${taskNum} only
+  Spec file:       ${tasksFile}
+  Report to write: ${implementReport}
+
+1. Read CLAUDE.md — internalize all standing rules (it is the authority; assume no stack/locale/
+   narrative/content rule unless written there). Universal: no fabricated metrics or quotes, no emoji,
+   every change ships with the tests that prove it.
+   Run: cat CLAUDE.md
+
+2. Read the spec, focusing on the "### ${taskNum}." section:
+   Run: cat ${tasksFile}
+   Implement ONLY "### ${taskNum}." — do NOT implement other tasks.
+
+2.5. Optional breakdown (more granular sub-steps from /breakdown):
+   Run: ls ${breakdownFile} 2>/dev/null && echo "BREAKDOWN_EXISTS" || echo "NO_BREAKDOWN"
+   If BREAKDOWN_EXISTS: read ${breakdownFile}, find "### Step ${taskNum}:", and use its atomic sub-steps
+   as the execution guide (run each inline "Verify:" checkpoint). tasks.md stays authoritative for
+   scope/acceptance criteria; breakdown.md is authoritative for HOW.
+
+3. Execute each step methodically with Read, Edit, Write, Bash. All paths resolve from the repo root.
+
+4. Follow every CLAUDE.md standing rule; add/update tests for new code/logic; verify any model ids /
+   package names via the claude-api skill — never from memory.
+
+5. Run the spec's Validation Commands (planning/harness.json, or the spec's "## Validation Commands")
+   to confirm correctness:  <each validation command> 2>&1 | tail -20
+
+5.5. SELF-CHECK — completeness gate (BEFORE writing the report or committing). Re-read the in-scope
+   "## Acceptance Criteria" for Task ${taskNum}. For EACH, open the actual file(s) and confirm it is
+   FULLY satisfied — do not assume from memory:
+   (a) NO placeholder/stub bodies on a required code path — \`todo!()\`/\`unimplemented!()\`/
+       \`unreachable!()\`, \`raise NotImplementedError\`, \`throw new Error('not implemented')\`,
+       empty \`pass\`-only bodies, or \`TODO\`/\`FIXME\` in required paths. Sanity-grep ONLY the files
+       the in-scope criteria require (build that path list from the criteria), NOT every changed file:
+         grep -nE 'todo!\\(|unimplemented!\\(|unreachable!\\(|NotImplementedError|not implemented|FIXME' <those paths> 2>/dev/null
+       A stub in a file no in-scope criterion requires is OUT OF SCOPE — leave it for its owning task.
+   (b) EVERY deliverable file a criterion names exists at the stated path — \`ls\` it.
+   (c) EVERY "unit-tested"/"covered by a test" criterion has a real, hermetic test exercising that path.
+   If ANY criterion is not fully met, FIX IT NOW and re-run step 5 before proceeding. Do NOT return
+   success:true with a known gap.
+
+6. Write the implementation report to ${implementReport}:
+
+   # Implementation Report — ${stem}
+
+   **Date:** [run: date +%Y-%m-%d]
+   **Plan:** ${tasksFile}
+   **Scope:** Task ${taskNum}
+
+   ## What Was Built or Changed
+   - [bullets with file paths]
+
+   ## Files Created or Modified
+   | File | Action |
+   |---|---|
+   | path/to/file | created / modified |
+
+   ## Validation Output
+   **Result:** PASSED / FAILED
+   On FAIL only, paste the failing command's last 20 lines; on PASS do NOT paste stdout (the
+   consolidated Test stage is the authoritative full-output capture).
+
+   ## Decisions and Trade-offs
+   [non-obvious choices]
+
+   ## Follow-up Work
+   [anything deferred]
+
+7. Commit your changes on the integration branch. Never use git add -A or git add . — stage by name:
+   git status
+   git add <each changed source/test file> ${implementReport}
+   git commit -m "$(cat <<'EOF'
+feat: implement ${stem}
+EOF
+)"
+   git log --oneline -1   (capture the short hash)
+
+Return using StructuredOutput:
+  reportFile: "${implementReport}"
+  success: true if implementation completed AND the self-check (5.5) passed with no known gap
+  filesModified: array of source files created or modified
+  commitHash: the 7-char short hash (empty string if commit failed)
+  notes: one-line summary
+`, { label: `implement-${taskNum}`, schema: INPLACE_STAGE_SCHEMA, phase: waveLabel, model: 'sonnet' })
+
+    if (!impl || !impl.success) {
+      // Implement failed (or the D8 self-check found a gap) — roll the branch back, then triage.
+      const why = impl?.notes || (impl ? 'implement reported a completeness gap' : 'implement agent returned null')
+      log(`Task ${taskNum}: in-place implement did NOT pass — ${why}`)
+      if (preSha) await rollbackInPlace(preSha, taskNum)
+      const triage = await triageFailure(taskNum, attempt, JSON.stringify({ stage: 'implement', success: false, notes: why, previousReason: prevReason }, null, 2))
+      if (!triage || triage.class === 'MAJOR' || attempt === MAX_TASK_ATTEMPTS) {
+        const reason = triage?.reason || (attempt === MAX_TASK_ATTEMPTS ? 'retries exhausted' : 'triage returned null')
+        log(`Task ${taskNum}: ESCALATE — ${reason}.`)
+        return { taskNum, status: 'escalate', inPlace: true, finalVerdict: 'FAIL', reasons: [why], attempts: attempt, triage: reason }
+      }
+      log(`Task ${taskNum}: RETRYABLE — ${triage.reason}. Clean-slate retry (branch rolled back).`)
+      prevReason = why
+      continue
+    }
+
+    // Implement passed the D8 gate → its work stays on the integration branch. Optionally run ONE
+    // review pass as a localization map (consolidated+review). The review NEVER gates the merge — the
+    // consolidated back-half is authoritative — so a PARTIAL/FAIL here only annotates the outcome.
+    let finalVerdict = 'IMPLEMENTED'
+    let reviewReasons = []
+    if (perTaskReview) {
+      log(`Task ${taskNum}: per-task review pass (localization map)...`)
+      const rev = await tracedAgent(`
+You are the review agent for the lean spec orchestration. You run IN PLACE on the MAIN repo root (the
+integration branch). Produce a LOCALIZATION review of Task ${taskNum} ONLY — your verdict does NOT gate
+anything (the consolidated back-half over the integrated tree is authoritative); it is a map for the
+later consolidated fix. Do NOT modify source.
+
+Target:
+  Spec:             ${blockId}
+  Task:             Task ${taskNum}
+  Spec file:        ${tasksFile}
+  Implement report: ${implementReport}
+  Report to write:  ${reviewReport}
+
+1. Read the spec's "## Acceptance Criteria" (cat ${tasksFile}); identify the criteria in scope for
+   Task ${taskNum} (criteria clearly tagged for other tasks → SKIP, do not let them affect the verdict).
+2. For each in-scope criterion, read the relevant source and mark MET / PARTIAL / NOT_MET.
+3. Re-run the GATING validation checks (gates:true in planning/harness.json, or the spec's Validation
+   Commands) and note results — but remember a failure here is informational at this stage.
+4. Verdict: PASS (all in-scope MET) / PARTIAL / FAIL (any NOT_MET).
+5. Write ${reviewReport}:
+
+   # Review Report — ${stem}
+
+   **Date:** [run: date +%Y-%m-%d]
+   **Spec:** ${tasksFile}
+   **Scope:** Task ${taskNum} (per-task localization — NON-gating)
+   **Verdict:** PASS / PARTIAL / FAIL
+
+   ## Acceptance Criteria Check
+   | Criterion | Status | Evidence |
+   |---|---|---|
+
+   ## Issues Found
+   [specific problems — empty if PASS]
+
+   Commit it:
+   git add ${reviewReport} && git commit -m "docs: per-task review for ${stem}" || echo "nothing to commit"
+
+Return using StructuredOutput: reportFile="${reviewReport}", verdict, failureReasons, unmetCriteria, notes.
+`, { label: `review-${taskNum}`, schema: INPLACE_REVIEW_SCHEMA, phase: waveLabel, model: 'sonnet' })
+      finalVerdict = rev?.verdict || 'IMPLEMENTED'
+      reviewReasons = (rev?.unmetCriteria || []).concat(rev?.failureReasons || [])
+      log(`Task ${taskNum}: per-task review verdict ${finalVerdict} (non-gating; consolidated back-half decides).`)
+    }
+
+    return { taskNum, status: 'pass', inPlace: true, finalVerdict, commitHash: impl.commitHash, reviewReport: perTaskReview ? reviewReport : null, reasons: reviewReasons, attempts: attempt }
+  }
+  return { taskNum, status: 'escalate', inPlace: true, finalVerdict: 'NOT_REACHED', reasons: [], attempts: MAX_TASK_ATTEMPTS }
+}
+
+// D23 — run ONE task in an isolated WORKTREE (used only for width-≥2 waves: genuine concurrent
+// writers). Delegates to /sdlc-task --implement-only (+ --review for consolidated+review), which runs
+// worktree-setup → implement (+ optional localization review) and STOPS — no per-task test/document/
+// wrap-up. The block merges the branch and runs ONE consolidated back-half. "Mergeable" = the implement
+// succeeded (finalVerdict !== 'FAIL'); a per-task review PARTIAL/FAIL is advisory and does not block.
+async function runTaskWorktree(taskNum, resume = false, parallelWave = false) {
+  let prevReasons = null
+  for (let attempt = 1; attempt <= MAX_TASK_ATTEMPTS; attempt++) {
+    const resumeArg = (resume && attempt === 1) ? ' --resume' : ''
+    const parallelArg = parallelWave ? ' --parallel-wave' : ''
+    const reviewArg = perTaskReview ? ' --review' : ''
+    log(`Task ${taskNum}: worktree implement-only attempt ${attempt}/${MAX_TASK_ATTEMPTS} via /sdlc-task${resumeArg}...`)
+    const r = await workflow('sdlc-task', `${blockId} ${taskNum} --implement-only${reviewArg}${resumeArg} --under-block${parallelArg}`)
+
+    // Mergeable when implement succeeded. With --review the verdict may be PASS/PARTIAL/FAIL; only a
+    // FAIL (or a null result) blocks the merge — PARTIAL is an advisory localization signal.
+    if (r && r.finalVerdict && r.finalVerdict !== 'FAIL') {
+      return { taskNum, status: 'pass', branchName: r.branchName, worktreePath: r.worktreePath, finalVerdict: r.finalVerdict, reviewReport: r.reviewReport, attempts: attempt }
+    }
+
+    const failBlob = JSON.stringify({ finalVerdict: r?.finalVerdict ?? 'NULL_RESULT', reviewVerdict: r?.reviewVerdict, previousFailureReasons: prevReasons }, null, 2)
+    const triage = await triageFailure(taskNum, attempt, failBlob)
+    const reasons = r?.reviewVerdict ? [`per-task review: ${r.reviewVerdict}`] : []
 
     if (!triage || triage.class === 'MAJOR' || attempt === MAX_TASK_ATTEMPTS) {
       const why = triage?.reason || (attempt === MAX_TASK_ATTEMPTS ? 'retries exhausted' : 'triage returned null')
@@ -931,19 +1323,28 @@ Return using StructuredOutput: class, reason, sameCriteriaAsBefore.
         taskNum, status: 'escalate',
         branchName: r?.branchName, worktreePath: r?.worktreePath,
         finalVerdict: r?.finalVerdict || 'NOT_REACHED',
-        reasons, reviewReport: `${reportsDir}/task${taskNum}-review.md`,
+        reasons, reviewReport: r?.reviewReport || `${reportsDir}/task${taskNum}-review.md`,
         attempts: attempt, triage: triage?.reason
       }
     }
-
-    // RETRYABLE → clean-slate: tear down this attempt's worktree, then loop
     log(`Task ${taskNum}: RETRYABLE — ${triage.reason}. Clean-slate retry.`)
     if (r?.branchName && r?.worktreePath) await teardownBranch(r.branchName, r.worktreePath)
     prevReasons = reasons
   }
-  // unreachable, but keep the shape consistent
   return { taskNum, status: 'escalate', finalVerdict: 'NOT_REACHED', reasons: [], attempts: MAX_TASK_ATTEMPTS }
 }
+
+// D28 — seed the task-state map so the breadcrumb reflects the full plan, then persist the initial
+// snapshot. Tasks Analyze found already done (committed reports) but the breadcrumb didn't record are
+// marked merged; everything else not yet recorded is pending. An early crash now still leaves a
+// readable, accurate state file.
+for (const t of doneTasks) {
+  if (!taskState[t] || taskState[t].status === 'pending') taskState[t] = { status: 'merged', commit: taskState[t]?.commit || null, branch: null, worktreePath: null }
+}
+for (const t of Object.keys(taskMap)) {
+  if (!taskState[t]) taskState[t] = { status: 'pending', commit: null, branch: null, worktreePath: null }
+}
+await writeBlockState('Analyze')
 
 // ================================================================
 // WAVE LOOP
@@ -954,9 +1355,10 @@ for (let wi = 0; wi < waves.length; wi++) {
   phase(waveLabel)
 
   // Budget guard: if a token target is set and the remaining can't cover a wave, stop and report.
-  // Rough estimate: a full sdlc-task pipeline is ~150k output tokens; size to this wave's width.
+  // Lean per-task cost is implement (+ optional review) only — far below the old full per-task pipeline.
+  // The consolidated back-half is charged once, after the wave loop.
   if (budget.total) {
-    const estPerTask = 150_000
+    const estPerTask = perTaskReview ? 90_000 : 55_000
     const waveCost = Math.min(wave.tasks.length, MAX_WAVE_WIDTH) * estPerTask
     if (budget.remaining() < waveCost) {
       log(`Budget guard: ~${Math.round(budget.remaining() / 1000)}k remaining < ~${Math.round(waveCost / 1000)}k needed for ${waveLabel}. Stopping before overrun — re-run /sdlc-block ${blockId} to resume.`)
@@ -975,6 +1377,7 @@ for (let wi = 0; wi < waves.length; wi++) {
     if (isPoisoned(t, taskMap, badSet)) {
       log(`Task ${t}: SKIPPED — depends on an escalated/failed task (${(taskMap[t].dependsOn || []).filter(d => badSet.has(d)).join(', ')}).`)
       badSet.add(t)
+      taskState[t] = { status: 'skipped', commit: null, branch: null, worktreePath: null }  // D28
       outcomes.push({ taskNum: t, status: 'skipped', reasons: ['blocked by upstream escalation'] })
       continue
     }
@@ -992,6 +1395,7 @@ for (let wi = 0; wi < waves.length; wi++) {
     if (rs.state === 'complete-unmerged-fail') {
       log(`Task ${t}: complete-unmerged (${rs.verdict || 'FAIL'}) — escalating; worktree preserved for inspection.`)
       badSet.add(t)
+      taskState[t] = { status: 'escalated', commit: null, branch: rs.branchName || null, worktreePath: rs.worktreePath || null, verdict: rs.verdict || 'FAIL' }  // D28
       outcomes.push({ taskNum: t, status: 'escalate', branchName: rs.branchName, worktreePath: rs.worktreePath, finalVerdict: rs.verdict || 'FAIL', reasons: ['prior run completed with a non-PASS verdict — needs your analysis'], reviewReport: `${reportsDir}/task${t}-review.md`, attempts: 0 })
       continue
     }
@@ -1015,26 +1419,37 @@ for (let wi = 0; wi < waves.length; wi++) {
     log(`${waveLabel}: no tasks to run — ${mergeOnlyThisWave.length} already-complete branch(es) routed straight to merge.`)
   }
 
-  // Execute: parallel waves in batches of MAX_WAVE_WIDTH; sequential waves one at a time
+  // D23 — isolation only for genuine concurrent writers. A wave with a SINGLE runnable task runs it
+  // IN PLACE on the integration branch (no worktree, no merge — the common lean path); a wave with ≥2
+  // runnable tasks uses worktrees + ordered merge (true parallelism). Each per-task stage is lean:
+  // implement (+ optional localization review) only — the single consolidated back-half does the rest.
   let waveOutcomes = []
-  if (wave.parallel) {
+  const useWorktrees = runnable.length >= 2
+  if (useWorktrees) {
+    log(`${waveLabel}: ${runnable.length} concurrent tasks — isolating in worktrees, then merging in order.`)
     for (let k = 0; k < runnable.length; k += MAX_WAVE_WIDTH) {
       const batch = runnable.slice(k, k + MAX_WAVE_WIDTH)
       if (batch.length < runnable.length) log(`${waveLabel}: batch [${batch.join(', ')}]`)
       // batch.length > 1 → concurrent siblings share the budget pool → per-task outTok is contaminated (D12).
-      const batchResults = await parallel(batch.map(t => () => runTask(t, resumeTasks.has(t), batch.length > 1)))
+      const batchResults = await parallel(batch.map(t => () => runTaskWorktree(t, resumeTasks.has(t), batch.length > 1)))
       waveOutcomes.push(...batchResults.filter(Boolean))
     }
   } else {
-    for (const t of runnable) waveOutcomes.push(await runTask(t, resumeTasks.has(t)))
+    for (const t of runnable) waveOutcomes.push(await runTaskInPlace(t, waveLabel))
   }
 
   outcomes.push(...waveOutcomes)
   for (const o of waveOutcomes) {
     if (o.status === 'pass') {
-      passedBranches.push({ taskNum: o.taskNum, branchName: o.branchName, worktreePath: o.worktreePath })
+      // In-place tasks are already committed on the integration branch — nothing to merge. Worktree
+      // tasks queue their branch for the ordered merge below (recorded after a successful merge).
+      if (o.inPlace) {
+        o.merged = true
+        taskState[o.taskNum] = { status: 'merged', commit: o.commitHash || null, branch: null, worktreePath: null }  // D28: in-place lands directly on the integration branch
+      } else passedBranches.push({ taskNum: o.taskNum, branchName: o.branchName, worktreePath: o.worktreePath })
     } else if (o.status === 'escalate') {
       badSet.add(o.taskNum)
+      taskState[o.taskNum] = { status: 'escalated', commit: null, branch: o.branchName || null, worktreePath: o.worktreePath || null, verdict: o.finalVerdict || 'FAIL' }  // D28
     }
   }
 
@@ -1110,207 +1525,118 @@ conflictedFiles, escalated, commitHash, notes.
         const note = m?.notes || 'merge agent returned null'
         log(`Task ${p.taskNum}: MERGE ESCALATED — ${note}. Branch preserved.`)
         badSet.add(p.taskNum)
+        taskState[p.taskNum] = { status: 'escalated', commit: null, branch: p.branchName || null, worktreePath: p.worktreePath || null, verdict: 'FAIL' }  // D28
         // reflect the merge failure in the outcome
         const o = outcomes.find(x => x.taskNum === p.taskNum)
         if (o) { o.status = 'escalate'; o.reasons = [...(o.reasons || []), `merge conflict: ${(m?.conflictedFiles || []).join(', ') || note}`] }
       } else {
         log(`Task ${p.taskNum}: merged (${m.strategy}) ${m.commitHash || ''}`)
+        taskState[p.taskNum] = { status: 'merged', commit: m.commitHash || null, branch: null, worktreePath: null }  // D28
         const o = outcomes.find(x => x.taskNum === p.taskNum)
         if (o) { o.merged = true; o.commitHash = m.commitHash; o.mergeStrategy = m.strategy }
       }
     }
   }
 
+  // D28 — persist the breadcrumb once per wave, after this wave's tasks have landed/escalated. Width-1
+  // (in-place) waves run one task, so this is per-task there; width-≥2 waves record every landing after
+  // their ordered merge. An interrupted re-run reads this and skips straight to the pending tasks.
+  await writeBlockState(waveLabel)
+
   if (budget.total) log(`Budget: ~${Math.round(budget.remaining() / 1000)}k tokens remaining.`)
 }
 
 // ================================================================
-// PLAYWRIGHT VERIFICATION — live browser sweep after all merges
+// CONSOLIDATED BACK-HALF (D24) — ONE test → review → fix → (ui-test) → document → wrap-up over the
+// integrated tree, via /sdlc-run --from test. Replaces the old per-task back-half (~113k × N → 1×):
+// each task already ran its lean implement (+ optional localization review); now the integrated result
+// is verified once, with the consolidated fix localized by the per-task implement reports.
+//
+// Runs ONLY when the block is COMPLETE this run (no escalated/skipped tasks). Escalations block
+// completion exactly as before — fix the blocker and re-run /sdlc-block; the back-half fires once
+// everything has landed. status.md / log.md / the spec Amendment Log (D18) are owned by the back-half's
+// wrap-up (it reads the seeded consolidated implement report), so the block's own Report does NOT touch
+// them — it writes only the block-level report (telemetry + breakdown + escalations + back-half link).
 // ================================================================
-let playwrightVerdict = 'SKIP'
-let playwrightChecks  = []
-let playwrightFixNotes = []
-const MAX_PLAYWRIGHT_ATTEMPTS = 2
-
-const hasMergedTasks = outcomes.some(o => o.merged)
-// harnessCfg was loaded once up front (after pre-flight). The post-merge browser sweep runs ONLY
-// when the project enables it; non-web projects skip it.
-if (hasMergedTasks && harnessCfg?.uiTest?.enabled) {
-  phase('Playwright')
-  const ui = renderUiTestPrompt(harnessCfg, harnessCfg.uiTest.port ?? 3000)
-  log('Running live browser verification against the dev server...')
-
-  for (let attempt = 1; attempt <= MAX_PLAYWRIGHT_ATTEMPTS; attempt++) {
-    log(`Playwright: attempt ${attempt}/${MAX_PLAYWRIGHT_ATTEMPTS}...`)
-
-    const pw = await tracedAgent(`
-You are the Playwright verification agent. You run from the MAIN repo root.
-
-GOAL: Run live browser checks against the dev server to confirm that the merged work for
-spec "${blockId}" renders correctly end-to-end. Report PASS/WARN/FAIL with per-check evidence.
-
-STEP 1 — Dev server:
-  Check if port ${ui.port} is already in use:
-    lsof -ti:${ui.port}
-  If a PID is returned: server is already running — skip startup, set serverStarted=false.
-  If not running: start it in the background (use run_in_background=true):
-    ${ui.devCmd}
-  Poll the output every 5 s for "${ui.ready}" or "Local:" up to 90 s.
-  If startup fails (error / non-zero exit / 90 s timeout), return immediately:
-    verdict=FAIL, failureSummary="Dev server failed to start — check build errors."
-
-STEP 2 — Open a browser session:
-  playwright-cli open http://localhost:${ui.port}${ui.routes[0]}
-  Take an initial snapshot to confirm the session is live.
-
-STEP 3 — Smoke + routes (scope="routes"):
-  For each route: ${ui.routeList}
-    playwright-cli goto http://localhost:${ui.port}<route>
-    playwright-cli snapshot
-    playwright-cli console
-    FAIL signals: title/heading contains "404","500","Error","Not Found"; bare framework error body;
-                  snapshot has < 5 interactive elements on a content page;
-                  console has error-level entries (warnings are WARN, not FAIL).
-  Record each as one check row.
-
-STEP 4 — Content spot-check (scope="content"):
-  From any route's snapshot, pick an internal link → playwright-cli click <ref> → snapshot →
-  verify the target page renders real content (a heading plus body text), not an error page.
-  Record one check row.
-
-STEP 5 — Close and cleanup:
-  playwright-cli close
-  If serverStarted=true: lsof -ti:${ui.port} | xargs kill 2>/dev/null || true
-
-Return using StructuredOutput:
-  verdict:        PASS (all checks pass) | WARN (all pass but console warnings found) | FAIL (any check fails).
-  checks:         one row per check — check name, scope, result (PASS/WARN/FAIL), notes (evidence if not PASS).
-  failureSummary: if FAIL — what failed, error text quoted, likely root cause in one paragraph.
-  serverStarted:  true if you started the server in STEP 1.
-`, { label: `playwright-${attempt}`, schema: PLAYWRIGHT_SCHEMA, phase: 'Playwright', model: 'sonnet' })
-
-    playwrightVerdict = pw?.verdict ?? 'FAIL'
-    playwrightChecks  = pw?.checks  ?? []
-
-    if (playwrightVerdict !== 'FAIL') {
-      const nPass = playwrightChecks.filter(c => c.result === 'PASS').length
-      log(`Playwright: ${playwrightVerdict} — ${nPass}/${playwrightChecks.length} checks passed.`)
-      if (playwrightVerdict === 'WARN') playwrightFixNotes.push('Playwright WARN: console warnings found — review before promoting to production.')
-      break
-    }
-
-    // FAIL path
-    const failSummary = pw?.failureSummary || 'Playwright agent returned null or did not report a failure summary.'
-    log(`Playwright: FAIL — ${failSummary}`)
-
-    if (attempt < MAX_PLAYWRIGHT_ATTEMPTS) {
-      log(`Playwright: running targeted fix agent (attempt ${attempt})...`)
-
-      const fix = await tracedAgent(`
-You are a targeted regression-fix agent. A live Playwright browser sweep found failures after
-the "${blockId}" spec was merged to main. Make the minimal surgical fix directly on main,
-commit it, and return so Playwright can re-verify on the next attempt.
-
-Do NOT run the full validation suite. Before committing, DO run the project's fast gating checks
-(the gates:true entries in planning/harness.json — e.g. a lint/format check and any content/asset
-validator); they must exit 0.
-
-Playwright failures:
-${JSON.stringify(playwrightChecks.filter(c => c.result === 'FAIL'), null, 2)}
-
-Failure summary:
-${failSummary}
-
-Common targeted fixes:
-- Route 404 → missing or misnamed file backing that route; compare against a known-good baseline.
-- "Application error" / blank page → malformed data/frontmatter, a missing anchor/ID, or a broken
-  import; re-run the project's content/asset validation check to surface errors.
-- "Module not found" in console → missing or misspelled import; check the relevant source dirs.
-- Missing/empty section → the source references a non-existent anchor/ID.
-
-STEPS:
-1. Diagnose: read the failure evidence carefully; identify the specific file(s) to change.
-2. Fix: make the minimal targeted change. Do NOT refactor or touch unrelated code.
-3. Re-run the project's gating checks (must exit 0 before continuing).
-4. git add <specific files only>
-5. git commit -m "fix: playwright regression after ${blockId}"
-6. git log --oneline -1
-
-If the issue requires changes that are too large or structural for a targeted patch (e.g. a
-new spec task, a route rewrite, a missing feature block), do NOT attempt it. Return fixed=false
-and in notes describe exactly what the user must do — for example:
-  "Run /sdlc-task ${blockId} <N> to add the missing piece."
-  "Edit tasks.md to add a dedicated fix task, then re-run /sdlc-block ${blockId}."
-
-Return using StructuredOutput: fixed (bool), commitHash, changesSummary, notes.
-`, { label: `playwright-fix-${attempt}`, schema: PLAYWRIGHT_FIX_SCHEMA, phase: 'Playwright', model: 'sonnet' })
-
-      if (fix?.fixed) {
-        log(`Playwright fix applied: ${fix.changesSummary || ''} (${fix.commitHash || ''})`)
-        playwrightFixNotes.push(`Fix ${attempt}: ${fix.changesSummary || ''} (${fix.commitHash || ''})`)
-      } else {
-        const reason = fix?.notes || 'fix agent could not determine a targeted remedy'
-        log(`Playwright fix attempt ${attempt} did not resolve the issue: ${reason}`)
-        playwrightFixNotes.push(`Fix ${attempt} failed: ${reason}`)
-        break
-      }
-    } else {
-      log(`Playwright: FAIL after ${MAX_PLAYWRIGHT_ATTEMPTS} attempt(s) — escalating to user.`)
-      playwrightFixNotes.push(`Playwright still FAIL after ${MAX_PLAYWRIGHT_ATTEMPTS} attempt(s). Manual resolution required.`)
-    }
-  }
-} else if (!hasMergedTasks) {
-  log('Playwright: skipped — no tasks merged, nothing to verify.')
-} else {
-  log('Playwright: skipped — planning/harness.json uiTest.enabled is false or config absent (non-web project).')
-}
-
-// ================================================================
-// REPORT — spec report + single status/log update + escalations
-// ================================================================
-phase('Report')
-
 const merged    = outcomes.filter(o => o.merged)
 const escalated = outcomes.filter(o => o.status === 'escalate')
 const skipped   = outcomes.filter(o => o.status === 'skipped')
-const playwrightFailed = playwrightVerdict === 'FAIL'
-const overall = escalated.length === 0 && skipped.length === 0 && !playwrightFailed ? 'PASS'
-              : merged.length > 0 ? 'PARTIAL' : 'BLOCKED'
+const mergedTaskNums = merged.map(o => o.taskNum).sort((a, b) => a - b)
+// Landed = implemented on the integration branch this run (merged) OR already done from a prior run
+// (doneTasks). The seed + back-half localization should cover ALL landed tasks, not just this run's.
+const landedTaskNums = [...new Set([...mergedTaskNums, ...doneTasks])].sort((a, b) => a - b)
+const blockComplete = escalated.length === 0 && skipped.length === 0
+
+let backHalf = null
+let backHalfVerdict = 'NOT_RUN'
+if (blockComplete) {
+  phase('Back-half')
+
+  // Seed a spec-level implement report from the per-task implement reports, so the consolidated
+  // review/document can localize each finding to the task that produced it (D24). sdlc-run --from test
+  // reads the no-prefix implement.md slot in the same reports dir.
+  if (landedTaskNums.length) {
+    log('Seeding the consolidated implement report from the per-task reports...')
+    await tracedAgent(`
+You run from the MAIN repo root (the integration branch). Build ONE consolidated implement report from
+the per-task implement reports so the back-half's review/document stages can localize each finding to
+the task that produced it. Do NOT modify source.
+
+1. For each task N in ${JSON.stringify(landedTaskNums)}: cat ${reportsDir}/task${'${N}'}-implement.md
+   (skip any that are absent).
+2. Write ${reportsDir}/implement.md:
+
+   # Implementation Report — ${blockId} (consolidated)
+
+   **Date:** [run: date +%Y-%m-%d]
+   **Plan:** ${tasksFile}
+   **Scope:** Full spec — per-task implement reports merged by /sdlc-block
+
+   ## Files Created or Modified
+   | File | Action | Task |
+   |---|---|---|
+   [UNION every per-task report's "Files Created or Modified" rows, tagging each with its task N]
+
+   ## Per-Task Summaries
+   - Task N: [one line from that report's "What Was Built or Changed"]
+
+3. Commit: git add ${reportsDir}/implement.md && git commit -m "chore: consolidated implement report for ${blockId}" || echo "nothing to commit"
+
+Return using StructuredOutput: reportFile="${reportsDir}/implement.md", success=true.
+`, { label: 'seed-implement', schema: { type: 'object', required: ['success'], properties: { reportFile: { type: 'string' }, success: { type: 'boolean' } } }, phase: 'Back-half', model: 'haiku' })
+  }
+
+  log('Running the consolidated back-half via /sdlc-run --from test (test → review → fix → document → wrap-up) over the integrated tree...')
+  backHalf = await workflow('sdlc-run', `${blockId} --from test`)
+  backHalfVerdict = backHalf?.finalVerdict || 'FAIL'
+  log(`Consolidated back-half verdict: ${backHalfVerdict} (review attempts: ${backHalf?.reviewAttempts ?? '—'}). status.md/log.md/spec Amendment Log updated by its wrap-up.`)
+} else {
+  log(`Back-half SKIPPED — ${escalated.length} escalated / ${skipped.length} skipped task(s) block completion.`)
+  log(`Fix the blocker(s) and re-run /sdlc-block ${blockId}; the consolidated back-half fires once everything has landed.`)
+}
+
+// ================================================================
+// REPORT — slim block-level report. The consolidated back-half's wrap-up owns status.md / log.md /
+// the spec Amendment Log; this report records ONLY block-orchestration facts (per-task outcomes,
+// escalations, breakdown assessment, token roll-up, back-half verdict) and commits block-workflow.md.
+// ================================================================
+phase('Report')
+
+const overall = !blockComplete
+  ? (merged.length > 0 ? 'PARTIAL' : 'BLOCKED')
+  : (backHalfVerdict === 'PASS' ? 'PASS' : backHalfVerdict === 'PARTIAL' ? 'PARTIAL' : 'BLOCKED')
 
 const outcomeTable = outcomes
   .sort((a, b) => a.taskNum - b.taskNum)
-  .map(o => `| ${o.taskNum} | ${o.merged ? 'merged' : o.status} | ${o.finalVerdict || '—'} | ${o.mergeStrategy || '—'} | ${o.commitHash || '—'} | ${(o.reasons || []).join('; ').substring(0, 80) || '—'} |`)
+  .map(o => `| ${o.taskNum} | ${o.merged ? (o.inPlace ? 'in-place' : 'merged') : o.status} | ${o.finalVerdict || '—'} | ${o.mergeStrategy || (o.inPlace ? 'in-place' : '—')} | ${o.commitHash || '—'} | ${(o.reasons || []).join('; ').substring(0, 80) || '—'} |`)
   .join('\n')
 
 const escalationBlock = escalated.length
-  ? escalated.map(o => `- **Task ${o.taskNum}** — verdict ${o.finalVerdict}. ${o.triage || ''}\n    - Review: \`${o.reviewReport || `${reportsDir}/task${o.taskNum}-review.md`}\`\n    - Worktree (preserved): \`${o.worktreePath || 'n/a'}\` (branch \`${o.branchName || 'n/a'}\`)\n    - Reasons: ${(o.reasons || []).join('; ') || 'see review report'}`).join('\n')
+  ? escalated.map(o => `- **Task ${o.taskNum}** — verdict ${o.finalVerdict}. ${o.triage || ''}\n    - Review: \`${o.reviewReport || `${reportsDir}/task${o.taskNum}-review.md`}\`\n    - ${o.inPlace ? 'Ran in-place (rolled back on failure) — no worktree.' : `Worktree (preserved): \`${o.worktreePath || 'n/a'}\` (branch \`${o.branchName || 'n/a'}\`)`}\n    - Reasons: ${(o.reasons || []).join('; ') || 'see review report'}`).join('\n')
   : '_None._'
 
-const mergedTaskNums = merged.map(o => o.taskNum)
-
-// Build the playwright section for the report
-const playwrightCheckTable = playwrightChecks.length
-  ? playwrightChecks.map(c => `   | ${c.check} | ${c.scope} | ${c.result} | ${c.notes || '—'} |`).join('\n')
-  : '   _No checks recorded._'
-const playwrightFixBlock = playwrightFixNotes.length
-  ? '\n   **Fix attempts:**\n' + playwrightFixNotes.map(n => `   - ${n}`).join('\n')
-  : ''
-const playwrightSection = playwrightVerdict === 'SKIP'
-  ? '   _Skipped — no tasks merged, nothing to verify._'
-  : `   **Verdict:** ${playwrightVerdict}
-
-   | Check | Scope | Result | Notes |
-   |---|---|---|---|
-${playwrightCheckTable}
-${playwrightFixBlock}`
-
-const playwrightEscalation = playwrightFailed
-  ? `\n- **Playwright verification FAILED** — the live browser sweep found regressions after all merges.\n    - See the Playwright Verification section above for per-check details.\n    - To fix: run \`/playwright --scope full\` locally to reproduce, then \`/sdlc-task ${blockId} <N>\` or \`/fix\` to patch the regression.`
-  : ''
-
-// Token-telemetry roll-up (Phase A) — computed here (before the Report agent) so it can be appended
-// verbatim to the block report. Covers only this engine's own orchestration agents; each task's
-// per-stage detail lives in its own /sdlc-task workflow report.
+// Token-telemetry roll-up — this engine's own orchestration agents only (the consolidated back-half's
+// per-stage detail lives in the spec's own workflow.md, written by /sdlc-run's wrap-up).
 const blockMetricsTable = metrics.map(m => {
   const out = m.outTok != null ? String(m.outTok) : '—'
   return `| ${m.label} | ${m.model} | ${m.promptTokEst} | ${out} |`
@@ -1318,8 +1644,7 @@ const blockMetricsTable = metrics.map(m => {
 const totalOut = metrics.reduce((s, m) => s + (m.outTok || 0), 0)
 const worstByPrompt = [...metrics].sort((a, b) => b.promptTokEst - a.promptTokEst).slice(0, 3)
 
-// D10 — Breakdown assessment summary, built deterministically here so the Report agent appends it
-// verbatim (like the token roll-up). Makes recommend-mode recommendations durable in block-workflow.md.
+// D10 — Breakdown assessment summary, built deterministically so the Report agent appends it verbatim.
 const breakdownSection = (() => {
   const ba = breakdownAssessment
   if (ba.mode === 'off') return `_Skipped — \`breakdown.mode\` is "off" in planning/harness.json._`
@@ -1338,41 +1663,54 @@ ${rows}
 **Action taken:** ${action}`
 })()
 
+const backHalfSection = blockComplete
+  ? `**Verdict:** ${backHalfVerdict} · **review attempts:** ${backHalf?.reviewAttempts ?? '—'} · **depth:** ${verifyDepth}
+Per-stage detail (test / review / fix / document / wrap-up over the integrated tree) is in the spec's
+own workflow report: \`${backHalf?.workflowReport || `${reportsDir}/workflow.md`}\`. Its wrap-up updated
+status.md, log.md, and the spec Amendment Log (D18).`
+  : `_Not run — ${escalated.length} escalated / ${skipped.length} skipped task(s) block completion. Resolve them and re-run \`/sdlc-block ${blockId}\`; the back-half runs once everything lands._`
+
 const reportResult = await tracedAgent(`
-You are the finalize/report agent for the spec orchestration. You run from the MAIN repo root.
+You are the block-report agent for the lean spec orchestration. You run from the MAIN repo root. Write
+the block-level report and commit it. Do NOT touch planning/status.md or log.md — the consolidated
+back-half's wrap-up already owns those.
 
 Spec: ${blockId}
 Overall verdict: ${overall}
-Merged tasks (applied to main): ${JSON.stringify(mergedTaskNums)}
-Escalated tasks (NOT merged): ${JSON.stringify(escalated.map(o => o.taskNum))}
+Landed tasks: ${JSON.stringify(mergedTaskNums)}
+Escalated tasks: ${JSON.stringify(escalated.map(o => o.taskNum))}
 Skipped (blocked by upstream): ${JSON.stringify(skipped.map(o => o.taskNum))}
-Playwright verdict: ${playwrightVerdict}
+Consolidated back-half verdict: ${backHalfVerdict}
 
 DO THIS, IN ORDER:
 
-1. Write the spec report to ${blockReport}:
+1. Write the block report to ${blockReport}:
 
    # Spec Orchestration Report — ${blockId}
 
    **Date:** [run: date +%Y-%m-%d]
    **Overall verdict:** ${overall}
-   **Tasks merged:** ${mergedTaskNums.length}  |  **Escalated:** ${escalated.length}  |  **Skipped:** ${skipped.length}  |  **Playwright:** ${playwrightVerdict}
+   **Verify depth:** ${verifyDepth}
+   **Tasks landed:** ${mergedTaskNums.length}  |  **Escalated:** ${escalated.length}  |  **Skipped:** ${skipped.length}  |  **Back-half:** ${backHalfVerdict}
 
    ## Outcome by Task
-   | Task | Result | Verdict | Merge | Commit | Notes |
+   (Result "in-place" = implemented directly on the integration branch; "merged" = implemented in a
+   worktree for a parallel wave, then merged. Per-task Verdict is IMPLEMENTED, or the localization
+   review verdict under consolidated+review — NON-gating; the back-half verdict is authoritative.)
+   | Task | Result | Verdict | Path | Commit | Notes |
    |---|---|---|---|---|---|
 ${outcomeTable}
 
-   ## Playwright Verification
-${playwrightSection}
+   ## Consolidated Back-half (D24)
+${backHalfSection}
 
    ## Escalations (need your attention)
-${escalationBlock}${playwrightEscalation}
+${escalationBlock}
 
    ## Resume
    After fixing any blocker (or editing ${planFile}), re-run:  /sdlc-block ${blockId}
-   Completed tasks are detected on main and skipped; escalated tasks are retried.
-   ${playwrightFailed ? `Playwright failed — fix the regression first, then re-promote to production.` : ''}
+   Landed tasks are detected (their implement commit is on the integration branch) and skipped;
+   escalated tasks are retried. The consolidated back-half re-runs once every task has landed.
 
 2. Append the breakdown assessment, then the orchestrator token roll-up, to ${blockReport}. Run BOTH
    appends EXACTLY as written (literal heredocs) — do NOT retype, summarize, reorder, or omit them;
@@ -1387,11 +1725,11 @@ BREAKDOWN_EOF
    cat >> ${blockReport} <<'ROLLUP_EOF'
 
 ## Token Roll-up (orchestrator stages)
-Attribution for THIS engine's own agents (preflight / analyze / merge / triage / report). Each task's
-full per-stage detail lives in its own task<N>-workflow.md. promptTok = injected input estimate;
-outTok = output-token delta ("—" when no +Nk budget target was set). These orchestrator stages run
-sequentially, so their outTok is clean. NOTE: per-task outTok for tasks that ran in a PARALLEL wave is
-shared-pool-contaminated and is reported there as "— (parallel)" rather than a misleading number (D12).
+Attribution for THIS engine's own agents (preflight / analyze / per-task implement+review / merge /
+triage / seed / report). The consolidated back-half's per-stage detail lives in the spec's workflow.md.
+promptTok = injected input estimate; outTok = output-token delta ("—" when no +Nk budget target was
+set). NOTE: per-task outTok for tasks that ran in a PARALLEL (width-≥2) wave is shared-pool-contaminated
+and reported as a misleading number — width-1 in-place tasks run sequentially, so theirs is clean (D12).
 
 **Total orchestrator outTok:** ${totalOut || '—'}
 
@@ -1400,32 +1738,17 @@ shared-pool-contaminated and is reported there as "— (parallel)" rather than a
 ${blockMetricsTable}
 ROLLUP_EOF
 
-3. Apply log + status ONCE (the per-task logs deferred these). The merged branches each carry a
-   planning/${blockId}/sdlc/reports/task<N>-log.md committed on main with "Applied: false".
-   For EACH merged task N in ${JSON.stringify(mergedTaskNums)} (ascending):
-     - cat ${reportsDir}/task${'${N}'}-log.md
-     - Append everything under its "## Log Entry" heading (from the "## YYYY-MM-DD" line onward,
-       NOT the "## Log Entry" header itself) to the TOP of log.md (most-recent-first), once.
-     - Flip that log's "**Applied:** false" -> "**Applied:** true".
-   Then update planning/status.md ONCE:
-     - If ALL tasks in the spec are now merged: mark the spec "Done" in the progress table and set
-       "**Current focus:**" to the NEXT spec; otherwise mark it "In progress" and set Current focus to
-       the lowest not-yet-merged task.
-     - Bump the "**Last updated:**" line (today's date + one-line summary).
-   Apply each merged task's "## status.md — *" sections from its log where present. Do NOT apply
-   status/log for escalated or skipped tasks.
-
-4. Commit:
-   git add ${blockReport} log.md planning/status.md ${reportsDir}/task*-log.md
-   git commit -m "chore: spec orchestration report + status for ${blockId}"
+3. Commit ONLY the block report (NOT status.md or log.md — the back-half owns those):
+   git add ${blockReport}
+   git commit -m "chore: block orchestration report for ${blockId}" || echo "nothing to commit"
    git log --oneline -1
 
 Return using StructuredOutput: reportFile="${blockReport}", overallVerdict="${overall}",
-statusUpdated (true if status.md was updated), nextFocus (the Current focus string you wrote), notes.
+statusUpdated=false (the back-half wrap-up owns status.md), nextFocus="", notes.
 `, { label: 'report', schema: REPORT_SCHEMA, phase: 'Report', model: 'sonnet' })
 
 // ----------------------------------------------------------------
-// Console echo of the roll-up (computed above; also persisted to the block report by the Report agent).
+// Console echo of the roll-up (also persisted to the block report by the Report agent).
 // ----------------------------------------------------------------
 log(`Token roll-up (orchestrator stages): total outTok=${totalOut || '—'} | worst 3 by injected prompt: ${worstByPrompt.map(m => `${m.label} (~${m.promptTokEst} tok)`).join(', ') || 'none'}`)
 
@@ -1433,29 +1756,25 @@ log(`Token roll-up (orchestrator stages): total outTok=${totalOut || '—'} | wo
 // Final console summary
 // ----------------------------------------------------------------
 log('=== SPEC ORCHESTRATION COMPLETE ===')
-log(`Overall: ${overall} | merged: ${merged.map(o => o.taskNum).join(', ') || 'none'} | escalated: ${escalated.map(o => o.taskNum).join(', ') || 'none'} | skipped: ${skipped.map(o => o.taskNum).join(', ') || 'none'} | playwright: ${playwrightVerdict}`)
+log(`Overall: ${overall} | landed: ${merged.map(o => o.taskNum).join(', ') || 'none'} | escalated: ${escalated.map(o => o.taskNum).join(', ') || 'none'} | skipped: ${skipped.map(o => o.taskNum).join(', ') || 'none'} | back-half: ${backHalfVerdict}`)
 if (escalated.length) {
   log('Escalations need your analysis:')
   for (const o of escalated) {
-    log(`  Task ${o.taskNum}: ${o.triage || (o.reasons || []).join('; ')} | worktree: ${o.worktreePath || 'n/a'} | review: ${o.reviewReport || `${reportsDir}/task${o.taskNum}-review.md`}`)
+    log(`  Task ${o.taskNum}: ${o.triage || (o.reasons || []).join('; ')} | ${o.inPlace ? 'in-place (rolled back)' : `worktree: ${o.worktreePath || 'n/a'}`} | review: ${o.reviewReport || `${reportsDir}/task${o.taskNum}-review.md`}`)
   }
   log(`After fixing, resume with: /sdlc-block ${blockId}`)
 }
-if (playwrightFailed) {
-  log('Playwright verification FAILED — live browser regressions found after merge.')
-  if (playwrightFixNotes.length) for (const n of playwrightFixNotes) log(`  ${n}`)
-  log(`To fix: run /playwright --scope full locally, then /sdlc-task ${blockId} <N> or /fix to patch.`)
-}
-log(`Spec report: ${reportResult?.reportFile || blockReport}`)
+log(`Block report: ${reportResult?.reportFile || blockReport}`)
 
 return {
   blockId,
   overallVerdict: overall,
+  verifyDepth,
   waves: waves.length,
-  merged: merged.map(o => ({ taskNum: o.taskNum, commitHash: o.commitHash, mergeStrategy: o.mergeStrategy })),
+  merged: merged.map(o => ({ taskNum: o.taskNum, commitHash: o.commitHash, mergeStrategy: o.inPlace ? 'in-place' : o.mergeStrategy })),
   escalated: escalated.map(o => ({ taskNum: o.taskNum, finalVerdict: o.finalVerdict, worktreePath: o.worktreePath, branchName: o.branchName, reviewReport: o.reviewReport, reasons: o.reasons, triage: o.triage })),
   skipped: skipped.map(o => o.taskNum),
-  playwright: { verdict: playwrightVerdict, checks: playwrightChecks, fixNotes: playwrightFixNotes },
+  backHalf: blockComplete ? { verdict: backHalfVerdict, reviewAttempts: backHalf?.reviewAttempts ?? null, workflowReport: backHalf?.workflowReport || null } : null,
   breakdown: breakdownAssessment,
   blockReport: reportResult?.reportFile || blockReport,
   resumeCommand: `/sdlc-block ${blockId}`,

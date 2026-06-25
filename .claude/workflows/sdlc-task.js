@@ -13,7 +13,10 @@
 // for sequential use.
 //
 // USAGE
-//   /sdlc-task <spec-slug> 2   runs task 2 in an isolated worktree
+//   /sdlc-task <spec-slug> 2                  runs task 2 in an isolated worktree (full pipeline)
+//   /sdlc-task <spec-slug> 2 --implement-only  worktree implement only, then STOP (lean /sdlc-block
+//                                              width-≥2 path; add --review for one localization-map
+//                                              review pass). No test/document/wrap-up/merge.
 //
 //   Task number is REQUIRED. For full-spec runs use /sdlc-run instead.
 //
@@ -115,6 +118,16 @@ const underBlock = parts.includes('--under-block')
 // measures the whole batch's burn, not this task's, so we mark it non-isolated rather than reporting a
 // misleading number. promptTok and filesReadKb stay per-agent and accurate. See decisions/D12.
 const parallelWave = parts.includes('--parallel-wave')
+// --implement-only (set by the lean /sdlc-block for a width-≥2 parallel wave): run
+// worktree-setup → implement → (one review pass ONLY when --review is also set) and STOP. Skip
+// test/fix/ui-test/document/wrap-up and the merge hand-off. /sdlc-block merges the branch and runs
+// ONE consolidated back-half (test → review → fix → document → wrap-up) over the integrated tree, so
+// per-task verification beyond the optional localization-map review is wasteful here (D23/D24). The
+// block owns status/log; this mode writes no deferred task-log.
+const implementOnly = parts.includes('--implement-only')
+// --review: under --implement-only, add a single per-task review pass (no fix loop) as a localization
+// map for the consolidated fix. Set by /sdlc-block only when block.verify is "consolidated+review".
+const withReview = parts.includes('--review')
 
 if (taskNumber === null || isNaN(taskNumber)) {
   log(`ERROR: Task number is required but not provided (got: "${rawArgs}").`)
@@ -158,6 +171,8 @@ const SETUP_SCHEMA = {
     // stage is then deterministic). Only consulted when NOT resuming; on resume the scout decides.
     specFileExists: { type: 'boolean', description: 'true if the task spec file exists in the worktree' },
     blockStatus:    { type: 'string', description: "This spec's Status in status.md (title-case), or 'Unknown'" },
+    specThin:       { type: 'boolean', description: 'D19: true ONLY on a fresh run (wasCreated && specFileExists) with a structurally-valid but substantively-thin spec per STEP 6c. false on resume or a healthy spec.' },
+    thinReason:     { type: 'string', description: 'D19: the specific thin-spec failures when specThin; empty string otherwise.' },
     notes:         { type: 'string' }
   }
 }
@@ -663,7 +678,8 @@ RESUME MODE IS ON — reuse the existing worktree for this task instead of creat
        mkdir -p trees
        git worktree add --no-checkout trees/${baseBranchName} ${baseBranchName}
        git -C trees/${baseBranchName} sparse-checkout init --cone
-       git -C trees/${baseBranchName} sparse-checkout set app components hooks lib content scripts docs planning .claude __tests__ __mocks__ types
+       # Cone ALL tracked top-level directories — stack-agnostic, no project-layout assumptions (D5/P5).
+       git -C trees/${baseBranchName} sparse-checkout set $(git ls-tree HEAD --name-only -d | tr '\\n' ' ')
        git -C trees/${baseBranchName} checkout
        if [ -f .env ]; then cp .env trees/${baseBranchName}/.env; fi
        if [ -f .env.local ]; then cp .env.local trees/${baseBranchName}/.env.local; fi
@@ -697,7 +713,8 @@ STEP 3 — Create the worktree:
   a. mkdir -p trees
   b. git worktree add --no-checkout trees/[branchName] -b [branchName]
   c. git -C trees/[branchName] sparse-checkout init --cone
-  d. git -C trees/[branchName] sparse-checkout set app components hooks lib content scripts docs planning .claude __tests__ __mocks__ types
+  d. # Cone ALL tracked top-level directories — stack-agnostic, no project-layout assumptions (D5/P5).
+     git -C trees/[branchName] sparse-checkout set $(git ls-tree HEAD --name-only -d | tr '\\n' ' ')
   e. git -C trees/[branchName] checkout
   f. if [ -f .env ]; then cp .env trees/[branchName]/.env; fi
   g. if [ -f .env.local ]; then cp .env.local trees/[branchName]/.env.local; fi
@@ -706,7 +723,8 @@ STEP 3 — Create the worktree:
 STEP 4 — Verify:
   Run: git worktree list
   Run: ls trees/[branchName]/
-  Confirm the worktree exists and contains app/, components/, content/, planning/, .claude/ directories.
+  Confirm the worktree exists and contains the tracked top-level directories — at minimum planning/
+  and .claude/ (the scout/spec/report machinery), plus whatever source/content trees the project has.
 
 STEP 5 — Compute the absolute worktree path:
   worktreePath = repoRoot + "/trees/" + branchName
@@ -719,6 +737,16 @@ STEP 6 — Report the pipeline-start inputs (so a fresh run can skip the separat
        cd trees/[branchName] && grep -iE "${blockId}" planning/status.md | head -5
      Set blockStatus to the title-case Status value (Not started / In progress / Done / Blocked /
      Skipped). If no row is found, set blockStatus = "Unknown".
+  c. Thin-spec content check (D19) — evaluate ONLY when wasCreated is true AND specFileExists is true
+     (a fresh run about to spend implement tokens; skip entirely on a resumed/existing worktree). Read
+     the spec and set specThin=true ONLY on these high-confidence signals (a blocked valid spec is far
+     costlier than a missed thin one — when in doubt, do NOT flag):
+       - cd trees/[branchName] && grep -n '{{' ${specFile}  → any unfilled {{TOKEN}} is thin.
+       - The '## Acceptance Criteria' section has no real '- ' bullet (empty, or only a verbatim
+         template seed) → thin.
+     Do NOT flag a bare 'TODO'/'TBD' in prose, do NOT treat any '<...>' as a token (legitimate in
+     'Vec<T>', 'the <concept> folder', globs), and never flag the Amendment Log seed
+     '_No amendments yet._'. Set specThin=false otherwise, and thinReason="" unless thin.
 
 Return your result using the StructuredOutput tool:
   branchName:     the final chosen branch name (e.g. "${baseBranchName}" or "${baseBranchName}-2")
@@ -726,6 +754,8 @@ Return your result using the StructuredOutput tool:
   wasCreated:     true if a NEW worktree was created; false if an existing one was reused (resume mode)
   specFileExists: from STEP 6a
   blockStatus:    from STEP 6b
+  specThin:       from STEP 6c (false unless a fresh run with a structurally-valid but thin spec)
+  thinReason:     from STEP 6c (the specific failures when specThin; empty string otherwise)
   notes:          any issues encountered
 `, withModel({ label: 'worktree-setup', schema: SETUP_SCHEMA, phase: 'Worktree' }, MODEL.worktreeSetup))
 
@@ -737,6 +767,14 @@ if (!setupResult) {
 const { branchName, worktreePath } = setupResult
 log(`Worktree ready: ${worktreePath} (branch: ${branchName})`)
 stageResults.push({ stage: 'worktree-setup', ...setupResult, success: true })
+
+// D19 — thin-spec guard for a standalone fresh run. Skipped under a block (the block's pre-flight
+// already validated content once on main) and on resume (specThin is only set on a fresh worktree).
+if (setupResult.specThin && !underBlock) {
+  log(`ABORTED (D19) — spec is structurally valid but substantively thin: ${setupResult.thinReason || '(no reason given)'}`)
+  log(`Fix: flesh out ${specFile} (run /generate-tasks --force to regenerate, or edit + commit), then re-run.`)
+  return { error: 'Thin spec (D19)', reason: setupResult.thinReason || '', blockId, taskNumber, stem }
+}
 
 // ----------------------------------------------------------------
 // Build the worktree path injection header — prepended to EVERY agent prompt
@@ -1113,7 +1151,7 @@ Instructions:
    ## Files Created or Modified
    | File | Action |
    |---|---|
-   | path/to/file.tsx | created / modified |
+   | path/to/file | created / modified |
 
    ## Validation Output
    **Commands run:**
@@ -1142,7 +1180,7 @@ Instructions:
 7. Commit your changes. Run from the worktree:
    cd ${worktreePath} && git status
    Stage files explicitly by name (never git add -A or git add .):
-     cd ${worktreePath} && git add components/Foo.tsx __tests__/foo.test.ts ${implementReport}
+     cd ${worktreePath} && git add <each changed source/test file> ${implementReport}
    Commit using HEREDOC:
      cd ${worktreePath} && git commit -m "$(cat <<'EOF'
      feat: implement ${stem}
@@ -1173,7 +1211,11 @@ Return using StructuredOutput:
       log('Implement reported failure — aborting pipeline')
       break
     }
-    currentStage = 'test'
+    // --implement-only (lean block, D23): stop after implement. With --review, run ONE review pass
+    // first (implement → review, skipping the test stage — review re-runs the gating checks itself);
+    // otherwise exit straight to the implement-only return below. Either way the consolidated back-half
+    // does the authoritative test/fix/document/wrap-up over the integrated tree.
+    currentStage = implementOnly ? (withReview ? 'review' : 'implement-only-done') : 'test'
   }
 
   // ----------------------------------------------------------
@@ -1552,7 +1594,12 @@ Return using StructuredOutput:
       log(`Review verdict: ${reviewResult.verdict} (attempt ${reviewAttempts}/${MAX_REVIEW_ATTEMPTS})`)
     }
 
-    if (lastReviewResult.verdict === 'PASS') {
+    if (implementOnly) {
+      // Lean block: the single review pass is a localization map only — no fix loop, no ui-test.
+      // The consolidated back-half owns fix/document/wrap-up over the integrated tree.
+      log(`Implement-only review: ${lastReviewResult.verdict} (localization map for the consolidated back-half).`)
+      currentStage = 'implement-only-done'
+    } else if (lastReviewResult.verdict === 'PASS') {
       currentStage = 'ui-test'
     } else if (reviewAttempts < MAX_REVIEW_ATTEMPTS) {
       log(`Review ${lastReviewResult.verdict} — running fix pass ${reviewAttempts + 1}/${MAX_REVIEW_ATTEMPTS}...`)
@@ -1689,6 +1736,39 @@ Return the result using StructuredOutput.
     }
   }
 } // end implement→fix→test→review→ui-test retry loop
+
+// ================================================================
+// IMPLEMENT-ONLY EARLY RETURN (lean /sdlc-block, D23/D24)
+//
+// Stop here: no document, no wrap-up, no task-log, no merge hand-off. The implement agent already
+// committed the code + implement report in the worktree (and the optional review committed its report);
+// /sdlc-block merges this branch into the integration branch and runs ONE consolidated back-half over
+// the integrated tree. finalVerdict tells the block whether the branch is mergeable:
+//   FAIL        — implement failed; the block escalates instead of merging.
+//   <review>    — when --review ran: the per-task review verdict (a localization signal, not a gate).
+//   IMPLEMENTED — implement succeeded, no per-task review (consolidated back-half will verify).
+// ================================================================
+if (implementOnly) {
+  const implOk = lastImplReport && lastImplReport.success !== false
+  const verdict = !implOk ? 'FAIL' : (withReview ? (lastReviewResult?.verdict || 'FAIL') : 'IMPLEMENTED')
+  log(`Implement-only complete: ${stem} → ${verdict} | branch ${branchName}`)
+  log(`(No per-task back-half — /sdlc-block merges this branch and runs one consolidated back-half.)`)
+  return {
+    blockId,
+    taskNumber,
+    stem,
+    branchName,
+    worktreePath,
+    finalVerdict: verdict,
+    implementOnly: true,
+    reviewRan: withReview,
+    reviewVerdict: lastReviewResult?.verdict || null,
+    implementReport,
+    reviewReport: withReview ? reviewReport : null,
+    startStage: scout.startStage,
+    stageResults
+  }
+}
 
 // ================================================================
 // PHASE 6: DOCUMENT (gates on PASS verdict)
@@ -1908,6 +1988,17 @@ STEP 2 — Write the TASK LOG file: ${worktreePath}/${logFile}
    \`\`\`
    [paste the git log --oneline output from STEP 1c]
    \`\`\`
+
+   ---
+
+   ## Amendment Log Entry (D18)
+   [Genuine DEVIATIONS this task introduced relative to the spec as written — a task implemented
+    materially differently than specified, a scope adjustment, a substitution, or a deferral. Routine
+    successful implementation is NOT a deviation. The spec is a SHARED file across parallel tasks, so do
+    NOT edit it from this worktree — record the lines here and the merge applier (/clean-worktree)
+    appends them to the spec's "## Amendment Log" on main, in task order. Write ONE line per deviation:
+      - YYYY-MM-DD [<stage>] <what changed vs the spec, and why>
+    If there were no genuine deviations, write exactly: _none_]
 
 STEP 3 — Write the WORKFLOW REPORT: ${worktreePath}/${workflowReport}
 

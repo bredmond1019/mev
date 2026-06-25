@@ -60,6 +60,18 @@
       },
       "required": ["enabled"]
     },
+    "planning": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional planning-phase policy read by the authoring commands (/plan, /feature, /generate-tasks). Absent → all fields default to preserve today's zero-touch behavior.",
+      "properties": {
+        "clarify": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, the authoring commands surface 2-4 targeted clarifying questions for an ambiguous prompt BEFORE writing the spec. Default false preserves the zero-touch flow (write immediately). A user can always force this per-invocation with the --clarify flag regardless of this setting."
+        }
+      }
+    },
     "breakdown": {
       "type": "object",
       "additionalProperties": false,
@@ -75,6 +87,48 @@
           "type": "integer",
           "default": 3,
           "description": "A task that creates/modifies MORE than this many distinct files is a breakdown candidate (the file-count signal). Multi-concern / multi-layer tasks are flagged regardless of count."
+        }
+      }
+    },
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional policy for the lean /sdlc-block runner (the 'more powerful sdlc-run': a fresh implement agent per task, shared setup once, one consolidated back-half). Absent → verify 'consolidated' (per-task review off). Only read by /sdlc-block; /sdlc-run and /sdlc-task ignore it.",
+      "properties": {
+        "verify": {
+          "type": "string",
+          "enum": ["consolidated", "consolidated+review"],
+          "default": "consolidated",
+          "description": "How much per-task verification the lean block does before its single consolidated back-half (test → review → fix → document → wrap-up over the integrated tree). 'consolidated' (default, cheapest): each task runs implement + the D8 completeness self-check only; localization happens once at the end. 'consolidated+review': each task additionally gets one review pass (a localization map for the consolidated fix) — recommended by /generate-tasks when tasks are large/heterogeneous enough that end-only localization is hard (≈38k tokens × N). The consolidated review stays authoritative in both modes; per-task review never substitutes for it. CLI override: --verify-depth <value>."
+        }
+      }
+    },
+    "flow": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional policy for /sdlc-flow (the default engine for non-trivial feature work: one shared worktree, per-task test-fix loop, single end-review, PR terminal step). Absent → CLI flag defaults apply. Only read by /sdlc-flow; other engines ignore it. CLI flags override these keys for a single run.",
+      "properties": {
+        "autoMerge": {
+          "type": "boolean",
+          "default": false,
+          "description": "Default for the --auto-merge flag. When true, /sdlc-flow merges the PR and tears down the worktree on a clean PASS (non-draft PR only). False: stop after opening the PR and let a human merge. CLI --auto-merge overrides this."
+        },
+        "testDepth": {
+          "type": "string",
+          "enum": ["fast", "full"],
+          "default": "fast",
+          "description": "Per-task validation depth. 'fast' (default): run only gates:true checks as a tripwire per task — cheap and catches regressions early. 'full': run the whole validation suite per task — more thorough but slower. The end-review always runs the full suite regardless of this setting. CLI --test-depth overrides this."
+        },
+        "prBase": {
+          "type": "string",
+          "default": "main",
+          "description": "Base branch for gh pr create --base. Defaults to 'main'. Set to 'develop' or another integration branch if the project does not use main as its primary target. No CLI override — set once per project here."
+        },
+        "bailReasons": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Extra project-specific immediate-bail reasons appended to the five universal ones. When the triage agent classifies a failure, it checks this list in addition to the hardcoded set. Format: plain-English sentences (one reason per string). Bias: 'when unsure, bail' — keep reasons concrete so the agent can make a clean yes/no call."
         }
       }
     }

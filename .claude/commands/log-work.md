@@ -74,7 +74,7 @@ Return the subagent's result to the user.
 6. Never edit the master plan file (`master-plan.md`).
 
 7. **Sync the company brain.** After status.md and log.md are confirmed:
-   - Read `../docs/projects/markdown-engine-validator.md` in the company brain.
+   - Read `../docs/projects/{{SLUG}}.md` in the company brain.
    - Update the **Current Status** date and focus line to match the new status.md state.
    - Update the Status column in this project's progress table for any rows that changed.
    - Open `../README.md` and find the Quick Status subsection for THIS project (the `###`
@@ -91,5 +91,5 @@ Return the subagent's result to the user.
 - `planning/status.md`
 - The current `planning/<name>/tasks.md`
 - `log.md`
-- `../docs/projects/markdown-engine-validator.md` (brain sync target)
+- `../docs/projects/{{SLUG}}.md` (brain sync target)
 - `../README.md` (brain sync target)
