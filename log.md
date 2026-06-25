@@ -10,6 +10,17 @@ description: Chronological log of work completed for markdown-engine-validator.
 
 ---
 
+## 2026-06-24 — Harness pull from base-template (b8ebbf7)
+
+Pulled the full current `base-template` harness (commit `b8ebbf71c20445de65195037aa24bfe00bbf080b`)
+into `.claude/`. Added the **`/sdlc-flow`** engine (D30–D33; shared-worktree sequential flow, one end
+review, PR wrap-up), **`/generate-master-plan`** + the **block-definition planning seam** (D34:
+`/generate-tasks --from`, `/plan`-as-block, hardened block skeleton), the **plan-quality floor** (D35:
+clarify-or-abort, never fabricate), and the TAC8 commands (`/patch`, `/conditional_docs`, the `e2e/`
+template library). All engines `node --check` clean; command/engine files byte-identical to base.
+`planning/harness.json` untouched. Provenance stamped in `planning/.template-version`.
+
+
 ### 2026-06-20 (task 7 — Run validation suite and confirm all gates green)
 
 Task 7 executed the final harness validation gates: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, and `cargo build --release`. All four gates passed cleanly. The implementation from tasks 1–6 (struct deserialization, enum/format validation, YAML frontmatter parsing, and comprehensive fixture tests) was verified to meet the acceptance criteria: required-field diagnostics, enum/format violations, malformed YAML, and missing frontmatter blocks all surface correctly as errors with precise locators; no false positives or panics. Review verdict: PASS. Block C is feature-complete and ready for merge. Next: Task 1 of phase1-blockD — anchor-slice contract and pair existence validation.

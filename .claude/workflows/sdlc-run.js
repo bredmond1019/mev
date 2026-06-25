@@ -155,7 +155,9 @@ const SCOUT_SCHEMA = {
     currentFocus: { type: 'string', description: 'The Current focus line from status.md' },
     lastDevlogEntry: { type: 'string', description: 'Summary of the most recent log entry (first 6 lines)' },
     statusSummary: { type: 'string', description: 'Human-readable summary of what the scout found and why it chose startStage' },
-    discrepancies: { type: 'string', description: 'Any discrepancies between log entries and report files, or empty string if none' }
+    discrepancies: { type: 'string', description: 'Any discrepancies between log entries and report files, or empty string if none' },
+    specThin: { type: 'boolean', description: 'D19: true ONLY when startStage is "implement" (a fresh run) AND the spec is structurally present but substantively thin per the scout STEP 9 signals. false in every other case (resume, missing spec, or a healthy spec).' },
+    thinReason: { type: 'string', description: 'D19: when specThin is true, the specific thin-spec failures named; empty string otherwise.' }
   }
 }
 
@@ -211,6 +213,7 @@ const WRAPUP_SCHEMA = {
     workflowReportFile: { type: 'string' },
     commitMessage:      { type: 'string' },
     commitHash:         { type: 'string' },
+    amendments:         { type: 'array', items: { type: 'string' }, description: 'D18: the dated amendment-log lines appended to the spec for genuine deviations this run (empty array if none).' },
     notes:              { type: 'string' }
   }
 }
@@ -287,10 +290,29 @@ const HARNESS_CONFIG_SCHEMA = {
               items: {
                 type: 'object',
                 properties: {
+                  kind:    { type: 'string', description: 'command (default) | baseline-diff | count-delta | warning-scan | forbidden-pattern-scan' },
                   name:    { type: 'string' },
                   command: { type: 'string' },
                   purpose: { type: 'string' },
-                  gates:   { type: 'boolean' }
+                  gates:   { type: 'boolean' },
+                  baselineCommand: { type: 'string', description: 'baseline-diff only' },
+                  compareKeys:     { type: 'array', items: { type: 'string' }, description: 'baseline-diff only' },
+                  countPattern:    { type: 'string', description: 'count-delta only' },
+                  failOn:          { type: 'string', description: 'count-delta only: decrease | zero-or-decrease' },
+                  warningPatterns: { type: 'array', items: { type: 'string' }, description: 'warning-scan only' },
+                  rules: {
+                    type: 'array',
+                    description: 'forbidden-pattern-scan only',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        id:               { type: 'string' },
+                        pattern:          { type: 'string' },
+                        paths:            { type: 'string' },
+                        allowlistPattern: { type: 'string' }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -326,8 +348,11 @@ STEP 2 — Decide:
   - "__HARNESS_ABSENT__" (file missing) → present=false, omit config.
   - File printed but NOT valid JSON → present=false, notes="harness.json present but invalid JSON: <reason>".
   - File printed and valid JSON → present=true, and copy the parsed object into "config", keeping ONLY
-    these fields when present: stack; validation.checks[] ({name, command, purpose, gates});
-    uiTest ({enabled, devServerCommand, readySignal, port, routes[]}). Ignore any other fields.
+    these fields when present: stack; validation.checks[] (each: {kind, name, command, purpose, gates}
+    plus any kind-specific fields that are present — baselineCommand, compareKeys[], countPattern,
+    failOn, warningPatterns[], rules[] ({id, pattern, paths, allowlistPattern})); uiTest ({enabled,
+    devServerCommand, readySignal, port, routes[]}). Preserve kind-specific fields verbatim; ignore
+    any other fields.
 
 Return your findings using the StructuredOutput tool.
 `, { label: 'harness-config', schema: HARNESS_CONFIG_SCHEMA, model: 'sonnet' })
@@ -340,7 +365,8 @@ Return your findings using the StructuredOutput tool.
 // Returns the numbered CHECK blocks the agent runs before the universal emoji gate. When the
 // config is absent (or carries no checks), returns instructions to fall back to the spec's
 // optional `## Validation Commands` section — the engine ships NO stack defaults.
-// changedPaths is reserved for the deferred conditionalChecks feature (unused in the MVP).
+// Handles all D6 check kinds: command (default), baseline-diff, count-delta, warning-scan,
+// forbidden-pattern-scan. changedPaths is reserved for the deferred conditionalChecks feature.
 function renderCheckList(cfg, { changedPaths } = {}) {
   const checks = cfg?.validation?.checks ?? []
   if (!checks.length) {
@@ -356,13 +382,134 @@ from the spec instead:
   }
   return checks.map((c, i) => {
     const n = i + 1
+    const kind = c.kind || 'command'
+    const slug = (c.name || `check${n}`).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
     const gate = c.gates
       ? 'GATING — a failure here blocks the review verdict'
       : 'non-gating — informational; a failure here does not block the verdict'
-    return `CHECK ${n} — ${c.name} (${c.purpose}) [${gate}]:
+    const header = `CHECK ${n} — ${c.name} (${c.purpose}) [${gate}]`
+
+    // --- baseline-diff: fail only on items absent from the pre-implement baseline ---
+    if (kind === 'baseline-diff') {
+      const baselinePath = `${reportsDir}/${taskPrefix}${slug}-baseline.json`
+      const currentPath = `/tmp/${stem}-${slug}-current.json`
+      const keysLiteral = JSON.stringify(c.compareKeys || [])
+      return `${header} — baseline-diff (fail ONLY on net-new items vs the baseline snapshotted before implement):
+  ${c.command} > ${currentPath} 2>/dev/null; true
+  python3 << 'PYEOF'
+import json, sys
+baseline_path = '${baselinePath}'
+current_path  = '${currentPath}'
+keys = ${keysLiteral}
+try:
+    b = json.load(open(baseline_path, encoding='utf-8'))
+except Exception as e:
+    print(f'WARNING: could not load baseline ({e}) — treating all current items as pre-existing'); b = []
+try:
+    c = json.load(open(current_path, encoding='utf-8'))
+except Exception:
+    c = []
+def k(v): return tuple(str(v.get(x, '')) for x in keys) if isinstance(v, dict) else (str(v),)
+seen = set(k(v) for v in b)
+new = [v for v in c if k(v) not in seen]
+if new:
+    print(f'NET-NEW ({len(new)} introduced by this run, absent from baseline):')
+    for v in new[:20]: print('  ' + json.dumps(v)[:200])
+    sys.exit(1)
+print(f'CHECK ${n} PASSED: no net-new items (baseline {len(b)}, current {len(c)})'); sys.exit(0)
+PYEOF
+  echo "CHECK${n}_EXIT:$?"`
+    }
+
+    // --- count-delta: compare an integer count vs the previous task's report ---
+    // In a full-spec run (taskNumber null) there is no previous task to compare — skip.
+    if (kind === 'count-delta') {
+      if (taskNumber === null) {
+        return `${header} — count-delta (SKIP: count-delta is per-task comparison; no task number in full-spec mode):
+  echo "COUNT[${slug}]: N/A (full-spec run — count-delta skipped)"
+  echo "CHECK${n}_EXIT:0"`
+      }
+      const prevReport = taskNumber > 1 ? `${reportsDir}/task${taskNumber - 1}-test.md` : ''
+      const failRule = c.failOn === 'zero-or-decrease'
+        ? 'FAIL if delta <= 0 (count must strictly increase)'
+        : 'FAIL if delta < 0 (count must not decrease)'
+      const prevStep = prevReport
+        ? `  Read the previous task's recorded count:
+    grep -oE 'COUNT\\[${slug}\\]: [0-9]+' ${prevReport} | head -1 || echo "NO_PREV_COUNT"
+  If NO_PREV_COUNT (previous report has no marker), treat this check as SKIP — delta unknown, do not fail.`
+        : `  This is task 1 — there is no previous task. Treat this check as SKIP (no delta to compare).`
+      return `${header} — count-delta (${c.failOn}):
+  ${c.command}
+  Extract the current count: the first integer on the line matching the ERE /${c.countPattern}/.
+${prevStep}
+  Compute delta = current - previous. ${failRule}.
+  IMPORTANT: write the marker line "COUNT[${slug}]: <current>" verbatim into the test report (any
+  section) so the NEXT task can read it. Record the delta and the pass/fail in this check's row.
+  echo "CHECK${n}_EXIT:0  (set to 1 only if the rule above fails; SKIP counts as pass)"`
+    }
+
+    // --- warning-scan: run a command (exit code gates) and record matches of warningPatterns ---
+    if (kind === 'warning-scan') {
+      const outPath = `/tmp/${stem}-${slug}.out`
+      const alternation = (c.warningPatterns || []).map(p => `(${p})`).join('|')
+      const patternSeverity = c.gates
+        ? 'Because gates:true, a pattern match ALSO FAILS this check.'
+        : 'Because gates:false, pattern matches are informational WARN entries — they do NOT fail the check (but DO record them).'
+      return `${header} — warning-scan (run the command, gate on its exit code, then scan its output):
+  ${c.command} > ${outPath} 2>&1; echo "CMD_EXIT:$?"
+  grep -nE '${alternation}' ${outPath} && echo "WARNINGS_FOUND" || echo "NO_WARNINGS"
+  Pass/fail: this check FAILS if CMD_EXIT is non-zero (the command itself failed). Record every matched
+  warning line in this check's row/notes. ${patternSeverity}
+  Set the exit marker accordingly:
+  echo "CHECK${n}_EXIT:<0 if CMD_EXIT==0 and not failed-by-pattern, else 1>"`
+    }
+
+    // --- forbidden-pattern-scan: source greps that must find NO matches ---
+    if (kind === 'forbidden-pattern-scan') {
+      const ruleLines = (c.rules || []).map(r => {
+        const paths = r.paths || '.'
+        const allow = r.allowlistPattern ? ` | grep -vE '${r.allowlistPattern}'` : ''
+        return `  Rule "${r.id}":
+    grep -rnE '${r.pattern}' ${paths}${allow} && echo "RULE ${r.id}: MATCHED (violation)" || echo "RULE ${r.id}: clean"`
+      }).join('\n')
+      return `${header} — forbidden-pattern scan (every rule below must find NO matches):
+${ruleLines}
+  This check PASSES only if EVERY rule reports "clean". If any rule MATCHED, the check FAILS and the
+  matched lines are violations — list them in this check's row.
+  echo "CHECK${n}_EXIT:0  (set to 1 if any rule MATCHED, else 0)"`
+    }
+
+    // --- command (default): plain exit-code gate (unchanged behavior) ---
+    return `${header}:
   ${c.command}
   echo "CHECK${n}_EXIT:$?"`
   }).join('\n\n')
+}
+
+// Snapshot baseline artifacts for any `baseline-diff` checks before implement, so the Test stage
+// can diff current output vs the pre-run state and fail only on net-new items. Resume-safe: only
+// writes a baseline that does not already exist. No-op when no baseline-diff checks are configured.
+// When called from /sdlc-block (--from test), block already ran snapshotBlockBaselines() which
+// wrote the same paths (no taskPrefix in full-spec mode) — so this is a no-op on those files.
+async function snapshotBaselines(cfg) {
+  const checks = (cfg?.validation?.checks || []).filter(c => c.kind === 'baseline-diff' && c.baselineCommand)
+  if (!checks.length) return
+  const steps = checks.map(c => {
+    const slug = (c.name || 'check').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+    const path = `${reportsDir}/${taskPrefix}${slug}-baseline.json`
+    return `Baseline "${c.name}" -> ${path}:
+  mkdir -p ${reportsDir}
+  [ -f ${path} ] && echo "BASELINE EXISTS (kept): ${path}" || { ${c.baselineCommand} > ${path} 2>/dev/null; echo "BASELINE WRITTEN: ${path}"; }`
+  }).join('\n\n')
+  await agent(`
+You are the baseline-snapshot agent for the SDLC pipeline. Capture the pre-implement baseline for each
+baseline-diff validation check BEFORE any implementation runs. Run each block exactly as written.
+Do NOT modify source. Existing baselines are kept (resume-safe).
+
+${steps}
+
+Return using StructuredOutput: done=true, and note which baselines were written vs already present.
+`, { label: 'baseline-snapshot', schema: { type: 'object', required: ['done'], properties: { done: { type: 'boolean' }, notes: { type: 'string' } } }, model: 'haiku' })
 }
 
 // Render the UI-test stage prompt body from harness config. Called ONLY when cfg.uiTest.enabled.
@@ -388,6 +535,75 @@ function renderUiTestPrompt(cfg, port) {
 // Stage results accumulator
 // ----------------------------------------------------------------
 const stageResults = []
+
+// ----------------------------------------------------------------
+// PERSISTENT PHASE STATE (D27) — after each phase resolves, write a small JSON
+// breadcrumb to planning/<concept>/sdlc/sdlc-state.json (alongside D22's
+// execution-plan.json). Two uses: (1) crash visibility — `cat` it to see which phase a run
+// last finished without reading agent output; (2) a resume_from hint for a restarted run.
+//
+// This is AUDIT/CRASH state, NOT a replacement for the scout's report-file resume — report
+// files are committed and remain the authoritative resumption signal (see the RESUMPTION header
+// and D27). The state file is gitignored runtime state, so it never pollutes commits or causes
+// parallel-merge conflicts.
+//
+// The workflow runtime has no filesystem access and cannot call Date.now(), so a cheap Haiku
+// writer agent stamps the timestamps (via `date`) and writes the file, preserving started_at
+// across writes. Best-effort: a failed write logs a warning but never aborts the pipeline.
+// ----------------------------------------------------------------
+const stateFile = `planning/${blockId}/sdlc/sdlc-state.json`
+const completedPhases = []
+
+const STATE_WRITE_SCHEMA = {
+  type: 'object',
+  required: ['written'],
+  properties: {
+    written: { type: 'boolean', description: 'true if the state file was written successfully' },
+    stateFile: { type: 'string' },
+    notes: { type: 'string' }
+  }
+}
+
+// Persist the phase breadcrumb after a phase resolves. On success the phase is appended to
+// completed_phases (monotonic, deduped). On failure, failed_phase + resume_from are set to the
+// phase name and completed_phases is left untouched (the phase did not complete).
+async function recordPhaseState(phaseName, { failed = false } = {}) {
+  if (!failed && phaseName && !completedPhases.includes(phaseName)) {
+    completedPhases.push(phaseName)
+  }
+  const failedPhase = failed ? phaseName : null
+  const result = await agent(`
+You maintain the SDLC pipeline's persistent phase-state breadcrumb. Overwrite a single JSON file —
+do not run any checks, edit code, or commit anything.
+
+STEP 1 — current UTC timestamp + preserved start time:
+  NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  cat ${stateFile} 2>/dev/null || echo "__NO_STATE__"
+  If that file already exists and contains a "started_at" value, REUSE it verbatim for started_at
+  below. Otherwise set started_at = the NOW value.
+
+STEP 2 — ensure the directory exists:
+  mkdir -p planning/${blockId}/sdlc
+
+STEP 3 — write ${stateFile} with EXACTLY this JSON (valid JSON only: double quotes, no trailing
+commas, no markdown fences). Substitute <STARTED_AT> (preserved or NOW) and <NOW> from STEP 1:
+{
+  "spec_slug": ${JSON.stringify(blockId)},
+  "started_at": "<STARTED_AT>",
+  "updated_at": "<NOW>",
+  "current_phase": ${JSON.stringify(phaseName)},
+  "completed_phases": ${JSON.stringify(completedPhases)},
+  "failed_phase": ${failedPhase === null ? 'null' : JSON.stringify(failedPhase)},
+  "task_number": ${taskNumber === null ? 'null' : taskNumber},
+  "resume_from": ${failedPhase === null ? 'null' : JSON.stringify(failedPhase)}
+}
+
+Use the Write tool to write ${stateFile}. Then return via StructuredOutput (written=true on success).
+`, withModel({ label: `state:${phaseName}${failed ? ':failed' : ''}`, schema: STATE_WRITE_SCHEMA }, MODEL.scout))
+  if (!result || !result.written) {
+    log(`(state) could not persist phase state for "${phaseName}"${failed ? ' (failure record)' : ''} — continuing`)
+  }
+}
 
 // ================================================================
 // PHASE 1: SCOUT — determine current pipeline stage
@@ -453,6 +669,20 @@ STEP 7 — Find the spec's status in status.md progress table. Look for a row co
 
 STEP 8 — Note any discrepancy: if log says a stage is done but the matching report file is missing, record that.
 
+STEP 9 — Thin-spec content check (D19). Set specThin and thinReason. Evaluate this ONLY when
+  startStage from STEP 6 is "implement" (a fresh run about to spend implement tokens). In EVERY
+  other case (resume at test/review/fix/etc., or spec missing → generate-tasks) set specThin=false,
+  thinReason="". When startStage is "implement", read the spec and flag it thin ONLY on these
+  high-confidence signals — a blocked valid spec is far costlier than a missed thin one, so when in
+  doubt do NOT flag:
+    a) grep -n '{{' ${specFile}  → any unfilled {{TOKEN}} scaffold token is thin.
+    b) The '## Acceptance Criteria' section has no real '- ' bullet (empty, or only a verbatim
+       template seed like '- <Observable, checkable condition') → thin.
+  Do NOT flag a bare 'TODO'/'TBD' in prose, and do NOT treat any '<...>' as a token (it is legitimate
+  in generics like 'Vec<T>', prose like 'the <concept> folder', and globs). The Amendment Log seed
+  '_No amendments yet._' is the correct resting state — never flag it. If neither (a) nor (b) holds,
+  specThin=false. If either holds, specThin=true and thinReason names the specific failures.
+
 Collect the list of existing report files from the ls output in STEP 2 and STEP 6.
 
 Return your findings using the StructuredOutput tool.
@@ -466,6 +696,14 @@ if (!scout) {
 log(`Scout: start from "${scout.startStage}" | spec status: "${scout.blockStatus}"`)
 if (scout.discrepancies) log(`Discrepancies: ${scout.discrepancies}`)
 if (scout.statusSummary) log(scout.statusSummary)
+
+// D19 — thin-spec guard. Abort before spending implement tokens on a structurally-valid but
+// substantively-empty spec. Scout only sets specThin on a fresh implement-stage run (never on resume).
+if (scout.specThin) {
+  log(`ABORTED (D19) — spec is structurally valid but substantively thin: ${scout.thinReason || '(no reason given)'}`)
+  log(`Fix: flesh out ${specFile} (run /generate-tasks --force to regenerate, or edit + commit), then re-run /sdlc-run ${blockId}.`)
+  return { error: 'Thin spec (D19)', reason: scout.thinReason || '', blockId, stem }
+}
 
 // Auto-flip spec to "In progress" if it is "Not started"
 if (scout.blockStatus === 'Not started') {
@@ -569,10 +807,12 @@ Return your result using the StructuredOutput tool with fields:
   if (!genResult || !genResult.success) {
     log('generate-tasks failed — aborting pipeline')
     stageResults.push({ stage: 'generate-tasks', success: false })
+    await recordPhaseState('generate-tasks', { failed: true })
     return { error: 'generate-tasks failed', blockId, stem, stageResults }
   }
   stageResults.push({ stage: 'generate-tasks', ...genResult })
   log(`Task spec written: ${genResult.reportFile}`)
+  await recordPhaseState('generate-tasks')
   currentStage = 'implement'
 }
 
@@ -583,6 +823,11 @@ const harnessCfg = await loadHarnessConfig()
 log(harnessCfg
   ? `Harness config loaded: ${(harnessCfg.validation?.checks || []).length} validation check(s); uiTest ${harnessCfg.uiTest?.enabled ? 'enabled' : 'disabled'}.`
   : 'No planning/harness.json — validation falls back to the spec; UI-test disabled.')
+
+// D6 baseline-diff: snapshot pre-implement state once (resume-safe — existing baselines kept).
+// No-op when no baseline-diff checks are configured (the common case). When called from
+// /sdlc-block via --from test, block already ran snapshotBlockBaselines() writing the same paths.
+await snapshotBaselines(harnessCfg)
 
 // ================================================================
 // PHASES 3–5: IMPLEMENT → (FIX →) TEST → REVIEW (with retry loop)
@@ -659,7 +904,7 @@ Instructions:
    ## Files Created or Modified
    | File | Action |
    |---|---|
-   | path/to/file.tsx | created / modified |
+   | path/to/file | created / modified |
 
    ## Validation Output
    **Commands run:**
@@ -686,10 +931,10 @@ Instructions:
 7. Commit your changes now. Never use git add -A or git add . — stage files explicitly by name.
 
    Run: git status
-   Identify all changed/new files under app/, components/, lib/, content/, scripts/, __tests__/, and the implement report.
+   Identify all changed/new source/content files (from git status) plus the implement report.
 
    Stage code/content files first, then the report:
-     git add components/Widget.tsx __tests__/widget.test.ts ${implementReport}  (list each file explicitly)
+     git add <each changed source/test file> ${implementReport}  (list each file explicitly)
 
    Commit using HEREDOC:
      git commit -m "$(cat <<'EOF'
@@ -714,13 +959,16 @@ Return your result using the StructuredOutput tool:
     if (!implResult) {
       log('Implement agent returned null — aborting pipeline')
       stageResults.push({ stage: 'implement', success: false, notes: 'Agent returned null' })
+      await recordPhaseState('implement', { failed: true })
       break
     }
     stageResults.push({ stage: 'implement', ...implResult })
     if (!implResult.success) {
       log('Implement reported failure — aborting pipeline')
+      await recordPhaseState('implement', { failed: true })
       break
     }
+    await recordPhaseState('implement')
     currentStage = 'test'
   }
 
@@ -807,7 +1055,7 @@ Instructions:
    ## Files Created or Modified
    | File | Action |
    |---|---|
-   | path/to/file.tsx | created / modified |
+   | path/to/file | created / modified |
    [IMPORTANT: include ALL files from the prior implement report PLUS any newly touched files]
 
    ## Validation Output
@@ -832,10 +1080,10 @@ Instructions:
 9. Commit your changes now. Never use git add -A or git add . — stage files explicitly by name.
 
    Run: git status
-   Identify all changed/new files under app/, components/, lib/, content/, scripts/, __tests__/, and the updated implement report.
+   Identify all changed/new source/content files (from git status) plus the updated implement report.
 
    Stage targeted changes and the updated report:
-     git add components/Widget.tsx __tests__/widget.test.ts ${implementReport}  (list each file explicitly)
+     git add <each changed source/test file> ${implementReport}  (list each file explicitly)
 
    Commit using HEREDOC:
      git commit -m "$(cat <<'EOF'
@@ -859,13 +1107,16 @@ Return your result using the StructuredOutput tool:
     if (!fixResult) {
       log('Fix agent returned null — aborting pipeline')
       stageResults.push({ stage: 'fix', attempt: fixPass, success: false, notes: 'Agent returned null' })
+      await recordPhaseState('fix', { failed: true })
       break
     }
     stageResults.push({ stage: 'fix', attempt: fixPass, ...fixResult })
     if (!fixResult.success) {
       log(`Fix pass ${fixPass} reported failure — aborting pipeline`)
+      await recordPhaseState('fix', { failed: true })
       break
     }
+    await recordPhaseState('fix')
     currentStage = 'test'
   }
 
@@ -877,8 +1128,11 @@ Return your result using the StructuredOutput tool:
     log('Running the project validation suite...')
 
     const testResult = await agent(`
-You are the test agent for the SDLC pipeline. Run the project's validation suite (from
-planning/harness.json, or the spec fallback) plus the universal emoji gate, and write a test report.
+You are the test agent for the SDLC pipeline. Run the project's validation suite and write a test report.
+
+IMPORTANT — run ONLY the checks enumerated below (sourced from planning/harness.json and the spec's
+Validation Commands). Do NOT invent or add checks that are not listed here; if a check name does not
+appear in the list below, it is out of scope for this run.
 
 Target:
   Spec:            ${specFile}
@@ -888,29 +1142,6 @@ Run EVERY check below IN ORDER using the Bash tool. Capture the full output (std
 each. Run from the repo root.
 
 ${renderCheckList(harnessCfg)}
-
-EMOJI CHECK — Emoji prohibition (universal harness gate — always runs last):
-  Hard FAIL if any markdown file changed by this work introduces an emoji.
-
-  Files modified by this work vs main (hard FAIL if emoji found):
-  python3 - <<'PYEOF'
-import subprocess, re, sys, os
-EMOJI = re.compile(r'[\\U0001F300-\\U0001FAFF\\U00002600-\\U000027BF]')
-changed = subprocess.run(['git','diff','main..HEAD','--name-only'], capture_output=True, text=True).stdout.splitlines()
-md_files = [f for f in changed if f.endswith(('.md','.mdx')) and os.path.isfile(f)]
-hits = []
-for path in md_files:
-    for n, line in enumerate(open(path, errors='ignore'), 1):
-        if EMOJI.search(line):
-            hits.append(f'{path}:{n}: {line.rstrip()[:100]}')
-if hits:
-    print('EMOJI CHECK FAIL: emoji in modified files (violates the no-emoji harness rule):')
-    for h in hits[:25]: print(h)
-    sys.exit(1)
-print('EMOJI CHECK: OK — no emoji in modified files')
-sys.exit(0)
-PYEOF
-  echo "EMOJI_EXIT:$?"
 
 For each check record:
   test_name: descriptive name
@@ -951,7 +1182,7 @@ Use EXACTLY this format:
 
 Return your result using the StructuredOutput tool:
   reportFile: "${testReport}"
-  allPassed: true only if EVERY check passed (each exit code 0, emoji gate clean)
+  allPassed: true only if EVERY check passed (each exit code 0)
   passCount: integer count of checks that passed
   failCount: integer count of checks that failed
   failedTests: array of test_name strings for failed checks
@@ -969,6 +1200,7 @@ Return your result using the StructuredOutput tool:
         log(`All ${testResult.passCount} checks passed`)
       }
     }
+    await recordPhaseState('test')
     currentStage = 'review'
   }
 
@@ -1091,6 +1323,7 @@ Return your result using the StructuredOutput tool:
       stageResults.push({ stage: 'review', attempt: reviewAttempts, ...reviewResult, success: reviewResult.verdict === 'PASS' })
       log(`Review verdict: ${reviewResult.verdict} (attempt ${reviewAttempts}/${MAX_REVIEW_ATTEMPTS})`)
     }
+    await recordPhaseState('review')
 
     if (lastReviewResult.verdict === 'PASS') {
       currentStage = 'ui-test'
@@ -1112,6 +1345,7 @@ Return your result using the StructuredOutput tool:
     if (!harnessCfg?.uiTest?.enabled) {
       log('UI test stage disabled (harness.json uiTest.enabled is false or config absent) — SKIPPED.')
       stageResults.push({ stage: 'ui-test', verdict: 'SKIPPED', success: true, notes: 'uiTest disabled in harness.json' })
+      await recordPhaseState('ui-test')
       currentStage = 'document'
     } else {
       log('Running UI test stage...')
@@ -1223,6 +1457,7 @@ Return the result using StructuredOutput.
           currentStage = 'document'
         }
       }
+      await recordPhaseState('ui-test')
     }
   }
 } // end implement→fix→test→review→ui-test retry loop
@@ -1331,6 +1566,7 @@ Return your result using the StructuredOutput tool:
       log(`Docs updated: ${(docResult.filesModified || []).join(', ') || 'none needed changes'}`)
     }
   }
+  await recordPhaseState('document')
   currentStage = 'wrap-up'
 }
 
@@ -1402,6 +1638,20 @@ PART A — Update status.md + log (code/doc changes are already committed by the
 
 7. If the implement report's "Decisions and Trade-offs" section contains any settled choices, mention them in your notes — but do NOT edit planning/decisions/ yourself (that is a manual step).
 
+PART A.5 — Living-artifact amendment log (D18). Make the spec record how it actually ran:
+   a. Review the implement/fix reports and the review verdict for genuine DEVIATIONS from the spec as
+      written — a task implemented materially differently than specified, a scope adjustment, a
+      substitution, a deferral. Routine successful implementation is NOT a deviation.
+   b. For EACH genuine deviation, append ONE dated line to the "## Amendment Log" section of
+      ${specFile} using the Edit tool (append-only — never rewrite existing lines):
+        - YYYY-MM-DD [<stage>] <what changed vs the spec, and why>
+      If the section still shows only "_No amendments yet._" and you are adding the first line, replace
+      that placeholder text with your line(s). If there were NO genuine deviations, leave the section
+      unchanged.
+   c. If ${specFile} has a provenance stub near the top (a line with "**Status:**" / "**Last run:**"),
+      update "**Last run:**" to today's date (date +%Y-%m-%d) and "**Status:**" to the spec's new status.
+   d. Return every appended line in the amendments[] field (empty array if none).
+
 PART B — Write the workflow report to: ${workflowReport}
 
   Use EXACTLY this format:
@@ -1439,12 +1689,14 @@ PART C — Commit the remaining planning files as a single chore commit.
   Never use git add -A or git add . — stage files explicitly by name.
 
   Run: git status
-  Look for any uncommitted files in: planning/status.md, log.md,
+  Look for any uncommitted files in: planning/status.md, log.md, ${specFile}
+  (modified iff you appended an amendment line or updated its provenance stub in PART A.5),
   ${testReport}, ${reviewReport},
   and ${workflowReport} (which you just wrote).
 
   Stage them:
     git add planning/status.md log.md ${workflowReport}
+    git add ${specFile} 2>/dev/null || true
     git add ${testReport} 2>/dev/null || true
     git add ${reviewReport} 2>/dev/null || true
     git add ${uitestReport} 2>/dev/null || true
@@ -1468,18 +1720,22 @@ Return your result using the StructuredOutput tool:
   workflowReportFile: "${workflowReport}"
   commitMessage: "chore: wrap up ${stem}"
   commitHash: the 7-character short hash from git log --oneline -1
+  amendments: the dated amendment-log lines you appended to the spec in PART A.5 (empty array if none)
   notes: any follow-up items (settled decisions to add to planning/decisions/, NEEDS_REVIEW doc flags)
 `, withModel({ label: 'wrap-up', schema: WRAPUP_SCHEMA, phase: 'Wrap-up' }, MODEL.wrapup))
 
 if (wrapupResult) {
   stageResults.push({ stage: 'wrap-up', ...wrapupResult, success: wrapupResult.statusUpdated && wrapupResult.devlogUpdated })
   if (wrapupResult.notes) log(`Decisions to log: ${wrapupResult.notes}`)
+  if (wrapupResult.amendments?.length) log(`Spec amendments (D18): ${wrapupResult.amendments.length} line(s) appended to ${specFile}`)
   log(`Committed: ${wrapupResult.commitMessage}`)
   log(`Workflow report: ${wrapupResult.workflowReportFile}`)
 } else {
   stageResults.push({ stage: 'wrap-up', success: false, notes: 'Agent returned null' })
   log('Wrap-up agent returned null — manual status/log update, commit, and workflow report may be needed')
 }
+
+await recordPhaseState('wrap-up')
 
 log(`Pipeline complete. Verdict: ${finalVerdict} | Attempts: ${reviewAttempts} | Report: ${workflowReport}`)
 

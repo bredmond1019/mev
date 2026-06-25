@@ -121,16 +121,23 @@ The literal single-token form is output by `/sdlc-task` when it creates a suffix
       everything from the `## YYYY-MM-DD` date header line onward, NOT the `## Log Entry`
       section header itself. Insert it immediately after the `# Log —` header line
       (before existing entries), preserving a blank line between the new entry and the one below.
+   g.5. **Apply the amendment log (D18).** If the log file has a `## Amendment Log Entry (D18)` section
+      whose body is NOT exactly `_none_`, append each `- YYYY-MM-DD [<stage>] ...` line from it to the
+      `## Amendment Log` section of the spec at `planning/<spec-slug>/tasks.md` (append-only, below any
+      existing lines; if that section still reads only `_No amendments yet._`, replace that placeholder
+      with the line(s)). Merging tasks in task-number order keeps the amendment lines chronological.
+      Omit this sub-step if the section is absent or `_none_`.
    h. Edit `<logFile>`: change `**Applied:** false` → `**Applied:** true`.
-   i. Stage and commit these three files only:
+   i. Stage and commit (include the spec only if step g.5 modified it):
       ```bash
       git add planning/status.md log.md <logFile>
+      git add planning/<spec-slug>/tasks.md 2>/dev/null || true
       git commit -m "$(cat <<'EOF'
       chore: apply task log for <stem>
       EOF
       )"
       ```
-   j. Report: "status.md and log.md updated from task log."
+   j. Report: "status.md and log.md updated from task log." (Note if amendment lines were applied to the spec.)
 
    **If `Applied: true`:** report "Task log already applied — skipping STATUS/Log update."
 

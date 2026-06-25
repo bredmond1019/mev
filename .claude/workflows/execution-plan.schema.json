@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://agentic-portfolio/base-template/execution-plan.schema.json",
+  "title": "SDLC execution plan",
+  "description": "The dependency graph + (optional) wave structure for a block-runnable spec, written to planning/<spec>/sdlc/execution-plan.json. Authored by /generate-tasks when it recommends a block runner (D22), so /sdlc-block's Analyze stage can LOAD the plan instead of re-deriving it on an Opus agent. The block VALIDATES this file on load — it must parse, match this schema, AND its task set (the keys of `tasks`) must match the current tasks.md `### N.` headings exactly (same count + numbering). A stale plan (tasks.md edited after authoring) is REJECTED and the block falls back to the Opus analyzer; loading a stale plan blindly would fan out the wrong waves. `waves` is optional — when absent the engine computes them deterministically from the graph.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["blockId", "tasks", "additiveFiles"],
+  "properties": {
+    "blockId": {
+      "type": "string",
+      "description": "The spec slug this plan belongs to (e.g. 'phase0-blockC')."
+    },
+    "additiveFiles": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Shared files every touching task only APPENDS to (safe to union-merge), e.g. a barrel/index re-export, a registry/manifest, an auto-generated reference doc."
+    },
+    "tasks": {
+      "type": "object",
+      "description": "The dependency graph, keyed by task number (string key, e.g. \"1\", \"2\"). One entry per `### N.` task in tasks.md.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["num", "title", "dependsOn", "filesCreated", "filesModified"],
+        "additionalProperties": false,
+        "properties": {
+          "num": { "type": "integer", "description": "Task number (matches the key and the `### N.` heading)." },
+          "title": { "type": "string" },
+          "dependsOn": { "type": "array", "items": { "type": "integer" }, "description": "Task numbers whose output this task consumes." },
+          "filesCreated": { "type": "array", "items": { "type": "string" }, "description": "New files this task creates." },
+          "filesModified": { "type": "array", "items": { "type": "string" }, "description": "Existing shared files this task edits." },
+          "evidence": { "type": "string", "description": "Quote(s) from tasks.md establishing each dependsOn edge." },
+          "recommendBreakdown": { "type": "boolean", "description": "true if this task is coarse enough to benefit from /breakdown (D10/D13 heuristic)." },
+          "breakdownReason": { "type": "string", "description": "One sentence naming the coarseness signal (only when recommendBreakdown)." }
+        }
+      }
+    },
+    "waves": {
+      "type": "array",
+      "description": "Optional. The wave structure (dependency-ordered batches). When absent the engine computes it deterministically from the graph. When present the engine uses it verbatim.",
+      "items": {
+        "type": "object",
+        "required": ["tasks"],
+        "additionalProperties": false,
+        "properties": {
+          "label": { "type": "string" },
+          "parallel": { "type": "boolean" },
+          "tasks": { "type": "array", "items": { "type": "integer" } },
+          "mergeOrder": { "type": "array", "items": { "type": "integer" } }
+        }
+      }
+    }
+  }
+}

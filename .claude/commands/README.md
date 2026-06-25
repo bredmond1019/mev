@@ -31,10 +31,12 @@ predictably-named output file.
 | Session End | `/wrap-up [note]` | Log work + commit; clean close without a handoff file | status.md, log.md, git |
 | Session End | `/handoff [note]` | Write handoff + log work + commit; hands off to a fresh session | `planning/handoff.md`, status.md, log.md, git |
 | Block Setup | `/start-block [name]` | Flip a spec to `In progress` in status.md | status.md |
-| **1 — Plan** | `/generate-tasks <name>` | Write the full task spec from the master plan | `planning/<name>/tasks.md` |
+| **1 — Roadmap** | `/generate-master-plan [desc]` | Author the full roadmap as canonical block definitions | `planning/master-plan.md` |
+| **1 — Plan** | `/generate-tasks <name>` ·  `/generate-tasks --from <path>` | Write the full task spec from a master-plan block, **or** from a standalone block file (`--from`) | `planning/<name>/tasks.md` |
 | **1 — Plan (ad-hoc)** | `/chore` · `/feature` · `/plan <desc>` | Plan ad-hoc work from a free-text description (not a master-plan block) | `planning/<prefix>-<slug>/{tasks,plan}.md` |
 | **1 — Plan (opt.)** | `/breakdown <spec>` | Decompose spec into atomic, agent-executable sub-steps | `planning/<name>/breakdown.md` |
 | **2 — Implement** | `/implement <spec> [N]` | Execute every task (or task N) in the spec | `planning/<name>/sdlc/reports/[taskN-]implement.md` |
+| **2 — Hotfix** | `/patch` | Implement → validate → commit for low-risk single-file fixes; skips test/review/document | git history |
 | **2 — Fix** | `/fix <spec> [N]` | Targeted fixes for FAIL/PARTIAL verdict; reads review report; overwrites implement report | `planning/<name>/sdlc/reports/[taskN-]implement.md` |
 | **2 — Track** | `/update-task [name] <step> [note]` | Mark a step done and/or append a dated note mid-implementation | spec file (in-place) |
 | **2 — Commit** | `/commit [hint]` | Stage + commit with a conventional message | git history |
@@ -146,26 +148,32 @@ unattended.
 |---|---|---|
 | `/sdlc-run <name> [N]` | one task or a **full spec**, sequential | none — runs on the current branch, updates STATUS/Log directly |
 | `/sdlc-task <name> N` | **one** task, parallel-safe | own git worktree; defers STATUS/Log to merge time |
-| `/sdlc-block <name> [range]` | a **whole spec** as dependency-ordered waves of parallel `/sdlc-task` runs | one worktree per task; **merges for you** |
+| `/sdlc-block <name> [range]` | a **whole spec** as dependency-ordered waves | shared integration branch; worktrees only for genuinely parallel waves; **merges for you** |
+
+> **Full reference with mermaid diagrams, per-stage detail, and token usage:**
+> [`docs/workflows/`](../../docs/workflows/index.md) — one page per engine plus the manual lifecycle.
 
 ### `/sdlc-block` — spec-level orchestration
 
-**Drive an entire spec to completion across many parallel tasks.** A **pre-flight** first
-guarantees a clean tree with the spec committed — it auto-generates a missing `tasks.md` from
-the master plan, commits an uncommitted one, and aborts fast if any *unrelated* file is dirty.
-Then it reads (or generates) a dependency-ordered execution plan, runs each wave of
-independent tasks through `/sdlc-task`, and merges the wave before the next begins. Adds
-bounded per-task **retries** with failure **triage**, **selective-union merges** (additive
-shared files only; real conflicts escalate), and a single authoritative STATUS/Log update
-at the end. **Resumable without duplicating work** — git is the source of truth for which
-tasks are done.
+**Drive an entire spec to completion in one invocation** — "a more powerful `/sdlc-run`". A **pre-flight**
+first guarantees a clean tree with the spec committed (auto-generates a missing `tasks.md`, commits an
+uncommitted one, aborts fast if any *unrelated* file is dirty). **Analyze** then loads or derives the
+dependency-ordered execution plan and snapshots baselines **once**. Each wave runs a **fresh implement
+agent per task**: a width-1 wave runs **in place** on the integration branch (no worktree/merge, with
+`git reset --hard` rollback on failure); a width-≥2 wave isolates each task in a worktree
+(`/sdlc-task --implement-only`) and **selective-union-merges** in order. Once every task has landed, **one
+consolidated back-half** (`/sdlc-run --from test`) tests → reviews → fixes → documents → wraps up the
+integrated tree. Adds bounded per-task **retries** with failure **triage**, subtree-scoped escalation, and
+**resume** (git + a `sdlc-block-state.json` breadcrumb) without duplicating work. See
+[D23](../../planning/decisions/D23-lean-block-shared-setup.md)/[D24](../../planning/decisions/D24-consolidated-back-half.md)/[D28](../../planning/decisions/D28-sdlc-block-task-state.md).
 
 | Arg | Meaning | Default |
 |---|---|---|
 | `<name>` | Required — drives every `planning/<name>/…` path. | — |
 | `[range]` | Optional task selection (2nd positional **or** `--tasks`): `1-7`, `1,3,5`, `1-3,7`. | all tasks |
-| `--max-retries N` | Total `/sdlc-task` attempts per task before escalation. | `2` |
-| `--max-wave-width W` | Max full pipelines run concurrently per batch. | `3` |
+| `--max-retries N` | Total attempts per task before escalation. | `2` |
+| `--max-wave-width W` | Max tasks run concurrently per batch (worktree waves). | `3` |
+| `--verify-depth <d>` | Per-task verification: `consolidated` (per-task review off) or `consolidated+review` (one non-gating localization review per task). Overrides `harness.json` `block.verify`. | `consolidated` |
 
 ---
 
@@ -187,6 +195,12 @@ Start-of-session briefing: reads the three most recent Log entries, status.md, t
 spec's `tasks.md`, and the `reports/` directory listing; outputs a concise briefing (under 300
 words) and the exact next command. Read-only.
 
+### `/conditional_docs [task-type]`
+Routes the agent to the documentation most relevant to the current task type (feature, bug/fix,
+api/endpoint, test/testing, docs/documentation). Reduces CLAUDE.md overload by surfacing only
+the files needed for the task at hand. Takes an optional argument; defaults to reading
+`planning/context.md` + `planning/status.md` + `planning/harness.json`.
+
 ### `/prime`
 Orient to this repo at session start: reads `README.md`, `CLAUDE.md`, `planning/context.md`,
 `planning/status.md`; runs `git ls-files`; summarizes the codebase, layout, focus, and standing
@@ -204,10 +218,23 @@ it are `Done`), and returns a status table. Read-only.
 
 ## Phase 1 — Plan
 
+### `/generate-master-plan`
+Authors (or revises) `planning/master-plan.md` — the roadmap source of truth — as a sequence of
+canonical **block definitions** (`## Phase N` → `### Block X`, each with What / Why / Build notes /
+Acceptance criteria) whose phase/block headers `/generate-tasks` can parse directly. Turns a
+free-form planning session into the structure the rest of Phase 1 expects. `/new-project` should call
+this as its post-scaffold roadmap step. See `planning/decisions/D34-adhoc-planning-seam.md`.
+
 ### `/generate-tasks`
 Reads the relevant section of `planning/master-plan.md`, writes a full task spec to
 `planning/<name>/tasks.md`, and **commits it** (clean tree for downstream `/sdlc-block`).
 Each spec carries a **Validation Commands** block and ends with a Validate task.
+
+**`--from <path>` mode** decomposes a single **standalone block file** (e.g. a `/plan` output)
+instead of a master-plan block — for ad-hoc / experimental features kept out of the roadmap. It
+derives the slug from the file's parent directory and writes `tasks.md` beside the source, then runs
+the identical decomposition / pipeline-recommendation / `execution-plan.json` logic. The default
+master-plan slug mode is unchanged.
 
 ### `/breakdown`
 Reads a task spec and the source files each step touches, then writes a granular
@@ -230,6 +257,13 @@ unchanged.
 
 > Downstream commands derive report paths from the spec's **parent directory**, so a `plan.md`
 > spec flows through identically to a `tasks.md` one.
+
+`/chore` and `/feature` write a runnable `tasks.md` **directly** (the fast path). `/plan` writes a
+`plan.md` that doubles as a **standalone block definition**: run it directly via `/implement`, or take
+the rigorous route — `/generate-tasks --from planning/plan-<slug>/plan.md` decomposes it into a
+`tasks.md` (with `execution-plan.json` + pipeline recommendation) to run on a feature branch via
+`/sdlc-flow`, all **without** touching `master-plan.md`. See
+`planning/decisions/D34-adhoc-planning-seam.md`.
 
 ---
 
