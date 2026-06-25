@@ -30,6 +30,7 @@ predictably-named output file.
 | Session Start | `/process-tasks` | Check which specs are eligible to start | chat only |
 | Session End | `/wrap-up [note]` | Log work + commit; clean close without a handoff file | status.md, log.md, git |
 | Session End | `/handoff [note]` | Write handoff + log work + commit; hands off to a fresh session | `planning/handoff.md`, status.md, log.md, git |
+| Session End | `/close-out [--skip-coverage] [note]` | Verify coverage → patch docs → hand off; the quality-close pipeline after sdlc-run/sdlc-flow | status.md, log.md, docs/, git |
 | Block Setup | `/start-block [name]` | Flip a spec to `In progress` in status.md | status.md |
 | **1 — Roadmap** | `/generate-master-plan [desc]` | Author the full roadmap as canonical block definitions | `planning/master-plan.md` |
 | **1 — Plan** | `/generate-tasks <name>` ·  `/generate-tasks --from <path>` | Write the full task spec from a master-plan block, **or** from a standalone block file (`--from`) | `planning/<name>/tasks.md` |
@@ -189,6 +190,16 @@ Session end-of-context handoff. Writes `planning/handoff.md` (what's in flight, 
 remaining, open questions, first command for the next agent), then invokes `/log-work` and
 `/commit`. `/prime` in the next session detects the handoff file and surfaces it first.
 Delete `planning/handoff.md` once the new session has consumed it.
+
+### `/close-out [--skip-coverage] [note]`
+Quality-close pipeline for the end of an `sdlc-run` or `sdlc-flow` session. Runs three
+steps in sequence: **(1)** the full validation suite from `planning/harness.json` — stops
+immediately if any gating check fails; **(2)** coverage gap scan — reads changed source
+files, classifies gaps as adequate/non-blocking/blocking, writes minimal targeted tests for
+blocking gaps and re-runs the suite to confirm; **(3)** `/update-docs --patch`; **(4)**
+`/handoff` with the provided note. Pass `--skip-coverage` to skip step 2 when coverage was
+already verified by a prior `/review-task`. Non-blocking gaps are noted in the handoff rather
+than blocking it.
 
 ### `/session-recap`
 Start-of-session briefing: reads the three most recent Log entries, status.md, the current
