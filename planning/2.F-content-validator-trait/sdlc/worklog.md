@@ -14,3 +14,7 @@ Validated: gating checks (fast tripwire)
 What: Relocated src/crawl.rs and src/meta.rs into src/learn_ai/, defined LearnAiValidator implementing ContentValidator, updated lib.rs module declarations and re-exports to preserve the public crate surface unchanged
 Decisions: Updated validate() body in lib.rs to use learn_ai::crawl::crawl and learn_ai::meta::validate_file (explicit module paths) rather than the re-exported names, to keep intent clear for Task 4 which rewrites validate() to use LearnAiValidator.run(); Fixed meta.rs test imports: within #[cfg(test)] mod tests, super refers to meta not learn_ai, so used crate::learn_ai::crawl::{FileKind, Locale} for the test import
 Validated: gating checks (fast tripwire)
+
+## Task 4 — PASSED (1 attempt)
+What: Rewrote validate() as a one-liner delegating to LearnAiValidator.run() via the ContentValidator trait; signature and diagnostics unchanged, all 57 tests pass.
+Validated: gating checks (fast tripwire)
