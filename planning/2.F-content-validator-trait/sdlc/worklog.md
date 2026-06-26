@@ -9,3 +9,8 @@ Validated: gating checks (fast tripwire)
 What: Define ContentValidator trait with associated Item type, crawl/validate_item methods, and default run() driver in src/validator.rs; re-export from crate root
 Decisions: Used three separate test structs (StubValidator, EmptyValidator, CleanValidator) inline in the test module to cover the three distinct run() scenarios without a shared fixture; Kept trait free of any learn-ai domain types as specified; Item = () in tests avoids any domain dependency
 Validated: gating checks (fast tripwire)
+
+## Task 3 — PASSED (1 attempt)
+What: Relocated src/crawl.rs and src/meta.rs into src/learn_ai/, defined LearnAiValidator implementing ContentValidator, updated lib.rs module declarations and re-exports to preserve the public crate surface unchanged
+Decisions: Updated validate() body in lib.rs to use learn_ai::crawl::crawl and learn_ai::meta::validate_file (explicit module paths) rather than the re-exported names, to keep intent clear for Task 4 which rewrites validate() to use LearnAiValidator.run(); Fixed meta.rs test imports: within #[cfg(test)] mod tests, super refers to meta not learn_ai, so used crate::learn_ai::crawl::{FileKind, Locale} for the test import
+Validated: gating checks (fast tripwire)

@@ -66,7 +66,7 @@ Introduce the associated-type `ContentValidator` trait + a `shared` helper modul
 - **Acceptance:** trait compiles; the stub-driver unit test passes; `cargo clippy -- -D warnings` clean.
 - Depends on: 1.
 
-### 3. Relocate the learn-ai code into a `src/learn_ai/` module + implement `LearnAiValidator`
+### 3. [~] Relocate the learn-ai code into a `src/learn_ai/` module + implement `LearnAiValidator`
 - Create the `src/learn_ai/` module directory with `src/learn_ai/mod.rs`.
 - Move `src/crawl.rs` → `src/learn_ai/crawl.rs` and `src/meta.rs` → `src/learn_ai/meta.rs` **verbatim** (adjust only `crate::` paths that changed — e.g. helper imports now resolve from `crate::shared`, and `crate::Diagnostic` is unchanged). Declare both as submodules in `src/learn_ai/mod.rs`.
 - In `src/learn_ai/mod.rs`, define `pub struct LearnAiValidator;` and `impl ContentValidator for LearnAiValidator` with `type Item = ContentFile`, wiring `crawl` to the existing `crawl::crawl` (returning `corpus.files` + the crawl diagnostics) and `validate_item` to `meta::validate_file`.
