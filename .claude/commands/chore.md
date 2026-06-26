@@ -72,13 +72,10 @@ IMPORTANT: Execute every step in order, top to bottom.
 
 ## Report
 
-Output the path to the plan file created and the next-step options:
+Output the path to the plan file created and the next step:
 ```
 planning/chore-{name}/tasks.md
 
-Next (optional — decompose into atomic sub-steps):
-  /breakdown planning/chore-{name}/tasks.md
-
-Next (skip breakdown — implement directly):
-  /implement planning/chore-{name}/tasks.md
+Next (implement + test loop):
+  /sdlc-task chore-{name}
 ```

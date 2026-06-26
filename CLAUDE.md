@@ -1,6 +1,11 @@
 # CLAUDE.md — markdown-engine-validator
 
-A Rust CLI tool that parses, validates, and compiles MDX/Markdown lessons for learn-agentic-ai.com — frontmatter validation, link checking, code block linting, and watch-mode hot-reload
+A Rust CLI tool (`mev`) that parses and validates Markdown/MDX against a pluggable set of content
+schemas. Two consumers today behind one `ContentValidator` core: **learn-ai content** (frontmatter +
+JSON struct validation, link checking, code-block linting, watch-mode hot-reload for
+learn-agentic-ai.com) and **Bastion Brain OKF** (OKF YAML frontmatter across the company-brain repo,
+gating docs before the RAG index). See `planning/master-plan.md` — Phase 2 (the Brain OKF validator)
+is the current priority.
 
 ## Before you start
 

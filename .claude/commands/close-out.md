@@ -7,6 +7,9 @@ docs, then produce a clean `/handoff`.
 ## Variables
 
 $ARGUMENTS — optional. Parsed left to right:
+  - `--gap-check-only` — run Steps 1–3 only (validation + coverage + docs); skip Step 4
+    (`/handoff`). Designed for automated per-block close-out from `/sdlc-block` where
+    handing off mid-run makes no sense. Preserves all gating and coverage logic.
   - `--skip-coverage` — skip Step 2 (coverage scan + gap fill); use when coverage is
     already known good or was verified by a prior `/review-task`.
   - Remaining text — passed through verbatim as the narrative note to `/handoff`. If
@@ -14,6 +17,7 @@ $ARGUMENTS — optional. Parsed left to right:
 
 Examples:
   - (no args) — run all steps; `/handoff` derives the narrative
+  - `--gap-check-only` — run Steps 1–3 only; no handoff (used by automated orchestration)
   - `shipped D36 close-out command` — run all steps; pass note to `/handoff`
   - `--skip-coverage shipped D36` — skip coverage scan; pass note to `/handoff`
 
@@ -26,8 +30,9 @@ tool calls from the main agent context; they have their own confirmation gates.
 
 ### Step 0 — Parse $ARGUMENTS
 
-Strip `--skip-coverage` if present (record whether it was set). Treat the remainder as
-the handoff note (may be empty).
+Strip `--gap-check-only` if present (record whether it was set — when set, Step 4 is
+skipped). Strip `--skip-coverage` if present (record whether it was set). Treat the
+remainder as the handoff note (may be empty).
 
 ### Step 1 — Run the validation suite
 
@@ -108,10 +113,14 @@ Invoke the `/update-docs --patch` skill. Wait for it to complete.
 
 ### Step 4 — Hand off
 
-Invoke the `/handoff` skill.
+**Skip this step if `--gap-check-only` was passed.** Instead, print a one-line summary:
+`Gap-check complete. Gating: <PASS|FAIL>. Coverage gaps filled: <N>. Docs patched: <yes|no>.`
 
-Pass the handoff note (the $ARGUMENTS remainder after stripping `--skip-coverage`). If
-non-blocking coverage gaps were found in Step 2, prepend a brief line to the note:
+Otherwise, invoke the `/handoff` skill.
+
+Pass the handoff note (the $ARGUMENTS remainder after stripping `--skip-coverage` and
+`--gap-check-only`). If non-blocking coverage gaps were found in Step 2, prepend a brief
+line to the note:
 
 ```
 Coverage note: <comma-separated list of files with non-blocking gaps> — not blocking.

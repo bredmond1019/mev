@@ -1,348 +1,265 @@
 // =============================================================================
-// sdlc-task — Parallel-Safe SDLC Pipeline with Auto-Managed Worktree
+// sdlc-task — the LEAN small-work engine (implement → test → fix → commit)
 // =============================================================================
 //
-// A parallel-safe variant of sdlc-run that:
-//   1. Auto-creates a git worktree for this specific task
-//   2. Runs the full SDLC pipeline inside that worktree
-//   3. Defers status.md / log.md updates to a task log file
-//      (applied at merge time via /clean-worktree)
+// The cheap rung of the pipeline ladder, for one small unit of behaviour-changing
+// work (a /ticket or /chore). Runs a spec's task(s) through a tight per-task loop —
+//   implement → fast gating-test → triage → fix (≤3 attempts, Opus on the last)
+//   → commit
+// and nothing else. No scout, no separate review, no document stage, no ui-test,
+// no wrap-up agent, no PR. When you need a consolidated review + docs + a PR, use
+// /sdlc-flow; for a whole spec in place, /sdlc-run; for a roadmap, /sdlc-block.
 //
-// This lets multiple tasks run simultaneously with zero shared file writes,
-// eliminating merge conflicts. sdlc-run.js is unchanged and still available
-// for sequential use.
+// ISOLATION
+//   Default: IN PLACE on the current branch (no worktree) — cheapest, like /sdlc-run.
+//   --worktree: run in an isolated git worktree on its own branch (you integrate the
+//   branch yourself when ready). Opt-in only.
 //
 // USAGE
-//   /sdlc-task <spec-slug> 2                  runs task 2 in an isolated worktree (full pipeline)
-//   /sdlc-task <spec-slug> 2 --implement-only  worktree implement only, then STOP (lean /sdlc-block
-//                                              width-≥2 path; add --review for one localization-map
-//                                              review pass). No test/document/wrap-up/merge.
+//   /sdlc-task <spec-slug>                 run every task in the spec, in place
+//   /sdlc-task <spec-slug> 2               run only task 2
+//   /sdlc-task <spec-slug> 1-3             run a task range (1-3, 1,3,5, 5)
+//   /sdlc-task <spec-slug> 2 --worktree    run task 2 in an isolated worktree/branch
+//   /sdlc-task <spec-slug> --resume        resume from the committed state file
+//   /sdlc-task <spec-slug> --test-depth full  full gating suite per task (default: fast)
 //
-//   Task number is REQUIRED. For full-spec runs use /sdlc-run instead.
+// PIPELINE
+//   setup (locate repo / create worktree) → enumerate (D16 lint) → [resume load]
+//     → per-task loop → final state commit
 //
-// PIPELINE STAGES (in order)
-//   Worktree   → auto-create (or suffix-increment) isolated git worktree (also reports spec-exists +
-//                block status, so a fresh non-resume run can skip the Scout stage entirely)
-//   Scout      → detect current stage from report files (RESUME runs only; a fresh run's start stage
-//                is deterministic — generate-tasks if the spec is missing, else implement)
-//   Plan       → generate task spec (if missing) + breakdown assessment (standalone runs; recommend/auto/off
-//                per planning/harness.json breakdown.mode — skipped under /sdlc-block, which assesses once)
-//   Implement  → execute the task from spec
-//   Fix        → targeted fixes for FAIL/PARTIAL review (up to 3 attempts)
-//   Test       → run the project's validation suite from planning/harness.json (+ universal emoji gate)
-//   Review     → fresh validation run + acceptance criteria; verdict gates next stage
-//   Document   → surgical patches to docs/ (gates on PASS verdict)
-//   Wrap-up    → write task log + workflow report, commit all reports (status/log deferred to merge
-//                time). task-log and finalize were merged into one Haiku agent — see D14.
+//   Per-task loop (sequential):
+//     implement → fast-test → (triage → fix/bail) ×≤3 → one state write per task
+//   A triage MAJOR / immediate-bail reason breaks straight out (does NOT burn the
+//   remaining attempts); the run stops and reports for human pickup.
 //
-// WHAT RUNS IN THE WORKTREE vs. MAIN
-//   Worktree branch: all code, content, doc, and report changes
-//   Main (at merge): status.md + log.md updates (applied by /clean-worktree)
+// STATE (committed — NOT gitignored — at planning/<spec>/sdlc/)
+//   sdlc-task-state.json   the authoritative run index (per-task summary/issues/
+//                          fixes/commit + the Block-A `tokens` block). Committed in the
+//                          worktree under --worktree; in place it is written uncommitted
+//                          each task (cat-visible for crash inspection) and swept into
+//                          ONE final `chore:` commit at the end.
 //
-// MERGE FLOW
-//   After pipeline completes:
-//     /clean-worktree <branchName>
-//   This: merges the branch → applies the task log → updates status/log →
-//         commits → removes worktree → deletes branch.
+// COMMIT STRATEGY
+//   feat: implement <stem>         implement agent (per task)
+//   fix:  fix pass P for <stem>    fix agent (per pass)
+//   chore: sdlc-task state — <…>   state-writer (committed writes)
 //
-// WORKTREE PATH CONVENTION
-//   trees/<specSlug-lowercased>-task<N>   e.g. trees/<spec-slug>-task2
-//   If that name is taken, auto-increments: trees/...-task2-2, -3, etc.
-//   The actual branch name is always reported in the pipeline output and task log.
+// MODEL TIERING (the token lever — see the MODEL map below)
+//   haiku : setup, enumerate, state-load, test, state-writer
+//   sonnet: implement, fix, triage
+//   opus  : ESCALATION on the FINAL per-task fix pass
 //
-// RESUMPTION
-//   Same as sdlc-run: the scout checks which report files exist.
-//   If the worktree already exists at setup time, a new suffixed worktree is
-//   created rather than resuming the old one. This ensures clean state for retries.
-//
-// COMMIT STRATEGY (same as sdlc-run)
-//   feat: implement <stem>         implement agent
-//   fix: fix pass N for <stem>     fix agent (one per pass)
-//   docs: update docs for <stem>   document agent
-//   chore: wrap up <stem>          finalize agent (reports + task log)
-//
-// MODEL TIERING (token lever — see the MODEL map below)
-//   Three tiers: Opus earns its cost on PLANNING (generate-tasks fallback); Haiku handles the
-//   purely-mechanical stages (scout, test, wrap-up — fixed procedures, no judgment); Sonnet
-//   handles everything in between (implement/fix/review/document/task-log). Tune one place: the
-//   MODEL map. Real planning happens upstream in the /generate-tasks and /breakdown skills — run
-//   those on Opus. This matters most under /sdlc-block, which fans this pipeline out across many tasks.
-//
-// STAGED MODEL ESCALATION (ESCALATION_MODEL)
-//   The FINAL fix pass and FINAL review attempt before the loop gives up run on Opus.
-//   The cheap Sonnet path covers the common case; a genuinely hard failure that has
-//   already failed twice gets one strong shot before the task escalates. Set null to off.
-//
+// IMPLEMENTATION RULE: engines are self-contained — lift, don't import. No cross-engine
+// require. Validation is downstream only; never run this against base-template itself.
 // =============================================================================
 
 export const meta = {
   name: 'sdlc-task',
-  description: 'Run the SDLC pipeline for a single task in an isolated worktree — parallel-safe variant of sdlc-run',
-  whenToUse: 'When running a specific numbered task in parallel with other tasks. Task number is required. Usage: /sdlc-task <spec-slug> 2',
+  description: 'Lean single-unit SDLC engine — implement → fast-test → fix → commit, in place or in a worktree',
+  whenToUse: 'For one small unit of behaviour-changing work (a /ticket or /chore). No review/docs/PR — use /sdlc-flow for those. Usage: /sdlc-task <spec-slug> [task|range] [--worktree] [--resume]',
   phases: [
-    { title: 'Worktree',   detail: 'Auto-create (or suffix-increment) git worktree for isolated execution' },
-    { title: 'Scout',      detail: 'Determine current pipeline stage from report files (resume runs only)' },
-    { title: 'Plan',       detail: 'Generate task spec (if missing) and assess whether a coarse task needs breakdown first' },
-    { title: 'Implement',  detail: 'Execute the task' },
-    { title: 'Fix',        detail: 'Targeted fixes for FAIL/PARTIAL review' },
-    { title: 'Test',       detail: "Run the project's validation suite (from planning/harness.json) in the worktree" },
-    { title: 'Review',     detail: 'Verify acceptance criteria; issue verdict' },
-    { title: 'UI Test',    detail: 'Browser smoke check (only when planning/harness.json enables uiTest)' },
-    { title: 'Document',   detail: 'Patch docs/ (gates on PASS verdict)' },
-    { title: 'Wrap-up',    detail: 'Write task log + workflow report and commit (status/log deferred to merge time)' },
+    { title: 'Setup', detail: 'Locate the repo root (or create an isolated worktree under --worktree)' },
+    { title: 'Plan',  detail: 'Enumerate tasks from tasks.md (### N. lint) + load resume state' },
+    { title: 'Tasks', detail: 'Per task: implement → fast-test → (triage → fix/bail), then a state write' },
   ]
 }
 
 // ----------------------------------------------------------------
-// Parse args: REQUIRE "<spec-slug> 2" — task number is mandatory
+// Parse args: "<spec-slug> [task|range] [--worktree] [--resume] [--test-depth fast|full]"
 // ----------------------------------------------------------------
 const rawArgs = typeof args === 'string' ? args.trim() : ''
 if (!rawArgs) {
-  log('ERROR: No arguments provided.')
-  log('Usage: /sdlc-task <spec-slug> 2')
-  log('Task number is required. For full-spec runs, use /sdlc-run instead.')
-  return { error: 'Missing required arguments: spec name and task number' }
+  log('ERROR: No spec name provided.')
+  log('Usage: /sdlc-task <spec-slug> [task|range] [--worktree] [--resume] [--test-depth fast|full]')
+  return { error: 'Missing required argument: spec name (e.g. "<spec-slug>" or "<spec-slug> 2")' }
 }
 
-const parts = rawArgs.split(/\s+/)
-const blockId = parts[0]
-const taskNumber = parts.length > 1 ? parseInt(parts[1], 10) : null
-// --resume: reuse an EXISTING worktree for this task (set by /sdlc-block when a prior run was
-// interrupted after implement completed) instead of suffix-incrementing into a fresh duplicate.
-const resumeMode = parts.includes('--resume')
-// Set by /sdlc-block: it runs the breakdown assessment ONCE at the spec level (Analyze stage), so the
-// per-task engine must NOT re-assess — that would duplicate the work across every parallel task.
-const underBlock = parts.includes('--under-block')
-// Set by /sdlc-block ONLY when this task runs in a parallel batch with concurrent siblings (batch
-// width > 1). Output-token telemetry (outTok) is a shared-pool delta — under concurrent siblings it
-// measures the whole batch's burn, not this task's, so we mark it non-isolated rather than reporting a
-// misleading number. promptTok and filesReadKb stay per-agent and accurate. See decisions/D12.
-const parallelWave = parts.includes('--parallel-wave')
-// --implement-only (set by the lean /sdlc-block for a width-≥2 parallel wave): run
-// worktree-setup → implement → (one review pass ONLY when --review is also set) and STOP. Skip
-// test/fix/ui-test/document/wrap-up and the merge hand-off. /sdlc-block merges the branch and runs
-// ONE consolidated back-half (test → review → fix → document → wrap-up) over the integrated tree, so
-// per-task verification beyond the optional localization-map review is wasteful here (D23/D24). The
-// block owns status/log; this mode writes no deferred task-log.
-const implementOnly = parts.includes('--implement-only')
-// --review: under --implement-only, add a single per-task review pass (no fix loop) as a localization
-// map for the consolidated fix. Set by /sdlc-block only when block.verify is "consolidated+review".
-const withReview = parts.includes('--review')
+const tokens = rawArgs.split(/\s+/)
+const blockId = tokens[0]
 
-if (taskNumber === null || isNaN(taskNumber)) {
-  log(`ERROR: Task number is required but not provided (got: "${rawArgs}").`)
-  log('Usage: /sdlc-task <spec-slug> 2')
-  log('For full-spec runs use /sdlc-run instead.')
-  return { error: 'Task number required', rawArgs }
+function hasFlag(name) { return tokens.includes(name) }
+function flagStr(name) {
+  const i = tokens.indexOf(name)
+  return (i === -1 || i + 1 >= tokens.length) ? null : tokens[i + 1]
+}
+// Parse a task selection like "1-7", "1,3,5", "1-3,7", or "5" into a sorted int array.
+function parseRange(spec) {
+  const out = new Set()
+  for (const part of spec.split(',')) {
+    const m = part.trim().match(/^(\d+)(?:-(\d+))?$/)
+    if (!m) return null
+    const a = parseInt(m[1], 10), b = m[2] ? parseInt(m[2], 10) : a
+    for (let i = Math.min(a, b); i <= Math.max(a, b); i++) out.add(i)
+  }
+  return [...out].sort((x, y) => x - y)
 }
 
-const specFile    = `planning/${blockId}/tasks.md`
-const stem        = `${blockId}-task${taskNumber}`
-const reportsDir  = `planning/${blockId}/sdlc/reports`
-const taskPrefix  = `task${taskNumber}-`
-const implementReport = `${reportsDir}/${taskPrefix}implement.md`
-const testReport      = `${reportsDir}/${taskPrefix}test.md`
-const reviewReport    = `${reportsDir}/${taskPrefix}review.md`
-const documentReport  = `${reportsDir}/${taskPrefix}document.md`
-const uitestReport    = `${reportsDir}/${taskPrefix}ui-test.md`
-const workflowReport  = `${reportsDir}/${taskPrefix}workflow.md`
-const logFile         = `${reportsDir}/${taskPrefix}log.md`
-const breakdownFile   = `planning/${blockId}/breakdown.md`
+const useWorktree = hasFlag('--worktree')
+const resumeMode  = hasFlag('--resume')
 
-// Base branch name (suffix may be appended by setup agent).
-// Dots are kept so a phase-dotted spec slug (e.g. <spec-slug>) round-trips
-// to its planning/<slug>/ directory; git allows '.' in a branch name (just not '..').
-const baseBranchName = `${blockId}-task${taskNumber}`.toLowerCase().replace(/[^a-z0-9.-]/g, '-')
+const VALID_TEST_DEPTHS = ['fast', 'full']
+const testDepthFlag = flagStr('--test-depth')
+if (testDepthFlag && !VALID_TEST_DEPTHS.includes(testDepthFlag)) {
+  log(`ERROR: unknown --test-depth "${testDepthFlag}". Valid values: ${VALID_TEST_DEPTHS.join(', ')}.`)
+  return { error: 'Invalid --test-depth', testDepthFlag, blockId }
+}
 
-log(`Target: ${blockId} task ${taskNumber}`)
-log(`Spec: ${specFile} | Stem: ${stem}`)
+// Optional task selection: `--tasks 1-7` OR a positional range/number as the 2nd token.
+const rangeSpec = flagStr('--tasks') || (tokens[1] && !tokens[1].startsWith('--') ? tokens[1] : null)
+let selectedTasks = null
+if (rangeSpec) {
+  const parsed = parseRange(rangeSpec)
+  if (!parsed || parsed.length === 0) {
+    log(`ERROR: could not parse task selection "${rangeSpec}". Use forms like 2, 1-7, 1,3,5, or 1-3,7.`)
+    return { error: 'Invalid task selection', rangeSpec, blockId }
+  }
+  selectedTasks = new Set(parsed)
+}
 
-// ----------------------------------------------------------------
+const blockDir      = `planning/${blockId}`
+const specFile      = `${blockDir}/tasks.md`
+const breakdownFile = `${blockDir}/breakdown.md`
+const reportsDir    = `${blockDir}/sdlc/reports`
+const stateFile     = `${blockDir}/sdlc/sdlc-task-state.json`   // COMMITTED authoritative run index (Block A)
+const baseBranchName = `${blockId}-task`.toLowerCase().replace(/[^a-z0-9.-]/g, '-')  // worktree branch base
+
+const MAX_TASK_ATTEMPTS = 3   // implement→test→fix attempts per task before bail (final on Opus)
+
+log(`Target: ${blockId} (${selectedTasks ? [...selectedTasks].sort((a, b) => a - b).join(', ') : 'all tasks'})`)
+log(`Spec: ${specFile} | mode: ${useWorktree ? 'worktree' : 'in-place'}${resumeMode ? ' | RESUME' : ''}`)
+
+// ================================================================
 // Schemas
-// ----------------------------------------------------------------
+// ================================================================
 const SETUP_SCHEMA = {
   type: 'object',
-  required: ['branchName', 'worktreePath', 'wasCreated'],
+  required: ['runDir', 'branchName', 'baseSha'],
   properties: {
-    branchName:    { type: 'string', description: 'Actual branch name used (may have -2, -3 suffix if base was taken)' },
-    worktreePath:  { type: 'string', description: 'Absolute path to the worktree directory' },
-    wasCreated:    { type: 'boolean', description: 'true if a new worktree was created, false if it already existed' },
-    // Pipeline-start inputs — let a fresh (non-resume) run skip the scout stage entirely (the start
-    // stage is then deterministic). Only consulted when NOT resuming; on resume the scout decides.
-    specFileExists: { type: 'boolean', description: 'true if the task spec file exists in the worktree' },
+    runDir:         { type: 'string', description: 'Absolute path the pipeline runs from (worktree path under --worktree; else the repo root)' },
+    branchName:     { type: 'string', description: 'The branch commits land on (a new worktree branch under --worktree; else the current branch)' },
+    baseSha:        { type: 'string', description: 'The HEAD short sha AFTER setup, BEFORE any task commit — the emoji-gate diff base' },
+    wasCreated:     { type: 'boolean', description: 'true if a new worktree was created (--worktree only)' },
+    specFileExists: { type: 'boolean', description: 'true if the task spec file exists' },
     blockStatus:    { type: 'string', description: "This spec's Status in status.md (title-case), or 'Unknown'" },
-    specThin:       { type: 'boolean', description: 'D19: true ONLY on a fresh run (wasCreated && specFileExists) with a structurally-valid but substantively-thin spec per STEP 6c. false on resume or a healthy spec.' },
+    specThin:       { type: 'boolean', description: 'D19: true on a fresh (non-resume) run with a structurally-valid but substantively-thin spec; false on resume or a healthy spec.' },
     thinReason:     { type: 'string', description: 'D19: the specific thin-spec failures when specThin; empty string otherwise.' },
-    notes:         { type: 'string' }
+    notes:          { type: 'string' }
   }
 }
 
-const SCOUT_SCHEMA = {
+// D16 preflight lint — the spec MUST carry `### N.` task headings or the loop would have to guess
+// the task count non-deterministically.
+const ENUMERATE_SCHEMA = {
   type: 'object',
-  required: ['startStage', 'specFileExists', 'blockStatus', 'existingReports', 'statusSummary'],
+  required: ['hasTaskHeadings', 'allTasks'],
   properties: {
-    startStage: {
-      type: 'string',
-      enum: ['generate-tasks', 'implement', 'fix', 'test', 'review', 'ui-test', 'document', 'wrap-up'],
-    },
-    specFileExists:    { type: 'boolean' },
-    blockStatus: {
-      type: 'string',
-      enum: ['Not started', 'In progress', 'Done', 'Blocked', 'Skipped', 'Unknown'],
-    },
-    existingReports:   { type: 'array', items: { type: 'string' } },
-    reviewVerdict:     { type: 'string', description: 'PASS, FAIL, PARTIAL, or empty string' },
-    currentFocus:      { type: 'string' },
-    lastDevlogEntry:   { type: 'string' },
-    statusSummary:     { type: 'string' },
-    discrepancies:     { type: 'string' }
+    hasTaskHeadings: { type: 'boolean', description: 'true if tasks.md has at least one "### N." numbered task heading' },
+    allTasks:        { type: 'array', items: { type: 'integer' }, description: 'Every task number found as a "### N." heading, in order' },
+    notes:           { type: 'string' }
+  }
+}
+
+const STATE_LOAD_SCHEMA = {
+  type: 'object',
+  required: ['exists'],
+  properties: {
+    exists:      { type: 'boolean', description: 'true if a valid sdlc-task-state.json was read' },
+    startedAt:   { type: 'string',  description: "the file's started_at value, or '' when absent" },
+    passedTasks: { type: 'array', items: { type: 'integer' }, description: 'task numbers whose status is "passed"' },
+    bailReason:  { type: 'string',  description: 'the prior bail_reason, or "" when none' },
+    notes:       { type: 'string' }
   }
 }
 
 const STAGE_SCHEMA = {
   type: 'object',
-  required: ['reportFile', 'success'],
+  required: ['success'],
   properties: {
-    reportFile:     { type: 'string' },
-    success:        { type: 'boolean' },
-    filesModified:  { type: 'array', items: { type: 'string' } },
-    commitHash:     { type: 'string' },
-    filesReadKb:    { type: 'number', description: 'Telemetry (optional): sum of bytes of all files this stage cat/Read, divided by 1024.' },
-    notes:          { type: 'string' }
+    success:       { type: 'boolean' },
+    filesModified: { type: 'array', items: { type: 'string' } },
+    commitHash:    { type: 'string', description: 'Short hash of the commit this agent made, or empty string' },
+    summary:       { type: 'string', description: 'One-line summary of what was implemented/fixed (folded into state.tasks[N].summary)' },
+    decisions:     { type: 'array', items: { type: 'string' }, description: 'Non-obvious choices made (folded into state)' },
+    filesReadKb:   { type: 'number', description: 'Telemetry (optional): sum of bytes of all files this stage cat/Read, divided by 1024.' },
+    notes:         { type: 'string' }
   }
 }
 
 const TEST_SCHEMA = {
   type: 'object',
-  required: ['reportFile', 'allPassed', 'passCount', 'failCount'],
+  required: ['allPassed', 'passCount', 'failCount'],
   properties: {
-    reportFile:   { type: 'string' },
-    allPassed:    { type: 'boolean' },
-    passCount:    { type: 'integer' },
-    failCount:    { type: 'integer' },
-    failedTests:  { type: 'array', items: { type: 'string' } },
-    notes:        { type: 'string' }
+    allPassed:   { type: 'boolean' },
+    passCount:   { type: 'integer' },
+    failCount:   { type: 'integer' },
+    failedTests: { type: 'array', items: { type: 'string' } },
+    failBlob:    { type: 'string', description: 'Compact failure output (failing check names + the tail of their output) for triage; empty when allPassed' },
+    notes:       { type: 'string' }
   }
 }
 
-const REVIEW_SCHEMA = {
+// Triage a per-task failure: RETRYABLE (a bounded fix can help) vs MAJOR (bail to a human now).
+const TRIAGE_SCHEMA = {
   type: 'object',
-  required: ['reportFile', 'verdict'],
+  required: ['class', 'reason'],
   properties: {
-    reportFile:      { type: 'string' },
-    verdict:         { type: 'string', enum: ['PASS', 'FAIL', 'PARTIAL'] },
-    failureReasons:  { type: 'array', items: { type: 'string' } },
-    unmetCriteria:   { type: 'array', items: { type: 'string' } },
-    filesReadKb:     { type: 'number', description: 'Telemetry (optional): sum of bytes of all files this stage cat/Read, divided by 1024.' },
-    notes:           { type: 'string' }
+    class:               { type: 'string', enum: ['RETRYABLE', 'MAJOR'] },
+    reason:              { type: 'string', description: 'One sentence: why retryable (transient/changed/progressing) or major (an immediate-bail reason, stuck, or structural)' },
+    bailReason:          { type: 'string', description: 'When class=MAJOR: a short human-readable reason for the handoff; empty when RETRYABLE' },
+    sameFailureAsBefore: { type: 'boolean', description: 'true if the SAME failure as the previous attempt (no progress)' }
   }
 }
 
-// Wrap-up = task-log + finalize merged into one bookkeeping agent (both were cheap, sequential, and
-// purely mechanical). It writes the deferred status/log content AND the workflow report, then commits
-// every report file in one chore commit. status.md / log.md themselves are still NOT touched here —
-// they are applied at merge time by /clean-worktree.
-const WRAPUP_SCHEMA = {
+const STATE_WRITE_SCHEMA = {
   type: 'object',
-  required: ['logFile', 'workflowReportFile', 'commitMessage'],
+  required: ['written'],
   properties: {
-    logFile:            { type: 'string' },
-    workflowReportFile: { type: 'string' },
-    commitMessage:      { type: 'string' },
-    commitHash:         { type: 'string' },
-    nextFocus:          { type: 'string', description: 'The Current focus string written to the task log file' },
-    notes:              { type: 'string', description: 'Any decisions that should be added to planning/decisions/, plus NEEDS_REVIEW doc flags' }
-  }
-}
-
-const UI_TEST_SCHEMA = {
-  type: 'object',
-  required: ['reportFile', 'verdict'],
-  properties: {
-    reportFile:      { type: 'string' },
-    verdict:         { type: 'string', enum: ['PASS', 'WARN', 'FAIL', 'SKIPPED'] },
-    failureReasons:  { type: 'array', items: { type: 'string' } },
-    notes:           { type: 'string' }
-  }
-}
-
-const BREAKDOWN_ASSESS_SCHEMA = {
-  type: 'object',
-  required: ['alreadyExists', 'recommendBreakdown'],
-  properties: {
-    alreadyExists:      { type: 'boolean', description: 'true if breakdown.md already has a "### Step N:" section for this task — assessment is then a no-op' },
-    recommendBreakdown: { type: 'boolean', description: 'true if the task is coarse enough to benefit from /breakdown into atomic sub-steps' },
-    reason:             { type: 'string', description: 'one sentence: which heuristic signal fired (or why no breakdown is needed)' },
-    fileCount:          { type: 'integer', description: 'distinct files the task creates/modifies' }
+    written:    { type: 'boolean', description: 'true if state.json was written (and committed when asked)' },
+    commitHash: { type: 'string' },
+    notes:      { type: 'string' }
   }
 }
 
 // ----------------------------------------------------------------
 // MODEL TIERING — the primary token lever for this pipeline.
 //
-// Principle: match the model to the work. Opus earns its cost on PLANNING; Haiku handles the
-// purely-mechanical stages; Sonnet handles the judgment work in between.
-//   • Opus   — generate-tasks (authors the spec; fallback path only) and breakdown-gen (authors
-//              atomic sub-steps for a coarse task in auto mode). Both are PLANNING.
-//   • Haiku  — worktree-setup / scout / test / wrap-up. Each is a fixed procedure with no real
-//              judgment: worktree-setup follows an exact free-name + sparse-checkout recipe, scout is
-//              a deterministic file-existence decision tree (resume only), test runs the project's
-//              validation suite and reads exit codes (review re-runs the gating checks anyway), and
-//              wrap-up (task-log + finalize, merged in D14) fills a rigid template plus a
-//              one-paragraph summary and a JS-precomputed table, then runs scripted git adds.
-//   • Sonnet — implement / fix / review / document / breakdown-assess. A sharp spec + breakdown makes
-//              these well-scoped enough that Sonnet does them reliably. (Review is gated by an
-//              authoritative fresh-test run, and fix failures escalate rather than silently ship.)
-//
-// Note: the REAL planning usually happens upstream in the /generate-tasks and /breakdown
-// SKILLS (run those on an Opus session). The generate-tasks stage below is only a fallback
-// that fires when the spec file is missing — pinned to Opus so that path is strong too.
-//
-// To re-tier, change one value here — nothing else moves.
+// Match the model to the work (mirrors sdlc-run/flow). To re-tier, change one value here.
 // Valid values: 'haiku' | 'sonnet' | 'opus' | undefined (inherit session model).
 // ----------------------------------------------------------------
 const MODEL = {
-  worktreeSetup: 'haiku',    // scripted git following an exact free-name recipe + sparse-checkout; recipe-
-                             //   following, not judgment. A failure aborts the run, but that is a reliability
-                             //   property haiku meets — the recipe is deterministic (re-tiered, D11).
-  scout:         'haiku',    // deterministic decision tree: ls a few files, apply a fixed 7-rule order
-  generateTasks: 'opus',     // PLANNING — authors the spec that drives everything (fallback path)
-  breakdownAssess: 'sonnet', // judges whether a single task is too coarse — light judgment, same tier as review
-  breakdownGen:  'opus',     // PLANNING — authors atomic sub-steps for a flagged task (auto mode only)
-  implement:     'sonnet',   // writes content/code + tests against a scoped spec/breakdown
-  fix:           'sonnet',   // targeted fixes; failures escalate, never silently ship
-  test:          'haiku',    // runs the project's validation suite, reads exit codes; review re-runs the gating checks
-  review:        'sonnet',   // verify criteria; gated by an authoritative fresh run of the gating checks
-  uiTest:        'sonnet',   // live browser smoke checks (when uiTest.enabled); needs judgment to interpret results
-  document:      'sonnet',   // surgical doc patches, gated on PASS
-  wrapup:        'haiku',    // task-log + finalize merged (D14): fills a rigid template + a one-paragraph
-                             //   summary + a JS-precomputed table, then scripted git add; can't break the
-                             //   pipeline. Small generative surface — haiku (task-log was re-tiered in D11)
+  setup:       'haiku',    // scripted git: locate the repo root, or follow the worktree free-name recipe
+  enumerate:   'haiku',    // grep the spec for "### N." headings — a fixed procedure
+  stateLoad:   'haiku',    // read + parse one JSON file (resume only)
+  implement:   'sonnet',   // writes code/content + tests against a scoped task
+  fix:         'sonnet',   // targeted fixes; failures escalate, never silently ship
+  test:        'haiku',    // runs the project's validation suite, reads exit codes
+  triage:      'sonnet',   // classifies a failure RETRYABLE vs MAJOR — light judgment
+  stateWriter: 'haiku',    // stamps timestamps, writes state.json, commits when asked
 }
 
-// Merge an optional model override into an agent's opts (omits the key when undefined,
-// so the agent inherits the session model rather than receiving model: undefined).
+// Final per-task fix pass before the loop gives up runs on a stronger model. The common path
+// stays on Sonnet; only the genuinely-hard case that already failed gets an Opus shot.
+const ESCALATION_MODEL = 'opus'
+
+// Merge an optional model override into an agent's opts (omits the key when undefined, so the agent
+// inherits the session model rather than receiving model: undefined).
 function withModel(base, model) {
   return model ? { ...base, model } : base
 }
 
 // ----------------------------------------------------------------
-// TOKEN TELEMETRY (Phase A — additive, no behavior change)
+// TOKEN TELEMETRY (Block A — the shared committed-state token contract)
 //
-// Per-stage attribution of injected-prompt size and output-token delta. The runtime cannot
-// see a subagent's INTERNAL context (the `cat` outputs land inside the spawned agent, invisible
-// here), so JS-side we measure only the injected prompt and the budget delta. The read-heavy
-// stages self-report a `filesReadKb` ingestion estimate via the schema (folded in at the call
-// site). `agent` stays importable for any call we deliberately want untraced.
+// Lifted verbatim across all four engines (engines are self-contained — lift, don't import). Each
+// substantive stage runs through tracedAgent, which records the injected-prompt size and the
+// output-token delta off the shared budget pool. buildTokensBlock() rolls the accumulated metrics
+// into the canonical `tokens` block committed state carries (per-stage + a cumulative total).
 //
 //   promptTokEst — injected input only (~prompt.length / 4)
 //   outTok       — output-token delta from the shared budget pool; null when no +Nk target is set.
-//                  Attributes cleanly only for SEQUENTIAL stages — which is this engine's whole
-//                  pipeline when run solo. BUT when /sdlc-block runs this task in a parallel batch
-//                  (--parallel-wave), the pool is shared with concurrent sibling tasks, so the delta
-//                  is contaminated and the runtime exposes no per-agent output count. Under parallel
-//                  the report's "tok" column therefore flips to an estimated INPUT cost (promptTok +
-//                  filesRead→tokens) instead of a misleading output number. See D12 + D15.
+//                  sdlc-task is fully SEQUENTIAL, so the delta attributes cleanly to its stage.
+//   filesReadKb  — a stage's self-reported ingestion estimate, folded in via recordFilesRead().
+//   inTokEst     — D15 input-cost estimate = promptTokEst + filesReadKb→tokens (~256 tok/KB).
 // ----------------------------------------------------------------
 const metrics = []
 async function tracedAgent(prompt, opts = {}) {
@@ -358,7 +275,7 @@ async function tracedAgent(prompt, opts = {}) {
   return r
 }
 
-// Fold a stage's self-reported `filesReadKb` (A2) into the metrics entry the wrapper just pushed.
+// Fold a stage's self-reported `filesReadKb` into the metrics entry the wrapper just pushed.
 // Safe to call immediately after the awaited tracedAgent call — that entry is always metrics[last].
 function recordFilesRead(result) {
   if (result && result.filesReadKb != null && metrics.length) {
@@ -366,17 +283,38 @@ function recordFilesRead(result) {
   }
 }
 
+// Build the canonical `tokens` block from the accumulated per-agent metrics (Block A — the shared
+// committed-state token contract, identical across all four engines): per-stage output tokens + the
+// D15 input-cost estimate (promptTok + filesReadKb→tokens at ~256 tok/KB) + a cumulative total.
+//
+// CONTRACT SCOPE (Phase 0 /code-review carry-in): `metrics` — and therefore `tokens.total` — cover the
+// SUBSTANTIVE stages only. Cheap helper / state-writer agents (the Haiku state-writer, config + baseline
+// loaders) deliberately use bare agent() and are EXCLUDED; this bounded, Haiku-cheap exclusion is the
+// same boundary in all four engines, named here so it is explicit rather than silent — it keeps the
+// two-level /sdlc-block roll-up summing comparable substantive-stage totals at both levels.
+function buildTokensBlock() {
+  const stages = metrics.map(m => {
+    const filesReadKb = m.filesReadKb != null ? m.filesReadKb : null
+    const inTokEst = m.promptTokEst + (filesReadKb != null ? Math.round(filesReadKb * 256) : 0)
+    return { label: m.label, model: m.model, promptTokEst: m.promptTokEst, filesReadKb, inTokEst, outTok: m.outTok }
+  })
+  const total = stages.reduce((acc, s) => {
+    acc.promptTokEst += s.promptTokEst
+    acc.filesReadKb  += s.filesReadKb || 0
+    acc.inTokEst     += s.inTokEst
+    acc.outTok       += s.outTok || 0
+    return acc
+  }, { promptTokEst: 0, filesReadKb: 0, inTokEst: 0, outTok: 0 })
+  return { stages, total }
+}
+
 // ----------------------------------------------------------------
 // HARNESS CONFIG — mechanism/policy split (see planning/harness.json)
 //
 // The engine ships NO stack defaults. A project declares its validation policy in
-// planning/harness.json. The workflow runtime has no filesystem access, so a dedicated
-// micro-loader agent reads + parses the file (the same way sdlc-block loads execution-plan.json).
-// Returns the parsed config object, or null when the file is absent or invalid — callers then
-// degrade to the spec's `## Validation Commands` section and disable the UI-test stage.
-//
-// NOTE (P4): this task engine runs inside a git worktree — when wired, the loader's cat must run
-// as `cd ${worktreePath} && cat planning/harness.json` (the worktree carries the project's config).
+// planning/harness.json. The runtime has no filesystem access, so a micro-loader agent reads + parses
+// the file. Returns the parsed config (or null when absent/invalid) — callers then degrade to the
+// spec's `## Validation Commands`. Loaded from runDir (the worktree under --worktree; else repo root).
 // ----------------------------------------------------------------
 const HARNESS_CONFIG_SCHEMA = {
   type: 'object',
@@ -401,14 +339,13 @@ const HARNESS_CONFIG_SCHEMA = {
                   command: { type: 'string' },
                   purpose: { type: 'string' },
                   gates:   { type: 'boolean' },
-                  baselineCommand: { type: 'string', description: 'baseline-diff only' },
-                  compareKeys:     { type: 'array', items: { type: 'string' }, description: 'baseline-diff only' },
-                  countPattern:    { type: 'string', description: 'count-delta only' },
-                  failOn:          { type: 'string', description: 'count-delta only: decrease | zero-or-decrease' },
-                  warningPatterns: { type: 'array', items: { type: 'string' }, description: 'warning-scan only' },
+                  baselineCommand: { type: 'string' },
+                  compareKeys:     { type: 'array', items: { type: 'string' } },
+                  countPattern:    { type: 'string' },
+                  failOn:          { type: 'string' },
+                  warningPatterns: { type: 'array', items: { type: 'string' } },
                   rules: {
                     type: 'array',
-                    description: 'forbidden-pattern-scan only',
                     items: {
                       type: 'object',
                       properties: {
@@ -423,23 +360,6 @@ const HARNESS_CONFIG_SCHEMA = {
               }
             }
           }
-        },
-        uiTest: {
-          type: 'object',
-          properties: {
-            enabled:          { type: 'boolean' },
-            devServerCommand: { type: 'string' },
-            readySignal:      { type: 'string' },
-            port:             { type: 'integer' },
-            routes:           { type: 'array', items: { type: 'string' } }
-          }
-        },
-        breakdown: {
-          type: 'object',
-          properties: {
-            mode:                { type: 'string', description: 'recommend (default) | auto | off' },
-            complexityThreshold: { type: 'integer' }
-          }
         }
       }
     },
@@ -447,27 +367,22 @@ const HARNESS_CONFIG_SCHEMA = {
   }
 }
 
-// Spawn the micro-loader agent and return the parsed config (or null). Wired into the stages
-// in P4; defined here so the loader path exists from P1. No stack defaults on absence.
-// cwd: optional working-directory prefix (the worktree path) for the cat command.
 async function loadHarnessConfig(cwd) {
-  const prefix = cwd ? `cd ${cwd} && ` : ''
-  const result = await tracedAgent(`
+  const result = await agent(`
 You are the harness-config loader for the SDLC pipeline. Your ONLY job is to read the project's
 validation-policy file and return it as structured data. Do not run any checks or modify anything.
 
-STEP 1 — Read the config file:
-  ${prefix}cat planning/harness.json 2>/dev/null && echo "__HARNESS_PRESENT__" || echo "__HARNESS_ABSENT__"
+STEP 1 — Read the config file (from the run root):
+  cd ${cwd} && cat planning/harness.json 2>/dev/null && echo "__HARNESS_PRESENT__" || echo "__HARNESS_ABSENT__"
 
 STEP 2 — Decide:
   - "__HARNESS_ABSENT__" (file missing) → present=false, omit config.
   - File printed but NOT valid JSON → present=false, notes="harness.json present but invalid JSON: <reason>".
   - File printed and valid JSON → present=true, and copy the parsed object into "config", keeping ONLY
     these fields when present: stack; validation.checks[] (each: {kind, name, command, purpose, gates}
-    plus any kind-specific fields that are present — baselineCommand, compareKeys[], countPattern,
-    failOn, warningPatterns[], rules[] ({id, pattern, paths, allowlistPattern})); uiTest ({enabled,
-    devServerCommand, readySignal, port, routes[]}); breakdown ({mode, complexityThreshold}). Preserve
-    kind-specific fields verbatim; ignore any other fields.
+    plus any kind-specific fields present — baselineCommand, compareKeys[], countPattern, failOn,
+    warningPatterns[], rules[] ({id, pattern, paths, allowlistPattern})). Preserve kind-specific fields
+    verbatim; ignore any other fields.
 
 Return your findings using the StructuredOutput tool.
 `, { label: 'harness-config', schema: HARNESS_CONFIG_SCHEMA, model: 'sonnet' })
@@ -476,85 +391,53 @@ Return your findings using the StructuredOutput tool.
   return result.config
 }
 
-// Snapshot baseline artifacts for any `baseline-diff` checks at worktree creation (pre-implement),
-// so the Test stage can diff current output against the pre-task state and fail only on net-new
-// items. Resume-safe: only writes a baseline that does not already exist. No-op when no baseline-diff
-// checks are configured. The engine ships no stack defaults — baselineCommand comes from harness.json.
-async function snapshotBaselines(cfg, cwd) {
-  const checks = (cfg?.validation?.checks || []).filter(c => c.kind === 'baseline-diff' && c.baselineCommand)
-  if (!checks.length) return
-  const pre = cwd ? `cd ${cwd} && ` : ''
-  const steps = checks.map(c => {
-    const slug = (c.name || 'check').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-    const path = `${reportsDir}/${taskPrefix}${slug}-baseline.json`
-    return `Baseline "${c.name}" -> ${path}:
-  ${pre}mkdir -p ${reportsDir}
-  ${pre}[ -f ${path} ] && echo "BASELINE EXISTS (kept): ${path}" || { ${c.baselineCommand} > ${path} 2>/dev/null; echo "BASELINE WRITTEN: ${path}"; }`
-  }).join('\n\n')
-  await tracedAgent(`
-You are the baseline-snapshot agent for the SDLC pipeline. Capture the pre-task baseline for each
-baseline-diff validation check, in the worktree, BEFORE any implementation runs. Run each block
-exactly as written. Do NOT modify source. Existing baselines are kept (resume-safe).
-
-${steps}
-
-Return using StructuredOutput: done=true, and note which baselines were written vs already present.
-`, { label: 'baseline-snapshot', schema: { type: 'object', required: ['done'], properties: { done: { type: 'boolean' }, notes: { type: 'string' } } }, model: 'haiku' })
-}
-
-// Render the inner project-validation check list for the Test stage from harness config.
-// Returns the numbered CHECK blocks the agent runs (each prefixed `cd <cwd> &&` so it runs in the
-// worktree) before the universal emoji gate. cfg null / no checks → fall back to the spec's
-// `## Validation Commands`. The engine ships NO stack defaults. changedPaths is reserved for the
-// deferred conditionalChecks feature (unused in the MVP).
-function renderCheckList(cfg, { changedPaths, cwd } = {}) {
-  const pre = cwd ? `cd ${cwd} && ` : ''
-  const checks = cfg?.validation?.checks ?? []
+// Render the inner project-validation check list for a Test stage. When gatingOnly is true (the fast
+// per-task tripwire), emit only the checks with gates:true; --test-depth full runs the whole suite.
+// When the config is absent (or carries no checks), fall back to the spec's `## Validation Commands` —
+// the engine ships NO stack defaults. Handles all D6 check kinds.
+function renderCheckList(cfg, { gatingOnly = false, cwd } = {}) {
+  let checks = cfg?.validation?.checks ?? []
+  if (gatingOnly) checks = checks.filter(c => c.gates)
+  const cd = cwd ? `cd ${cwd} && ` : ''
   if (!checks.length) {
-    return `The project ships no \`planning/harness.json\` validation suite, so derive the checks
-from the spec instead:
+    return `The project ships no matching \`planning/harness.json\` validation ${gatingOnly ? 'GATING ' : ''}checks, so derive the checks from the spec instead:
   - Read the spec's optional "## Validation Commands" section.
-  - Run each command it lists, IN ORDER (from the worktree root: ${cwd || 'repo root'}). Each command
-    is one check — record test_name (a short slug), execution_command, test_purpose ("from the spec's
-    Validation Commands"), passed (true iff exit code 0), and error (output on failure).
+  - Run each command it lists, IN ORDER (prefix each Bash call with: ${cd}). Each command is one check —
+    record its name, the command, passed (true iff exit code 0), and the output on failure.
   - If the spec has no "## Validation Commands" section, run no project checks — record a single
-    informational row (test_name "no_validation_suite", passed true, empty error). Then run the
-    universal emoji gate below.`
+    informational row (name "no_validation_suite", passed true) noting the project declared none.`
   }
   return checks.map((c, i) => {
     const n = i + 1
     const kind = c.kind || 'command'
     const slug = (c.name || `check${n}`).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
     const gate = c.gates
-      ? 'GATING — a failure here blocks the review verdict'
+      ? 'GATING — a failure here blocks the verdict'
       : 'non-gating — informational; a failure here does not block the verdict'
     const header = `CHECK ${n} — ${c.name} (${c.purpose}) [${gate}]`
 
-    // --- baseline-diff: fail only on items absent from the worktree-creation baseline ---
     if (kind === 'baseline-diff') {
-      const baselinePath = `${reportsDir}/${taskPrefix}${slug}-baseline.json`
-      const currentPath = `/tmp/${stem}-${slug}-current.json`
+      const baselinePath = `${reportsDir}/${slug}-baseline.json`
+      const currentPath = `/tmp/${blockId}-task-${slug}-current.json`
       const keysLiteral = JSON.stringify(c.compareKeys || [])
-      return `${header} — baseline-diff (fail ONLY on net-new items vs the baseline snapshotted at worktree creation):
-  ${pre}${c.command} > ${currentPath} 2>/dev/null; true
-  ${pre}python3 << 'PYEOF'
+      return `${header} — baseline-diff (fail ONLY on net-new items vs the baseline snapshotted before the run):
+  ${cd}${c.command} > ${currentPath} 2>/dev/null; true
+  python3 << 'PYEOF'
 import json, sys
-baseline_path = '${baselinePath}'
-current_path  = '${currentPath}'
-keys = ${keysLiteral}
 try:
-    b = json.load(open(baseline_path, encoding='utf-8'))
+    b = json.load(open('${cwd ? cwd + '/' : ''}${baselinePath}', encoding='utf-8'))
 except Exception as e:
     print(f'WARNING: could not load baseline ({e}) — treating all current items as pre-existing'); b = []
 try:
-    c = json.load(open(current_path, encoding='utf-8'))
+    c = json.load(open('${currentPath}', encoding='utf-8'))
 except Exception:
     c = []
+keys = ${keysLiteral}
 def k(v): return tuple(str(v.get(x, '')) for x in keys) if isinstance(v, dict) else (str(v),)
 seen = set(k(v) for v in b)
 new = [v for v in c if k(v) not in seen]
 if new:
-    print(f'NET-NEW ({len(new)} introduced by this task, absent from baseline):')
+    print(f'NET-NEW ({len(new)} introduced by this run, absent from baseline):')
     for v in new[:20]: print('  ' + json.dumps(v)[:200])
     sys.exit(1)
 print(f'CHECK ${n} PASSED: no net-new items (baseline {len(b)}, current {len(c)})'); sys.exit(0)
@@ -562,1565 +445,535 @@ PYEOF
   echo "CHECK${n}_EXIT:$?"`
     }
 
-    // --- count-delta: extract an integer and fail when it regresses vs the previous task ---
-    if (kind === 'count-delta') {
-      const prevReport = taskNumber > 1 ? `${reportsDir}/task${taskNumber - 1}-test.md` : ''
-      const failRule = c.failOn === 'zero-or-decrease'
-        ? 'FAIL if delta <= 0 (count must strictly increase)'
-        : 'FAIL if delta < 0 (count must not decrease)'
-      const prevStep = prevReport
-        ? `  Read the previous task's recorded count:
-    ${pre}grep -oE 'COUNT\\[${slug}\\]: [0-9]+' ${prevReport} | head -1 || echo "NO_PREV_COUNT"
-  If NO_PREV_COUNT (previous report has no marker), treat this check as SKIP — delta unknown, do not fail.`
-        : `  This is task 1 — there is no previous task. Treat this check as SKIP (no delta to compare).`
-      return `${header} — count-delta (${c.failOn}):
-  ${pre}${c.command}
-  Extract the current count: the first integer on the line matching the ERE /${c.countPattern}/.
-${prevStep}
-  Compute delta = current - previous. ${failRule}.
-  IMPORTANT: write the marker line "COUNT[${slug}]: <current>" verbatim into the test report (any
-  section) so the NEXT task can read it. Record the delta and the pass/fail in this check's row.
-  echo "CHECK${n}_EXIT:0  (set to 1 only if the rule above fails; SKIP counts as pass)"`
-    }
-
-    // --- warning-scan: run a command (exit code gates) and record matches of warningPatterns ---
     if (kind === 'warning-scan') {
-      const outPath = `/tmp/${stem}-${slug}.out`
+      const outPath = `/tmp/${blockId}-task-${slug}.out`
       const alternation = (c.warningPatterns || []).map(p => `(${p})`).join('|')
       const patternSeverity = c.gates
         ? 'Because gates:true, a pattern match ALSO FAILS this check.'
         : 'Because gates:false, pattern matches are informational WARN entries — they do NOT fail the check (but DO record them).'
       return `${header} — warning-scan (run the command, gate on its exit code, then scan its output):
-  ${pre}${c.command} > ${outPath} 2>&1; echo "CMD_EXIT:$?"
-  ${pre}grep -nE '${alternation}' ${outPath} && echo "WARNINGS_FOUND" || echo "NO_WARNINGS"
-  Pass/fail: this check FAILS if CMD_EXIT is non-zero (the command itself failed). Record every matched
-  warning line in this check's row/notes. ${patternSeverity}
-  Set the exit marker accordingly:
+  ${cd}${c.command} > ${outPath} 2>&1; echo "CMD_EXIT:$?"
+  grep -nE '${alternation}' ${outPath} && echo "WARNINGS_FOUND" || echo "NO_WARNINGS"
+  Pass/fail: FAILS if CMD_EXIT is non-zero. Record every matched warning line. ${patternSeverity}
   echo "CHECK${n}_EXIT:<0 if CMD_EXIT==0 and not failed-by-pattern, else 1>"`
     }
 
-    // --- forbidden-pattern-scan: source greps that must find NO matches ---
     if (kind === 'forbidden-pattern-scan') {
       const ruleLines = (c.rules || []).map(r => {
         const paths = r.paths || '.'
         const allow = r.allowlistPattern ? ` | grep -vE '${r.allowlistPattern}'` : ''
         return `  Rule "${r.id}":
-    ${pre}grep -rnE '${r.pattern}' ${paths}${allow} && echo "RULE ${r.id}: MATCHED (violation)" || echo "RULE ${r.id}: clean"`
+    ${cd}grep -rnE '${r.pattern}' ${paths}${allow} && echo "RULE ${r.id}: MATCHED (violation)" || echo "RULE ${r.id}: clean"`
       }).join('\n')
       return `${header} — forbidden-pattern scan (every rule below must find NO matches):
 ${ruleLines}
-  This check PASSES only if EVERY rule reports "clean". If any rule MATCHED, the check FAILS and the
-  matched lines are violations — list them in this check's row.
+  This check PASSES only if EVERY rule reports "clean". If any rule MATCHED, the check FAILS.
   echo "CHECK${n}_EXIT:0  (set to 1 if any rule MATCHED, else 0)"`
     }
 
-    // --- command (default): plain exit-code gate (unchanged behavior) ---
+    // count-delta has no analog in this consolidated-per-run model — treat as a plain command run
+    // (its exit code still gates if gates:true).
     return `${header}:
-  ${pre}${c.command}
+  ${cd}${c.command}
   echo "CHECK${n}_EXIT:$?"`
   }).join('\n\n')
 }
 
-// Render the UI-test stage prompt parts from harness config. Called ONLY when cfg.uiTest.enabled.
-// Interpolates the MVP fields (devServerCommand / readySignal / port / routes); the stage gate
-// decides whether this runs at all. port is the resolved per-task port (base + taskNumber).
-function renderUiTestPrompt(cfg, port) {
-  const ui = cfg.uiTest
-  const routes = (Array.isArray(ui.routes) && ui.routes.length) ? ui.routes : ['/']
-  const ready = ui.readySignal || 'ready'
-  const devCmd = ui.devServerCommand || 'echo "ERROR: uiTest.enabled but devServerCommand missing in planning/harness.json" && false'
-  const routeChecks = routes.map((r, i) => `  CHECK ${i + 1} — Route ${r} renders without error:
-    playwright-cli goto http://localhost:${port}${r}
-    playwright-cli snapshot
-    playwright-cli console
-    Verify: the page title / headings do not contain "404", "500", "Error", or "Not Found";
-    the page shows real content (not a bare framework error screen); the console has no
-    error-level entries ("warning"-level entries → WARN, not FAIL).`).join('\n\n')
-  const routeRows = routes.map(r => `  | Route ${r} renders | PASS/WARN/FAIL | |`).join('\n')
-  return { routes, ready, devCmd, port, routeChecks, routeRows }
+// Snapshot baseline artifacts for any baseline-diff checks before the first task, so the test stages
+// can diff current output vs the pre-run state and fail only on net-new items. Resume-safe: only
+// writes a baseline that does not already exist. No-op when no baseline-diff checks are configured.
+async function snapshotBaselines(cfg, cwd) {
+  const checks = (cfg?.validation?.checks || []).filter(c => c.kind === 'baseline-diff' && c.baselineCommand)
+  if (!checks.length) return
+  const steps = checks.map(c => {
+    const slug = (c.name || 'check').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+    const path = `${reportsDir}/${slug}-baseline.json`
+    return `Baseline "${c.name}" -> ${path}:
+  cd ${cwd} && mkdir -p ${reportsDir}
+  cd ${cwd} && { [ -f ${path} ] && echo "BASELINE EXISTS (kept): ${path}" || { ${c.baselineCommand} > ${path} 2>/dev/null; echo "BASELINE WRITTEN: ${path}"; } ; }`
+  }).join('\n\n')
+  await agent(`
+You are the baseline-snapshot agent for the SDLC pipeline. Capture the pre-run baseline for each
+baseline-diff validation check BEFORE any implementation runs. Run each block exactly as written.
+Do NOT modify source. Existing baselines are kept (resume-safe).
+
+${steps}
+
+Return using StructuredOutput: done=true, and note which baselines were written vs already present.
+`, { label: 'baseline-snapshot', schema: { type: 'object', required: ['done'], properties: { done: { type: 'boolean' }, notes: { type: 'string' } } }, model: 'haiku' })
 }
 
 // ----------------------------------------------------------------
-// Stage results accumulator
+// COMMITTED AUTHORITATIVE STATE (Block A)
+//
+// `state` is the in-memory source of truth; writeTaskState() persists it to sdlc-task-state.json.
+// COMMIT CADENCE mirrors the rest of the engine family:
+//   --worktree → commit every write (the worktree is throwaway; mirrors sdlc-flow).
+//   in place   → write uncommitted each task (cat-visible for crash inspection) and sweep into ONE
+//                final `chore:` state commit at the end (mirrors sdlc-run's defer-to-final pattern,
+//                keeping the current branch free of per-task state-churn commits).
+// The runtime has no fs/clock, so a Haiku writer stamps started_at/updated_at and does the Write
+// (+ git when committing). Committed report/code commits remain the authoritative resume signal;
+// state is the at-a-glance index.
 // ----------------------------------------------------------------
-const stageResults = []
+const state = {
+  spec_slug: blockId,
+  mode: useWorktree ? 'worktree' : 'in-place',
+  branch: baseBranchName,
+  worktree_path: '',
+  status: 'running',
+  current_task: null,
+  tasks_run: [],
+  tasks: {},        // "N": { status, attempts, summary, issues, fixes, decisions, files_changed, commit, validated }
+  bail_reason: null,
+  tokens: { stages: [], total: { promptTokEst: 0, filesReadKb: 0, inTokEst: 0, outTok: 0 } },  // Block A — refreshed on every write
+}
+
+// Persist `state` to sdlc-task-state.json. `commit` controls whether this write is also committed.
+async function writeTaskState(label, { cwd, commit }) {
+  state.tokens = buildTokensBlock()   // Block A — refresh the committed token roll-up before persisting
+  const stateJson = JSON.stringify(state, null, 2)
+  const commitStep = commit
+    ? `STEP 4 — commit on the branch (never git add -A; stage explicitly):
+  cd ${cwd} && git add ${stateFile}
+  cd ${cwd} && git commit -m "$(cat <<'EOF'
+chore: sdlc-task state — ${label}
+EOF
+)" || echo "NOTHING_TO_COMMIT"
+  cd ${cwd} && git log --oneline -1`
+    : `STEP 4 — do NOT commit. Leave ${stateFile} written but unstaged (it is swept into one final commit later).`
+  const result = await agent(`
+You maintain the COMMITTED, authoritative run-state for an /sdlc-task pipeline. You run from the run
+root. Write ONE JSON file${commit ? ' and commit it' : ''} — do not run checks, edit source, or touch anything else.
+
+STEP 1 — timestamps + preserved start time (from the run root):
+  cd ${cwd} && NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  cd ${cwd} && cat ${stateFile} 2>/dev/null || echo "__NO_STATE__"
+  If that file exists and has a "started_at" value, REUSE it verbatim. Otherwise started_at = NOW.
+
+STEP 2 — ensure the dir exists:
+  cd ${cwd} && mkdir -p ${blockDir}/sdlc
+
+STEP 3 — write ${stateFile} with EXACTLY this JSON, but inserting two extra top-level keys
+  "started_at" (preserved or NOW) and "updated_at" (NOW) right after "branch". Valid JSON only
+  (double quotes, no trailing commas, no markdown fences). The object to write (verbatim except for
+  adding those two timestamp keys):
+${stateJson}
+
+${commitStep}
+
+Use the Write tool for the file. Return via StructuredOutput: written=true on success, commitHash from
+the final git log line (empty string when not committed / nothing to commit).
+`, withModel({ label: `state:${label}`, schema: STATE_WRITE_SCHEMA }, MODEL.stateWriter))
+  if (!result || !result.written) {
+    log(`(state) could not persist task state for "${label}" — continuing`)
+  }
+  return result
+}
 
 // ================================================================
-// PHASE 0: WORKTREE SETUP — auto-create isolated worktree
+// PHASE 0: SETUP — locate the repo root, or create the isolated worktree (--worktree)
 // ================================================================
-phase('Worktree')
-log(`Setting up worktree for ${stem}${resumeMode ? ' (resume mode — reuse existing worktree if present)' : ''}...`)
+phase('Setup')
+log(`Setting up (${useWorktree ? 'isolated worktree' : 'in place'})${resumeMode ? ', resume' : ''}...`)
 
 const setupResult = await tracedAgent(`
-You are the worktree setup agent. Your job is to create (or locate) an isolated git worktree
-for this pipeline run. All bash commands run from the MAIN REPO ROOT (your current CWD).
+You are the setup agent for the lean /sdlc-task pipeline. ${useWorktree
+  ? 'Create (or locate) ONE isolated git worktree for this run.'
+  : 'The pipeline runs IN PLACE on the current branch — do NOT create a worktree.'} All bash commands run
+from the MAIN REPO ROOT (your current CWD).
 
 Target:
-  Spec:           ${blockId}
-  Task:           ${taskNumber}
-  Base name:      ${baseBranchName}
+  Spec:       ${blockId}
+  Spec file:  ${specFile}
+${useWorktree ? `  Base name:  ${baseBranchName}` : ''}
 
-STEP 1 — Get the absolute path to the repo root:
-  Run: git rev-parse --show-toplevel
-  Store the output as repoRoot (trim whitespace).
-${resumeMode ? `
-RESUME MODE IS ON — reuse the existing worktree for this task instead of creating a fresh one.
-  a. Check whether the base worktree directory exists:
-       git worktree list | grep "trees/${baseBranchName}" && echo "WT_EXISTS" || echo "WT_MISSING"
-  b. Check whether the base branch exists:
-       git branch --list "${baseBranchName}"
-  Then:
-  - WT_EXISTS → REUSE it verbatim. Set branchName="${baseBranchName}", do NOT create anything,
-    do NOT recreate the empty init commit. Skip STEP 2 and STEP 3 entirely; go to STEP 4.
-    Set wasCreated=false.
-  - WT_MISSING but the branch "${baseBranchName}" exists (orphan branch, dir was removed) →
-    re-attach a worktree to the existing branch (note: NO -b flag, so it checks out the existing branch):
-       mkdir -p trees
-       git worktree add --no-checkout trees/${baseBranchName} ${baseBranchName}
-       git -C trees/${baseBranchName} sparse-checkout init --cone
-       # Cone ALL tracked top-level directories — stack-agnostic, no project-layout assumptions (D5/P5).
-       git -C trees/${baseBranchName} sparse-checkout set $(git ls-tree HEAD --name-only -d | tr '\\n' ' ')
-       git -C trees/${baseBranchName} checkout
-       if [ -f .env ]; then cp .env trees/${baseBranchName}/.env; fi
-       if [ -f .env.local ]; then cp .env.local trees/${baseBranchName}/.env.local; fi
-    Set branchName="${baseBranchName}", wasCreated=false. Skip STEP 2 and STEP 3; go to STEP 4.
-  - Neither exists → resume was requested but nothing is there; fall through to STEP 2/3 and create
-    a fresh worktree named "${baseBranchName}" as normal.
-` : ''}
-STEP 2 — Find a free worktree name using this exact algorithm:
+STEP 1 — Get the absolute repo root and the current branch:
+  Run: git rev-parse --show-toplevel        (store trimmed output as repoRoot)
+  Run: git rev-parse --abbrev-ref HEAD       (store as currentBranch)
+${useWorktree ? `
+WORKTREE MODE (--worktree) — create or reuse an isolated worktree:
+${resumeMode ? `  RESUME — reuse the existing worktree for this spec if present:
+    a. git worktree list | grep "trees/${baseBranchName}" && echo "WT_EXISTS" || echo "WT_MISSING"
+    b. git branch --list "${baseBranchName}"
+    - WT_EXISTS → REUSE verbatim. branchName="${baseBranchName}", wasCreated=false. Skip to STEP 3.
+    - WT_MISSING but branch "${baseBranchName}" exists (orphan branch, dir removed) → re-attach (NO -b flag):
+        mkdir -p trees
+        git worktree add --no-checkout trees/${baseBranchName} ${baseBranchName}
+        git -C trees/${baseBranchName} sparse-checkout init --cone
+        git -C trees/${baseBranchName} sparse-checkout set $(git ls-tree HEAD --name-only -d | tr '\\n' ' ')
+        git -C trees/${baseBranchName} checkout
+        if [ -f .env ]; then cp .env trees/${baseBranchName}/.env; fi
+        if [ -f .env.local ]; then cp .env.local trees/${baseBranchName}/.env.local; fi
+      branchName="${baseBranchName}", wasCreated=false. Skip to STEP 3.
+    - Neither exists → fall through and create a fresh worktree as normal.
+` : ''}  STEP 2 — Find a free worktree name. Start with candidate "${baseBranchName}"; for each candidate run:
+      git worktree list | grep "trees/<candidate>"
+      git branch --list "<candidate>"
+    If BOTH return nothing → the candidate is free; use it. Otherwise try "${baseBranchName}-2",
+    "${baseBranchName}-3", … up to "-10". Store the chosen name as branchName.
 
-  Start with candidate = "${baseBranchName}" and work through each suffix in turn:
+  STEP 2b — Create the worktree (replace [branchName] with the chosen name):
+    a. mkdir -p trees
+    b. git worktree add --no-checkout trees/[branchName] -b [branchName]
+    c. git -C trees/[branchName] sparse-checkout init --cone
+    d. # Cone ALL tracked top-level directories — stack-agnostic, no project-layout assumptions (D5/P5).
+       git -C trees/[branchName] sparse-checkout set $(git ls-tree HEAD --name-only -d | tr '\\n' ' ')
+    e. git -C trees/[branchName] checkout
+    f. if [ -f .env ]; then cp .env trees/[branchName]/.env; fi
+    g. if [ -f .env.local ]; then cp .env.local trees/[branchName]/.env.local; fi
+    h. git -C trees/[branchName] commit --allow-empty -m "chore: init worktree [branchName]"
+    Set wasCreated=true.
+` : `
+IN-PLACE MODE — no worktree. branchName=currentBranch, wasCreated=false. runDir=repoRoot.
+`}
+STEP 3 — Compute runDir:
+  ${useWorktree ? 'runDir = repoRoot + "/trees/" + branchName' : 'runDir = repoRoot'}
 
-  Iteration 1 — candidate = "${baseBranchName}":
-    Run: git worktree list | grep "trees/${baseBranchName}"
-    Run: git branch --list "${baseBranchName}"
-    If BOTH return nothing → "${baseBranchName}" is free. Use it. Skip to STEP 3.
-
-  Iteration 2 — candidate = "${baseBranchName}-2":
-    Run: git worktree list | grep "trees/${baseBranchName}-2"
-    Run: git branch --list "${baseBranchName}-2"
-    If BOTH return nothing → "${baseBranchName}-2" is free. Use it. Skip to STEP 3.
-
-  Iteration 3 — candidate = "${baseBranchName}-3":
-    ... same pattern ...
-
-  Continue through "-10" as the cap. Use the first free candidate found.
-  Store the chosen name as branchName.
-
-STEP 3 — Create the worktree:
-  Run these commands in order (replace [branchName] and [repoRoot] with actual values):
-
-  a. mkdir -p trees
-  b. git worktree add --no-checkout trees/[branchName] -b [branchName]
-  c. git -C trees/[branchName] sparse-checkout init --cone
-  d. # Cone ALL tracked top-level directories — stack-agnostic, no project-layout assumptions (D5/P5).
-     git -C trees/[branchName] sparse-checkout set $(git ls-tree HEAD --name-only -d | tr '\\n' ' ')
-  e. git -C trees/[branchName] checkout
-  f. if [ -f .env ]; then cp .env trees/[branchName]/.env; fi
-  g. if [ -f .env.local ]; then cp .env.local trees/[branchName]/.env.local; fi
-  h. git -C trees/[branchName] commit --allow-empty -m "chore: init worktree [branchName]"
-
-STEP 4 — Verify:
-  Run: git worktree list
-  Run: ls trees/[branchName]/
-  Confirm the worktree exists and contains the tracked top-level directories — at minimum planning/
-  and .claude/ (the scout/spec/report machinery), plus whatever source/content trees the project has.
-
-STEP 5 — Compute the absolute worktree path:
-  worktreePath = repoRoot + "/trees/" + branchName
-
-STEP 6 — Report the pipeline-start inputs (so a fresh run can skip the separate scout stage):
+STEP 4 — Report pipeline-start inputs (run these from runDir):
   a. Spec file:
-       cd trees/[branchName] && ls ${specFile} 2>/dev/null && echo "SPEC_EXISTS" || echo "SPEC_MISSING"
-     Set specFileExists = true iff "SPEC_EXISTS" printed.
-  b. Block status — find this spec's row in status.md and read its Status column:
-       cd trees/[branchName] && grep -iE "${blockId}" planning/status.md | head -5
-     Set blockStatus to the title-case Status value (Not started / In progress / Done / Blocked /
-     Skipped). If no row is found, set blockStatus = "Unknown".
-  c. Thin-spec content check (D19) — evaluate ONLY when wasCreated is true AND specFileExists is true
-     (a fresh run about to spend implement tokens; skip entirely on a resumed/existing worktree). Read
-     the spec and set specThin=true ONLY on these high-confidence signals (a blocked valid spec is far
-     costlier than a missed thin one — when in doubt, do NOT flag):
-       - cd trees/[branchName] && grep -n '{{' ${specFile}  → any unfilled {{TOKEN}} is thin.
-       - The '## Acceptance Criteria' section has no real '- ' bullet (empty, or only a verbatim
-         template seed) → thin.
-     Do NOT flag a bare 'TODO'/'TBD' in prose, do NOT treat any '<...>' as a token (legitimate in
-     'Vec<T>', 'the <concept> folder', globs), and never flag the Amendment Log seed
-     '_No amendments yet._'. Set specThin=false otherwise, and thinReason="" unless thin.
+       cd <runDir> && ls ${specFile} 2>/dev/null && echo "SPEC_EXISTS" || echo "SPEC_MISSING"
+     specFileExists = true iff "SPEC_EXISTS" printed.
+  b. Block status — find this spec's row in status.md:
+       cd <runDir> && grep -iE "${blockId}" planning/status.md | head -5
+     blockStatus = the title-case Status value (Not started / In progress / Done / Blocked / Skipped),
+     or "Unknown" if no row is found.
+  c. Thin-spec check (D19) — evaluate ONLY when specFileExists AND this is NOT a resume run (a fresh run
+     about to spend implement tokens). Set specThin=true ONLY on these high-confidence signals (a blocked
+     valid spec is far costlier than a missed thin one — when in doubt do NOT flag):
+       - cd <runDir> && grep -n '{{' ${specFile}  → any unfilled {{TOKEN}} is thin.
+       - The '## Acceptance Criteria' section has no real '- ' bullet (empty, or only a template seed) → thin.
+     Do NOT flag bare 'TODO'/'TBD' prose, do NOT treat '<...>' as a token (legitimate in 'Vec<T>', globs),
+     never flag the Amendment Log seed '_No amendments yet._'. Else specThin=false, thinReason="".
+
+STEP 5 — Capture the emoji-gate diff base — the HEAD short sha as it stands NOW, before any task commit:
+  cd <runDir> && git rev-parse --short HEAD     (store as baseSha)
 
 Return your result using the StructuredOutput tool:
-  branchName:     the final chosen branch name (e.g. "${baseBranchName}" or "${baseBranchName}-2")
-  worktreePath:   the ABSOLUTE path to the worktree (e.g. <repoRoot>/trees/${baseBranchName})
-  wasCreated:     true if a NEW worktree was created; false if an existing one was reused (resume mode)
-  specFileExists: from STEP 6a
-  blockStatus:    from STEP 6b
-  specThin:       from STEP 6c (false unless a fresh run with a structurally-valid but thin spec)
-  thinReason:     from STEP 6c (the specific failures when specThin; empty string otherwise)
-  notes:          any issues encountered
-`, withModel({ label: 'worktree-setup', schema: SETUP_SCHEMA, phase: 'Worktree' }, MODEL.worktreeSetup))
+  runDir, branchName, baseSha, wasCreated, specFileExists, blockStatus, specThin, thinReason, notes.
+`, withModel({ label: 'setup', schema: SETUP_SCHEMA, phase: 'Setup' }, MODEL.setup))
 
 if (!setupResult) {
-  log('Worktree setup agent returned null — aborting pipeline')
-  return { error: 'Worktree setup failed', blockId, taskNumber, stem }
+  log('Setup agent returned null — aborting pipeline')
+  return { error: 'Setup failed', blockId }
+}
+const { runDir, branchName, baseSha } = setupResult
+state.branch = branchName
+state.worktree_path = useWorktree ? runDir : ''
+log(`Run root: ${runDir} | branch: ${branchName} | base: ${baseSha}`)
+
+if (!setupResult.specFileExists) {
+  log(`Spec file ${specFile} not found. /sdlc-task expects an authored spec.`)
+  log(`Fix: run /generate-tasks ${blockId} (and /breakdown) on main, commit, then re-run /sdlc-task ${blockId}.`)
+  return { error: 'Missing spec', blockId, specFile }
 }
 
-const { branchName, worktreePath } = setupResult
-log(`Worktree ready: ${worktreePath} (branch: ${branchName})`)
-stageResults.push({ stage: 'worktree-setup', ...setupResult, success: true })
-
-// D19 — thin-spec guard for a standalone fresh run. Skipped under a block (the block's pre-flight
-// already validated content once on main) and on resume (specThin is only set on a fresh worktree).
-if (setupResult.specThin && !underBlock) {
+// D19 — thin-spec guard for a fresh run.
+if (setupResult.specThin && !resumeMode) {
   log(`ABORTED (D19) — spec is structurally valid but substantively thin: ${setupResult.thinReason || '(no reason given)'}`)
   log(`Fix: flesh out ${specFile} (run /generate-tasks --force to regenerate, or edit + commit), then re-run.`)
-  return { error: 'Thin spec (D19)', reason: setupResult.thinReason || '', blockId, taskNumber, stem }
+  return { error: 'Thin spec (D19)', reason: setupResult.thinReason || '', blockId }
 }
 
-// ----------------------------------------------------------------
-// Build the worktree path injection header — prepended to EVERY agent prompt
-// ----------------------------------------------------------------
-const W = `WORKTREE (not the main repo). repo root = ${worktreePath}
-Shell state does NOT persist between Bash calls — START EVERY Bash call with: cd ${worktreePath} &&
-Run all build/test/validation from the repo root; relative paths (planning/...) resolve from there.
+// Run-root path injection header — prepended to every agent prompt that does real work.
+const W = `Run root = ${runDir}${useWorktree ? ' (an isolated WORKTREE, not the main repo)' : ' (the main repo, IN PLACE on branch ' + branchName + ')'}.
+Shell state does NOT persist between Bash calls — START EVERY Bash call with: cd ${runDir} &&
+Run all build/test/validation from the run root; relative paths (planning/...) resolve from there.
 `
 
 // ================================================================
-// PHASE 1: SCOUT — determine current pipeline stage
-//
-// Only RESUME runs need a scout. A fresh standalone run always gets a clean, suffix-incremented
-// worktree (see the WORKTREE setup above), so none of THIS task's report files can exist yet — the
-// start stage is deterministic: generate-tasks iff the spec is missing, else implement. The setup
-// agent already reported specFileExists + blockStatus, so the non-resume path skips the scout
-// agent entirely (one fewer round-trip). On --resume we reuse an existing worktree that may be
-// partway through, so the scout's report-file decision tree is needed to find the resume point.
+// PHASE 1: PLAN — enumerate tasks (D16 lint) + load resume state
 // ================================================================
-let scout
-if (!resumeMode) {
-  scout = {
-    startStage:     setupResult.specFileExists ? 'implement' : 'generate-tasks',
-    specFileExists: setupResult.specFileExists ?? true,
-    blockStatus:    setupResult.blockStatus || 'Unknown',
-    existingReports: [],
-    statusSummary:  '',
-    discrepancies:  '',
-  }
-  log(`Fresh worktree — starting from "${scout.startStage}" (scout skipped; not a resume).`)
-} else {
-  phase('Scout')
-  scout = await tracedAgent(`${W}
-You are the pipeline scout for the SDLC workflow system.
+phase('Plan')
 
-Target:
-  Spec ID:     ${blockId}
-  Task number: ${taskNumber}
-  Spec file:   ${specFile}
-  Report stem: ${stem}
-  Reports dir: ${reportsDir}
+const enumResult = await tracedAgent(`${W}
+You enumerate the numbered tasks in a spec. Do NOT modify anything.
 
-Your job is to determine which SDLC stage to start from, based on which report files exist.
-Run these checks using the Bash tool (all commands start with: cd ${worktreePath} &&):
+STEP 1 — read the spec headings:
+  cd ${runDir} && grep -nE '^### [0-9]+\\.' ${specFile} || echo "NO_TASK_HEADINGS"
 
-STEP 1 — Check spec file:
-  cd ${worktreePath} && ls -la ${specFile} 2>/dev/null && echo "SPEC_EXISTS" || echo "SPEC_MISSING"
+STEP 2 — Each "### N." line is one task. Collect every N in document order into allTasks.
+  Set hasTaskHeadings=true iff at least one "### N." heading exists.
 
-STEP 2 — Check report files:
-  cd ${worktreePath} && ls ${implementReport} 2>/dev/null && echo "HAS_IMPLEMENT" || echo "NO_IMPLEMENT"
-  cd ${worktreePath} && ls ${testReport} 2>/dev/null && echo "HAS_TEST" || echo "NO_TEST"
-  cd ${worktreePath} && ls ${reviewReport} 2>/dev/null && echo "HAS_REVIEW" || echo "NO_REVIEW"
-  cd ${worktreePath} && ls ${uitestReport} 2>/dev/null && echo "HAS_UITEST" || echo "NO_UITEST"
-  cd ${worktreePath} && ls ${documentReport} 2>/dev/null && echo "HAS_DOCUMENT" || echo "NO_DOCUMENT"
-  cd ${worktreePath} && ls ${reportsDir}/*.md 2>/dev/null | head -20 || echo "NO_BLOCK_REPORTS"
+Return via StructuredOutput: hasTaskHeadings, allTasks (integers in order), notes.
+`, withModel({ label: 'enumerate', schema: ENUMERATE_SCHEMA, phase: 'Plan' }, MODEL.enumerate))
 
-STEP 3 — Read status.md:
-  cd ${worktreePath} && head -60 planning/status.md
-
-STEP 4 — Read recent log (at the worktree root):
-  cd ${worktreePath} && head -60 log.md
-
-STEP 5 — If review report exists, extract the verdict:
-  cd ${worktreePath} && grep -iE "\\*\\*Verdict|## Verdict|^Verdict:" ${reviewReport} 2>/dev/null | head -5 || echo "NO_REVIEW_REPORT"
-
-STEP 6 — Determine startStage using this EXACT priority order:
-  1. Spec file MISSING → "generate-tasks"
-  2. Spec exists, no implement report → "implement"
-  3. Implement report exists, no test report → "test"
-  4. Test report exists, no review report → "review"
-  5. Review report with FAIL or PARTIAL verdict → "fix"
-  6. Review report with PASS verdict, no ui-test report → "ui-test"
-  7. Review report with PASS verdict, ui-test report exists, no document report → "document"
-  8. Document report exists → "wrap-up"
-
-STEP 7 — Find this spec's status in status.md progress table. Look for a row containing
-  "${blockId}" and extract its Status column value (title-case: Not started / In progress / Done / Blocked / Skipped).
-
-STEP 8 — Note any discrepancy between log and report files.
-
-Return your findings using the StructuredOutput tool.
-`, withModel({ label: 'scout', schema: SCOUT_SCHEMA, phase: 'Scout' }, MODEL.scout))
-
-  if (!scout) {
-    log('Scout agent failed — cannot determine pipeline state, aborting')
-    return { error: 'Scout failed', blockId, taskNumber, stem }
-  }
+if (!enumResult || !enumResult.hasTaskHeadings || !(enumResult.allTasks || []).length) {
+  // D16 preflight lint — refuse to guess the task structure.
+  log(`ABORTED (D16) — ${specFile} has no "### N." numbered task headings.`)
+  log(`Fix: structure the spec with "### 1.", "### 2.", … task headings (see the spec template), commit, then re-run.`)
+  return { error: 'No task headings (D16)', blockId, specFile }
 }
 
-log(`Scout: start from "${scout.startStage}" | block status: "${scout.blockStatus}"`)
-if (scout.discrepancies) log(`Discrepancies: ${scout.discrepancies}`)
-if (scout.statusSummary) log(scout.statusSummary)
-
-// Block "Not started" warning — do NOT edit status.md in the worktree.
-// status.md changes are always deferred to the task log (applied at merge time).
-// If the block needs to be flipped before parallel tasks start, run /start-block first.
-if (scout.blockStatus === 'Not started') {
-  log(`Note: Spec "${blockId}" is "Not started" in status.md.`)
-  log(`The task log will record the status flip — applied when this branch merges to main.`)
-  log(`To update status.md immediately (e.g. before other parallel tasks start), run /start-block ${blockId} from the main session.`)
+const allTasks = enumResult.allTasks
+const taskList = selectedTasks ? allTasks.filter(n => selectedTasks.has(n)) : allTasks.slice()
+if (!taskList.length) {
+  log(`No tasks match the selection "${rangeSpec}" against spec tasks [${allTasks.join(', ')}].`)
+  return { error: 'Empty task selection', blockId, rangeSpec, allTasks }
 }
-
-let currentStage = scout.startStage
-let reviewAttempts = 0
-const MAX_REVIEW_ATTEMPTS = 3
-let lastReviewResult = null
-// B1: hand-off context carried structurally between stages so review/fix do NOT re-ingest the
-// upstream prose reports. The review gate stays authoritative — it re-runs gating checks fresh
-// and reads real source; these fields only tell it WHERE to look and what the prior stage claimed.
-let lastImplReport = null   // implement OR fix result (fix overwrites the implement-report slot)
-let lastTestReport = null   // most recent test result
-
-// Render a structured hand-off field as prompt-safe text (arrays → bullet list, empty → "none").
-const handoff = (v) => Array.isArray(v)
-  ? (v.length ? v.map((x) => `     - ${x}`).join('\n') : '     (none)')
-  : (v === undefined || v === null || v === '' ? '(none)' : String(v))
-
-// STAGED MODEL ESCALATION — the FINAL fix pass and FINAL review attempt before the loop
-// gives up run on a stronger model. The common path stays on Sonnet (MODEL.fix/review);
-// only the genuinely-hard case that has already failed twice gets one Opus shot before
-// the task escalates to /sdlc-block triage (or a FAIL wrap-up). Set to null to disable.
-const ESCALATION_MODEL = 'opus'
-
-// ================================================================
-// PHASE 2: PLAN — generate-tasks (only if spec file missing)
-// ================================================================
-if (currentStage === 'generate-tasks') {
-  phase('Plan')
-  log('Spec file not found — running generate-tasks...')
-
-  const genResult = await tracedAgent(`${W}
-You need to generate the task spec for "${blockId}".
-
-Spec file to create: ${specFile}
-Worktree root: ${worktreePath}
-
-Instructions:
-
-1. Read planning/master-plan.md (at the worktree root) — find the section covering "${blockId}".
-   Run: cd ${worktreePath} && cat planning/master-plan.md
-
-2. Read CLAUDE.md and planning/context.md — internalize and enforce the project's standing rules.
-   CLAUDE.md is the authority; do not assume any stack, locale-parity, narrative, or content-layout
-   rule unless written there. Universal harness rules always apply: no fabricated metrics or quotes,
-   no emoji, every change ships with tests.
-   Run: cd ${worktreePath} && cat CLAUDE.md
-
-3. Read the generic spec skeleton as a format reference:
-   cd ${worktreePath} && cat .claude/workflows/templates/spec-template.md
-
-   Also create the spec directory structure now if it does not exist:
-   cd ${worktreePath} && mkdir -p planning/${blockId}/sdlc/reports
-
-4. Write ${specFile} (absolute path: ${worktreePath}/${specFile}) following the standard format.
-
-   Rules:
-   - Every task ships with the validation that proves it (the project's validation suite passes)
-   - Follow every CLAUDE.md standing rule; record any deferral in ## Notes
-   - The final task must always be "Validate"
-   - Tasks should be numbered ### 1., ### 2., etc.
-   - Include exact file paths and component/function names
-   - Include a ## Validation Commands block that mirrors planning/harness.json
-     (validation.checks[].command, in order); if that file is absent, use the project's
-     documented build/test commands from CLAUDE.md
-
-Return using StructuredOutput:
-  reportFile: "${specFile}"
-  success: true if written successfully
-  filesModified: ["${specFile}"]
-  notes: brief note about what was generated
-`, { label: 'generate-tasks', schema: STAGE_SCHEMA, phase: 'Plan' })
-
-  if (!genResult || !genResult.success) {
-    log('generate-tasks failed — aborting pipeline')
-    stageResults.push({ stage: 'generate-tasks', success: false })
-    return { error: 'generate-tasks failed', blockId, taskNumber, stem, stageResults }
-  }
-  stageResults.push({ stage: 'generate-tasks', ...genResult })
-  log(`Task spec written: ${genResult.reportFile}`)
-  currentStage = 'implement'
-}
-
-// Load the project's validation policy once (mechanism/policy split — see planning/harness.json).
-// Read from the worktree checkout. null when absent/invalid → Test falls back to the spec's
-// ## Validation Commands and the UI-test stage is skipped. The engine ships no stack defaults.
-const harnessCfg = await loadHarnessConfig(worktreePath)
-log(harnessCfg
-  ? `Harness config loaded: ${(harnessCfg.validation?.checks || []).length} validation check(s); uiTest ${harnessCfg.uiTest?.enabled ? 'enabled' : 'disabled'}.`
-  : 'No planning/harness.json — validation falls back to the spec; UI-test disabled.')
-// Capture pre-task baselines for any baseline-diff checks (resume-safe; no-op when none configured).
-await snapshotBaselines(harnessCfg, worktreePath)
-
-// ================================================================
-// BREAKDOWN ASSESSMENT — should this task be decomposed before implementing?
-//
-// Assess Task N against a universal coarseness heuristic and act per the project's breakdown policy
-// (planning/harness.json → breakdown.mode; default 'recommend'). Runs ONLY when:
-//   • we are about to implement fresh (currentStage === 'implement'), AND
-//   • this is a STANDALONE run — NOT under /sdlc-block (which assesses once at the spec level), AND
-//   • mode !== 'off'.
-// Because a standalone run has exactly one worktree, writing breakdown.md here is conflict-free; the
-// agent itself no-ops if a "### Step N:" section already exists. 'recommend' logs and proceeds;
-// 'auto' generates the sub-steps before implementing. Advisory by default — it never blocks.
-// ================================================================
-const breakdownMode = harnessCfg?.breakdown?.mode || 'recommend'
-const breakdownThreshold = harnessCfg?.breakdown?.complexityThreshold ?? 3
-if (currentStage === 'implement' && !underBlock && breakdownMode !== 'off') {
-  phase('Plan')
-  log(`Breakdown assessment for task ${taskNumber} (mode=${breakdownMode})...`)
-
-  const assess = await tracedAgent(`${W}
-You are the breakdown-assessment agent. Decide whether Task ${taskNumber} of this spec is too COARSE
-to implement directly and would benefit from a /breakdown into atomic sub-steps first.
-
-STEP 1 — If a breakdown already covers this task, do nothing:
-  cd ${worktreePath} && ls ${breakdownFile} 2>/dev/null && grep -q "### Step ${taskNumber}:" ${breakdownFile} && echo "HAS_STEP" || echo "NO_STEP"
-  If the last line is "HAS_STEP": return alreadyExists=true, recommendBreakdown=false, and STOP.
-
-STEP 2 — Read Task ${taskNumber} from the spec:
-  cd ${worktreePath} && cat ${specFile}
-  Focus on the "### ${taskNumber}." section and the Acceptance Criteria that apply to it.
-
-STEP 3 — Apply the coarseness heuristic. The real predictor of decomposition value is SEPARABLE
-  STRUCTURE, not raw file count. Task ${taskNumber} is a BREAKDOWN CANDIDATE when ANY hold:
-  - it bundles multiple separable concerns (e.g. "implement X AND refactor Y AND add Z"); OR
-  - it spans multiple layers/modules (e.g. data model + API + UI); OR
-  - it carries a large acceptance-criteria set covering several INDEPENDENTLY-testable units; OR
-  - it touches MORE than ${breakdownThreshold} distinct files AND those files are HETEROGENEOUS
-    (different shapes/roles, or spanning more than one concern/layer above). File count is a
-    CONTRIBUTING signal here, never a trigger on its own.
-  HOMOGENEITY DISCOUNT — do NOT flag on file count alone when the many files are the SAME shape serving
-  ONE concern (e.g. a content path's metadata file + N near-identical lesson/module pairs, or N
-  parallel fixtures). A single focused change over a small file set is also NOT a candidate.
-
-Return using StructuredOutput: alreadyExists, recommendBreakdown, reason (one sentence naming the
-signal that fired, or why none did), fileCount (distinct files the task touches).
-`, withModel({ label: 'breakdown-assess', schema: BREAKDOWN_ASSESS_SCHEMA, phase: 'Plan' }, MODEL.breakdownAssess))
-
-  if (assess?.alreadyExists) {
-    log(`Task ${taskNumber}: breakdown already present — skipping assessment.`)
-  } else if (assess?.recommendBreakdown) {
-    if (breakdownMode === 'auto') {
-      log(`Task ${taskNumber}: coarse (${assess.reason}) — auto-generating breakdown (mode=auto)...`)
-      const gen = await tracedAgent(`${W}
-You are the breakdown-generation agent (auto mode). Author atomic sub-steps for Task ${taskNumber} so
-the implement stage executes a granular plan instead of a coarse one. Do NOT implement anything and do
-NOT modify ${specFile}.
-
-1. Read the task and the real source it will touch (so sub-steps name actual paths/symbols):
-   cd ${worktreePath} && cat ${specFile}   (focus on "### ${taskNumber}.")
-   Read the files that section references before writing sub-steps.
-
-2. Write (create the file, or append this task's section) ${breakdownFile}:
-
-   ### Step ${taskNumber}: <task title>
-   - ${taskNumber}.1 <atomic action — exact file path + symbol + what to write/change>
-   - ${taskNumber}.2 <...>
-   **Verify:** <a concrete command/check after each logical group of sub-steps>
-
-   Each sub-step is a SINGLE atomic action naming exact file paths and function/component names.
-   tasks.md stays authoritative for scope/acceptance criteria; breakdown.md is authoritative for HOW.
-
-3. Commit just the breakdown:
-   cd ${worktreePath} && git add ${breakdownFile} && git commit -m "docs: breakdown for ${stem}"
-   cd ${worktreePath} && git log --oneline -1
-
-Return using StructuredOutput: reportFile="${breakdownFile}", success, filesModified, commitHash, notes.
-`, withModel({ label: 'breakdown-gen', schema: STAGE_SCHEMA, phase: 'Plan' }, MODEL.breakdownGen))
-      if (gen?.success) {
-        log(`Breakdown written: ${breakdownFile} — implement will use its sub-steps.`)
-        stageResults.push({ stage: 'breakdown', ...gen })
-      } else {
-        log(`Breakdown generation did not complete — implementing from tasks.md only.`)
-      }
-    } else {
-      log(`Task ${taskNumber}: RECOMMENDATION — consider /breakdown before implementing (${assess.reason}). breakdown.mode=recommend, so proceeding with tasks.md as-is.`)
-    }
-  } else if (assess) {
-    log(`Task ${taskNumber}: breakdown not needed (${assess.reason || 'task is appropriately scoped'}).`)
-  }
-}
-
-// ================================================================
-// PHASES 3–5: IMPLEMENT → (FIX →) TEST → REVIEW (with retry loop)
-// ================================================================
-while (['implement', 'fix', 'test', 'review', 'ui-test'].includes(currentStage) && reviewAttempts < MAX_REVIEW_ATTEMPTS) {
-
-  // ----------------------------------------------------------
-  // IMPLEMENT
-  // ----------------------------------------------------------
-  if (currentStage === 'implement') {
-    phase('Implement')
-    log('Running implement...')
-
-    const implResult = await tracedAgent(`${W}
-You are the implementation agent for the SDLC pipeline.
-
-Target:
-  Spec:            ${blockId}
-  Task:            Task ${taskNumber} only
-  Spec file:       ${specFile}
-  Report to write: ${implementReport}
-  Worktree root:   ${worktreePath}
-
-Instructions:
-
-1. Read CLAUDE.md — internalize all standing rules.
-   Run: cd ${worktreePath} && cat CLAUDE.md
-
-2. Read the spec file, focusing on the "### ${taskNumber}." section:
-   Run: cd ${worktreePath} && cat ${specFile}
-   Implement ONLY the "### ${taskNumber}." section. Do not implement other tasks.
-
-2.5. Check for an optional breakdown file (more granular sub-steps written by /breakdown):
-   Run: cd ${worktreePath} && ls ${breakdownFile} 2>/dev/null && echo "BREAKDOWN_EXISTS" || echo "NO_BREAKDOWN"
-
-   If BREAKDOWN_EXISTS:
-     Read ${worktreePath}/${breakdownFile}
-     Find the "### Step ${taskNumber}:" section — use its atomic sub-steps as the primary
-     execution guide for HOW to implement this task.
-     Inline "Verify:" commands are live checkpoints — run each before moving to the next sub-step.
-     tasks.md is authoritative for scope/acceptance criteria; breakdown.md is authoritative for HOW.
-
-   If NO_BREAKDOWN: proceed using tasks.md only.
-
-3. Execute each step methodically using Read, Edit, Write, and Bash tools.
-   ALL file paths must be absolute (under ${worktreePath}) OR use:
-     cd ${worktreePath} && <command>
-
-4. As you implement, follow every CLAUDE.md standing rule:
-   - CLAUDE.md is the authority — do not assume any stack, locale-parity, narrative, or
-     content-layout rule unless written there; if it is, enforce it exactly
-   - No fabricated metrics or quotes — every number must be verifiable
-   - No emoji in any file
-   - Add or update tests for any new code/logic — every change ships with the validation that proves it
-
-5. Run the Validation Commands from the spec to confirm correctness (the project's own suite —
-   from planning/harness.json, or the spec's ## Validation Commands):
-   cd ${worktreePath} && <each validation command from the spec> 2>&1 | tail -20
-
-5.5. SELF-CHECK — completeness gate (do this BEFORE writing the report or committing):
-   Re-read the in-scope "## Acceptance Criteria" for Task ${taskNumber}. For EACH criterion, open the
-   actual file(s) and confirm it is FULLY satisfied by your changes — do not assume from memory.
-   In particular:
-   (a) NO placeholder/stub bodies remain on any code path a criterion requires — e.g.
-       \`todo!()\`/\`unimplemented!()\`/\`unreachable!()\`, \`raise NotImplementedError\`,
-       \`throw new Error('not implemented')\`, empty \`pass\`-only bodies, or \`TODO\`/\`FIXME\` markers
-       in required paths. Sanity-grep ONLY the files the in-scope criteria require (the deliverable
-       files and the source paths those criteria name) — NOT every changed file — so the gate never
-       pushes you to edit files outside this task's scope. Build that path list from the criteria, then:
-         cd ${worktreePath} && grep -nE 'todo!\\(|unimplemented!\\(|unreachable!\\(|NotImplementedError|not implemented|FIXME' <those paths> 2>/dev/null
-       A stub in a file no in-scope criterion requires is OUT OF SCOPE — leave it for its owning task.
-   (b) EVERY deliverable file a criterion names actually exists at the stated path (e.g. a required
-       \`.env.example\`, config file, or fixture) — \`ls\` it.
-   (c) EVERY criterion that says "unit-tested"/"covered by a test" has a real, hermetic test that
-       exercises that path — not just a compiling stub.
-   If ANY criterion is not fully met, FIX IT NOW and re-run step 5 before proceeding. Do NOT write the
-   report or return \`success: true\` with a known gap — an unmet criterion shipped here costs a full
-   review-fail loop downstream.
-
-6. Write the implementation report:
-   Absolute path: ${worktreePath}/${implementReport}
-
-   Format:
-   # Implementation Report — ${stem}
-
-   **Date:** [run: cd ${worktreePath} && date +%Y-%m-%d]
-   **Plan:** ${specFile}
-   **Scope:** Task ${taskNumber}
-
-   ## What Was Built or Changed
-   - [bullet list with file paths]
-
-   ## Files Created or Modified
-   | File | Action |
-   |---|---|
-   | path/to/file | created / modified |
-
-   ## Validation Output
-   **Commands run:**
-   \`\`\`
-   [one line per command]
-   \`\`\`
-   **Result:** PASSED / FAILED
-   On FAIL only, paste the failing command's last 20 lines (\`... 2>&1 | tail -20\`). On PASS, do NOT
-   paste stdout — the Test stage is the authoritative full-output capture, and downstream stages re-run
-   the gating checks fresh.
-   \`\`\`
-   [failing tail -20 — omit this block entirely when PASSED]
-   \`\`\`
-
-   ## Decisions and Trade-offs
-   [non-obvious choices]
-
-   ## Follow-up Work
-   [anything deferred]
-
-   ## git diff --stat
-   \`\`\`
-   [run: cd ${worktreePath} && git diff --stat]
-   \`\`\`
-
-7. Commit your changes. Run from the worktree:
-   cd ${worktreePath} && git status
-   Stage files explicitly by name (never git add -A or git add .):
-     cd ${worktreePath} && git add <each changed source/test file> ${implementReport}
-   Commit using HEREDOC:
-     cd ${worktreePath} && git commit -m "$(cat <<'EOF'
-     feat: implement ${stem}
-
-     EOF
-     )"
-   Run: cd ${worktreePath} && git log --oneline -1
-
-Return using StructuredOutput:
-  reportFile: "${implementReport}"
-  success: true if implementation completed without critical errors
-  filesModified: array of source files created or modified
-  commitHash: 7-character short hash from git log --oneline -1
-  filesReadKb: telemetry — before returning, sum the byte size of every file you cat/Read this
-    stage (cd ${worktreePath} && wc -c <each file>), divide the total by 1024, and report the number.
-  notes: one-line summary
-`, { label: 'implement', schema: STAGE_SCHEMA, phase: 'Implement' })
-    recordFilesRead(implResult)
-
-    if (!implResult) {
-      log('Implement agent returned null — aborting pipeline')
-      stageResults.push({ stage: 'implement', success: false, notes: 'Agent returned null' })
-      break
-    }
-    stageResults.push({ stage: 'implement', ...implResult })
-    lastImplReport = implResult
-    if (!implResult.success) {
-      log('Implement reported failure — aborting pipeline')
-      break
-    }
-    // --implement-only (lean block, D23): stop after implement. With --review, run ONE review pass
-    // first (implement → review, skipping the test stage — review re-runs the gating checks itself);
-    // otherwise exit straight to the implement-only return below. Either way the consolidated back-half
-    // does the authoritative test/fix/document/wrap-up over the integrated tree.
-    currentStage = implementOnly ? (withReview ? 'review' : 'implement-only-done') : 'test'
-  }
-
-  // ----------------------------------------------------------
-  // FIX (review retry path)
-  // ----------------------------------------------------------
-  if (currentStage === 'fix') {
-    phase('Fix')
-    const fixPass = reviewAttempts + 1
-    log(`Running fix (pass ${fixPass}) — targeting review failures...`)
-
-    // Last fix pass before the loop can give up → escalate the model.
-    const fixModel = (ESCALATION_MODEL && fixPass === MAX_REVIEW_ATTEMPTS) ? ESCALATION_MODEL : MODEL.fix
-    if (fixModel !== MODEL.fix) log(`Final fix pass — escalating model to ${fixModel}.`)
-
-    const fixResult = await tracedAgent(`${W}
-You are the fix agent for the SDLC pipeline. Make targeted fixes for the failures identified
-in the last review — NOT a full re-implementation.
-
-Target:
-  Spec:                 ${blockId}
-  Task:                 Task ${taskNumber}
-  Review report:        ${reviewReport}
-  Prior implement report: ${implementReport}
-  Report to write:      ${implementReport}  ← overwrites this slot (Fix Pass ${fixPass})
-  Worktree root:        ${worktreePath}
-
-GATE CHECKS (do these first):
-1. cd ${worktreePath} && ls ${reviewReport} 2>/dev/null && echo EXISTS || echo MISSING
-   If MISSING → stop, return success: false, notes: "No review report found."
-2. cd ${worktreePath} && grep -i "verdict" ${reviewReport} | head -3
-   If verdict is PASS → stop, return success: false, notes: "Review verdict is already PASS."
-
-Instructions:
-
-1. Failures to address (structured hand-off from the review — do NOT re-read ${reviewReport}):
-   Review verdict: ${handoff(lastReviewResult?.verdict)}
-   Criteria NOT_MET / PARTIAL (fix every one):
-${handoff(lastReviewResult?.unmetCriteria)}
-   Failure reasons / issues found:
-${handoff(lastReviewResult?.failureReasons)}
-   (The full review report is at ${reviewReport} — read it ONLY if a failure above is ambiguous.)
-
-2. Prior implementation context (structured hand-off — do NOT re-read ${implementReport}):
-   Files touched so far:
-${handoff(lastImplReport?.filesModified)}
-   Prior note: ${handoff(lastImplReport?.notes)}
-
-3. If a breakdown file exists, check the relevant sub-steps for original intent:
-   Run: cd ${worktreePath} && ls ${breakdownFile} 2>/dev/null && echo EXISTS || echo MISSING
-   If EXISTS: read ${worktreePath}/${breakdownFile} and find the "### Step ${taskNumber}:" section.
-   Use it to understand what the original implementation was supposed to do for the failing criterion.
-   Do NOT re-implement from scratch — use it only as context for the targeted fix.
-
-4. Make MINIMUM targeted changes to address the failing criteria.
-   Fix ONLY what the review identified as failing.
-
-5. Run the Validation Commands from the spec:
-   cd ${worktreePath} && cat ${specFile} | grep -A 20 "## Validation Commands"
-   Then run those commands.
-
-5.5. SELF-CHECK — completeness gate (do this BEFORE writing the report or committing):
-   For EACH criterion the review flagged (step 1), open the actual file and confirm it is now FULLY
-   satisfied — do not assume from your own diff. In particular: NO stub remains on a required path
-   (\`todo!()\`/\`unimplemented!()\`/\`unreachable!()\`, \`raise NotImplementedError\`,
-   \`throw new Error('not implemented')\`, empty \`pass\` bodies, \`TODO\`/\`FIXME\`), every named
-   deliverable file exists, and every "unit-tested" criterion has a real hermetic test. Quick grep —
-   scope it to the files the FLAGGED criteria require, not every changed file:
-     cd ${worktreePath} && grep -nE 'todo!\\(|unimplemented!\\(|unreachable!\\(|NotImplementedError|not implemented|FIXME' <the flagged criteria's paths> 2>/dev/null
-   If any flagged criterion is still not met, fix it NOW and re-run step 5 — returning with a known
-   remaining gap just burns another review-fail loop.
-
-6. Overwrite the implement report at: ${worktreePath}/${implementReport}
-
-   Format:
-   # Fix Pass ${fixPass} — ${stem}
-
-   **Date:** [run: cd ${worktreePath} && date +%Y-%m-%d]
-   **Plan:** ${specFile}
-   **Fix pass:** ${fixPass}
-
-   ## Failures Addressed
-   [each failing criterion and how it was fixed]
-
-   ## Changes Made
-   - [targeted changes with file paths]
-
-   ## Files Created or Modified
-   | File | Action |
-   |---|---|
-   [IMPORTANT: include ALL files from prior implement report PLUS newly touched files]
-
-   ## Validation Output
-   [commands run, one per line] — Status: PASSED / FAILED
-   On FAIL only, paste the failing command's last 20 lines; on PASS, do not paste stdout (the Test
-   stage is the authoritative full-output capture).
-
-   ## git diff --stat
-   \`\`\`
-   [run: cd ${worktreePath} && git diff --stat]
-   \`\`\`
-
-7. Commit your changes:
-   cd ${worktreePath} && git status
-   cd ${worktreePath} && git add <changed files> ${implementReport}
-   cd ${worktreePath} && git commit -m "$(cat <<'EOF'
-   fix: fix pass ${fixPass} for ${stem}
-   EOF
-   )"
-   cd ${worktreePath} && git log --oneline -1
-
-Return using StructuredOutput:
-  reportFile: "${implementReport}"
-  success: true if fixes applied and validation passed
-  filesModified: files changed this pass only
-  commitHash: 7-character short hash
-  filesReadKb: telemetry — before returning, sum the byte size of every file you cat/Read this
-    stage (cd ${worktreePath} && wc -c <each file>), divide the total by 1024, and report the number.
-  notes: one-line summary of what was fixed
-`, withModel({ label: `fix-${fixPass}`, schema: STAGE_SCHEMA, phase: 'Fix' }, fixModel))
-    recordFilesRead(fixResult)
-
-    if (!fixResult) {
-      log('Fix agent returned null — aborting pipeline')
-      stageResults.push({ stage: 'fix', attempt: fixPass, success: false, notes: 'Agent returned null' })
-      break
-    }
-    stageResults.push({ stage: 'fix', attempt: fixPass, ...fixResult })
-    lastImplReport = fixResult   // fix overwrites the implement-report slot
-    if (!fixResult.success) {
-      log(`Fix pass ${fixPass} reported failure — aborting pipeline`)
-      break
-    }
-    currentStage = 'test'
-  }
-
-  // ----------------------------------------------------------
-  // TEST
-  // ----------------------------------------------------------
-  if (currentStage === 'test') {
-    phase('Test')
-    log('Running the project validation suite...')
-
-    const testResult = await tracedAgent(`${W}
-You are the test agent for the SDLC pipeline. Run the project's validation suite (from
-planning/harness.json, or the spec fallback) plus the universal emoji gate, in the worktree.
-
-Target:
-  Spec:            ${specFile}
-  Report to write: ${testReport}
-  Worktree root:   ${worktreePath}
-
-PRE-FLIGHT — Verify all top-level tracked directories exist in this sparse-checkout worktree:
-  cd ${worktreePath} && for DIR in $(git ls-tree HEAD --name-only 2>/dev/null); do [ -d "$DIR" ] || echo "MISSING_DIR: $DIR"; done
-  If any "MISSING_DIR:" lines appear above, materialize all tracked directories now:
-    cd ${worktreePath} && git sparse-checkout reapply && ls -d */ | head -20
-  This catches any directory added to main after this worktree was initialized (not just hooks/),
-  preventing silent module-resolution failures in the validation checks below.
-
-Run EVERY check below IN ORDER. Capture full output (stdout + stderr) for each.
-All commands run from the worktree root (each is already prefixed with cd ${worktreePath}).
-
-Most checks are plain commands that pass iff their exit code is 0. Some checks carry their OWN
-pass/fail logic, described inline in the check block (baseline-diff = fail only on net-new items;
-count-delta = fail on a count regression, SKIP when there is no previous task; warning-scan = record
-pattern matches, gating per the [GATING/non-gating] label; forbidden-pattern scan = fail if any rule
-matched). Honor each block's stated logic. A check marked [non-gating] or resolved to SKIP does NOT
-block the verdict.
-
-${renderCheckList(harnessCfg, { cwd: worktreePath })}
-
-EMOJI CHECK — Emoji prohibition (universal harness gate — always runs last):
-  Hard FAIL if any markdown file changed by THIS TASK introduces an emoji.
-
-  Files modified by THIS TASK vs main (hard FAIL if emoji found):
-  cd ${worktreePath} && python3 - <<'PYEOF'
-import subprocess, re, sys, os
-EMOJI = re.compile(r'[\\U0001F300-\\U0001FAFF\\U00002600-\\U000027BF]')
-changed = subprocess.run(['git','diff','main..HEAD','--name-only'], capture_output=True, text=True).stdout.splitlines()
-md_files = [f for f in changed if f.endswith(('.md','.mdx')) and os.path.isfile(f)]
-hits = []
-for path in md_files:
-    for n, line in enumerate(open(path, errors='ignore'), 1):
-        if EMOJI.search(line):
-            hits.append(f'{path}:{n}: {line.rstrip()[:100]}')
-if hits:
-    print('EMOJI CHECK FAIL: emoji in modified files (violates the no-emoji harness rule):')
-    for h in hits[:25]: print(h)
-    sys.exit(1)
-print('EMOJI CHECK: OK — no emoji in modified files')
-sys.exit(0)
-PYEOF
-  echo "EMOJI_EXIT:$?"
-
-Note in the report any project-specific standing-rule checks the spec or CLAUDE.md calls for
-(the project's own validation suite covers most of these).
-
-Write the test report to: ${worktreePath}/${testReport}
-
-Format:
-# Test Report — ${stem}
-
-**Date:** [run: date +%Y-%m-%d]
-**Spec:** ${specFile}
-**Scope:** Task ${taskNumber}
-
-## Summary
-
-| Test | Result | Error |
-|---|---|---|
-[FAILED rows first, then PASSED rows]
-
-## Full Results (JSON)
-\`\`\`json
-[array of {test_name, passed, execution_command, test_purpose, error}]
-\`\`\`
-For each entry: a PASSED check stores \`error: ""\` (empty — never paste passing stdout); a FAILED
-check stores ONLY the last 20 lines of its failing output in \`error\`. Review re-runs the gating
-checks fresh, so the full passing transcript is never read downstream.
-
-Return using StructuredOutput:
-  reportFile: "${testReport}"
-  allPassed: true only if every GATING check passed and the emoji gate is clean. [non-gating] checks
-    and SKIPPED checks (e.g. count-delta on task 1) never set allPassed false on their own — but DO
-    record their result.
-  passCount: integer count of checks that passed (count SKIPPED as passed)
-  failCount: integer count of checks that failed
-  failedTests: array of test_name strings for checks that failed (include non-gating failures here too,
-    flagged as non-gating, so they surface in the report even though they do not block the verdict)
-  notes: one-line summary
-`, withModel({ label: 'test', schema: TEST_SCHEMA, phase: 'Test' }, MODEL.test))
-
-    if (!testResult) {
-      log('Test agent returned null — recording failure, continuing to review')
-      lastTestReport = { allPassed: false, passCount: 0, failCount: 0, failedTests: ['test agent returned null'] }
-      stageResults.push({ stage: 'test', attempt: reviewAttempts + 1, allPassed: false, success: false, notes: 'Agent returned null' })
-    } else {
-      lastTestReport = testResult
-      stageResults.push({ stage: 'test', attempt: reviewAttempts + 1, ...testResult, success: testResult.allPassed })
-      if (!testResult.allPassed) {
-        log(`Test failures (${testResult.failCount}): ${(testResult.failedTests || []).join(', ')}`)
-      } else {
-        log(`All ${testResult.passCount} checks passed`)
-      }
-    }
-    currentStage = 'review'
-  }
-
-  // ----------------------------------------------------------
-  // REVIEW
-  // ----------------------------------------------------------
-  if (currentStage === 'review') {
-    phase('Review')
-    reviewAttempts++
-    log(`Running review (attempt ${reviewAttempts}/${MAX_REVIEW_ATTEMPTS})...`)
-
-    // Final review attempt before the loop can give up → escalate the model.
-    const reviewModel = (ESCALATION_MODEL && reviewAttempts === MAX_REVIEW_ATTEMPTS) ? ESCALATION_MODEL : MODEL.review
-    if (reviewModel !== MODEL.review) log(`Final review attempt — escalating model to ${reviewModel}.`)
-
-    const reviewResult = await tracedAgent(`${W}
-You are the review agent for the SDLC pipeline. Verify the implementation against the spec.
-
-Target:
-  Spec:             ${blockId}
-  Task:             Task ${taskNumber}
-  Spec file:        ${specFile}
-  Implement report: ${implementReport}
-  Test report:      ${testReport}
-  Report to write:  ${reviewReport}
-  Worktree root:    ${worktreePath}
-
-Instructions:
-
-1. Read the spec file:
-   cd ${worktreePath} && cat ${specFile}
-   Extract the COMPLETE "## Acceptance Criteria" section.
-
-2. Implementation hand-off (structured — do NOT re-read ${implementReport}; this is its summary):
-   Files modified by the implementation:
-${handoff(lastImplReport?.filesModified)}
-   Commit: ${handoff(lastImplReport?.commitHash)}
-   Implementer's note: ${handoff(lastImplReport?.notes)}
-   Use the files-modified list to know WHERE to look — you verify against real source (step 5),
-   not against this self-report. (Full report at ${implementReport} only if a claim is ambiguous.)
-
-3. Test hand-off (structured — do NOT re-read ${testReport}; you re-run the checks yourself next):
-   All gating checks passed: ${handoff(lastTestReport?.allPassed)}
-   Passed: ${handoff(lastTestReport?.passCount)}   Failed: ${handoff(lastTestReport?.failCount)}
-   Failed checks: ${handoff(lastTestReport?.failedTests)}
-
-4. Run FRESH authoritative checks (this result determines the verdict, not the test report):
-   Re-run each GATING validation check — those whose test_purpose in the test report (${testReport})
-   is marked "GATING", i.e. the checks with gates:true in planning/harness.json. Use each check's
-   execution_command verbatim, from the worktree root:
-   cd ${worktreePath} && <gating check command>
-   If the project ships no harness suite, re-run the spec's "## Validation Commands". A fresh
-   failure of any gating check ALWAYS prevents PASS.
-
-5. Scope your review to Task ${taskNumber} only.
-   The spec may list acceptance criteria spanning multiple tasks. For each criterion:
-   - If tagged for a different task (e.g. "[T5]", "(Task 5)") OR clearly belongs to a later
-     task's scope (the work it describes is not in Task ${taskNumber}'s step list) →
-     mark SKIP with a note. SKIP criteria do NOT affect the verdict.
-   - All others: evaluate normally.
-
-   For each in-scope criterion, read relevant source files and determine:
-   MET — fully satisfied by this task's changes
-   PARTIAL — partially satisfied
-   NOT_MET — not satisfied (counts as a verdict failure)
-   Also check the project's CLAUDE.md standing-rules compliance — a violation is a failing
-   criterion. CLAUDE.md is the authority: do not assume any stack, locale-parity, narrative, or
-   content-layout rule unless written there. Universal harness rules always apply: no fabricated
-   metrics or quotes, no emoji, every change ships with tests.
-   IDENTITY INTEGRITY: flag any handle, profile link, or URL that contradicts the verified
-   identities/handles declared in CLAUDE.md, or that appears fabricated. Mark such a criterion
-   NOT_MET — only the CLAUDE.md-declared identities are authoritative.
-
-5.5. HARD RULE — do NOT fix environment or infrastructure issues yourself:
-   If a fresh gating check fails due to environment/infrastructure causes (missing module files,
-   sparse-checkout gaps, missing hooks, missing directories), do NOT fix them yourself. Return
-   verdict: FAIL with failureReasons: ["Environment issue — missing files or sparse-checkout gap;
-   the fix agent must resolve them and re-run the pipeline."]. A review agent that resolves
-   infrastructure issues itself bypasses the test gate that validates the fix.
-
-6. Determine verdict:
-   PASS — ALL criteria MET AND every fresh gating check passes (exit 0)
-   PARTIAL — some criteria PARTIAL, OR gating checks pass but some criteria not fully met
-   FAIL — any criterion NOT_MET, OR any fresh gating check fails
-   (A fresh gating-check failure ALWAYS prevents PASS)
-
-7. Write the review report: ${worktreePath}/${reviewReport}
-
-   Format:
-   # Review Report — ${stem}
-
-   **Date:** [run: date +%Y-%m-%d]
-   **Spec:** ${specFile}
-   **Scope:** Task ${taskNumber}
-   **Verdict:** PASS / PARTIAL / FAIL
-
-   ## Acceptance Criteria Check
-   | Criterion | Status | Evidence |
-   |---|---|---|
-   | [criterion] | MET / PARTIAL / NOT_MET | [file:line or test name] |
-
-   ## Fresh Test Results
-   [the fresh gating-check output — per-check pass/fail and any failure output]
-
-   ## Verdict: PASS / PARTIAL / FAIL
-   [one paragraph explaining the verdict]
-
-   ## Issues Found
-   [specific problems — empty if PASS]
-
-   ## Next Steps
-   [what to do based on verdict]
-
-Return using StructuredOutput:
-  reportFile: "${reviewReport}"
-  verdict: "PASS", "FAIL", or "PARTIAL"
-  failureReasons: array of strings (empty if PASS)
-  unmetCriteria: array of criterion texts that were NOT_MET or PARTIAL (empty if PASS)
-  filesReadKb: telemetry — before returning, sum the byte size of every file you cat/Read this
-    stage (cd ${worktreePath} && wc -c <each file>), divide the total by 1024, and report the number.
-  notes: one-line summary
-`, withModel({ label: `review-${reviewAttempts}`, schema: REVIEW_SCHEMA, phase: 'Review' }, reviewModel))
-    recordFilesRead(reviewResult)
-
-    if (!reviewResult) {
-      log(`Review agent returned null (attempt ${reviewAttempts}) — treating as FAIL`)
-      lastReviewResult = { verdict: 'FAIL', failureReasons: ['Review agent returned null'], unmetCriteria: [], reportFile: reviewReport }
-      stageResults.push({ stage: 'review', attempt: reviewAttempts, verdict: 'FAIL', success: false, notes: 'Agent returned null' })
-    } else {
-      lastReviewResult = reviewResult
-      stageResults.push({ stage: 'review', attempt: reviewAttempts, ...reviewResult, success: reviewResult.verdict === 'PASS' })
-      log(`Review verdict: ${reviewResult.verdict} (attempt ${reviewAttempts}/${MAX_REVIEW_ATTEMPTS})`)
-    }
-
-    if (implementOnly) {
-      // Lean block: the single review pass is a localization map only — no fix loop, no ui-test.
-      // The consolidated back-half owns fix/document/wrap-up over the integrated tree.
-      log(`Implement-only review: ${lastReviewResult.verdict} (localization map for the consolidated back-half).`)
-      currentStage = 'implement-only-done'
-    } else if (lastReviewResult.verdict === 'PASS') {
-      currentStage = 'ui-test'
-    } else if (reviewAttempts < MAX_REVIEW_ATTEMPTS) {
-      log(`Review ${lastReviewResult.verdict} — running fix pass ${reviewAttempts + 1}/${MAX_REVIEW_ATTEMPTS}...`)
-      currentStage = 'fix'
-    } else {
-      log(`Review FAILED after ${MAX_REVIEW_ATTEMPTS} attempts — skipping to wrap-up with FAIL status`)
-      currentStage = 'wrap-up'
-    }
-  }
-
-  // ----------------------------------------------------------
-  // UI TEST (after Review PASS — browser smoke check)
-  // ----------------------------------------------------------
-  if (currentStage === 'ui-test') {
-    phase('UI Test')
-
-    if (!harnessCfg?.uiTest?.enabled) {
-      log('UI test stage disabled (harness.json uiTest.enabled is false or config absent) — SKIPPED.')
-      stageResults.push({ stage: 'ui-test', verdict: 'SKIPPED', success: true, notes: 'uiTest disabled in harness.json' })
-      currentStage = 'document'
-    } else {
-      log('Running UI test stage...')
-      // Parallel-safe: each task gets a unique port (base port + task number).
-      const devPort = (harnessCfg.uiTest.port ?? 3000) + taskNumber
-      const ui = renderUiTestPrompt(harnessCfg, devPort)
-
-      const uitestResult = await tracedAgent(`${W}
-You are the UI test agent for the SDLC pipeline. Run a quick live browser smoke check using
-playwright-cli to catch visual/runtime regressions that the validation suite cannot catch.
-
-Target:
-  Spec:              ${blockId}
-  Task:              Task ${taskNumber}
-  Implement report:  ${implementReport}
-  Report to write:   ${uitestReport}
-  Dev server URL:    http://localhost:${ui.port}
-  Worktree root:     ${worktreePath}
-
-STEP 1 — Triage: did this task change application source?
-
-  Read the implement report:
-    cd ${worktreePath} && cat ${implementReport}
-  Scan the "Files Modified" list. If EVERY changed file is documentation/markdown or planning
-  metadata only (no application source), set verdict = SKIPPED, write the report, and stop.
-  Otherwise continue to STEP 2.
-
-STEP 2 — Start the dev server on port ${ui.port} (unique per task to avoid conflicts).
-
-  Check if port ${ui.port} is already in use:
-    lsof -ti :${ui.port} 2>/dev/null && echo "PORT_IN_USE" || echo "PORT_FREE"
-
-  If PORT_IN_USE: the server is already running — skip to STEP 3.
-  If PORT_FREE: start the server in the background from the worktree:
-    cd ${worktreePath} && PORT=${ui.port} ${ui.devCmd} > /tmp/uitest-${stem}.log 2>&1 &
-    echo "SERVER_PID=$!"
-
-  Wait up to 60 seconds for the ready signal:
-    for i in $(seq 1 30); do grep -q "${ui.ready}" /tmp/uitest-${stem}.log 2>/dev/null && echo "READY" && break; sleep 2; done
-    tail -20 /tmp/uitest-${stem}.log
-
-  If "READY" not seen within 60 s, write the report with verdict = FAIL (dev server did not start),
-  kill the background process, and stop.
-
-STEP 3 — Run smoke checks using playwright-cli, one per configured route.
-
-  Open a browser session:
-    playwright-cli open http://localhost:${ui.port}${ui.routes[0]}
-
-  For each route below, record PASS, WARN, or FAIL with quoted evidence:
-
-${ui.routeChecks}
-
-  Also confirm at least one internal link works: from any route's snapshot, pick an internal link
-  and \`playwright-cli click <ref>\`, then \`playwright-cli snapshot\` — the target must load without
-  an error page.
-
-  Close the browser session:
-    playwright-cli close
-
-STEP 4 — Kill the dev server (only if YOU started it in STEP 2).
-  If SERVER_PID was captured: kill $SERVER_PID 2>/dev/null || true
-
-STEP 5 — Determine verdict and write report.
-
-  Verdict rules:
-  - PASS:    All route checks passed with no errors.
-  - WARN:    All checks passed but console warnings were found.
-  - FAIL:    One or more checks failed — list each with quoted evidence.
-  - SKIPPED: No application source changed (from STEP 1 triage).
-
-  Write the report to ${uitestReport} (absolute: ${worktreePath}/${uitestReport}):
-  \`\`\`markdown
-  # UI Test Report: ${stem}
-
-  **Verdict:** <PASS|WARN|FAIL|SKIPPED>
-  **Date:** <today>
-
-  ## Smoke Check Results
-
-  | Check | Result | Notes |
-  |---|---|---|
-${ui.routeRows}
-
-  ## Summary
-  <one paragraph — what was tested and what was found>
-  \`\`\`
-
-  Commit the report:
-    cd ${worktreePath} && git add ${uitestReport} && git commit -m "test(ui): ui smoke check for ${stem}"
-
-Return the result using StructuredOutput.
-`, withModel({ label: 'ui-test', schema: UI_TEST_SCHEMA, phase: 'UI Test' }, MODEL.uiTest))
-
-    if (!uitestResult) {
-      log('UI test agent returned null — treating as WARN, continuing to document')
-      stageResults.push({ stage: 'ui-test', verdict: 'WARN', success: true, notes: 'Agent returned null' })
-      currentStage = 'document'
-    } else {
-      stageResults.push({ stage: 'ui-test', ...uitestResult, success: uitestResult.verdict !== 'FAIL' })
-      log(`UI test verdict: ${uitestResult.verdict}`)
-
-      if (uitestResult.verdict === 'FAIL') {
-        if (reviewAttempts < MAX_REVIEW_ATTEMPTS) {
-          log(`UI test FAIL — running fix pass ${reviewAttempts + 1}/${MAX_REVIEW_ATTEMPTS}...`)
-          currentStage = 'fix'
-        } else {
-          log(`UI test FAILED after ${MAX_REVIEW_ATTEMPTS} attempts — skipping to wrap-up`)
-          currentStage = 'wrap-up'
-        }
-      } else {
-        currentStage = 'document'
-      }
-    }
-    }
-  }
-} // end implement→fix→test→review→ui-test retry loop
-
-// ================================================================
-// IMPLEMENT-ONLY EARLY RETURN (lean /sdlc-block, D23/D24)
-//
-// Stop here: no document, no wrap-up, no task-log, no merge hand-off. The implement agent already
-// committed the code + implement report in the worktree (and the optional review committed its report);
-// /sdlc-block merges this branch into the integration branch and runs ONE consolidated back-half over
-// the integrated tree. finalVerdict tells the block whether the branch is mergeable:
-//   FAIL        — implement failed; the block escalates instead of merging.
-//   <review>    — when --review ran: the per-task review verdict (a localization signal, not a gate).
-//   IMPLEMENTED — implement succeeded, no per-task review (consolidated back-half will verify).
-// ================================================================
-if (implementOnly) {
-  const implOk = lastImplReport && lastImplReport.success !== false
-  const verdict = !implOk ? 'FAIL' : (withReview ? (lastReviewResult?.verdict || 'FAIL') : 'IMPLEMENTED')
-  log(`Implement-only complete: ${stem} → ${verdict} | branch ${branchName}`)
-  log(`(No per-task back-half — /sdlc-block merges this branch and runs one consolidated back-half.)`)
-  return {
-    blockId,
-    taskNumber,
-    stem,
-    branchName,
-    worktreePath,
-    finalVerdict: verdict,
-    implementOnly: true,
-    reviewRan: withReview,
-    reviewVerdict: lastReviewResult?.verdict || null,
-    implementReport,
-    reviewReport: withReview ? reviewReport : null,
-    startStage: scout.startStage,
-    stageResults
-  }
-}
-
-// ================================================================
-// PHASE 6: DOCUMENT (gates on PASS verdict)
-// ================================================================
-if (currentStage === 'document') {
-  phase('Document')
-  log('Running document stage...')
-
-  const docResult = await tracedAgent(`${W}
-You are the documentation agent for the SDLC pipeline. Surgically patch docs/ in the worktree.
-
-Target:
-  Spec:             ${blockId}
-  Task:             Task ${taskNumber}
-  Review report:    ${reviewReport}
-  Implement report: ${implementReport}
-  Report to write:  ${documentReport}
-  Worktree root:    ${worktreePath}
-
-Instructions:
-
-1. Read the review report:
-   cd ${worktreePath} && cat ${reviewReport}
-   GATE CHECK: If the verdict is FAIL or PARTIAL, stop immediately.
-   Return: success: false, notes: "Blocked — review verdict was not PASS".
-
-2. Read the implement report:
-   cd ${worktreePath} && cat ${implementReport}
-   Find the "## Files Created or Modified" table.
-
-3. For each source file in that table, find which docs/*.md files reference it:
-   cd ${worktreePath} && grep -rl "ComponentName\\|functionName\\|filename" docs/ 2>/dev/null
-
-4. Read each relevant doc file and surgically patch ONLY affected sections:
-   - Update component signatures, prop lists, descriptions that changed
-   - Add documentation for new public APIs / lib utilities
-   - Never delete documented items that still exist
-   - Use the Edit tool with absolute paths: ${worktreePath}/docs/filename.md
-
-5. If a change touched core wiring (entry points, shared modules, routing/config) and an
-   architecture/patterns doc would need updating, add that doc to NEEDS_REVIEW in the
-   document report but do NOT edit it directly.
-
-6. Write the document report: ${worktreePath}/${documentReport}
-
-   Format:
-   # Documentation Report — ${stem}
-
-   **Date:** [run: date +%Y-%m-%d]
-   **Spec:** ${specFile}
-   **Verdict gate:** PASS (confirmed)
-
-   ## Docs Patched
-   | Doc File | Section Updated | Change Summary |
-   |---|---|---|
-
-   ## Docs Flagged NEEDS_REVIEW
-   [list any docs needing human review]
-
-   ## Docs Clean (no changes needed)
-   [docs checked but unchanged]
-
-7. Commit your changes:
-   cd ${worktreePath} && git status
-   If no doc files were patched, commit just the report:
-     cd ${worktreePath} && git add ${documentReport}
-   If docs were patched:
-     cd ${worktreePath} && git add docs/file1.md docs/file2.md ${documentReport}
-   cd ${worktreePath} && git commit -m "$(cat <<'EOF'
-   docs: update docs for ${stem}
-   EOF
-   )"
-   cd ${worktreePath} && git log --oneline -1
-
-Return using StructuredOutput:
-  reportFile: "${documentReport}"
-  success: true if docs checked and report written (even if no changes needed)
-  filesModified: doc files actually patched (empty if none)
-  commitHash: 7-character short hash
-  notes: one-line summary
-`, withModel({ label: 'document', schema: STAGE_SCHEMA, phase: 'Document' }, MODEL.document))
-
-  if (!docResult) {
-    stageResults.push({ stage: 'document', success: false, notes: 'Document agent returned null' })
-    log('Document agent returned null')
+state.tasks_run = taskList
+log(`Tasks in spec: ${allTasks.join(', ')}${selectedTasks ? ` | selected: ${taskList.join(', ')}` : ''}`)
+
+// Resume: load the committed state.json to skip already-passed tasks.
+const passedFromState = new Set()
+if (resumeMode) {
+  const loaded = await tracedAgent(`${W}
+You read the COMMITTED run-state for an /sdlc-task resume. Do NOT modify anything.
+  cd ${runDir} && cat ${stateFile} 2>/dev/null || echo "__NO_STATE__"
+If "__NO_STATE__" or invalid JSON → exists=false. Otherwise exists=true, startedAt = its started_at,
+passedTasks = the task numbers whose tasks[N].status == "passed", bailReason = its bail_reason or "".
+Return via StructuredOutput.
+`, withModel({ label: 'state-load', schema: STATE_LOAD_SCHEMA, phase: 'Plan' }, MODEL.stateLoad))
+  if (loaded && loaded.exists) {
+    for (const n of (loaded.passedTasks || [])) passedFromState.add(n)
+    log(`Resume: ${passedFromState.size} task(s) already passed (${[...passedFromState].sort((a, b) => a - b).join(', ') || 'none'}); skipping them.`)
   } else {
-    stageResults.push({ stage: 'document', ...docResult })
-    if (!docResult.success) {
-      log(`Document stage blocked: ${docResult.notes}`)
-    } else {
-      log(`Docs updated: ${(docResult.filesModified || []).join(', ') || 'none needed changes'}`)
-    }
+    log('Resume requested but no valid state.json found — running all selected tasks fresh.')
   }
-  currentStage = 'wrap-up'
+}
+
+// Load the project's validation policy once (from the run root). null → fall back to the spec.
+const harnessCfg = await loadHarnessConfig(runDir)
+log(harnessCfg
+  ? `Harness config: ${(harnessCfg.validation?.checks || []).length} check(s).`
+  : 'No planning/harness.json — validation falls back to the spec.')
+
+// Resolve test depth: CLI flag overrides the built-in 'fast' default.
+const testDepth = testDepthFlag || 'fast'
+log(`Policy: testDepth=${testDepth}`)
+
+// Snapshot baselines once (resume-safe; no-op without baseline-diff checks).
+await snapshotBaselines(harnessCfg, runDir)
+
+// The immediate-bail reason set the triage agent enforces. "When unsure, prefer bail."
+const BAIL_REASONS = [
+  'Missing/undefined upstream dependency or symbol the spec assumes exists.',
+  'Spec ambiguity/contradiction — intended behavior is genuinely undeterminable.',
+  'Environment/credential/auth/network failure (not a code defect).',
+  'Change would require a destructive or out-of-scope action.',
+  'Same failure twice with no progress (stuck), or a structural design flaw needing a re-plan.',
+].map((r, i) => `  ${i + 1}. ${r}`).join('\n')
+
+// ----------------------------------------------------------------
+// Test stage helper — gatingOnly=true → fast tripwire (gating checks); false → full suite.
+// ----------------------------------------------------------------
+async function runTests(label, { gatingOnly }) {
+  return tracedAgent(`${W}
+You are the test agent for the lean /sdlc-task pipeline. Run the project's validation checks and report.
+
+IMPORTANT — run ONLY the checks enumerated below (from planning/harness.json + the spec). Do NOT invent
+checks. All Bash calls run from the run root (prefix each with: cd ${runDir} &&).
+
+${renderCheckList(harnessCfg, { gatingOnly, cwd: runDir })}
+
+Then run the universal emoji gate (a harness rule, always): scan the files changed by THIS run for emoji
+in markdown/docs.
+  cd ${runDir} && git diff --name-only ${baseSha}..HEAD
+  Inspect the changed .md/.mdx files; a stray emoji in docs FAILS this gate.
+
+For each check record: name, passed (true iff exit code 0), the command, and failure output.
+Return via StructuredOutput: allPassed (true only if EVERY gating check passed and the emoji gate is
+clean), passCount, failCount, failedTests (names), failBlob (compact: failing check names + the tail of
+their output; empty when allPassed).
+`, withModel({ label, schema: TEST_SCHEMA, phase: 'Tasks' }, MODEL.test))
+}
+
+// ----------------------------------------------------------------
+// Triage helper — classify a failure RETRYABLE vs MAJOR.
+// ----------------------------------------------------------------
+async function triage(context, attempt, maxAttempts, failBlob, sameContext) {
+  return tracedAgent(`
+You are the failure-triage agent for an /sdlc-task run. Classify a failure so the pipeline either makes
+a bounded fix or bails to a human NOW. Bailing is cheap; a wasted retry loop is not — when unsure, BAIL.
+
+Context: ${context} (attempt ${attempt} of ${maxAttempts}).
+Failure detail:
+${failBlob || '(no detail captured)'}
+
+IMMEDIATE-BAIL reasons — if the failure is ANY of these, class=MAJOR and put a short human-readable
+bailReason describing which one and where:
+${BAIL_REASONS}
+
+Otherwise:
+  RETRYABLE — transient/infra (agent died, flaky), OR the failure CHANGED from the previous attempt
+              (it is making progress and a bounded fix can plausibly close it).
+  MAJOR     — the SAME failure again with no progress, OR structural (one of the bail reasons above).
+
+Return via StructuredOutput: class, reason, bailReason (empty when RETRYABLE), sameFailureAsBefore.
+${sameContext ? `(Previous attempt context for the same-failure check: ${sameContext})` : ''}
+`, withModel({ label: `triage:${context}:${attempt}`, schema: TRIAGE_SCHEMA, phase: 'Tasks' }, MODEL.triage))
 }
 
 // ================================================================
-// PHASE 7: WRAP-UP — write task log (deferred status/log) + workflow report, then commit
-//
-// task-log and finalize were merged (D14): both were cheap, sequential, purely-mechanical Haiku
-// bookkeeping with no fresh-context boundary between them. One agent now writes the deferred
-// status/log content AND the workflow report, then commits every report file in one chore commit.
-// status.md / log.md themselves are still NOT touched here — applied at merge time by /clean-worktree.
+// PHASE 2: PER-TASK LOOP (sequential)
 // ================================================================
-phase('Wrap-up')
+phase('Tasks')
 
-const finalVerdict = lastReviewResult?.verdict || 'NOT_REACHED'
-const stageResultsSummary = stageResults
-  .map(r => `${r.stage}${r.attempt ? `(#${r.attempt})` : ''}: ${r.success ? (r.verdict || 'OK') : 'FAILED'}`)
-  .join(' → ')
+let bailed = false
+let bailReason = null
 
-log(`Wrap-up. Final verdict: ${finalVerdict}. Pipeline: ${stageResultsSummary}`)
+for (const taskNum of taskList) {
+  if (passedFromState.has(taskNum)) {
+    log(`Task ${taskNum}: already passed (resume) — skipping.`)
+    continue
+  }
+  state.current_task = taskNum
+  const stem = `${blockId}-task${taskNum}`
+  state.tasks[String(taskNum)] = state.tasks[String(taskNum)] || { status: 'running', attempts: 0, summary: '', issues: [], fixes: [], decisions: [], files_changed: [], commit: '', validated: '' }
+  const t = state.tasks[String(taskNum)]
 
-// Build the stage + telemetry tables BEFORE the wrap-up agent runs (they don't depend on it). The
-// wrap-up agent's own metrics line is absent — same as the finalize line always was — which is fine:
-// it is a cheap, fixed Haiku stage.
-const stageTable = stageResults.map(r => {
-  const label  = r.stage + (r.attempt ? ` (attempt ${r.attempt})` : '')
-  const status = r.verdict ? r.verdict : (r.success ? 'completed' : 'FAILED')
-  const file   = r.reportFile || r.workflowReportFile || r.logFile || '—'
-  const commit = r.commitHash ? r.commitHash.substring(0, 7) : '—'
-  const notes  = (r.notes || '').substring(0, 60)
-  return `| ${label} | ${status} | ${file} | ${commit} | ${notes} |`
-}).join('\n')
+  let taskPassed = false
+  let prevFailBlob = null
 
-const metricsTable = metrics.map(m => {
-  // outTok is a budget.spent() delta off a SHARED pool. Under a parallel wave (D12) it is contaminated
-  // by concurrent siblings and the runtime exposes no per-agent OUTPUT count, so a per-stage output
-  // number is unrecoverable. Rather than a blank "— (parallel)" cell (D15), show the one accurate
-  // per-agent figure we DO have under parallel: an estimated INPUT cost = promptTok + filesRead→tokens
-  // (~256 tok/KB). Marked "in" so it never reads as output. Solo runs still show the real output delta.
-  const inTokEst = m.promptTokEst + (m.filesReadKb != null ? Math.round(m.filesReadKb * 256) : 0)
-  const tok  = parallelWave ? `~${inTokEst} in` : (m.outTok != null ? String(m.outTok) : '—')
-  const read = m.filesReadKb != null ? `${Math.round(m.filesReadKb)} KB` : '—'
-  return `| ${m.label} | ${m.model} | ${m.promptTokEst} | ${tok} | ${read} |`
-}).join('\n')
-// Legend caveat: present under a parallel wave, where the tok column flips from output delta to an
-// estimated input cost (D15, refines D12's presentation).
-const metricsCaveat = parallelWave
-  ? '\n\n> **Parallel wave — "tok" column shows estimated INPUT cost, not output.** This task ran in a parallel batch under /sdlc-block; output tokens come off a shared budget pool contaminated by concurrent siblings, so a per-stage output number is unrecoverable. The "~N in" values are an input estimate (promptTok + filesRead at ~256 tok/KB) and ARE per-agent and uncontaminated. promptTok and filesReadKb are also accurate. See decisions/D15 (refines D12).'
-  : ''
-log(`Token metrics (stage | model | promptTok | tok | filesReadKb):\n${metricsTable}`)
+  for (let attempt = 1; attempt <= MAX_TASK_ATTEMPTS && !bailed; attempt++) {
+    t.attempts = attempt
+    const isFix = attempt > 1
+    const fixModel = (ESCALATION_MODEL && attempt === MAX_TASK_ATTEMPTS) ? ESCALATION_MODEL : MODEL.fix
+    if (isFix && fixModel !== MODEL.fix) log(`Task ${taskNum}: final fix pass — escalating model to ${fixModel}.`)
+    log(`Task ${taskNum}: ${isFix ? `fix pass ${attempt - 1}` : 'implement'} (attempt ${attempt}/${MAX_TASK_ATTEMPTS})...`)
 
-log('Writing task log + workflow report and committing (status/log deferred to merge time)...')
-
-const wrapupResult = await tracedAgent(`${W}
-You are the wrap-up agent for the SDLC pipeline. You do TWO things in one pass — write the task log,
-then write the workflow report — and finish by committing all report files in one chore commit.
-
-IMPORTANT: Do NOT modify planning/status.md or log.md. Those are applied at merge time via
-/clean-worktree. The task log you write below RECORDS what they should become; the commit includes
-ONLY report files (test, review, ui-test, document reports + the task log + the workflow report).
+    // Implement (attempt 1) or targeted Fix (attempt > 1).
+    const stageResult = await tracedAgent(`${W}
+You are the ${isFix ? 'fix' : 'implementation'} agent for the lean /sdlc-task pipeline. You run IN PLACE on
+the branch (sequential — earlier tasks in this spec are already committed on this branch). Work ONLY on
+Task ${taskNum} of this spec.
 
 Target:
-  Spec:             ${blockId}
-  Task:             ${taskNumber}
-  Final verdict:    ${finalVerdict}
-  Review attempts:  ${reviewAttempts} of ${MAX_REVIEW_ATTEMPTS} max
-  Pipeline started from: ${scout.startStage}
-  Pipeline summary: ${stageResultsSummary}
-  Branch:           ${branchName}
-  Worktree root:    ${worktreePath}
-  Task log:         ${logFile}
-  Workflow report:  ${workflowReport}
+  Spec:       ${blockId}
+  Task:       Task ${taskNum} only
+  Spec file:  ${specFile}
 
-STEP 1 — Gather shared facts (used by both files):
-  a. Next task title — read the spec and find the section "### ${taskNumber + 1}.":
-     cd ${worktreePath} && cat ${specFile}
-     If no task ${taskNumber + 1} exists, treat the spec as complete.
-  b. Progress-table notes format (title-case status):
-     cd ${worktreePath} && head -30 planning/status.md
-  c. Commit history for this run:
-     cd ${worktreePath} && git log --oneline main..HEAD 2>/dev/null || git log --oneline -15
-  d. Today's date:
-     date +%Y-%m-%d
+1. Read CLAUDE.md and planning/context.md — internalize the project's standing rules (CLAUDE.md is the
+   authority; assume no stack/locale/narrative/content rule unless written there). Universal harness
+   rules always apply: no fabricated metrics or quotes, no emoji, every change ships with tests.
+   Run: cd ${runDir} && cat CLAUDE.md
 
-STEP 2 — Write the TASK LOG file: ${worktreePath}/${logFile}
+2. Read the spec, focusing on the "### ${taskNum}." section:
+   Run: cd ${runDir} && cat ${specFile}
+   ${isFix ? `Do NOT re-implement from scratch. Make the MINIMUM targeted changes to address THIS failure:
+   ${prevFailBlob ? 'Failing checks/output from the last test run:\n' + prevFailBlob.split('\n').map(l => '     ' + l).join('\n') : ''}` : 'Implement ONLY "### ' + taskNum + '." — do NOT implement other tasks.'}
 
-   Use EXACTLY this format (fill in all bracketed values):
+2.5. Optional breakdown (more granular sub-steps from /breakdown):
+   Run: cd ${runDir} && ls ${breakdownFile} 2>/dev/null && echo "BREAKDOWN_EXISTS" || echo "NO_BREAKDOWN"
+   If BREAKDOWN_EXISTS: read ${breakdownFile}, find "### Step ${taskNum}:", and use its atomic sub-steps as
+   the execution guide (run each inline "Verify:" checkpoint). tasks.md stays authoritative for scope.
 
-   # Task Log — ${blockId} task ${taskNumber}
+3. Execute methodically with Read/Edit/Write/Bash (all paths resolve from the run root).
 
-   **Spec:** ${blockId}
-   **Task:** ${taskNumber}
-   **Verdict:** ${finalVerdict}
-   **Date:** [today's date from STEP 1d]
-   **Branch:** ${branchName}
-   **Applied:** false
+4. Follow every CLAUDE.md standing rule; add/update tests for new code/logic; verify any model ids /
+   package names via the claude-api skill — never from memory.
 
-   ---
+5. COMPLETENESS SELF-CHECK before committing (D8): no stub/placeholder on any path the task's acceptance
+   criteria require (no \`todo!()\`/\`unimplemented!()\`/\`unreachable!()\`, \`raise NotImplementedError\`,
+   \`throw new Error('not implemented')\`, empty \`pass\`-only bodies, or \`TODO\`/\`FIXME\` in required
+   paths); every deliverable named for Task ${taskNum} exists; any "unit-tested" criterion has a real,
+   hermetic test. Sanity-grep ONLY the files the in-scope criteria require:
+     cd ${runDir} && grep -nE 'todo!\\(|unimplemented!\\(|unreachable!\\(|NotImplementedError|not implemented|FIXME' <those paths> 2>/dev/null
+   If something required is incomplete, finish it now — do not commit a partial task.
 
-   ## status.md — Spec Status
-   [Only include this section if the spec was "Not started" when this task ran (blockStatus: ${scout.blockStatus}).
-    Write: "In progress" to flip it. Omit this section entirely if it was already In progress or Done.]
+6. Run the spec's "## Validation Commands" for Task ${taskNum} to confirm correctness.
 
-   ## status.md — Current Focus Line
-   [The COMPLETE replacement string for the "Current focus:" line.
-    If task ${taskNumber + 1} exists: "${blockId} — Task ${taskNumber + 1}: [task title]"
-    If spec complete: the next spec's focus line]
+7. Commit on the branch. Never use git add -A or git add . — stage files explicitly by name.
+   Run: cd ${runDir} && git status
+   Stage your changed source/test files explicitly, then commit using HEREDOC:
+     cd ${runDir} && git commit -m "$(cat <<'EOF'
+${isFix ? `fix: fix pass ${attempt - 1} for ${stem}` : `feat: implement ${stem}`}
+EOF
+)"
+   Run: cd ${runDir} && git log --oneline -1   (capture the short hash)
 
-   ## status.md — Last Updated Line
-   [The COMPLETE replacement string for the "Last updated:" line.
-    Format: "YYYY-MM-DD — ${blockId} in progress (Tasks 1–${taskNumber} complete; Tasks ${taskNumber + 1}–N next — [brief description])"]
+Return via StructuredOutput:
+  success: true if the work completed and the spec validation passed
+  filesModified: every source file you created or modified this attempt
+  commitHash: the 7-char short hash (empty string if no commit was made)
+  summary: one line — what this task now does
+  decisions: any non-obvious choices (empty array if none)
+  filesReadKb: telemetry — before returning, sum the byte size of every file you cat/Read this attempt
+    (cd ${runDir} && wc -c <each file>), divide the total by 1024, and report the number.
+  notes: one-line status
+`, withModel({ label: `${isFix ? 'fix' : 'implement'}-${taskNum}-${attempt}`, schema: STAGE_SCHEMA, phase: 'Tasks' }, isFix ? fixModel : MODEL.implement))
+    recordFilesRead(stageResult)
 
-   ## status.md — Notes Column
-   [The updated Notes column text for this spec's row in the progress table.
-    Summarizes which tasks are done and which remain.]
+    if (!stageResult) {
+      log(`Task ${taskNum} attempt ${attempt}: agent returned null.`)
+      const tr = await triage(`task ${taskNum} implement`, attempt, MAX_TASK_ATTEMPTS, 'NULL_RESULT — the agent died or returned nothing.', prevFailBlob)
+      if (tr && tr.class === 'MAJOR') { bailed = true; bailReason = tr.bailReason || tr.reason || 'agent returned null'; break }
+      continue
+    }
+    if (stageResult.commit) t.commit = stageResult.commit
+    if (stageResult.summary) t.summary = stageResult.summary
+    if (Array.isArray(stageResult.filesModified)) t.files_changed = [...new Set([...(t.files_changed || []), ...stageResult.filesModified])]
+    if (Array.isArray(stageResult.decisions) && stageResult.decisions.length) t.decisions = [...(t.decisions || []), ...stageResult.decisions]
 
-   ---
+    // Fast test (tripwire) — gating checks only unless testDepth=full.
+    const testResult = await runTests(`test-${taskNum}-${attempt}`, { gatingOnly: testDepth === 'fast' })
+    if (testResult && testResult.allPassed) {
+      t.validated = testDepth === 'fast' ? 'gating checks (fast tripwire)' : 'full gating suite'
+      taskPassed = true
+      break
+    }
 
-   ## Log Entry
+    // Failure → triage.
+    const failBlob = (testResult && testResult.failBlob) || `Test stage failed or returned null (failCount=${testResult?.failCount ?? '?'}, failed=${(testResult?.failedTests || []).join(', ')}).`
+    t.issues = [...(t.issues || []), ...((testResult?.failedTests) || [])]
+    const tr = await triage(`task ${taskNum} test`, attempt, MAX_TASK_ATTEMPTS, failBlob, prevFailBlob)
+    prevFailBlob = failBlob
+    if (tr && tr.class === 'MAJOR') {
+      bailed = true
+      bailReason = tr.bailReason || tr.reason || `Task ${taskNum}: ${(testResult?.failedTests || []).join(', ')}`
+      log(`Task ${taskNum}: triage → MAJOR — bailing immediately (not burning the remaining attempts). Reason: ${bailReason}`)
+      break
+    }
+    if (attempt === MAX_TASK_ATTEMPTS) {
+      bailed = true
+      bailReason = `Task ${taskNum} still failing after ${MAX_TASK_ATTEMPTS} attempts: ${(testResult?.failedTests || []).join(', ')}`
+      log(`Task ${taskNum}: exhausted ${MAX_TASK_ATTEMPTS} attempts — bailing.`)
+      break
+    }
+    if (tr) t.fixes = [...(t.fixes || []), tr.reason]
+    log(`Task ${taskNum}: triage → RETRYABLE — fix pass ${attempt}/${MAX_TASK_ATTEMPTS - 1}. ${tr?.reason || ''}`)
+  }
 
-   ## [today's date] (task ${taskNumber} — [brief description matching the task])
+  // One state write per task. --worktree commits each write; in place writes uncommitted (swept at end).
+  t.status = taskPassed ? 'passed' : 'failed'
+  if (bailed && !taskPassed) { state.status = 'blocked'; state.bail_reason = bailReason }
+  await writeTaskState(`task ${taskNum} ${t.status}`, { cwd: runDir, commit: useWorktree })
 
-   [One paragraph: what was implemented or tested, how review went (${finalVerdict} verdict${reviewAttempts > 1 ? ` after ${reviewAttempts} attempts` : ''}), notable findings. End with: "Next: Task ${taskNumber + 1} — [next task description]."]
-
-   \`\`\`
-   [paste the git log --oneline output from STEP 1c]
-   \`\`\`
-
-   ---
-
-   ## Amendment Log Entry (D18)
-   [Genuine DEVIATIONS this task introduced relative to the spec as written — a task implemented
-    materially differently than specified, a scope adjustment, a substitution, or a deferral. Routine
-    successful implementation is NOT a deviation. The spec is a SHARED file across parallel tasks, so do
-    NOT edit it from this worktree — record the lines here and the merge applier (/clean-worktree)
-    appends them to the spec's "## Amendment Log" on main, in task order. Write ONE line per deviation:
-      - YYYY-MM-DD [<stage>] <what changed vs the spec, and why>
-    If there were no genuine deviations, write exactly: _none_]
-
-STEP 3 — Write the WORKFLOW REPORT: ${worktreePath}/${workflowReport}
-
-  Format:
-  # SDLC Workflow Report — ${blockId} Task ${taskNumber}
-
-  **Date:** [today's date from STEP 1d]
-  **Spec:** ${blockId}
-  **Task scope:** Task ${taskNumber}
-  **Pipeline started from:** ${scout.startStage}
-  **Review attempts:** ${reviewAttempts} of ${MAX_REVIEW_ATTEMPTS} max
-  **Worktree:** ${worktreePath}
-  **Branch:** ${branchName}
-
-  ## Final Verdict
-  ${finalVerdict} — [one sentence explanation]
-
-  ## Stage Results
-
-  | Stage | Status | Report | Commit | Notes |
-  |---|---|---|---|---|
-  ${stageTable}
-
-  (The ## Token Metrics section is appended verbatim in STEP 3b — do NOT write it here.)
-
-  ## Key Findings
-  [what was implemented, notable decisions, content-parity notes]
-
-  ## Files Modified
-  [source files created or modified — from the implement report]
-
-  ## Docs Updated
-  [doc files patched — from the document report; NEEDS_REVIEW flags]
-
-  ## Commits (this pipeline run)
-  [relevant lines from git log --oneline]
-
-  ## Next Step
-  To merge this task into main and apply status/log updates:
-    /clean-worktree ${branchName}
-
-STEP 3b — Append the Token Metrics section to the workflow report you just wrote. Run this EXACTLY as
-written (a literal heredoc append). Do NOT retype, summarize, reorder, or omit the table — it is
-machine-generated telemetry and must land verbatim:
-  cd ${worktreePath} && cat >> ${workflowReport} <<'METRICS_EOF'
-
-## Token Metrics
-Per-stage attribution (promptTok = injected input estimate; tok = output-token delta on a solo run,
-"—" when no +Nk budget target was set, OR an estimated input cost "~N in" under a parallel wave where
-output isn't isolatable; filesReadKb = stage-reported ingestion estimate).${metricsCaveat}
-
-| Stage | Model | promptTok | tok | filesReadKb |
-|---|---|---|---|---|
-${metricsTable}
-METRICS_EOF
-
-STEP 4 — Commit the report files. Never use git add -A or git add .
-
-  Run: cd ${worktreePath} && git status
-  Stage ONLY report files (NOT status.md or log.md — never touch those in the worktree):
-    cd ${worktreePath} && git add ${testReport} 2>/dev/null || true
-    cd ${worktreePath} && git add ${reviewReport} 2>/dev/null || true
-    cd ${worktreePath} && git add ${uitestReport} 2>/dev/null || true
-    cd ${worktreePath} && git add ${documentReport} 2>/dev/null || true
-    cd ${worktreePath} && git add ${logFile} 2>/dev/null || true
-    cd ${worktreePath} && git add ${workflowReport}
-
-  Commit using HEREDOC:
-    cd ${worktreePath} && git commit -m "$(cat <<'EOF'
-    chore: wrap up ${stem}
-    EOF
-    )"
-  cd ${worktreePath} && git log --oneline -1
-
-STEP 5 — Print the merge instructions EXACTLY as shown:
-
-  ╔══════════════════════════════════════════════════════════════════╗
-  ║  Pipeline complete: ${stem}
-  ║  Verdict: ${finalVerdict}
-  ║
-  ║  Worktree: ${worktreePath}
-  ║  Branch:   ${branchName}
-  ║
-  ║  To merge and apply status/log updates, run from main session:
-  ║    /clean-worktree ${branchName}
-  ╚══════════════════════════════════════════════════════════════════╝
-
-Return using StructuredOutput:
-  logFile: "${logFile}"
-  workflowReportFile: "${workflowReport}"
-  commitMessage: "chore: wrap up ${stem}"
-  commitHash: 7-character short hash from git log --oneline -1
-  nextFocus: the exact Current Focus Line string you wrote to the task log
-  notes: any settled decisions for planning/decisions/, plus NEEDS_REVIEW doc flags
-`, withModel({ label: 'wrap-up', schema: WRAPUP_SCHEMA, phase: 'Wrap-up' }, MODEL.wrapup))
-
-if (wrapupResult) {
-  stageResults.push({ stage: 'wrap-up', ...wrapupResult, success: true })
-  log(`Task log: ${wrapupResult.logFile} | Workflow report: ${wrapupResult.workflowReportFile}`)
-  log(`Committed: ${wrapupResult.commitMessage}`)
-  if (wrapupResult.notes) log(`Follow-ups (decisions / NEEDS_REVIEW): ${wrapupResult.notes}`)
-} else {
-  stageResults.push({ stage: 'wrap-up', success: false, notes: 'Wrap-up agent returned null' })
-  log('Wrap-up agent returned null — task log / workflow report / commit may need manual creation')
+  if (bailed) break
 }
 
-log(`Pipeline complete. Verdict: ${finalVerdict} | Worktree: ${worktreePath} | Branch: ${branchName}`)
-log(`To merge: /clean-worktree ${branchName}`)
-log(`IMPORTANT: If running multiple tasks in parallel, merge them in task-number order.`)
-log(`Merging out of order will cause status.md "Current focus" to point to the wrong next task.`)
+// ================================================================
+// FINAL STATE COMMIT + SUMMARY
+// ================================================================
+const passedTasks = taskList.filter(n => state.tasks[String(n)]?.status === 'passed' || passedFromState.has(n))
+state.status = bailed ? 'blocked' : 'done'
+
+// In-place mode wrote state uncommitted per task — sweep it into ONE final commit now. Worktree mode
+// already committed each write, so a final commit is a cheap no-op (NOTHING_TO_COMMIT).
+await writeTaskState(`run ${state.status} (${passedTasks.length}/${taskList.length})`, { cwd: runDir, commit: true })
+
+const tokensBlock = state.tokens   // already rebuilt by the writeTaskState call just above (no traced agent ran since); reuse it rather than rebuilding (carry-in #3)
+log(`Token roll-up: ${tokensBlock.total.inTokEst} inTokEst${tokensBlock.total.outTok ? ` | ${tokensBlock.total.outTok} outTok` : ''} across ${tokensBlock.stages.length} stage(s) — persisted in ${stateFile}.`)
+log(`/sdlc-task complete. ${bailed ? `BAILED: ${bailReason}` : 'all selected tasks passed'} | passed ${passedTasks.length}/${taskList.length}.`)
+if (useWorktree) {
+  log(`Worktree branch "${branchName}" carries the commits at ${runDir}.`)
+  log(`Integrate it when ready: git checkout main && git merge ${branchName}, then git worktree remove ${runDir} && git branch -d ${branchName}.`)
+} else {
+  log(`Commits landed in place on branch "${branchName}".`)
+}
+if (bailed) {
+  log(`Pick up: read ${stateFile} for per-task state, fix the blocker, then re-run with --resume.`)
+}
 
 return {
   blockId,
-  taskNumber,
-  stem,
-  branchName,
-  worktreePath,
-  finalVerdict,
-  reviewAttempts,
-  startStage: scout.startStage,
-  workflowReport: wrapupResult?.workflowReportFile || workflowReport,
-  logFile,
-  mergeCommand: `/clean-worktree ${branchName}`,
-  stageResults
+  mode: state.mode,
+  branch: branchName,
+  runDir,
+  bailed,
+  bailReason: bailReason || null,
+  tasksRun: taskList,
+  tasksPassed: passedTasks,
+  stateFile,
+  tokens: tokensBlock,
 }

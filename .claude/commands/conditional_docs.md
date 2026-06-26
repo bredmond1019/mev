@@ -21,7 +21,7 @@ Read in this order:
 3. `planning/harness.json` — check validation commands and any stack-specific config.
 4. The relevant spec in `planning/<concept>/tasks.md` if one already exists.
 
-Then use `/generate-tasks` (or `/feature`) to plan the work before starting.
+Then use `/generate-tasks` (or `/plan`) to plan the work before starting.
 
 ---
 

@@ -63,7 +63,7 @@
     "planning": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Optional planning-phase policy read by the authoring commands (/plan, /feature, /generate-tasks). Absent → all fields default to preserve today's zero-touch behavior.",
+      "description": "Optional planning-phase policy read by the authoring commands (/plan, /generate-tasks). Absent → all fields default to preserve today's zero-touch behavior.",
       "properties": {
         "clarify": {
           "type": "boolean",
@@ -93,13 +93,17 @@
     "block": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Optional policy for the lean /sdlc-block runner (the 'more powerful sdlc-run': a fresh implement agent per task, shared setup once, one consolidated back-half). Absent → verify 'consolidated' (per-task review off). Only read by /sdlc-block; /sdlc-run and /sdlc-task ignore it.",
+      "description": "Optional policy for /sdlc-block (the block-level roadmap orchestrator: fans out one /sdlc-flow per independent block in its own worktree, runs blocks in dependency-ordered waves derived from a master-plan-format file, opens a PR per block by default). Absent → maxParallelBlocks 3, autoMerge false. Only read by /sdlc-block; other engines ignore it.",
       "properties": {
-        "verify": {
-          "type": "string",
-          "enum": ["consolidated", "consolidated+review"],
-          "default": "consolidated",
-          "description": "How much per-task verification the lean block does before its single consolidated back-half (test → review → fix → document → wrap-up over the integrated tree). 'consolidated' (default, cheapest): each task runs implement + the D8 completeness self-check only; localization happens once at the end. 'consolidated+review': each task additionally gets one review pass (a localization map for the consolidated fix) — recommended by /generate-tasks when tasks are large/heterogeneous enough that end-only localization is hard (≈38k tokens × N). The consolidated review stays authoritative in both modes; per-task review never substitutes for it. CLI override: --verify-depth <value>."
+        "maxParallelBlocks": {
+          "type": "integer",
+          "default": 3,
+          "description": "Maximum number of blocks /sdlc-block fans out concurrently within a wave. A wave contains blocks that share no dependency; this cap limits concurrent worktree creation and /sdlc-flow runs. Lower for machines with tight disk/memory; raise for CI with ample resources."
+        },
+        "autoMerge": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, /sdlc-block merges each block's branch into the train branch as it completes (no PRs opened; human review bypassed). When false (default), one PR is opened per block and /merge-train handles the ordered merge after human review. CLI --auto-merge overrides this per run."
         }
       }
     },
