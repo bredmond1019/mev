@@ -21,8 +21,9 @@
 
 use serde::Deserialize;
 
+use super::crawl::{ContentFile, FileKind};
 use crate::Diagnostic;
-use crate::crawl::{ContentFile, FileKind};
+use crate::shared::{extract_frontmatter, is_kebab_case, non_empty};
 
 /// Read a classified content file's contents from disk.
 ///
@@ -348,34 +349,6 @@ pub struct MdxFrontmatter {
     pub last_updated: Option<String>,
 }
 
-/// Extract the raw YAML text from a leading `---\n…\n---` frontmatter block.
-///
-/// Returns `None` when the file does not start with `---` (no frontmatter), or when the
-/// closing `---` fence is never found (unterminated block).
-fn extract_frontmatter(contents: &str) -> Option<&str> {
-    let rest = contents.strip_prefix("---")?;
-    // Accept `---\n` or `---\r\n` as the opening fence line.
-    let rest = rest
-        .strip_prefix('\n')
-        .or_else(|| rest.strip_prefix("\r\n"))?;
-
-    // Special case: closing fence immediately follows opening fence (empty frontmatter).
-    for empty_pat in ["---\n", "---\r\n", "---"] {
-        if rest.starts_with(empty_pat) {
-            return Some("");
-        }
-    }
-
-    // General case: find the closing `---` on its own line (preceded by a newline).
-    for end_pat in ["\n---\n", "\n---\r\n", "\n---"] {
-        if let Some(yaml_end) = rest.find(end_pat) {
-            return Some(&rest[..yaml_end]);
-        }
-    }
-
-    None
-}
-
 /// Validate a `.mdx` module file: extract the leading YAML frontmatter block, parse it with
 /// `serde_yaml`, and check required fields, `difficulty` enum, and `duration` format.
 ///
@@ -460,25 +433,6 @@ fn require_str(
     }
 }
 
-/// Return the trimmed-non-empty borrow of an optional string, or `None` if absent/blank.
-fn non_empty(value: &Option<String>) -> Option<&str> {
-    match value {
-        Some(s) if !s.trim().is_empty() => Some(s),
-        _ => None,
-    }
-}
-
-/// `true` if `s` matches `^[a-z0-9]+(-[a-z0-9]+)*$` (kebab-case), without the `regex` crate.
-fn is_kebab_case(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-    // Each hyphen-delimited segment must be non-empty and all `[a-z0-9]` — this rejects
-    // leading/trailing hyphens and `--` runs (which produce an empty segment when split).
-    s.split('-')
-        .all(|seg| !seg.is_empty() && seg.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9')))
-}
-
 /// `true` if `s` matches `^\d+\s+(minutes?|hours?)$`, without the `regex` crate.
 fn is_valid_duration(s: &str) -> bool {
     let chars: Vec<char> = s.chars().collect();
@@ -529,7 +483,7 @@ fn is_valid_section_type(s: &str) -> bool {
 mod tests {
     use super::*;
     use crate::Severity;
-    use crate::crawl::{FileKind, Locale};
+    use crate::learn_ai::crawl::{FileKind, Locale};
     use std::path::PathBuf;
 
     fn temp_dir(suffix: &str) -> PathBuf {
@@ -969,18 +923,6 @@ mod tests {
     // --- helper unit tests ---
 
     #[test]
-    fn kebab_case_helper() {
-        assert!(is_kebab_case("intro-to-mcp"));
-        assert!(is_kebab_case("abc123"));
-        assert!(!is_kebab_case("Intro"));
-        assert!(!is_kebab_case("-leading"));
-        assert!(!is_kebab_case("trailing-"));
-        assert!(!is_kebab_case("double--hyphen"));
-        assert!(!is_kebab_case("under_score"));
-        assert!(!is_kebab_case(""));
-    }
-
-    #[test]
     fn duration_helper() {
         assert!(is_valid_duration("30 minutes"));
         assert!(is_valid_duration("1 minute"));
@@ -1189,24 +1131,5 @@ mod tests {
                 "missing locator {expected} in {locs:?}"
             );
         }
-    }
-
-    #[test]
-    fn extract_frontmatter_helper() {
-        // Normal case.
-        let body = "---\ntitle: T\n---\nbody";
-        assert_eq!(extract_frontmatter(body), Some("title: T"));
-
-        // Unterminated: returns None.
-        let unterminated = "---\ntitle: T\n";
-        assert_eq!(extract_frontmatter(unterminated), None);
-
-        // No leading fence: returns None.
-        let no_fence = "title: T\n---\n";
-        assert_eq!(extract_frontmatter(no_fence), None);
-
-        // Empty frontmatter block.
-        let empty_block = "---\n---\nbody";
-        assert_eq!(extract_frontmatter(empty_block), Some(""));
     }
 }

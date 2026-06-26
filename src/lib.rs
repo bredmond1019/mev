@@ -5,10 +5,13 @@
 //! future check emits. Phase 1, Block B adds content-tree crawl + classification (see
 //! `planning/master-plan.md`).
 
-mod crawl;
-mod meta;
-pub use crawl::{ContentFile, Corpus, FileKind, Locale, crawl};
-pub use meta::validate_file;
+mod learn_ai;
+mod shared;
+mod validator;
+pub use learn_ai::LearnAiValidator;
+pub use learn_ai::crawl::{ContentFile, Corpus, FileKind, Locale, crawl};
+pub use learn_ai::meta::validate_file;
+pub use validator::ContentValidator;
 
 use std::path::PathBuf;
 
@@ -93,10 +96,8 @@ impl Report {
 /// Block C: struct and frontmatter validation — each file in the [`Corpus`] is dispatched to
 /// [`meta::validate_file`], which checks required fields, enum values, and format constraints.
 /// All diagnostics (filename + struct/frontmatter) are collected into the returned [`Report`].
+///
+/// Delegates to [`LearnAiValidator`] via the [`ContentValidator`] trait's default `run` driver.
 pub fn validate(root: &std::path::Path) -> anyhow::Result<Report> {
-    let (corpus, mut diagnostics) = crawl::crawl(root);
-    for cf in &corpus.files {
-        diagnostics.extend(meta::validate_file(cf));
-    }
-    Ok(Report { diagnostics })
+    Ok(LearnAiValidator.run(root))
 }
