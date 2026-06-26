@@ -8,8 +8,10 @@
 mod crawl;
 mod meta;
 mod shared;
+mod validator;
 pub use crawl::{ContentFile, Corpus, FileKind, Locale, crawl};
 pub use meta::validate_file;
+pub use validator::ContentValidator;
 
 use std::path::PathBuf;
 
