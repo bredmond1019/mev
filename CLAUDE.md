@@ -19,7 +19,20 @@ is the current priority.
 ## Standing rules
 
 1. **Every block/task ships with tests** covering its core functionality. No exceptions.
-2. **Maintain OKF frontmatter** on every markdown file.
+2. **OKF frontmatter is required on every new `.md` file** under `docs/` and `planning/`.
+   Every new file must open with a YAML frontmatter block containing:
+   - **Required:** `type` (e.g. Decision, Index, Plan, Reference, Log, ProjectStatus, LocalContext),
+     `title` (human-readable), `description` (one-line summary written for a searcher).
+   - **Optional but strongly encouraged:** `doc_id` (kebab-case stable id; defaults to filename stem),
+     `layer` (closed list — one or more of: `brain` · `engine` · `factory` · `console` · `surface` · `infra` · `business` · `content` · `meta`),
+     `project` (closed slug — use `markdown-engine-validator` for this repo; omit for genuinely cross-cutting docs),
+     `status` (one of: `active` · `draft` · `deprecated` · `superseded` · `archived`),
+     `keywords` (3–7 free-form topic terms),
+     `related` (list of `doc_id`s of other docs this file depends on or cross-references).
+   - Canonical schema and controlled vocabularies: company-brain `docs/okf-frontmatter.md`; governing decision: D27.
+   - **Adding a file to a directory also requires updating that directory's `index.md`** — add a row
+     for the new file. If the update changes the scope of a parent directory's `index.md`, update that
+     too (propagate up the chain as needed).
 3. **Sequence, not calendar** — work the order in `master-plan.md`; pick up where you left off.
 4. **Decisions are append-only** — never edit a settled decision; supersede it with a new
    atomic file in `planning/decisions/` and link back.
