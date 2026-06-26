@@ -22,3 +22,6 @@ Validated: gating checks (fast tripwire)
 ## Task 5 — PASSED (1 attempt)
 What: Task 5 validate: all four harness gates pass (fmt, clippy, 57 tests, release build); no test files or main.rs modified; public API preserved.
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: /Users/brandon/Dev/agentic-portfolio/markdown-engine-validator/trees/2.F-content-validator-trait-flow/README.md
