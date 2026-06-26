@@ -25,3 +25,6 @@ Validated: gating checks (fast tripwire)
 
 ## Docs
 Patched: /Users/brandon/Dev/agentic-portfolio/markdown-engine-validator/trees/2.F-content-validator-trait-flow/README.md
+
+## Wrap-up — PASS
+Next: Block G — Brain crawl: implement MdFile + crawl_brain() with nested-git pruning and skip-list
