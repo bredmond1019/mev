@@ -2,6 +2,12 @@
 type: Index
 title: markdown-engine-validator — Planning Docs
 description: Navigation index for the markdown-engine-validator planning folder.
+doc_id: planning-index
+layer: [factory]
+project: markdown-engine-validator
+status: active
+keywords: [planning navigation, context, master plan, SDLC, concept folders]
+related: [context, status, master-plan]
 ---
 
 # markdown-engine-validator — Planning Docs

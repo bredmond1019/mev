@@ -2,6 +2,12 @@
 type: Reference
 title: Manual SDLC command lifecycle
 description: The step-by-step slash-command pipeline (Phase 1–7) that the automated engines drive end-to-end — for running the SDLC with human checkpoints between stages.
+doc_id: workflows-commands
+layer: [factory]
+project: markdown-engine-validator
+status: active
+keywords: [SDLC commands, manual pipeline, implement, test, review, wrap-up]
+related: [workflows-index, sdlc-flow, sdlc-run, sdlc-task, sdlc-block]
 ---
 
 # Manual SDLC command lifecycle

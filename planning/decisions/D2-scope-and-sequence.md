@@ -2,6 +2,12 @@
 type: Decision
 title: "D2: Validator Scope & Sequence"
 description: Learn-first, validator-first, and superset-of-the-TS-script as the project's scope and sequencing decisions.
+doc_id: D2-scope-and-sequence
+layer: [factory, surface]
+project: markdown-engine-validator
+status: active
+keywords: [validator scope, learn-ai, MDX validation, anchor-slice, TS script superset]
+related: [decisions-index, master-plan]
 ---
 
 # D2 — Validator Scope & Sequence

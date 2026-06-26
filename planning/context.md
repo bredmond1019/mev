@@ -2,6 +2,12 @@
 type: LocalContext
 title: markdown-engine-validator Project Context
 description: Core context, governing principles, and documentation router for markdown-engine-validator.
+doc_id: context
+layer: [factory]
+project: markdown-engine-validator
+status: active
+keywords: [project orientation, governing principles, sequence, Rust CLI, MDX validation]
+related: [status, master-plan, decisions-index]
 ---
 
 # CONTEXT — markdown-engine-validator

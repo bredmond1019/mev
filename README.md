@@ -2,6 +2,12 @@
 type: Index
 title: markdown-engine-validator
 description: A Rust CLI tool that parses, validates, and compiles MDX/Markdown lessons for learn-agentic-ai.com — frontmatter validation, link checking, code block linting, and watch-mode hot-reload
+doc_id: mev-readme
+layer: [factory, meta]
+project: markdown-engine-validator
+status: active
+keywords: [markdown validation, MDX, Rust CLI, mev, learn-ai, OKF frontmatter]
+related: [context, master-plan, status]
 ---
 
 # markdown-engine-validator

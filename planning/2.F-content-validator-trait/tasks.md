@@ -7,7 +7,7 @@ layer: [engine]
 project: markdown-engine-validator
 status: active
 keywords: [content-validator, trait, refactor, shared-core, learn-ai, module-layout]
-related: [markdown-engine-validator-master-plan]
+related: [master-plan]
 ---
 
 # Task Spec — Phase 2, Block F — ContentValidator trait + shared core

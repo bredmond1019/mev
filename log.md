@@ -2,6 +2,13 @@
 type: Log
 title: markdown-engine-validator Development Log
 description: Chronological log of work completed for markdown-engine-validator.
+doc_id: log
+layer: [factory]
+project: markdown-engine-validator
+status: active
+keywords: [work log, development history, session entries, block completion]
+related: [status]
+timestamp: "2026-06-24"
 ---
 
 # Log — markdown-engine-validator

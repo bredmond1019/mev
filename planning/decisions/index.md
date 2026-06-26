@@ -2,6 +2,12 @@
 type: Index
 title: markdown-engine-validator Decisions Registry
 description: Index of atomic, append-only architectural decision records for markdown-engine-validator.
+doc_id: decisions-index
+layer: [factory]
+project: markdown-engine-validator
+status: active
+keywords: [decision records, ADR, architectural decisions, OKF, append-only]
+related: [D1-initial-okf, D2-scope-and-sequence]
 ---
 
 # Decisions Registry
