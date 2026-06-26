@@ -8,13 +8,13 @@ project: markdown-engine-validator
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-06-20"
+timestamp: "2026-06-26"
 ---
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-20 — phase1-blockC Done (All tasks 1–7 complete; phase1-blockD next — Cross-file integrity checks)
-**Current focus:** phase1-blockD — Planned (Cross-file integrity validation)
+**Last updated:** 2026-06-26 — Block 2.F Done (ContentValidator trait + shared core); Block 2.G next (Brain crawl)
+**Current focus:** Block 2.G — Planned (Brain crawl)
 
 ---
 
@@ -40,6 +40,14 @@ timestamp: "2026-06-20"
 | Block C | Frontmatter & JSON struct validation | Done | All tasks complete (1–7): struct/frontmatter validation module (`src/meta.rs`) with serde-based deserialization; `ModuleMeta` (LearnModuleJson), PathMetadataJson, and ModuleMdx frontmatter validation with required field checks, enum validation (difficulty, type, level), format validation (kebab-case id, duration pattern); YAML frontmatter parsing with proper error handling; fixture-driven tests (good + broken variants) for all cases; all four harness gates green (fmt, clippy, test, build). |
 | Block D | Cross-file integrity | Not started | Anchor-slice, pair existence, ID coherence, callout types |
 | Block E | pt-BR parity & reporter polish | Not started | Locale mirror checks; ANSI + `--json` output |
+
+### Phase 2 — Generalize: ContentValidator trait + Brain OKF validation
+| Block | What | Status | Notes |
+|---|---|---|---|
+| Block F | `ContentValidator` trait + shared core | Done | All tasks (1–5) complete: extracted `extract_frontmatter`, `is_kebab_case`, `non_empty` into `src/shared.rs`; defined associated-type `ContentValidator` trait in `src/validator.rs`; moved learn-ai code (`crawl.rs`, `meta.rs`) into `src/learn_ai/` module with `LearnAiValidator` impl; rewrote `validate()` as thin wrapper; public API preserved; all 27 tests pass (including post-flow code-review fix to `non_empty` docstring); all harness gates green. |
+| Block G | Brain crawl | Planned | Walk all `.md` under root, skip nested git + blocklist (`target/`, `node_modules/`, `.git/`) |
+| Block H | Brain OKF frontmatter validator | Planned | Validate OKF YAML frontmatter (type, title, description, layer, project, status, keywords, doc_id) |
+| Block I | `validate-brain` subcommand + `--json` | Planned | Wire `BrainValidator` to CLI; add global `--json` flag for RAG indexer |
 
 ---
 
