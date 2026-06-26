@@ -8,12 +8,32 @@ project: markdown-engine-validator
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-06-24"
+timestamp: "2026-06-26"
 ---
 
 # Log — markdown-engine-validator
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## 2026-06-26 — 2.F-content-validator-trait: ContentValidator trait + shared core (PASS)
+
+Completed Phase 2, Block F: the full refactor to introduce a generic `ContentValidator` trait. Extracted shared helpers (`extract_frontmatter`, `is_kebab_case`, `non_empty`) into `src/shared.rs`, defined the associated-type `ContentValidator` trait in `src/validator.rs`, moved the learn-ai code (`crawl.rs`, `meta.rs`) into a new `src/learn_ai/` module, implemented `LearnAiValidator` behind the trait, and rewrote `validate()` as a thin wrapper. All 27 tests pass. A post-flow code review fixed a misleading `non_empty` docstring. The public API (`mev::{ContentFile, Corpus, FileKind, Locale, crawl, validate_file, validate, Diagnostic, Severity}`) is preserved via `pub use`, so all existing integration tests pass unchanged. Next: Block 2.G (Brain crawl).
+
+```
+b8fe7f7 fix(shared): correct misleading non_empty docstring — returns original string, not trimmed
+6810c65 chore: flow state — wrap-up (PASS)
+eefd181 chore: wrap up 2.F-content-validator-trait
+23a270a chore: flow state — docs
+2d64850 docs: update docs for 2.F-content-validator-trait
+31805de chore: flow state — task 5 passed
+34e7596 feat: implement 2.F-content-validator-trait-task5
+f23c530 chore: flow state — task 4 passed
+2cf8b82 feat: implement 2.F-content-validator-trait-task4
+ae7937a chore: flow state — task 3 passed
+97894e6 feat: implement 2.F-content-validator-trait-task3
+```
 
 ---
 
