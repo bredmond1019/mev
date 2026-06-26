@@ -50,7 +50,12 @@ cargo fmt --check && cargo clippy -- -D warnings && cargo test && cargo build --
 markdown-engine-validator/
 ├── .claude/        ← Claude Code commands + SDLC workflow engines
 ├── planning/       ← context, status, master-plan, harness.json, decisions/, <concept>/
-├── src/            ← lib.rs (Diagnostic/Report core) + main.rs (clap CLI)
+├── src/
+│   ├── lib.rs          ← crate root: Diagnostic/Report core + public API re-exports
+│   ├── main.rs         ← clap CLI entry point
+│   ├── shared.rs       ← shared helpers: extract_frontmatter, is_kebab_case, non_empty
+│   ├── validator.rs    ← ContentValidator trait (crawl + validate_item + run driver)
+│   └── learn_ai/       ← LearnAiValidator: crawl.rs, meta.rs, mod.rs
 ├── tests/          ← integration tests + fixtures
 └── Cargo.toml
 ```
