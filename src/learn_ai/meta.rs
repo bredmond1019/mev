@@ -21,8 +21,8 @@
 
 use serde::Deserialize;
 
+use super::crawl::{ContentFile, FileKind};
 use crate::Diagnostic;
-use crate::crawl::{ContentFile, FileKind};
 use crate::shared::{extract_frontmatter, is_kebab_case, non_empty};
 
 /// Read a classified content file's contents from disk.
@@ -483,7 +483,7 @@ fn is_valid_section_type(s: &str) -> bool {
 mod tests {
     use super::*;
     use crate::Severity;
-    use crate::crawl::{FileKind, Locale};
+    use crate::learn_ai::crawl::{FileKind, Locale};
     use std::path::PathBuf;
 
     fn temp_dir(suffix: &str) -> PathBuf {
