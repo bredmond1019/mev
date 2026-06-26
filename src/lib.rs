@@ -7,6 +7,7 @@
 
 mod crawl;
 mod meta;
+mod shared;
 pub use crawl::{ContentFile, Corpus, FileKind, Locale, crawl};
 pub use meta::validate_file;
 
