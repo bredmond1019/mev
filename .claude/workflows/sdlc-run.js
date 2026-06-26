@@ -264,11 +264,75 @@ function withModel(base, model) {
 }
 
 // ----------------------------------------------------------------
+// TOKEN TELEMETRY (Block A — the shared committed-state token contract)
+//
+// Lifted verbatim from sdlc-task.js (engines are self-contained — lift, don't import). Each
+// substantive stage runs through tracedAgent, which records the injected-prompt size and the
+// output-token delta off the shared budget pool. buildTokensBlock() rolls the accumulated metrics
+// into the canonical `tokens` block that committed state carries (per-stage + a cumulative total).
+//
+//   promptTokEst — injected input only (~prompt.length / 4)
+//   outTok       — output-token delta from the shared budget pool; null when no +Nk target is set.
+//                  sdlc-run is fully SEQUENTIAL (no parallel waves), so the delta attributes cleanly
+//                  to its stage — no D12 contamination caveat applies here.
+//   filesReadKb  — a stage's self-reported ingestion estimate, folded in via recordFilesRead() when
+//                  the stage schema carries it (none do today; the plumbing is ready for later use).
+//   inTokEst     — D15 input-cost estimate = promptTokEst + filesReadKb→tokens (~256 tok/KB).
+// ----------------------------------------------------------------
+const metrics = []
+async function tracedAgent(prompt, opts = {}) {
+  const before = (typeof budget !== 'undefined' && budget.spent) ? budget.spent() : 0
+  const r = await agent(prompt, opts)
+  const after = (typeof budget !== 'undefined' && budget.spent) ? budget.spent() : 0
+  metrics.push({
+    label: opts.label || 'agent',
+    model: opts.model || 'session',
+    promptTokEst: Math.round(prompt.length / 4),
+    outTok: after - before > 0 ? after - before : null,
+  })
+  return r
+}
+
+// Fold a stage's self-reported `filesReadKb` into the metrics entry the wrapper just pushed.
+// Safe to call immediately after the awaited tracedAgent call — that entry is always metrics[last].
+function recordFilesRead(result) {
+  if (result && result.filesReadKb != null && metrics.length) {
+    metrics[metrics.length - 1].filesReadKb = result.filesReadKb
+  }
+}
+
+// Build the canonical `tokens` block from the accumulated per-agent metrics. This is the shared
+// token-telemetry contract every engine's committed state carries (Block A): per-stage output
+// tokens + the D15 input-cost estimate + a cumulative run total. inTokEst is always present
+// (prompt-derived); outTok is null when no budget target is set and is summed as 0 in the total.
+//
+// CONTRACT SCOPE (Phase 0 /code-review carry-in): `metrics` — and therefore `tokens.total` — cover the
+// SUBSTANTIVE stages only. Cheap helper / state-writer agents (the Haiku state-writer, config + baseline
+// loaders) deliberately use bare agent() and are EXCLUDED; this bounded, Haiku-cheap exclusion is the
+// same boundary in all four engines, named here so it is explicit rather than silent — it keeps the
+// two-level /sdlc-block roll-up summing comparable substantive-stage totals at both levels.
+function buildTokensBlock() {
+  const stages = metrics.map(m => {
+    const filesReadKb = m.filesReadKb != null ? m.filesReadKb : null
+    const inTokEst = m.promptTokEst + (filesReadKb != null ? Math.round(filesReadKb * 256) : 0)
+    return { label: m.label, model: m.model, promptTokEst: m.promptTokEst, filesReadKb, inTokEst, outTok: m.outTok }
+  })
+  const total = stages.reduce((acc, s) => {
+    acc.promptTokEst += s.promptTokEst
+    acc.filesReadKb  += s.filesReadKb || 0
+    acc.inTokEst     += s.inTokEst
+    acc.outTok       += s.outTok || 0
+    return acc
+  }, { promptTokEst: 0, filesReadKb: 0, inTokEst: 0, outTok: 0 })
+  return { stages, total }
+}
+
+// ----------------------------------------------------------------
 // HARNESS CONFIG — mechanism/policy split (see planning/harness.json)
 //
 // The engine ships NO stack defaults. A project declares its validation policy in
 // planning/harness.json. The workflow runtime has no filesystem access, so a dedicated
-// micro-loader agent reads + parses the file (the same way sdlc-block loads execution-plan.json).
+// micro-loader agent reads + parses the file (the same pattern every engine uses for harness.json).
 // Returns the parsed config object, or null when the file is absent or invalid — callers then
 // degrade to the spec's `## Validation Commands` section and disable the UI-test stage.
 // ----------------------------------------------------------------
@@ -537,21 +601,25 @@ function renderUiTestPrompt(cfg, port) {
 const stageResults = []
 
 // ----------------------------------------------------------------
-// PERSISTENT PHASE STATE (D27) — after each phase resolves, write a small JSON
-// breadcrumb to planning/<concept>/sdlc/sdlc-state.json (alongside D22's
-// execution-plan.json). Two uses: (1) crash visibility — `cat` it to see which phase a run
-// last finished without reading agent output; (2) a resume_from hint for a restarted run.
+// COMMITTED AUTHORITATIVE STATE (Block A — supersedes D27's gitignored breadcrumb)
 //
-// This is AUDIT/CRASH state, NOT a replacement for the scout's report-file resume — report
-// files are committed and remain the authoritative resumption signal (see the RESUMPTION header
-// and D27). The state file is gitignored runtime state, so it never pollutes commits or causes
-// parallel-merge conflicts.
+// After each phase resolves, write planning/<concept>/sdlc/sdlc-run-state.json (write-only — NOT
+// committed per phase). The file carries the phase trail (current/completed/failed) AND the canonical
+// `tokens` block (per-stage output tokens + the D15 input-cost estimate + a cumulative total) — so
+// token usage, which was render-only and vanished when a run ended, is now persisted and reviewable.
 //
-// The workflow runtime has no filesystem access and cannot call Date.now(), so a cheap Haiku
-// writer agent stamps the timestamps (via `date`) and writes the file, preserving started_at
-// across writes. Best-effort: a failed write logs a warning but never aborts the pipeline.
+// COMMIT CADENCE: sdlc-run executes IN PLACE on the current branch (usually main, no worktree), so —
+// unlike sdlc-flow's throwaway-worktree per-write commit — the state file is written uncommitted each
+// phase (still `cat`-visible for crash inspection) and the WRAP-UP chore commit stages it in ONE shot.
+// That keeps main free of per-phase state-churn commits. The committed report files remain the
+// AUTHORITATIVE resume signal (see the RESUMPTION header) — state is a best-effort index/review
+// artifact, so a crash before wrap-up leaves the state file uncommitted (acceptable: the per-stage
+// reports are already committed by their own agents). A failed write logs a warning, never aborts.
+//
+// The runtime has no filesystem access and cannot call Date.now(), so a cheap Haiku writer agent
+// stamps the timestamps (via `date`) and does the Write, preserving started_at across writes.
 // ----------------------------------------------------------------
-const stateFile = `planning/${blockId}/sdlc/sdlc-state.json`
+const stateFile = `planning/${blockId}/sdlc/sdlc-run-state.json`
 const completedPhases = []
 
 const STATE_WRITE_SCHEMA = {
@@ -564,17 +632,20 @@ const STATE_WRITE_SCHEMA = {
   }
 }
 
-// Persist the phase breadcrumb after a phase resolves. On success the phase is appended to
-// completed_phases (monotonic, deduped). On failure, failed_phase + resume_from are set to the
-// phase name and completed_phases is left untouched (the phase did not complete).
+// Persist the phase + tokens state after a phase resolves (write-only — the wrap-up commit stages it).
+// On success the phase is appended to completed_phases (monotonic, deduped). On failure, failed_phase +
+// resume_from are set to the phase name and completed_phases is left untouched (the phase did not
+// complete). The tokens block reflects every traced stage that has run so far (cumulative — the final
+// write before wrap-up is the run total, modulo the wrap-up agent's own as-yet-unrun cost).
 async function recordPhaseState(phaseName, { failed = false } = {}) {
   if (!failed && phaseName && !completedPhases.includes(phaseName)) {
     completedPhases.push(phaseName)
   }
   const failedPhase = failed ? phaseName : null
+  const tokensJson = JSON.stringify(buildTokensBlock(), null, 2)
   const result = await agent(`
-You maintain the SDLC pipeline's persistent phase-state breadcrumb. Overwrite a single JSON file —
-do not run any checks, edit code, or commit anything.
+You maintain the SDLC pipeline's committed run-state. Write ONE JSON file — do not run any checks,
+edit code, or commit anything (the wrap-up stage commits this file later).
 
 STEP 1 — current UTC timestamp + preserved start time:
   NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -586,7 +657,8 @@ STEP 2 — ensure the directory exists:
   mkdir -p planning/${blockId}/sdlc
 
 STEP 3 — write ${stateFile} with EXACTLY this JSON (valid JSON only: double quotes, no trailing
-commas, no markdown fences). Substitute <STARTED_AT> (preserved or NOW) and <NOW> from STEP 1:
+commas, no markdown fences). Substitute <STARTED_AT> (preserved or NOW) and <NOW> from STEP 1, and
+insert the "tokens" object verbatim as given:
 {
   "spec_slug": ${JSON.stringify(blockId)},
   "started_at": "<STARTED_AT>",
@@ -595,13 +667,15 @@ commas, no markdown fences). Substitute <STARTED_AT> (preserved or NOW) and <NOW
   "completed_phases": ${JSON.stringify(completedPhases)},
   "failed_phase": ${failedPhase === null ? 'null' : JSON.stringify(failedPhase)},
   "task_number": ${taskNumber === null ? 'null' : taskNumber},
-  "resume_from": ${failedPhase === null ? 'null' : JSON.stringify(failedPhase)}
+  "resume_from": ${failedPhase === null ? 'null' : JSON.stringify(failedPhase)},
+  "tokens": ${tokensJson}
 }
 
-Use the Write tool to write ${stateFile}. Then return via StructuredOutput (written=true on success).
+Use the Write tool to write ${stateFile}. Do NOT git add or commit. Then return via StructuredOutput
+(written=true on success).
 `, withModel({ label: `state:${phaseName}${failed ? ':failed' : ''}`, schema: STATE_WRITE_SCHEMA }, MODEL.scout))
   if (!result || !result.written) {
-    log(`(state) could not persist phase state for "${phaseName}"${failed ? ' (failure record)' : ''} — continuing`)
+    log(`(state) could not persist run state for "${phaseName}"${failed ? ' (failure record)' : ''} — continuing`)
   }
 }
 
@@ -623,7 +697,7 @@ if (fromStage) {
 } else {
 phase('Scout')
 
-scout = await agent(`
+scout = await tracedAgent(`
 You are the pipeline scout for the SDLC workflow system.
 
 Target:
@@ -741,7 +815,7 @@ if (currentStage === 'generate-tasks') {
   phase('Plan')
   log('Spec file not found — running generate-tasks...')
 
-  const genResult = await agent(`
+  const genResult = await tracedAgent(`
 You need to generate the task spec for spec "${blockId}".
 
 Spec file to create: ${specFile}
@@ -841,7 +915,7 @@ while (['implement', 'fix', 'test', 'review', 'ui-test'].includes(currentStage) 
     phase('Implement')
     log('Running implement...')
 
-    const implResult = await agent(`
+    const implResult = await tracedAgent(`
 You are the implementation agent for the SDLC pipeline.
 
 Target:
@@ -984,7 +1058,7 @@ Return your result using the StructuredOutput tool:
     const fixModel = (ESCALATION_MODEL && fixPass === MAX_REVIEW_ATTEMPTS) ? ESCALATION_MODEL : MODEL.fix
     if (fixModel !== MODEL.fix) log(`Final fix pass — escalating model to ${fixModel}.`)
 
-    const fixResult = await agent(`
+    const fixResult = await tracedAgent(`
 You are the fix agent for the SDLC pipeline. Your job is to make targeted fixes for the failures identified
 in the last review — NOT to re-implement the entire spec from scratch.
 
@@ -1127,7 +1201,7 @@ Return your result using the StructuredOutput tool:
     phase('Test')
     log('Running the project validation suite...')
 
-    const testResult = await agent(`
+    const testResult = await tracedAgent(`
 You are the test agent for the SDLC pipeline. Run the project's validation suite and write a test report.
 
 IMPORTANT — run ONLY the checks enumerated below (sourced from planning/harness.json and the spec's
@@ -1216,7 +1290,7 @@ Return your result using the StructuredOutput tool:
     const reviewModel = (ESCALATION_MODEL && reviewAttempts === MAX_REVIEW_ATTEMPTS) ? ESCALATION_MODEL : MODEL.review
     if (reviewModel !== MODEL.review) log(`Final review attempt — escalating model to ${reviewModel}.`)
 
-    const reviewResult = await agent(`
+    const reviewResult = await tracedAgent(`
 You are the review agent for the SDLC pipeline. Verify the implementation against the spec and issue a verdict.
 
 Target:
@@ -1351,7 +1425,7 @@ Return your result using the StructuredOutput tool:
       log('Running UI test stage...')
       const ui = renderUiTestPrompt(harnessCfg, harnessCfg.uiTest.port ?? 3000)
 
-      const uitestResult = await agent(`
+      const uitestResult = await tracedAgent(`
 You are the UI test agent for the SDLC pipeline. Run a quick live browser smoke check using
 playwright-cli to catch visual/runtime regressions that the validation suite cannot catch.
 
@@ -1469,7 +1543,7 @@ if (currentStage === 'document') {
   phase('Document')
   log('Running document stage...')
 
-  const docResult = await agent(`
+  const docResult = await tracedAgent(`
 You are the documentation agent for the SDLC pipeline. Surgically patch docs/ to reflect the completed implementation.
 
 Target:
@@ -1588,6 +1662,12 @@ log(`Wrap-up. Final verdict: ${finalVerdict}. Pipeline: ${stageResultsSummary}`)
 // ----------------------------------------------------------------
 log('Running wrap-up: status/log update + workflow report + chore commit...')
 
+// Write the final run-state (phase=wrap-up + the cumulative tokens block) BEFORE the wrap-up agent
+// runs, so the wrap-up's single chore commit stages it (defer-to-wrap-up cadence — no per-phase
+// commit). The wrap-up agent's own token cost is not yet in the metrics here; that is acceptable and
+// precedented (the wrap-up stage has historically been absent from the persisted token roll-up).
+await recordPhaseState('wrap-up')
+
 const stageTable = stageResults.map(r => {
   const label = r.stage + (r.attempt ? ` (attempt ${r.attempt})` : '')
   const status = r.verdict ? r.verdict : (r.success ? 'completed' : 'FAILED')
@@ -1597,7 +1677,7 @@ const stageTable = stageResults.map(r => {
   return `| ${label} | ${status} | ${file} | ${commit} | ${notes} |`
 }).join('\n')
 
-const wrapupResult = await agent(`
+const wrapupResult = await tracedAgent(`
 You are the wrap-up agent for the SDLC pipeline. You do THREE things in one pass — update status.md,
 append a log entry, then write the workflow report — and finish by committing all the remaining
 planning files in one chore commit.
@@ -1696,11 +1776,14 @@ PART C — Commit the remaining planning files as a single chore commit.
 
   Stage them:
     git add planning/status.md log.md ${workflowReport}
+    git add ${stateFile} 2>/dev/null || true
     git add ${specFile} 2>/dev/null || true
     git add ${testReport} 2>/dev/null || true
     git add ${reviewReport} 2>/dev/null || true
     git add ${uitestReport} 2>/dev/null || true
     (only add files that actually exist and are untracked/modified)
+  ${stateFile} is the committed run-state (phase trail + token roll-up) written just before this
+  stage — always stage it so the run leaves a clean tree.
 
   Commit using HEREDOC:
     git commit -m "$(cat <<'EOF'
@@ -1735,9 +1818,10 @@ if (wrapupResult) {
   log('Wrap-up agent returned null — manual status/log update, commit, and workflow report may be needed')
 }
 
-await recordPhaseState('wrap-up')
-
+const tokensBlock = buildTokensBlock()
+log(`Token roll-up: ${tokensBlock.total.inTokEst} inTokEst${tokensBlock.total.outTok ? ` | ${tokensBlock.total.outTok} outTok` : ''} across ${tokensBlock.stages.length} stage(s) — persisted in ${stateFile}.`)
 log(`Pipeline complete. Verdict: ${finalVerdict} | Attempts: ${reviewAttempts} | Report: ${workflowReport}`)
+log('Next: run /close-out to verify coverage + patch docs before handing off.')
 
 return {
   blockId,
@@ -1748,5 +1832,7 @@ return {
   startStage: scout.startStage,
   workflowReport: wrapupResult?.workflowReportFile || workflowReport,
   commitMessage: wrapupResult?.commitMessage,
+  stateFile,
+  tokens: tokensBlock,
   stageResults
 }

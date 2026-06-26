@@ -1,168 +1,171 @@
-# Plan — Create a plan for a task, scaled to its complexity.
-
-## Purpose
-
-Plan one ad-hoc / experimental task or feature from a free-text description. The resulting `plan.md`
-serves two downstream routes:
-- **Direct:** `/breakdown` or `/implement` it as-is (the quick path).
-- **Rigorous:** treat it as a **standalone block definition** and run `/generate-tasks --from
-  planning/plan-<slug>/plan.md` to decompose it into a `tasks.md` with full disjoint-ownership
-  analysis, an `execution-plan.json`, and a pipeline recommendation — then run it (e.g. via
-  `/sdlc-flow`) on a feature branch. This is how you try an experimental feature **without** putting
-  it in `master-plan.md` first. See `planning/decisions/D34-adhoc-planning-seam.md`. (For the roadmap
-  itself, use `/generate-master-plan`.)
+# Plan — Author a mini-roadmap for an ad-hoc or experimental feature.
 
 ## Variables
 
-$ARGUMENTS — description of the task to plan.
+$ARGUMENTS — free-text description of the feature, experiment, or bounded task to plan.
+
+## Purpose
+
+Turn a free-form description into a `planning/plan-<slug>/plan.md` whose phase/block structure
+`/generate-tasks` can consume directly. This is the **mini-roadmap** producer — for ad-hoc or
+experimental work you want to plan and run **without** putting it in the main `master-plan.md`
+first. The output uses the same master-plan format (phases/blocks/Quick Reference table), so
+`/sdlc-block` can orchestrate it as a branch train, or `/generate-tasks <block>` → `/sdlc-flow`
+can run a single block.
+
+> For the main project roadmap, use `/generate-master-plan` → `planning/master-plan.md`.
+> See `planning/decisions/D34-adhoc-planning-seam.md`.
 
 ## Instructions
 
-1. If `$ARGUMENTS` is not provided, stop and ask the user to describe the task.
+1. If `$ARGUMENTS` is not provided, stop and ask the user to describe the feature or task.
 2. **Clarify gate (only when enabled).** Read `planning/harness.json` → `planning.clarify`. When it is
    `true` **or** `$ARGUMENTS` contains `--clarify`, and the prompt is genuinely ambiguous (its scope,
    target files, or success criteria could be read more than one way), pause and ask the user **2–4
    targeted clarifying questions** before writing anything; fold the answers into the plan. If the
    prompt is already unambiguous, skip the questions and proceed even when the gate is on. When
-   `planning.clarify` is absent/`false` and no `--clarify` flag is present, skip this step entirely and
-   behave exactly as before (write immediately). Strip a `--clarify` token from the prompt before using
-   it as the `prompt:` metadata value.
+   `planning.clarify` is absent/`false` and no `--clarify` flag is present, skip this step entirely.
+   Strip a `--clarify` token from the prompt before using it as the title.
    - **Plan-quality floor — clarify, don't fabricate (holds even when the gate is off).** If filling a
-     load-bearing element (the Relevant Files / New Files, a `### N.` task's concrete files, Acceptance
-     Criteria, or a dependency) would require *inventing* a fact you cannot ground in `$ARGUMENTS`,
-     `CLAUDE.md`, `planning/context.md`, or the repo — **stop and ask the user** rather than write a
-     plausible-looking guess. The gate governs proactive question rounds; this floor governs never
-     fabricating. An honest "I need X" beats a confident invention.
-3. THINK HARD about task type and complexity before writing anything:
-   - `task_type`: `chore` | `feature` | `refactor` | `fix` | `enhancement` | `content`
-   - `complexity`: `simple` | `medium` | `complex`
-   - Simple tasks (chores, targeted fixes, single-post content edits): focus on specific changes and validation.
-   - Complex tasks (features, refactors, multi-page content arcs): include design rationale, implementation phases, and testing strategy.
-4. Research the codebase: read `CLAUDE.md`, then files directly relevant to the task.
-5. Create a plan using the Plan Format below, omitting sections marked as conditional when they don't apply.
-6. Choose a short descriptive slug (e.g. `fix-claude-sdk-package-name`, `refactor-content-loader`, `add-build-cache`).
-7. Create the directory `planning/plan-{descriptive-name}/` if it does not exist, then save the plan to `planning/plan-{descriptive-name}/plan.md`.
-8. **Property self-check.** Before reporting, re-read the plan and confirm every required property
-   holds; **revise in place** if any fails, then re-check:
-   - **Every `### N.` task names ≥1 concrete file** it creates or modifies (the final Validate step is
-     exempt).
-   - **Acceptance Criteria are non-empty and observable** — each can be judged true/false.
-   - **Validation Commands are present** (or `planning/harness.json` → `validation.checks[]` supplies
-     them as the fallback).
-   - **No leftover template sentinels** — no `{{TOKEN}}`, unfilled `<placeholder>`-style angle stubs,
-     or empty bullets. Do **not** treat legitimate `<...>` in code/prose or a bare `TODO`/`TBD` inside
-     authored content as a sentinel.
-9. Return only the path to the file created.
+     load-bearing element (a block's Files, Acceptance criteria, scope boundary, or a dependency) would
+     require *inventing* a fact you cannot ground in `$ARGUMENTS`, `CLAUDE.md`, `planning/context.md`,
+     or the repo — **stop and ask the user a targeted question** rather than write a plausible-looking
+     guess. An honest "I need X to define block N" beats a confident invention.
+3. Read `CLAUDE.md` and `planning/context.md` — internalize the standing rules and current architecture.
+4. Read any files directly relevant to the task (the files the blocks will touch).
+5. **THINK HARD about scope and decomposition before writing:**
+   - A mini-roadmap is typically 1–3 phases and 1–5 blocks. If it grows larger than that, it belongs
+     in `master-plan.md` via `/generate-master-plan`, not here.
+   - A **block** is a coherent, independently reviewable unit of work that `/generate-tasks` can turn
+     into ~one spec. Don't make blocks so large they hide separable concerns, nor so small they fragment
+     one feature across many.
+   - `/generate-tasks` reads **only the target block's section** — so every block must be
+     **self-sufficient**: concrete **Files** (New vs Modified, by path), **observable Acceptance
+     criteria**, explicit **Out of scope** boundaries, and any shared **Interfaces**.
+   - **Name files by path.** Tasks sharing a file must be serialized (`dependsOn`) or append-only;
+     tasks owning distinct files may run in parallel.
+   - Sequence blocks by dependency and competence — foundational / enabling work first.
+6. Choose a short descriptive slug (e.g. `keyboard-nav`, `auth-refresh`, `rust-streaming`).
+7. Create `planning/plan-<slug>/` if it does not exist, then write the plan to
+   `planning/plan-<slug>/plan.md` using the Output Format below.
+8. **Property self-check.** Before reporting, re-read the plan and **revise in place** until every
+   property holds, then re-check:
+   - Every block is a `### Block X — <name>` heading under a `## Phase N — <name>` heading, so
+     `/generate-tasks phaseN-blockX` can parse and locate it.
+   - Every block names its **Files** (New vs Modified, by path).
+   - Every block declares **Out of scope** — at least one explicit boundary.
+   - Every block has non-empty **What**, **Why**, and observable **Acceptance criteria** — each a
+     true/false condition checkable against the diff, ending with the project's gating checks passing.
+   - The **Quick Reference Sequence Table** has one row per block and matches the block headings.
+   - No leftover scaffold sentinels (`{{TOKEN}}`, unfilled `<placeholder>`-style angle stubs, empty
+     bullets). Legitimate `<...>` in code/prose is fine.
+9. Report the path and next steps.
 
 ## Codebase Structure
 
-- `CLAUDE.md` — standing rules, the SDLC pipeline, build/test/validate commands (start here)
-- `planning/context.md` — why the project exists + audit findings; `planning/status.md` — progress
-- `planning/harness.json` — the project's validation commands + UI-test config
-- `planning/` — task specs and plan files (one concept folder per task)
+- `CLAUDE.md` — standing rules, stack, build/test/validate commands (start here)
+- `planning/context.md` — why the project exists; `planning/status.md` — current state
+- `planning/harness.json` — validation commands + UI-test config
+- `planning/master-plan.md` — the main project roadmap (this command does NOT modify it)
 
-Read `CLAUDE.md` for the project's actual stack, directory layout, and conventions — do not assume
-any framework, language, or directory structure that isn't written there.
+Read `CLAUDE.md` for the project's actual stack and conventions — do not assume any framework,
+language, or directory structure that isn't written there.
 
 ## Standing rules to respect
 
-Read `CLAUDE.md` and `planning/context.md` — internalize and enforce **the project's standing rules**.
-CLAUDE.md is the authority; do not assume any stack, locale-parity, narrative, or content-layout rule
-unless written there. Universal harness rules still apply: no fabricated metrics/quotes, no emoji,
-every change ships with tests.
+Read `CLAUDE.md` and `planning/context.md` and enforce **the project's standing rules**. CLAUDE.md
+is the authority; assume no stack, locale-parity, narrative, or content-layout rule unless written
+there. Universal harness rules apply: no fabricated metrics/quotes, no emoji, every block's
+Acceptance criteria leave the project's gating checks (`planning/harness.json` →
+`validation.checks[]`) passing.
 
-## Plan Format
+## Output Format
 
-```md
-# Plan: <task name>
+The plan uses the same block-definition skeleton as `master-plan.md` (so `/sdlc-block` and
+`/generate-tasks` can consume it directly):
 
-## Metadata
-prompt: `{$ARGUMENTS}`
-task_type: <chore|feature|refactor|fix|enhancement|content>
-complexity: <simple|medium|complex>
-status: Not started
-last-run: never
+~~~md
+---
+type: Plan
+title: <Feature Name> Plan
+description: Mini-roadmap for <feature name> — ad-hoc, not in master-plan.md.
+---
 
-## Task Description
-<describe the task in detail based on the prompt>
+# <Feature Name> — Plan
 
-## Objective
-<one sentence: what will be true when this plan is fully executed>
+*Mini-roadmap. Created <DATE>. Ad-hoc: not in `planning/master-plan.md`.
+See `planning/decisions/D34-adhoc-planning-seam.md`.*
 
-<!-- Include for feature/refactor/complex tasks: -->
-## Problem Statement
-<the specific problem or opportunity this task addresses>
+## The Goal, Stated Plainly
+<1–2 paragraphs: what this feature is, why it matters now, and what "done" means.>
 
-## Solution Approach
-<the proposed solution and why it fits the project's existing patterns>
-<!-- end conditional -->
+## The Destination
+<The named outcome: what is true when this plan is fully executed.>
 
-## Relevant Files
-<list files relevant to the task with bullet points explaining why each is needed>
+## Architecture / Design Overview
+<Key structural decisions; which existing systems it hooks into; any new abstractions needed.>
 
-### New Files
-<list any new files to be created, if applicable — include any companion files the change requires>
+---
 
-<!-- Include for medium/complex tasks: -->
-## Implementation Phases
-### Phase 1: Foundation
-<any foundational work that must land first>
+## The Block Contract
 
-### Phase 2: Core Implementation
-<the main body of work>
+`/generate-tasks` reads **only the target block's section** below. Every block is self-sufficient
+and uses the same skeleton:
 
-### Phase 3: Integration & Validation
-<integration with existing pages/services, tests, final checks>
-<!-- end conditional -->
+- **What** — the scope, in implementation terms.
+- **Why** — the motivation (keeps the generator from over- or under-scoping).
+- **Files** — *new* vs *modified*, named by path. Load-bearing: tasks sharing a file must be
+  serialized (`dependsOn`) or append-only; tasks owning distinct files may run in parallel.
+- **Interfaces / shared surface** *(optional)* — shared exports/APIs consumed or added. Omit when
+  there is no shared layer.
+- **Out of scope** — explicit boundaries; what belongs to a later block or a different effort.
+- **Acceptance criteria** — true/false conditions checkable against the diff, ending with the
+  project's gating checks passing.
 
-## Step by Step Tasks
-IMPORTANT: Execute every step in order, top to bottom.
+---
 
-### 1. <First Task Name>
-- <specific action>
-- <specific action>
+## Phase 0 — <name>
 
-### 2. <Second Task Name>
-- <specific action>
+### Block A — <name>
+- **What:** <scope in implementation terms>
+- **Why:** <why this block, why now in the sequence>
+- **Files:**
+  - *New* `<path>` — <what it holds>
+  - *Modified* `<path>` — <what changes>
+- **Interfaces / shared surface:** <optional>
+- **Out of scope:** <explicit boundaries>
+- **Acceptance criteria:**
+  - <observable true/false condition>
+  - Project's gating checks pass (see `planning/harness.json`).
 
-### N. Validate
-- Run the Validation Commands listed below and confirm all pass.
+---
 
-<!-- Include for feature/complex tasks: -->
-## Testing Strategy
-<tests needed; edge cases to cover; any integration test requirements>
-<!-- end conditional -->
+## Quick Reference Sequence Table
 
-## Acceptance Criteria
-<list specific, measurable conditions that must be true for this task to be done>
+| Phase | Block | What | Why | Role in destination |
+|---|---|---|---|---|
+| 0 | A | <short> | <short> | <short> |
 
-## Validation Commands
-```
-<the project's validation commands — see `planning/harness.json` (`validation.checks[]`) or CLAUDE.md; one command per line, in order>
-```
-<add any task-specific checks above the standard project checks>
+---
 
-## Notes
-<optional: dependencies, new packages needed, deferrals, constraints, follow-ups>
-
-## Amendment Log
-<!-- Append-only. Pipeline stages append one dated line here when they deviate from the plan. -->
-_No amendments yet._
-```
+*Ad-hoc mini-roadmap — run one block or the full train (see Report below).*
+~~~
 
 ## Report
 
-Output the path to the plan file created and the next-step options:
+Output the path written and the next steps:
+
 ```
-planning/plan-{name}/plan.md
+planning/plan-<slug>/plan.md  (<N> phases, <M> blocks)
 
-Next (optional — decompose into atomic sub-steps):
-  /breakdown planning/plan-{name}/plan.md
+Blocks ready to generate:
+  - phase0-blockA — <name>
+  ...
 
-Next (skip breakdown — implement directly):
-  /implement planning/plan-{name}/plan.md
+Next (single block — decompose and run):
+  /generate-tasks --from planning/plan-<slug>/plan.md phase0-blockA
+  /sdlc-flow plan-<slug>
 
-Next (rigorous — decompose into a runnable spec, then run on a branch):
-  /generate-tasks --from planning/plan-{name}/plan.md
-  /sdlc-flow plan-{name}
+Next (all blocks as a branch train):
+  /sdlc-block planning/plan-<slug>/plan.md
 ```

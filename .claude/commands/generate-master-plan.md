@@ -42,7 +42,10 @@ block into a runnable `tasks.md`.
      define block N" over a confident invention.
 4. **THINK HARD about phase/block decomposition before writing:**
    - **Sequence by dependency and competence, not calendar.** Foundational, enabling work is Phase 0;
-     the hardest, most-differentiating work is the last phase.
+     the hardest, most-differentiating work is the last phase. `/sdlc-block` runs **phases
+     sequentially and the blocks within a phase in parallel** by default; add an optional
+     `- **Depends on:** Block <id>` line to a block only to override that default (e.g. to serialize
+     two same-phase blocks that edit the same file).
    - A **block** is a coherent unit of work that `/generate-tasks` can turn into ~one spec (roughly a
      21-hour spread across a few sessions). Don't make blocks so large they hide separable concerns,
      nor so small they fragment one feature across many.
@@ -144,8 +147,18 @@ it leans on. Every block uses the same skeleton:
   projects with no shared layer.
 - **Out of scope** — explicit boundaries; what belongs to a later block. Note any cross-repo /
   not-yet-built prerequisite here.
+- **Depends on** *(optional)* — `- **Depends on:** Block <id>` (a bare `Block A` means Block A of the
+  *same* phase; a fully-qualified `phase0-blockA` is also accepted). Names sibling blocks that must
+  merge first. Omit it and the default order applies (see below); add it only to override that default —
+  e.g. two blocks in the same phase that edit the same file must be serialized.
 - **Acceptance criteria** — each a true/false condition a reviewer can check against the diff, ending
   with the project's gating checks passing.
+
+**Default ordering — phases sequential, blocks within a phase parallel.** `/sdlc-block` runs each
+phase as a wave: all blocks of Phase N run in parallel (each in its own worktree → PR), and Phase N+1
+starts only after Phase N's blocks merge. A `Depends on` line refines this by adding an explicit edge,
+so a dependent block waves after the block it names (use it to serialize same-phase blocks that share a
+file).
 
 Later-phase blocks may be **forward-looking** — authored with the full skeleton while the context is
 fresh, but expect to refine their Files / interface lines when each becomes next (say so explicitly in
@@ -163,6 +176,7 @@ those blocks).
   - *Modified* <path> (what changes), …
 - **Interfaces / shared surface:** <optional — shared exports/APIs this block consumes or must add>
 - **Out of scope:** <explicit boundaries; what is a later block's job; any cross-repo prerequisite>
+- **Depends on:** Block <id>   *(include only when a sibling in the same phase must merge first; omit this line entirely when the default phase-sequential / block-parallel order suffices)*
 - **Acceptance criteria:** <observable, true/false conditions checkable against the diff; end with the
   project's gating checks passing>
 
