@@ -84,7 +84,7 @@ Introduce the associated-type `ContentValidator` trait + a `shared` helper modul
 - **Acceptance:** `tests/smoke.rs`, `tests/crawl.rs`, `tests/meta.rs` pass unchanged; `validate()` produces the identical diagnostic set as before the refactor.
 - Depends on: 3.
 
-### 5. Validate
+### 5. [~] Validate
 - Run the Validation Commands listed below and confirm all four pass.
 - Confirm no public signature changed: `git diff` touches no test file under `tests/` and does not modify `src/main.rs`.
 - Optionally run `cargo run -- validate ../learn-ai/content/learn` if the sibling checkout exists, to confirm the live corpus result is identical to pre-refactor.
