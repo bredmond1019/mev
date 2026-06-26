@@ -32,7 +32,7 @@ pub(crate) fn extract_frontmatter(contents: &str) -> Option<&str> {
     None
 }
 
-/// Return the trimmed-non-empty borrow of an optional string, or `None` if absent/blank.
+/// Return the original string borrow if it is non-blank, or `None` if absent/whitespace-only.
 pub(crate) fn non_empty(value: &Option<String>) -> Option<&str> {
     match value {
         Some(s) if !s.trim().is_empty() => Some(s),
