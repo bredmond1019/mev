@@ -8,13 +8,13 @@ project: markdown-engine-validator
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-06-20"
+timestamp: "2026-06-26"
 ---
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-20 — phase1-blockC Done (All tasks 1–7 complete; phase1-blockD next — Cross-file integrity checks)
-**Current focus:** phase1-blockD — Planned (Cross-file integrity validation)
+**Last updated:** 2026-06-26 — 2.F-content-validator-trait Done (ContentValidator trait + shared core; LearnAiValidator wired; all 5 tasks PASS)
+**Current focus:** Block G — Brain crawl (next in Phase 2 sequence)
 
 ---
 
@@ -40,6 +40,13 @@ timestamp: "2026-06-20"
 | Block C | Frontmatter & JSON struct validation | Done | All tasks complete (1–7): struct/frontmatter validation module (`src/meta.rs`) with serde-based deserialization; `ModuleMeta` (LearnModuleJson), PathMetadataJson, and ModuleMdx frontmatter validation with required field checks, enum validation (difficulty, type, level), format validation (kebab-case id, duration pattern); YAML frontmatter parsing with proper error handling; fixture-driven tests (good + broken variants) for all cases; all four harness gates green (fmt, clippy, test, build). |
 | Block D | Cross-file integrity | Not started | Anchor-slice, pair existence, ID coherence, callout types |
 | Block E | pt-BR parity & reporter polish | Not started | Locale mirror checks; ANSI + `--json` output |
+
+### Phase 2 — Generalize: ContentValidator trait + Brain OKF validation
+| Block | What | Status | Notes |
+|---|---|---|---|
+| Block F | ContentValidator trait + shared core | Done | Associated-type trait + `shared` module extracted; `src/learn_ai/` layout; `LearnAiValidator` impl; `validate()` rewritten as thin wrapper; all 57 tests pass unchanged; all four harness gates green |
+| Block G | Brain crawl | Not started | `MdFile` + `crawl_brain()` with nested-git pruning and skip-list |
+| Block H | Brain OKF frontmatter validator | Not started | `OkfFrontmatter` serde struct; required-field + controlled-vocab diagnostics |
 
 ---
 

@@ -8,12 +8,33 @@ project: markdown-engine-validator
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-06-24"
+timestamp: "2026-06-26"
 ---
 
 # Log — markdown-engine-validator
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## 2026-06-26 — 2.F-content-validator-trait: ContentValidator trait + shared core (PASS)
+
+Completed all five tasks of Block F via `/sdlc-flow`. Task 1 extracted the three shared helpers (`extract_frontmatter`, `is_kebab_case`, `non_empty`) and their unit tests from `src/meta.rs` into a new `src/shared.rs` module. Task 2 defined the `ContentValidator` associated-type trait in `src/validator.rs` with `crawl`, `validate_item`, and a default `run` driver — domain-type-free and static-dispatch-friendly. Task 3 relocated `src/crawl.rs` and `src/meta.rs` verbatim into `src/learn_ai/`, defined `LearnAiValidator: ContentValidator` in `src/learn_ai/mod.rs`, and updated `lib.rs` to preserve the full public crate surface via `pub use`. Task 4 rewrote `validate()` as a one-liner delegating to `LearnAiValidator.run()`. Task 5 verified all four harness gates (fmt, clippy, 57 tests, release build) pass with no edits to any test file or `src/main.rs`. Review verdict: PASS on first attempt. Next: Block G — Brain crawl (`MdFile` + `crawl_brain()` with nested-git pruning).
+
+```
+23a270a chore: flow state — docs
+2d64850 docs: update docs for 2.F-content-validator-trait
+31805de chore: flow state — task 5 passed
+34e7596 feat: implement 2.F-content-validator-trait-task5
+f23c530 chore: flow state — task 4 passed
+2cf8b82 feat: implement 2.F-content-validator-trait-task4
+ae7937a chore: flow state — task 3 passed
+97894e6 feat: implement 2.F-content-validator-trait-task3
+fd71cfb chore: flow state — task 2 passed
+b4eef23 feat(validator): define ContentValidator trait in src/validator.rs (2.F task 2)
+f263150 chore: flow state — task 1 passed
+a701866 feat(shared): extract shared helpers into src/shared.rs (2.F task 1)
+```
 
 ---
 
