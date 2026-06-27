@@ -13,7 +13,7 @@ timestamp: "2026-06-26"
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-26 — Block 2.I complete; live triage hardening (dir skip-list, D<n> doc_id pattern, D3 config decision)
+**Last updated:** 2026-06-27 — Block 2.M complete; brain.toml config wired; all hardcoded vocab/skip_dirs retired
 **Current focus:** 2.J-graph-integrity (next block)
 
 ---
@@ -48,6 +48,7 @@ timestamp: "2026-06-26"
 | Block G | Brain crawl | Done | `MdFile { path, rel, stem }` + `crawl_brain(root)` with two-layer skip-list (name blocklist + nested-git rule); 8 integration tests + unit tests for pruning helpers; all 96 tests pass |
 | Block H | Brain OKF frontmatter validator | Done | OkfFrontmatter struct, validate_md_file, BrainValidator (ContentValidator impl), vocab helpers, 30 unit tests + 14 integration tests; 142 total tests pass |
 | Block I | `validate-brain` subcommand + `--json` | Done | `mev validate-brain <root>` (default `..`), global `--json` flag, `JsonReport` envelope, `Serialize` on `Severity`/`Diagnostic`, `validate_brain()` public fn; 5 integration tests; 145 total tests pass |
+| Block 2.M | brain.toml config reader (HQ-R) | Done | `BrainConfig` (toml crate), `load_brain_config`/`find_brain_config` walk-up; `crawl_brain` skip_dirs from config; `is_valid_layer`/`is_valid_status`/`is_valid_project` config-driven; `validate_brain` resolves config via walk-up; path-style skip_dirs matching (`planning/archive`); D3 superseded; 10 config + 5 validate integration tests; all harness gates green |
 
 ---
 

@@ -1,0 +1,25 @@
+# brain.toml — minimal fixture for mev tests
+# This is NOT the live brain.toml; it exists only to drive unit/integration tests.
+
+[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git", ".claude", ".repo-backups", ".agent"]
+
+[[repos]]
+slug = "brain"
+tier = "primary"
+repo_path = "."
+status_file = "planning/status.md"
+cache_doc = "docs/projects/brain.md"
+heading = "Brain"
+
+[[repos]]
+slug = "mev"
+tier = "primary"
+repo_path = "core/mev"
+status_file = "planning/status.md"
+cache_doc = "docs/projects/mev.md"
+heading = "mev"

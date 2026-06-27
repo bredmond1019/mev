@@ -5,7 +5,7 @@ description: Plan to move hardcoded corpus rules (skip-lists, doc_id patterns, v
 doc_id: D3-corpus-config-system
 layer: [factory]
 project: mev
-status: draft
+status: superseded
 keywords: [config, corpus, skip-list, vocab, doc_id, extensibility]
 related: [D2-scope-and-sequence, decisions-index]
 ---
@@ -78,3 +78,13 @@ with a `// TODO(D3): move to config` comment so they're easy to migrate.
 Implement after Phase 3 (graph + link + structural integrity checks) so the config
 surface area is known before the schema is locked. Tentative slot: Phase 4 or a
 standalone block after Block L.
+
+## Superseded
+
+**Superseded by `brain.toml` — HQ Restructure Block M (2026-06-27).**
+
+D3's `.mev.toml` proposal is retired. The corpus-level config is instead the shared
+`brain.toml` at the HQ root, consumed directly by both `mev` (this block) and
+`index_brain.py` (HQ-R Block I). The walk-up resolution and the vocab/crawl/manifest
+surface are as specified in D3's "Decision" section; only the filename and the
+"each consumer carries its own" model differ. See the HQ Restructure master plan, Block M.

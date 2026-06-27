@@ -1,0 +1,335 @@
+{
+  "spec_slug": "2.M-brain-toml-reader",
+  "branch": "2.M-brain-toml-reader-flow-2",
+  "started_at": "2026-06-27T21:44:47Z",
+  "updated_at": "2026-06-27T22:24:07Z",
+  "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2",
+  "status": "done",
+  "current_task": 6,
+  "tasks": {
+    "1": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Add BrainConfig struct, load_brain_config, and find_brain_config walk-up resolver with full test coverage (toml crate added, fixture created, 10 integration tests)",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Made brain module pub in lib.rs (was mod brain) so integration tests can access mev::brain::config directly",
+        "Used Default derive on VocabConfig/CrawlConfig so partial brain.toml files parse without error",
+        "Kept find_brain_config returning ConfigError::NotFound rather than falling back to hardcodes, per spec",
+        "NotFound test uses /tmp path with graceful skip if a developer machine has brain.toml above /tmp"
+      ],
+      "files_changed": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "src/brain/config.rs",
+        "src/brain/mod.rs",
+        "src/lib.rs",
+        "tests/brain_config.rs",
+        "tests/fixtures/brain.toml"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "crawl_brain now takes skip_dirs from BrainConfig instead of hardcoded matches; BrainValidator gains a config field and new() constructor; 174 tests pass, all four harness gates green",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Used BrainConfig::default() in validate_brain (lib.rs) as a temporary placeholder — Task 4 replaces this with find_brain_config(root)",
+        "Updated tests/brain_okf.rs BrainValidator call sites (not explicitly listed in Task 2 spec) because changing BrainValidator from unit struct to struct-with-field broke compilation there",
+        "is_blocklisted_name kept as a named helper (not inlined) so it remains independently unit-testable"
+      ],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/src/brain/crawl.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/src/brain/mod.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/src/lib.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/tests/brain_crawl.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/tests/brain_okf.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "3": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Config-driven vocab validation: is_valid_layer/status/project now accept &BrainConfig and look up values from brain.toml; validate_md_file propagates config; all hardcoded vocabulary arrays removed from production code.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Changed good_okf_body() in tests/brain_okf.rs to use project: brain (in fixture) instead of project: bastion (not in fixture repos) to avoid needing to expand the fixture.",
+        "Added full_test_config() helper inside okf.rs inline tests constructing the full standard vocabulary inline — avoids file I/O in unit tests while covering all 13 standard project slugs.",
+        "Error messages now dynamically list config values via config.vocab.layer.join('|') and config.projects().join('|') instead of hardcoded strings.",
+        "BrainValidator tests that use good_okf_body() now use fixture_config() instead of BrainConfig::default() so vocab fields validate correctly."
+      ],
+      "files_changed": [
+        "src/brain/okf.rs",
+        "src/brain/mod.rs",
+        "tests/brain_okf.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "validate_brain now resolves brain.toml via find_brain_config walk-up; missing config surfaces as E_CONFIG_NOT_FOUND diagnostic; config-flip integration test proves vocab-only edits change validation results",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Existing tests updated to write brain.toml to their temp dirs (rather than relying on walk-up finding the real portfolio brain.toml) so they test actual OKF logic, not config resolution",
+        "The 'no brain.toml ancestor' test is a no-panic smoke test with a lenient assertion — on developer machines the real brain.toml may be found by walk-up, so E_CONFIG_NOT_FOUND is not guaranteed in that environment",
+        "E_CONFIG_NOT_FOUND surfaced as locator string (not a separate enum variant) to match the existing Diagnostic.locator pattern used for in-file locators"
+      ],
+      "files_changed": [
+        "src/lib.rs",
+        "tests/brain_validate.rs",
+        "planning/2.M-brain-toml-reader/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "5": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Mark D3-corpus-config-system.md as superseded: updated frontmatter status from draft to superseded and appended ## Superseded section citing HQ Restructure Block M",
+      "issues": [],
+      "fixes": [],
+      "decisions": [],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/planning/decisions/D3-corpus-config-system.md",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/planning/2.M-brain-toml-reader/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "6": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Task 6 validation: fixed path-style skip_dirs matching in crawl.rs so brain.toml's \"planning/archive\" entry prunes the archive subtree; all harness gates green and mev validate-brain exits 0 with 0 errors.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "is_blocklisted_name was updated to accept an optional relative path parameter so path-style skip_dirs entries (e.g. 'planning/archive') can be matched against the directory's relative path from root, while name-only entries (no separator) continue to match by leaf name; this avoids breaking the existing name-match contract while adding path-match support.",
+        "The fix surfaces a latent bug introduced in Task 2: brain.toml already had 'planning/archive' as a skip_dirs entry but the name-only comparison silently ignored it, causing the archived markdown-engine-validator.md to generate a false-positive error diagnostic."
+      ],
+      "files_changed": [
+        "src/brain/crawl.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    }
+  },
+  "review": {
+    "verdict": "PASS",
+    "findings": [],
+    "attempts": 1
+  },
+  "docs": {
+    "changed": [
+      "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/planning/status.md"
+    ],
+    "created": []
+  },
+  "bail_reason": null,
+  "pr": {
+    "url": null,
+    "number": null
+  },
+  "tokens": {
+    "stages": [
+      {
+        "label": "worktree-setup",
+        "model": "haiku",
+        "promptTokEst": 774,
+        "filesReadKb": null,
+        "inTokEst": 774,
+        "outTok": 4664
+      },
+      {
+        "label": "enumerate",
+        "model": "haiku",
+        "promptTokEst": 229,
+        "filesReadKb": null,
+        "inTokEst": 229,
+        "outTok": 600
+      },
+      {
+        "label": "update-task-1",
+        "model": "haiku",
+        "promptTokEst": 258,
+        "filesReadKb": null,
+        "inTokEst": 258,
+        "outTok": 1088
+      },
+      {
+        "label": "implement-1-1",
+        "model": "sonnet",
+        "promptTokEst": 894,
+        "filesReadKb": null,
+        "inTokEst": 894,
+        "outTok": 9905
+      },
+      {
+        "label": "test-1-1",
+        "model": "haiku",
+        "promptTokEst": 578,
+        "filesReadKb": null,
+        "inTokEst": 578,
+        "outTok": 2092
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 258,
+        "filesReadKb": null,
+        "inTokEst": 258,
+        "outTok": 2083
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 894,
+        "filesReadKb": null,
+        "inTokEst": 894,
+        "outTok": 18664
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 578,
+        "filesReadKb": null,
+        "inTokEst": 578,
+        "outTok": 3463
+      },
+      {
+        "label": "update-task-3",
+        "model": "haiku",
+        "promptTokEst": 258,
+        "filesReadKb": null,
+        "inTokEst": 258,
+        "outTok": 1137
+      },
+      {
+        "label": "implement-3-1",
+        "model": "sonnet",
+        "promptTokEst": 894,
+        "filesReadKb": null,
+        "inTokEst": 894,
+        "outTok": 22527
+      },
+      {
+        "label": "test-3-1",
+        "model": "haiku",
+        "promptTokEst": 578,
+        "filesReadKb": null,
+        "inTokEst": 578,
+        "outTok": 2303
+      },
+      {
+        "label": "update-task-4",
+        "model": "haiku",
+        "promptTokEst": 258,
+        "filesReadKb": null,
+        "inTokEst": 258,
+        "outTok": 1007
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 894,
+        "filesReadKb": null,
+        "inTokEst": 894,
+        "outTok": 15516
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 578,
+        "filesReadKb": null,
+        "inTokEst": 578,
+        "outTok": 2491
+      },
+      {
+        "label": "update-task-5",
+        "model": "haiku",
+        "promptTokEst": 258,
+        "filesReadKb": null,
+        "inTokEst": 258,
+        "outTok": 1054
+      },
+      {
+        "label": "implement-5-1",
+        "model": "sonnet",
+        "promptTokEst": 894,
+        "filesReadKb": null,
+        "inTokEst": 894,
+        "outTok": 3187
+      },
+      {
+        "label": "test-5-1",
+        "model": "haiku",
+        "promptTokEst": 578,
+        "filesReadKb": null,
+        "inTokEst": 578,
+        "outTok": 2182
+      },
+      {
+        "label": "update-task-6",
+        "model": "haiku",
+        "promptTokEst": 258,
+        "filesReadKb": null,
+        "inTokEst": 258,
+        "outTok": 981
+      },
+      {
+        "label": "implement-6-1",
+        "model": "sonnet",
+        "promptTokEst": 894,
+        "filesReadKb": null,
+        "inTokEst": 894,
+        "outTok": 13146
+      },
+      {
+        "label": "test-6-1",
+        "model": "haiku",
+        "promptTokEst": 578,
+        "filesReadKb": null,
+        "inTokEst": 578,
+        "outTok": 3555
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 991,
+        "filesReadKb": null,
+        "inTokEst": 991,
+        "outTok": 2818
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 562,
+        "filesReadKb": null,
+        "inTokEst": 562,
+        "outTok": 4945
+      },
+      {
+        "label": "wrap-up",
+        "model": "sonnet",
+        "promptTokEst": 827,
+        "filesReadKb": null,
+        "inTokEst": 827,
+        "outTok": 4578
+      }
+    ],
+    "total": {
+      "promptTokEst": 13763,
+      "filesReadKb": 0,
+      "inTokEst": 13763,
+      "outTok": 123986
+    }
+  }
+}

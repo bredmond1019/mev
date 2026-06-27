@@ -3,10 +3,15 @@
 //! Writes `.md` fixtures to a temp dir and drives them through [`BrainValidator`]
 //! (via the [`ContentValidator`] trait) or directly through [`validate_md_file`] on
 //! an [`MdFile`].  Mirrors the style of `tests/meta.rs` and `tests/brain_crawl.rs`.
+//!
+//! After Task 3, all `validate_md_file` calls require a `&BrainConfig`.
+//! Tests load the standard fixture from `tests/fixtures/brain.toml` via
+//! `fixture_config()` so vocabulary lookups resolve correctly.
 
 use std::path::PathBuf;
 
 use mev::ContentValidator;
+use mev::brain::config::{BrainConfig, load_brain_config};
 use mev::{BrainValidator, MdFile, Severity, validate_md_file};
 
 // ---------------------------------------------------------------------------
@@ -30,7 +35,19 @@ fn write_md(dir: &PathBuf, name: &str, content: &str) -> MdFile {
     }
 }
 
+/// Load the standard test fixture (`tests/fixtures/brain.toml`).
+fn fixture_config() -> BrainConfig {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("brain.toml");
+    load_brain_config(&path).expect("fixture brain.toml must parse")
+}
+
 /// A fully-valid OKF frontmatter body.
+///
+/// Uses `project: brain` — the `brain` slug is present in `tests/fixtures/brain.toml`
+/// and satisfies the config-driven project vocab check.
 fn good_okf_body() -> &'static str {
     "---\n\
 type: Decision\n\
@@ -38,7 +55,7 @@ title: My Decision\n\
 description: A one-line summary.\n\
 doc_id: my-decision\n\
 layer: [brain]\n\
-project: bastion\n\
+project: brain\n\
 status: active\n\
 keywords: [rust, cli, validation]\n\
 related: [context]\n\
@@ -53,7 +70,8 @@ related: [context]\n\
 fn good_okf_doc_is_clean() {
     let dir = temp_dir("good-doc");
     let mf = write_md(&dir, "status.md", good_okf_body());
-    let diags = validate_md_file(&mf);
+    let cfg = fixture_config();
+    let diags = validate_md_file(&mf, &cfg);
     assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -63,7 +81,8 @@ fn missing_required_fields_emit_errors() {
     // A document with no frontmatter fields at all — type, title, description must all error.
     let dir = temp_dir("missing-required");
     let mf = write_md(&dir, "bare.md", "---\nextra: tolerated\n---\nbody\n");
-    let diags = validate_md_file(&mf);
+    let cfg = fixture_config();
+    let diags = validate_md_file(&mf, &cfg);
     let locators: Vec<&str> = diags.iter().map(|d| d.locator.as_str()).collect();
     for expected in ["type", "title", "description"] {
         assert!(
@@ -83,7 +102,8 @@ fn bad_layer_member_emits_error() {
     let dir = temp_dir("bad-layer");
     let body = "---\ntype: T\ntitle: T\ndescription: D\nlayer: [unknown-layer]\n---\nbody\n";
     let mf = write_md(&dir, "doc.md", body);
-    let diags = validate_md_file(&mf);
+    let cfg = fixture_config();
+    let diags = validate_md_file(&mf, &cfg);
     assert_eq!(diags.len(), 1, "got: {diags:?}");
     assert_eq!(diags[0].severity, Severity::Error);
     assert_eq!(diags[0].locator, "layer");
@@ -95,7 +115,8 @@ fn bad_project_emits_error() {
     let dir = temp_dir("bad-project");
     let body = "---\ntype: T\ntitle: T\ndescription: D\nproject: not-a-project\n---\nbody\n";
     let mf = write_md(&dir, "doc.md", body);
-    let diags = validate_md_file(&mf);
+    let cfg = fixture_config();
+    let diags = validate_md_file(&mf, &cfg);
     assert_eq!(diags.len(), 1, "got: {diags:?}");
     assert_eq!(diags[0].severity, Severity::Error);
     assert_eq!(diags[0].locator, "project");
@@ -107,7 +128,8 @@ fn bad_status_emits_error() {
     let dir = temp_dir("bad-status");
     let body = "---\ntype: T\ntitle: T\ndescription: D\nstatus: unknown-status\n---\nbody\n";
     let mf = write_md(&dir, "doc.md", body);
-    let diags = validate_md_file(&mf);
+    let cfg = fixture_config();
+    let diags = validate_md_file(&mf, &cfg);
     assert_eq!(diags.len(), 1, "got: {diags:?}");
     assert_eq!(diags[0].severity, Severity::Error);
     assert_eq!(diags[0].locator, "status");
@@ -119,7 +141,8 @@ fn non_kebab_doc_id_emits_error() {
     let dir = temp_dir("bad-doc-id");
     let body = "---\ntype: T\ntitle: T\ndescription: D\ndoc_id: BadId_123\n---\nbody\n";
     let mf = write_md(&dir, "doc.md", body);
-    let diags = validate_md_file(&mf);
+    let cfg = fixture_config();
+    let diags = validate_md_file(&mf, &cfg);
     assert_eq!(diags.len(), 1, "got: {diags:?}");
     assert_eq!(diags[0].severity, Severity::Error);
     assert_eq!(diags[0].locator, "doc_id");
@@ -131,7 +154,8 @@ fn keywords_too_few_emits_warning() {
     let dir = temp_dir("keywords-low");
     let body = "---\ntype: T\ntitle: T\ndescription: D\nkeywords: [one]\n---\nbody\n";
     let mf = write_md(&dir, "doc.md", body);
-    let diags = validate_md_file(&mf);
+    let cfg = fixture_config();
+    let diags = validate_md_file(&mf, &cfg);
     assert_eq!(diags.len(), 1, "got: {diags:?}");
     assert_eq!(diags[0].severity, Severity::Warning);
     assert_eq!(diags[0].locator, "keywords");
@@ -144,7 +168,8 @@ fn keywords_too_many_emits_warning() {
     let body =
         "---\ntype: T\ntitle: T\ndescription: D\nkeywords: [a, b, c, d, e, f, g, h]\n---\nbody\n";
     let mf = write_md(&dir, "doc.md", body);
-    let diags = validate_md_file(&mf);
+    let cfg = fixture_config();
+    let diags = validate_md_file(&mf, &cfg);
     assert_eq!(diags.len(), 1, "got: {diags:?}");
     assert_eq!(diags[0].severity, Severity::Warning);
     assert_eq!(diags[0].locator, "keywords");
@@ -155,7 +180,8 @@ fn keywords_too_many_emits_warning() {
 fn no_frontmatter_emits_single_error() {
     let dir = temp_dir("no-fm");
     let mf = write_md(&dir, "doc.md", "# Heading only\n");
-    let diags = validate_md_file(&mf);
+    let cfg = fixture_config();
+    let diags = validate_md_file(&mf, &cfg);
     assert_eq!(diags.len(), 1, "got: {diags:?}");
     assert_eq!(diags[0].severity, Severity::Error);
     assert_eq!(diags[0].locator, "frontmatter");
@@ -166,7 +192,8 @@ fn no_frontmatter_emits_single_error() {
 fn malformed_yaml_emits_single_error() {
     let dir = temp_dir("bad-yaml");
     let mf = write_md(&dir, "doc.md", "---\ntitle: [unclosed\n---\nbody\n");
-    let diags = validate_md_file(&mf);
+    let cfg = fixture_config();
+    let diags = validate_md_file(&mf, &cfg);
     assert_eq!(diags.len(), 1, "got: {diags:?}");
     assert_eq!(diags[0].severity, Severity::Error);
     assert_eq!(diags[0].locator, "frontmatter");
@@ -180,10 +207,10 @@ fn malformed_yaml_emits_single_error() {
 #[test]
 fn brain_validator_run_clean_tree_returns_empty_report() {
     let dir = temp_dir("brain-run-clean");
-    // Write one good OKF doc.
+    // Write one good OKF doc (uses project: brain, which is in the fixture config).
     write_md(&dir, "status.md", good_okf_body());
 
-    let report = BrainValidator.run(&dir);
+    let report = BrainValidator::new(fixture_config()).run(&dir);
     assert!(
         report.diagnostics.is_empty(),
         "expected empty report for valid doc, got: {:?}",
@@ -198,7 +225,7 @@ fn brain_validator_run_violation_tree_returns_errors() {
     // Write one doc that is missing all required fields.
     write_md(&dir, "bare.md", "---\nextra: tolerated\n---\nbody\n");
 
-    let report = BrainValidator.run(&dir);
+    let report = BrainValidator::new(BrainConfig::default()).run(&dir);
     assert!(
         report.is_failure(),
         "expected failure for missing required fields, got: {:?}",
@@ -221,12 +248,12 @@ fn brain_validator_run_violation_tree_returns_errors() {
 #[test]
 fn brain_validator_run_mixed_tree_collects_all_diagnostics() {
     let dir = temp_dir("brain-run-mixed");
-    // Good doc.
+    // Good doc (project: brain is in the fixture config).
     write_md(&dir, "good.md", good_okf_body());
     // Bad doc — missing title.
     write_md(&dir, "bad.md", "---\ntype: T\ndescription: D\n---\nbody\n");
 
-    let report = BrainValidator.run(&dir);
+    let report = BrainValidator::new(fixture_config()).run(&dir);
     // Should have exactly one error: missing title on bad.md.
     assert_eq!(report.error_count(), 1, "got: {:?}", report.diagnostics);
     assert_eq!(report.diagnostics[0].locator, "title");
@@ -253,7 +280,7 @@ fn brain_validator_prunes_nested_git_repos() {
     // One valid .md at the root.
     write_md(&dir, "root.md", good_okf_body());
 
-    let report = BrainValidator.run(&dir);
+    let report = BrainValidator::new(fixture_config()).run(&dir);
     assert!(
         report.diagnostics.is_empty(),
         "nested-git docs must be pruned; got: {:?}",
