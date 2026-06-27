@@ -63,15 +63,42 @@ mev/
 │   ├── shared.rs       ← shared helpers: extract_frontmatter, is_kebab_case, non_empty
 │   ├── validator.rs    ← ContentValidator trait (crawl + validate_item + run driver)
 │   ├── learn_ai/       ← LearnAiValidator: crawl.rs, meta.rs, mod.rs
-│   └── brain/          ← BrainValidator: crawl.rs (crawl_brain, MdFile), mod.rs, okf.rs (OkfFrontmatter, validate_md_file)
+│   └── brain/          ← BrainValidator: config.rs (BrainConfig, find_brain_config), crawl.rs (crawl_brain, MdFile), mod.rs, okf.rs (OkfFrontmatter, validate_md_file)
 ├── tests/          ← integration tests + fixtures
 └── Cargo.toml
 ```
+
+## `--json` output shape
+
+The `--json` flag emits a `JsonReport` envelope consumed by the Brain RAG indexer:
+
+```json
+{
+  "validator": "brain",
+  "root": "/path/to/repo",
+  "errors": 0,
+  "warnings": 1,
+  "diagnostics": [
+    {
+      "severity": "warning",
+      "file": "docs/foo.md",
+      "locator": "keywords",
+      "message": "keywords count 2 is below the recommended minimum of 3"
+    }
+  ]
+}
+```
+
+See [`docs/cli.md`](docs/cli.md) for the full field reference.
 
 ## Documentation
 
 | Doc | Contents |
 |---|---|
+| [docs/cli.md](docs/cli.md) | Full CLI reference: subcommands, flags, exit codes, JSON shape |
+| [docs/architecture.md](docs/architecture.md) | Module map, `ContentValidator` trait, core types |
+| [docs/brain-toml.md](docs/brain-toml.md) | `brain.toml` config schema — `[vocab]`, `[crawl]`, `[[repos]]` |
+| [docs/okf-schema.md](docs/okf-schema.md) | OKF frontmatter fields, validation rules, diagnostic table |
 | [planning/context.md](planning/context.md) | Orientation + governing principles |
 | [planning/master-plan.md](planning/master-plan.md) | Strategy + phase specifications |
 | [planning/status.md](planning/status.md) | Current progress |
