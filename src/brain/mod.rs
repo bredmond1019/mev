@@ -45,7 +45,7 @@ impl ContentValidator for BrainValidator {
 
     /// Validate a single brain `.md` file against the OKF frontmatter schema.
     fn validate_item(&self, item: &MdFile) -> Vec<Diagnostic> {
-        okf::validate_md_file(item)
+        okf::validate_md_file(item, &self.config)
     }
 }
 

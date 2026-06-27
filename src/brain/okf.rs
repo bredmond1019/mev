@@ -11,6 +11,7 @@
 use serde::Deserialize;
 
 use crate::Diagnostic;
+use crate::brain::config::BrainConfig;
 use crate::brain::crawl::MdFile;
 use crate::shared::{extract_frontmatter, non_empty};
 
@@ -48,51 +49,22 @@ pub struct OkfFrontmatter {
 }
 
 // ---------------------------------------------------------------------------
-// Controlled-vocabulary sets
+// Controlled-vocabulary sets (config-driven — no hardcoded literal arrays)
 // ---------------------------------------------------------------------------
 
-/// Valid `layer` values (closed set).
-pub(crate) fn is_valid_layer(s: &str) -> bool {
-    matches!(
-        s,
-        "brain"
-            | "engine"
-            | "factory"
-            | "console"
-            | "surface"
-            | "infra"
-            | "business"
-            | "content"
-            | "meta"
-    )
+/// `true` if `s` is in the `vocab.layer` list from `brain.toml`.
+pub(crate) fn is_valid_layer(s: &str, config: &BrainConfig) -> bool {
+    config.vocab.layer.iter().any(|v| v == s)
 }
 
-/// Valid `project` values (closed set).
-pub(crate) fn is_valid_project(s: &str) -> bool {
-    matches!(
-        s,
-        "bastion"
-            | "bastion-ui"
-            | "orchestrator"
-            | "learn-ai"
-            | "rag-engine-rs"
-            | "claude-sdk-rs"
-            | "workflow-engine-rs"
-            | "mev"
-            | "bella"
-            | "price-scout"
-            | "amistad"
-            | "base-template"
-            | "brain"
-    )
+/// `true` if `s` is the slug of any `[[repos]]` entry in `brain.toml`.
+pub(crate) fn is_valid_project(s: &str, config: &BrainConfig) -> bool {
+    config.projects().contains(&s)
 }
 
-/// Valid `status` values (closed set).
-pub(crate) fn is_valid_status(s: &str) -> bool {
-    matches!(
-        s,
-        "active" | "draft" | "deprecated" | "superseded" | "archived"
-    )
+/// `true` if `s` is in the `vocab.status` list from `brain.toml`.
+pub(crate) fn is_valid_status(s: &str, config: &BrainConfig) -> bool {
+    config.vocab.status.iter().any(|v| v == s)
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +83,7 @@ pub(crate) fn is_decision_id(s: &str) -> bool {
         Some(0) => return false, // nothing consumed — no digit follows 'D'
         Some(i) => &rest[i..],
         None if !rest.is_empty() => return true, // "D7", "D29" — digits only
-        None => return false,                     // rest is empty → bare "D"
+        None => return false,                    // rest is empty → bare "D"
     };
     // Remaining portion (if any) must be `-<kebab-segment>+`.
     rest.strip_prefix('-')
@@ -166,7 +138,7 @@ fn require_str(mf: &MdFile, locator: &str, value: &Option<String>, diags: &mut V
 /// - Bad `status` value → one `error` at locator `"status"`.
 /// - Non-kebab-case `doc_id` (when present) → one `error` at locator `"doc_id"`.
 /// - `keywords` count outside 3–7 (when present) → one `warning` at locator `"keywords"`.
-pub fn validate_md_file(mf: &MdFile) -> Vec<Diagnostic> {
+pub fn validate_md_file(mf: &MdFile, config: &BrainConfig) -> Vec<Diagnostic> {
     // --- Read ---
     let contents = match std::fs::read_to_string(&mf.path) {
         Ok(s) => s,
@@ -213,13 +185,14 @@ pub fn validate_md_file(mf: &MdFile) -> Vec<Diagnostic> {
     // --- Controlled vocab: layer (list — each bad member is its own error) ---
     if let Some(layers) = &fm.layer {
         for layer in layers {
-            if !is_valid_layer(layer.as_str()) {
+            if !is_valid_layer(layer.as_str(), config) {
                 diags.push(Diagnostic::error(
                     mf.rel.clone(),
                     "layer",
                     format!(
-                        "layer value '{layer}' is not in the closed set \
-                         (brain|engine|factory|console|surface|infra|business|content|meta)"
+                        "layer value '{layer}' is not in the configured vocabulary \
+                         ({})",
+                        config.vocab.layer.join("|")
                     ),
                 ));
             }
@@ -228,30 +201,30 @@ pub fn validate_md_file(mf: &MdFile) -> Vec<Diagnostic> {
 
     // --- Controlled vocab: project (scalar; absent is OK) ---
     if let Some(project) = non_empty(&fm.project)
-        && !is_valid_project(project)
+        && !is_valid_project(project, config)
     {
         diags.push(Diagnostic::error(
             mf.rel.clone(),
             "project",
             format!(
-                "project value '{project}' is not in the closed set \
-                 (bastion|bastion-ui|orchestrator|learn-ai|rag-engine-rs|\
-                 claude-sdk-rs|workflow-engine-rs|mev|bella|\
-                 price-scout|amistad|base-template|brain)"
+                "project value '{project}' is not in the configured vocabulary \
+                 ({})",
+                config.projects().join("|")
             ),
         ));
     }
 
     // --- Controlled vocab: status (scalar; absent is OK) ---
     if let Some(status) = non_empty(&fm.status)
-        && !is_valid_status(status)
+        && !is_valid_status(status, config)
     {
         diags.push(Diagnostic::error(
             mf.rel.clone(),
             "status",
             format!(
-                "status value '{status}' is not in the closed set \
-                 (active|draft|deprecated|superseded|archived)"
+                "status value '{status}' is not in the configured vocabulary \
+                 ({})",
+                config.vocab.status.join("|")
             ),
         ));
     }
@@ -290,10 +263,11 @@ pub fn validate_md_file(mf: &MdFile) -> Vec<Diagnostic> {
 mod tests {
     use super::*;
     use crate::Severity;
+    use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
     use crate::brain::crawl::MdFile;
     use std::path::PathBuf;
 
-    // --- Helper: build an MdFile pointing at a temp file ---
+    // --- Helpers ---
 
     fn temp_dir(suffix: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("mev-okf-{suffix}"));
@@ -312,16 +286,72 @@ mod tests {
         }
     }
 
+    /// Build a [`BrainConfig`] covering the full standard vocabulary — used in tests
+    /// that need valid layer/status/project values recognised.
+    fn full_test_config() -> BrainConfig {
+        let layer = [
+            "brain", "engine", "factory", "console", "surface", "infra", "business", "content",
+            "meta",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let status = ["active", "draft", "deprecated", "superseded", "archived"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let slugs = [
+            "bastion",
+            "bastion-ui",
+            "orchestrator",
+            "learn-ai",
+            "rag-engine-rs",
+            "claude-sdk-rs",
+            "workflow-engine-rs",
+            "mev",
+            "bella",
+            "price-scout",
+            "amistad",
+            "base-template",
+            "brain",
+        ];
+        let repos = slugs
+            .iter()
+            .map(|slug| RepoEntry {
+                slug: slug.to_string(),
+                tier: String::new(),
+                repo_path: String::new(),
+                status_file: String::new(),
+                cache_doc: String::new(),
+                heading: String::new(),
+            })
+            .collect();
+        BrainConfig {
+            vocab: VocabConfig { layer, status },
+            crawl: CrawlConfig::default(),
+            repos,
+        }
+    }
+
     /// A fully-valid OKF frontmatter body (all required + optional fields).
     fn good_okf_body() -> &'static str {
         "---\ntype: Decision\ntitle: My Decision\ndescription: A one-line summary.\ndoc_id: my-decision\nlayer: [brain]\nproject: bastion\nstatus: active\nkeywords: [rust, cli, validation]\nrelated: [context]\n---\n\n# Body\n"
     }
 
-    /// Validate a YAML string (not a file) by writing to a temp file first.
+    /// Validate a YAML string by writing to a temp file, using the full standard config.
     fn validate_yaml(yaml_body: &str, suffix: &str) -> Vec<Diagnostic> {
+        validate_yaml_with_config(yaml_body, suffix, &full_test_config())
+    }
+
+    /// Validate a YAML string with an explicit config.
+    fn validate_yaml_with_config(
+        yaml_body: &str,
+        suffix: &str,
+        config: &BrainConfig,
+    ) -> Vec<Diagnostic> {
         let dir = temp_dir(suffix);
         let mf = write_md(&dir, "test.md", yaml_body);
-        let diags = validate_md_file(&mf);
+        let diags = validate_md_file(&mf, config);
         let _ = std::fs::remove_dir_all(&dir);
         diags
     }
@@ -330,23 +360,26 @@ mod tests {
 
     #[test]
     fn layer_helper_accepts_all_valid_values() {
+        let cfg = full_test_config();
         for v in [
             "brain", "engine", "factory", "console", "surface", "infra", "business", "content",
             "meta",
         ] {
-            assert!(is_valid_layer(v), "expected '{v}' to be valid");
+            assert!(is_valid_layer(v, &cfg), "expected '{v}' to be valid");
         }
     }
 
     #[test]
     fn layer_helper_rejects_unknown_value() {
-        assert!(!is_valid_layer("unknown"));
-        assert!(!is_valid_layer("Brain")); // case-sensitive
-        assert!(!is_valid_layer(""));
+        let cfg = full_test_config();
+        assert!(!is_valid_layer("unknown", &cfg));
+        assert!(!is_valid_layer("Brain", &cfg)); // case-sensitive
+        assert!(!is_valid_layer("", &cfg));
     }
 
     #[test]
     fn project_helper_accepts_all_valid_values() {
+        let cfg = full_test_config();
         for v in [
             "bastion",
             "bastion-ui",
@@ -362,27 +395,30 @@ mod tests {
             "base-template",
             "brain",
         ] {
-            assert!(is_valid_project(v), "expected '{v}' to be valid");
+            assert!(is_valid_project(v, &cfg), "expected '{v}' to be valid");
         }
     }
 
     #[test]
     fn project_helper_rejects_unknown_value() {
-        assert!(!is_valid_project("unknown-project"));
-        assert!(!is_valid_project("Bastion")); // case-sensitive
+        let cfg = full_test_config();
+        assert!(!is_valid_project("unknown-project", &cfg));
+        assert!(!is_valid_project("Bastion", &cfg)); // case-sensitive
     }
 
     #[test]
     fn status_helper_accepts_all_valid_values() {
+        let cfg = full_test_config();
         for v in ["active", "draft", "deprecated", "superseded", "archived"] {
-            assert!(is_valid_status(v), "expected '{v}' to be valid");
+            assert!(is_valid_status(v, &cfg), "expected '{v}' to be valid");
         }
     }
 
     #[test]
     fn status_helper_rejects_unknown_value() {
-        assert!(!is_valid_status("pending"));
-        assert!(!is_valid_status("Active")); // case-sensitive
+        let cfg = full_test_config();
+        assert!(!is_valid_status("pending", &cfg));
+        assert!(!is_valid_status("Active", &cfg)); // case-sensitive
     }
 
     // --- Good document is clean ---
@@ -565,8 +601,7 @@ mod tests {
 
     #[test]
     fn decision_style_doc_id_is_clean() {
-        let body =
-            "---\ntype: T\ntitle: T\ndescription: D\ndoc_id: D15-okf-lowercase-doc-names\n---\nbody\n";
+        let body = "---\ntype: T\ntitle: T\ndescription: D\ndoc_id: D15-okf-lowercase-doc-names\n---\nbody\n";
         let diags = validate_yaml(body, "decision-doc-id");
         assert!(
             diags.is_empty(),
@@ -653,12 +688,13 @@ mod tests {
 
     #[test]
     fn unreadable_file_emits_single_error() {
+        let cfg = full_test_config();
         let mf = MdFile {
             path: PathBuf::from("/nonexistent/mev/missing.md"),
             rel: PathBuf::from("missing.md"),
             stem: "missing".to_string(),
         };
-        let diags = validate_md_file(&mf);
+        let diags = validate_md_file(&mf, &cfg);
         assert_eq!(diags.len(), 1, "got: {diags:?}");
         assert_eq!(diags[0].severity, Severity::Error);
         assert_eq!(diags[0].locator, "");
