@@ -17,6 +17,18 @@ timestamp: "2026-06-26"
 
 ---
 
+## 2026-06-26 — 2.H-brain-okf-validator: Brain OKF frontmatter validator (PASS)
+
+Completed Phase 2, Block H: added the Brain OKF frontmatter validation layer on top of Block G's crawl infrastructure. Created `src/brain/okf.rs` with the `OkfFrontmatter` serde struct (all fields `Option`, `layer` as `Option<Vec<String>>`, extras tolerated), the `validate_md_file` entry point (read → extract → parse → field-check pipeline with short-circuit errors for missing/malformed frontmatter), and three vocab helpers (`is_valid_layer`, `is_valid_project`, `is_valid_status`) covering the three closed sets from D27. Required-field checks (`type`, `title`, `description`) each emit their own `error` with precise locators; controlled-vocab errors fire only when a field is present; `doc_id` uses `is_kebab_case` from shared; `keywords` count outside 3–7 emits a `warning`. `BrainValidator` was assembled in `src/brain/mod.rs` as the second `ContentValidator` impl (`type Item = MdFile`, crawl delegates to `crawl_brain`, validate_item delegates to `okf::validate_md_file`). Re-exports added to `src/lib.rs`. 30 unit tests in `src/brain/okf.rs` and 14 integration tests in `tests/brain_okf.rs` cover every rule, boundary cases, and end-to-end `BrainValidator::run`. Total test count: 142 (91 unit + 51 integration) — all pass. Review passed on first attempt with all 8 acceptance criteria MET. Next: Block 2.I (validate-brain subcommand + --json flag).
+
+```
+b6702d3 docs: update docs for 2.H-brain-okf-validator
+24b6996 feat: implement 2.H-brain-okf-validator
+2e38aba chore: add spec for 2.H-brain-okf-validator
+```
+
+---
+
 ## 2026-06-26 — Close-out for Block 2.G: Brain crawl (verification + docs + handoff)
 
 Completed Block 2.G close-out activities: verified all 96 tests pass (61 unit + 35 integration), ran coverage scan with no gaps flagged, and patched `README.md` to add `src/brain/` to the directory map (was missing the new module from the source-tree overview). Wrote `planning/handoff.md` to orient Block 2.H work: context on the OKF frontmatter schema, pointers to the Brain docs in the parent repo, test fixtures, and the validation rules needed. Block 2.G is fully closed; ready to hand off to Block 2.H (Brain OKF frontmatter validator).
