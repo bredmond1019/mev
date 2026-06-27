@@ -3,70 +3,72 @@ type: Handoff
 created: 2026-06-26
 ---
 
-# Handoff — Block 2.H done; start Block 2.I (validate-brain subcommand + --json)
+# Handoff — Crawl hardening done; Block J (graph integrity) is next
 
 > **For the next agent:** Read this immediately after `/prime`. Delete this file once consumed.
 
 ## What we're doing and why
 
-`mev` is being generalised into a two-consumer tool: learn-ai content validation (Phase 1)
-and Bastion Brain OKF frontmatter validation (Phase 2). The motivating goal is
-`mev validate-brain ~/Dev/agentic-portfolio` as a pre-flight gate for the Brain RAG indexer.
-Phase 2 blocks F → I drive this in sequence. Blocks F, G, and H are all done. Block I is the
-last Phase 2 block: wire `BrainValidator` into the CLI as a `validate-brain` subcommand and
-add a global `--json` output flag for the RAG indexer.
+Phase 3 of `mev` adds corpus-wide integrity checks on top of the OKF frontmatter validator
+(Phase 2). Before starting Block J we did a live run of `mev validate-brain` against the
+actual Brain repo and triaged every diagnostic. The crawl skip-lists were too narrow —
+`.claude/`, `.repo-backups/`, `.agent/`, `CLAUDE.md`, `GEMINI.md`, and `handoff.md` were all
+being validated as OKF docs. Those are now excluded. We also discovered that the Brain's
+`doc_id` convention for decision files (`D15-okf-lowercase-doc-names`) violates the old
+kebab-case regex, so we widened the validator to accept the `D<n>-…` format. A config-system
+decision (D3) was written to track eventual extraction of all these corpus-specific rules into
+a `.mev.toml` file (sequenced after Phase 3). The Brain now validates to **0 errors, 3 warnings**
+(the warnings are honest: three files have 8 keywords where the rule is 3–7).
 
 ## Completed this session
 
-- **Block 2.H — Brain OKF frontmatter validator — DONE** (`24b6996`)
-  - `OkfFrontmatter` serde struct in `src/brain/okf.rs` (all fields `Option`; `layer` as
-    `Option<Vec<String>>`; extras tolerated via `#[serde(flatten)]`/deny_unknown = false)
-  - `validate_md_file` entry point: read → extract frontmatter → parse YAML → field-check
-    pipeline; short-circuits on missing/malformed frontmatter
-  - Vocab helpers: `is_valid_layer`, `is_valid_project`, `is_valid_status` (closed sets from D27)
-  - `BrainValidator` assembled in `src/brain/mod.rs` as a `ContentValidator` impl
-  - Re-exports added to `src/lib.rs`
-  - 30 unit tests in `src/brain/okf.rs` + 14 integration tests in `tests/brain_okf.rs`
-  - **142 total tests pass** (91 unit + 51 integration); all 4 harness gates green; PASS on first review attempt
-- **Close-out** (`d31b6a7`)
-  - README directory map updated to include `okf.rs (OkfFrontmatter, validate_md_file)` in the `src/brain/` entry
-  - Full validation suite re-verified; emoji gate clean; doc health sweep: no stale sections found
-  - `docs/harness-json.md` flagged NEEDS_REVIEW (missing file referenced by 3 workflow docs — non-blocking)
+- **Live triage of `mev validate-brain ~/Dev/agentic-portfolio`** — diagnosed all 145 original
+  errors; reduced to 0 errors / 3 warnings across three targeted fixes
+- **`fix(brain/crawl)`: dir skip-list** (`4cd7843`) — added `.claude`, `.repo-backups`, `.agent`
+  to `is_blocklisted_name` in `src/brain/crawl.rs`; 3 new unit tests
+- **`fix(brain/okf)`: decision-id format** (`1790c64`) — added `is_decision_id` and
+  `is_valid_doc_id` helpers in `src/brain/okf.rs` to accept `D<n>-…` alongside standard
+  kebab-case; removed unused `is_kebab_case` import; 7 new unit tests; 152 total tests pass
+- **`docs(decisions)`: D3 — corpus config system** (`d727c7c`) — written as `planning/decisions/D3-corpus-config-system.md`; registered in `planning/decisions/index.md`; status `draft`, sequenced post-Phase 3
+- **File-level skip-list** (uncommitted) — added `is_blocklisted_file` to `src/brain/crawl.rs`
+  blocking `CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`, `handoff.md`; 4 new unit tests;
+  154 total tests pass
 
 ## Remaining work
 
-- **Block 2.I — `validate-brain` subcommand + `--json` flag** (start here — spec needed)
-  - Add `validate-brain <path>` subcommand to the clap CLI (`src/main.rs`)
-  - Wire it to `BrainValidator::run()` (already implemented in `src/brain/mod.rs`)
-  - Add a global `--json` flag; when set, serialize `Report` as JSON to stdout instead of ANSI text
-  - Exit code 1 on any error-severity diagnostic; 0 on clean/warn-only
-- **Block D / E** (Phase 1 learn-ai) — deprioritized; do not start until Phase 2 is complete
-- **NEEDS_REVIEW (non-blocking):** `docs/harness-json.md` is referenced from
-  `docs/workflows/index.md` (lines 123 and 187) but does not exist; create when time allows
+- **Block J — Graph integrity (`related:` edges)** (start here)
+  - Build a corpus-wide `doc_id` index (every `.md`'s `doc_id`, defaulting to filename stem)
+  - Flag every `related:` entry pointing at an undefined `doc_id` (dangling edge)
+  - Flag duplicate `doc_id`s
+  - Acceptance: renamed/deleted `doc_id` is flagged; duplicate `doc_id`s are flagged; clean corpus passes
+- **Block K — Link integrity** (markdown `[text](path)`, `file:///`, `[[wikilinks]]`)
+- **Block L — Structural coverage** (`index.md` ↔ directory bidirectional check, D17)
+- **Keyword warnings** (3 warnings in Brain corpus) — left as honest signal; will become
+  configurable via D3 config system. Not a blocker.
 
 ## Open questions / choices
 
-None — clear to proceed. The `validate-brain` subcommand scope is fully settled in the
-master-plan Block I definition. `--json` serialization format should mirror the existing `Report`
-struct (errors/warnings with file + locator + message); exact shape can be decided during
-implementation if it's not already in the master-plan spec.
+None — clear to proceed with Block J.
 
 ## Context the next agent needs
 
-- Repo is on `main`; no open worktrees. No GitHub remote — `gh pr list` will fail.
+- Repo is on `main`; no open worktrees. No GitHub remote.
 - Harness gates: `cargo fmt --check && cargo clippy -- -D warnings && cargo test && cargo build --release`
-- **142 tests currently passing** (91 unit + 51 integration). Keep all green after every block.
-- Source layout after 2.H:
-  - `src/brain/crawl.rs` — `MdFile`, `crawl_brain`
-  - `src/brain/okf.rs` — `OkfFrontmatter`, `validate_md_file`, vocab helpers
-  - `src/brain/mod.rs` — `BrainValidator` (ContentValidator impl)
-  - `src/learn_ai/` — LearnAiValidator
-  - `src/validator.rs` — `ContentValidator` trait
-  - `src/lib.rs` — re-exports both validators + core types
-  - `src/main.rs` — clap CLI (currently only `validate` subcommand for learn-ai)
-- The `layer` field in the live Brain corpus is always a YAML list (not scalar) — serde struct
-  already models it as `Option<Vec<String>>`; no coercion path needed
+- **154 tests currently passing** (after this session's uncommitted crawl.rs changes land).
+  Keep all green after every block.
+- `mev validate-brain ~/Dev/agentic-portfolio` now exits 0 (0 errors, 3 warnings).
+- The 3 remaining warnings are `keywords` count > 7 in:
+  - `planning/bastion-ui/plan.md`
+  - `planning/brain-rag-improvements/plan.md`
+  - `docs/projects/markdown-engine-validator.md`
+  These are real minor violations in the Brain corpus, not validator bugs.
+- D3 decision (`planning/decisions/D3-corpus-config-system.md`) captures the plan to move
+  all current hardcodes (skip-lists, doc_id patterns, vocab sets) into a per-corpus `.mev.toml`.
+  Current hardcodes are interim and should eventually carry `// TODO(D3): move to config`.
+- Block J will likely need `src/brain/graph.rs` with `build_doc_id_index` and
+  `check_related_edges`; wire into `BrainValidator::run()` or a new `validate_brain_graph()`
+  entry point.
 
 ## First command after `/prime`
 
-`/generate-tasks 2.I-validate-brain-subcommand`
+`/generate-tasks 2.J-graph-integrity`

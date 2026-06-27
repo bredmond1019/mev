@@ -1,7 +1,7 @@
 ---
 type: Index
 title: markdown-engine-validator
-description: A Rust CLI tool that parses, validates, and compiles MDX/Markdown lessons for learn-agentic-ai.com — frontmatter validation, link checking, code block linting, and watch-mode hot-reload
+description: A Rust CLI tool (`mev`) that validates Markdown/MDX content — learn-ai frontmatter + struct validation and Bastion Brain OKF frontmatter validation, with JSON output for RAG indexer integration
 doc_id: mev-readme
 layer: [factory, meta]
 project: markdown-engine-validator
@@ -12,13 +12,13 @@ related: [context, master-plan, status]
 
 # markdown-engine-validator
 
-A Rust CLI tool that parses, validates, and compiles MDX/Markdown lessons for learn-agentic-ai.com — frontmatter validation, link checking, code block linting, and watch-mode hot-reload
+A Rust CLI tool (`mev`) that validates Markdown/MDX content across two consumers: **learn-ai** (frontmatter + struct validation for learn-agentic-ai.com) and **Bastion Brain** (OKF frontmatter validation for the company-brain RAG index). Machine-readable `--json` output lets the RAG indexer use `mev` as a pre-rebuild gate.
 
 ## Prerequisites
 
 - Rust 1.95+ (`rustup show`). No other runtime — dependencies fetch on first build.
-- A checkout of the `learn-ai` site as a sibling directory (the content lives there); the
-  validator points at `../learn-ai/content/learn` by default.
+- For `validate`: a checkout of the `learn-ai` site as a sibling directory; the validator points at `../learn-ai/content/learn` by default.
+- For `validate-brain`: a checkout of `agentic-portfolio/` (the Brain repo); defaults to `..`.
 
 ## Setup
 
@@ -34,6 +34,13 @@ cargo build --release    # produces target/release/mev
 cargo run -- validate ../learn-ai/content/learn
 # or the built binary:
 ./target/release/mev validate ../learn-ai/content/learn
+
+# Validate the Bastion Brain OKF frontmatter (path defaults to ..)
+cargo run -- validate-brain ~/Dev/agentic-portfolio
+./target/release/mev validate-brain ~/Dev/agentic-portfolio
+
+# Machine-readable JSON output (exit 1 on any error-severity diagnostic)
+./target/release/mev --json validate-brain ~/Dev/agentic-portfolio
 ```
 
 ## Tests

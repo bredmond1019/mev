@@ -13,7 +13,7 @@ timestamp: "2026-06-26"
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-26 — Block 2.I complete (validate-brain subcommand + --json output flag)
+**Last updated:** 2026-06-26 — Block 2.I complete; live triage hardening (dir skip-list, D<n> doc_id pattern, D3 config decision)
 **Current focus:** 2.J-graph-integrity (next block)
 
 ---
