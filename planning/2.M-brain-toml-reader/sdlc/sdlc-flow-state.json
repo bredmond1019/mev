@@ -1,0 +1,99 @@
+{
+  "spec_slug": "2.M-brain-toml-reader",
+  "branch": "2.M-brain-toml-reader-flow-2",
+  "started_at": "2026-06-27T21:44:47Z",
+  "updated_at": "2026-06-27T21:44:47Z",
+  "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2",
+  "status": "running",
+  "current_task": 1,
+  "tasks": {
+    "1": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Add BrainConfig struct, load_brain_config, and find_brain_config walk-up resolver with full test coverage (toml crate added, fixture created, 10 integration tests)",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Made brain module pub in lib.rs (was mod brain) so integration tests can access mev::brain::config directly",
+        "Used Default derive on VocabConfig/CrawlConfig so partial brain.toml files parse without error",
+        "Kept find_brain_config returning ConfigError::NotFound rather than falling back to hardcodes, per spec",
+        "NotFound test uses /tmp path with graceful skip if a developer machine has brain.toml above /tmp"
+      ],
+      "files_changed": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "src/brain/config.rs",
+        "src/brain/mod.rs",
+        "src/lib.rs",
+        "tests/brain_config.rs",
+        "tests/fixtures/brain.toml"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    }
+  },
+  "review": {
+    "verdict": null,
+    "findings": [],
+    "attempts": 0
+  },
+  "docs": {
+    "changed": [],
+    "created": []
+  },
+  "bail_reason": null,
+  "pr": {
+    "url": null,
+    "number": null
+  },
+  "tokens": {
+    "stages": [
+      {
+        "label": "worktree-setup",
+        "model": "haiku",
+        "promptTokEst": 774,
+        "filesReadKb": null,
+        "inTokEst": 774,
+        "outTok": 4664
+      },
+      {
+        "label": "enumerate",
+        "model": "haiku",
+        "promptTokEst": 229,
+        "filesReadKb": null,
+        "inTokEst": 229,
+        "outTok": 600
+      },
+      {
+        "label": "update-task-1",
+        "model": "haiku",
+        "promptTokEst": 258,
+        "filesReadKb": null,
+        "inTokEst": 258,
+        "outTok": 1088
+      },
+      {
+        "label": "implement-1-1",
+        "model": "sonnet",
+        "promptTokEst": 894,
+        "filesReadKb": null,
+        "inTokEst": 894,
+        "outTok": 9905
+      },
+      {
+        "label": "test-1-1",
+        "model": "haiku",
+        "promptTokEst": 578,
+        "filesReadKb": null,
+        "inTokEst": 578,
+        "outTok": 2092
+      }
+    ],
+    "total": {
+      "promptTokEst": 2733,
+      "filesReadKb": 0,
+      "inTokEst": 2733,
+      "outTok": 18349
+    }
+  }
+}
