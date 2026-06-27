@@ -21,6 +21,9 @@ file**, append-only — never edit a settled decision; supersede it with a new o
   documentation structure.
 - [D2: Validator Scope & Sequence](./D2-scope-and-sequence.md) — Learn-first, validator-first,
   superset of the site's `validate-content.ts`; summaries/transcripts out of scope.
+- [D3: Corpus-level config file](./D3-corpus-config-system.md) — Plan to move hardcoded
+  skip-lists, doc_id patterns, and vocab sets into a per-corpus `.mev.toml`; current hardcodes
+  are interim. Sequenced after Phase 3.
 
 <!-- Add a row per decision as they are made. Record new ones with /log-decision-style atomic
-     files (D3, D4, …). -->
+     files (D4, D5, …). -->
