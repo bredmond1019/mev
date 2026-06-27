@@ -1,0 +1,587 @@
+//! OKF frontmatter validation for the company-brain repo (Phase 2, Block H).
+//!
+//! Defines [`OkfFrontmatter`] — the serde struct for the OKF YAML frontmatter schema
+//! (D27) — and [`validate_md_file`], which checks every required field, controlled-vocab
+//! membership, kebab-case `doc_id`, and keyword count on a single brain `.md` file.
+//!
+//! Design mirrors `learn_ai::meta`: all fields are `Option` (extras tolerated, no
+//! `deny_unknown_fields`), read/parse failures short-circuit to a single diagnostic,
+//! and every field violation gets its own precise-locator diagnostic.
+
+use serde::Deserialize;
+
+use crate::Diagnostic;
+use crate::brain::crawl::MdFile;
+use crate::shared::{extract_frontmatter, is_kebab_case, non_empty};
+
+// ---------------------------------------------------------------------------
+// OKF frontmatter struct
+// ---------------------------------------------------------------------------
+
+/// The OKF YAML frontmatter schema (D27) for company-brain `.md` files.
+///
+/// All fields are `Option` so per-field presence checks produce precise-locator
+/// diagnostics rather than aborting deserialization. Unknown keys are tolerated
+/// (`deny_unknown_fields` is deliberately absent), consistent with the live corpus
+/// carrying extra fields.
+///
+/// `layer` is a list per the settled canonical form — the live corpus only uses
+/// `[brain, meta]`-style lists, never bare scalars.
+#[derive(Debug, Deserialize)]
+pub struct OkfFrontmatter {
+    /// `type` field (renamed because `type` is a Rust keyword).
+    #[serde(rename = "type")]
+    pub type_: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub doc_id: Option<String>,
+    /// Closed-set list: `brain · engine · factory · console · surface · infra · business · content · meta`.
+    pub layer: Option<Vec<String>>,
+    /// Closed-set scalar; omitted on cross-cutting docs (absence is not an error).
+    pub project: Option<String>,
+    /// Closed-set scalar: `active · draft · deprecated · superseded · archived`.
+    pub status: Option<String>,
+    /// 3–7 free-form topic terms (outside that range → `warning`).
+    pub keywords: Option<Vec<String>>,
+    /// Tolerated but not validated.
+    pub related: Option<Vec<String>>,
+}
+
+// ---------------------------------------------------------------------------
+// Controlled-vocabulary sets
+// ---------------------------------------------------------------------------
+
+/// Valid `layer` values (closed set).
+pub(crate) fn is_valid_layer(s: &str) -> bool {
+    matches!(
+        s,
+        "brain"
+            | "engine"
+            | "factory"
+            | "console"
+            | "surface"
+            | "infra"
+            | "business"
+            | "content"
+            | "meta"
+    )
+}
+
+/// Valid `project` values (closed set).
+pub(crate) fn is_valid_project(s: &str) -> bool {
+    matches!(
+        s,
+        "bastion"
+            | "bastion-ui"
+            | "python-orchestration"
+            | "learn-ai"
+            | "rag-engine-rs"
+            | "claude-sdk-rs"
+            | "workflow-engine-rs"
+            | "markdown-engine-validator"
+            | "bella"
+            | "price-scout"
+            | "amistad"
+            | "base-template"
+            | "brain"
+    )
+}
+
+/// Valid `status` values (closed set).
+pub(crate) fn is_valid_status(s: &str) -> bool {
+    matches!(
+        s,
+        "active" | "draft" | "deprecated" | "superseded" | "archived"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Per-file helpers
+// ---------------------------------------------------------------------------
+
+/// Build a "missing required field" `error` diagnostic.
+fn missing(mf: &MdFile, locator: &str) -> Diagnostic {
+    Diagnostic::error(mf.rel.clone(), locator, "missing required field")
+}
+
+/// Push a `missing` diagnostic when `value` is absent or blank.
+fn require_str(mf: &MdFile, locator: &str, value: &Option<String>, diags: &mut Vec<Diagnostic>) {
+    if non_empty(value).is_none() {
+        diags.push(missing(mf, locator));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public entry point
+// ---------------------------------------------------------------------------
+
+/// Validate the OKF frontmatter of a single brain `.md` file.
+///
+/// Returns every diagnostic the file produces; an empty vector means the file is clean.
+///
+/// Error short-circuits:
+/// - File read failure → one `error` diagnostic.
+/// - No frontmatter block → one `error` diagnostic at locator `"frontmatter"`.
+/// - Malformed YAML → one `error` diagnostic at locator `"frontmatter"`.
+///
+/// Field checks (after successful parse):
+/// - Missing `type`, `title`, or `description` → one `error` each at that locator.
+/// - `type` value is **never** vocab-checked (open vocab; presence only).
+/// - Bad `layer` member → one `error` per bad member at locator `"layer"`.
+/// - Bad `project` value → one `error` at locator `"project"`.
+/// - Bad `status` value → one `error` at locator `"status"`.
+/// - Non-kebab-case `doc_id` (when present) → one `error` at locator `"doc_id"`.
+/// - `keywords` count outside 3–7 (when present) → one `warning` at locator `"keywords"`.
+pub fn validate_md_file(mf: &MdFile) -> Vec<Diagnostic> {
+    // --- Read ---
+    let contents = match std::fs::read_to_string(&mf.path) {
+        Ok(s) => s,
+        Err(e) => {
+            return vec![Diagnostic::error(
+                mf.rel.clone(),
+                "",
+                format!("could not read file: {e}"),
+            )];
+        }
+    };
+
+    // --- Extract frontmatter ---
+    let yaml = match extract_frontmatter(&contents) {
+        Some(y) => y,
+        None => {
+            return vec![Diagnostic::error(
+                mf.rel.clone(),
+                "frontmatter",
+                "missing or unterminated frontmatter block (expected leading --- fence)",
+            )];
+        }
+    };
+
+    // --- Parse YAML ---
+    let fm: OkfFrontmatter = match serde_yaml::from_str(yaml) {
+        Ok(f) => f,
+        Err(e) => {
+            return vec![Diagnostic::error(
+                mf.rel.clone(),
+                "frontmatter",
+                format!("malformed YAML in frontmatter: {e}"),
+            )];
+        }
+    };
+
+    let mut diags = Vec::new();
+
+    // --- Required fields: type, title, description ---
+    require_str(mf, "type", &fm.type_, &mut diags);
+    require_str(mf, "title", &fm.title, &mut diags);
+    require_str(mf, "description", &fm.description, &mut diags);
+
+    // --- Controlled vocab: layer (list — each bad member is its own error) ---
+    if let Some(layers) = &fm.layer {
+        for layer in layers {
+            if !is_valid_layer(layer.as_str()) {
+                diags.push(Diagnostic::error(
+                    mf.rel.clone(),
+                    "layer",
+                    format!(
+                        "layer value '{layer}' is not in the closed set \
+                         (brain|engine|factory|console|surface|infra|business|content|meta)"
+                    ),
+                ));
+            }
+        }
+    }
+
+    // --- Controlled vocab: project (scalar; absent is OK) ---
+    if let Some(project) = non_empty(&fm.project)
+        && !is_valid_project(project)
+    {
+        diags.push(Diagnostic::error(
+            mf.rel.clone(),
+            "project",
+            format!(
+                "project value '{project}' is not in the closed set \
+                 (bastion|bastion-ui|python-orchestration|learn-ai|rag-engine-rs|\
+                 claude-sdk-rs|workflow-engine-rs|markdown-engine-validator|bella|\
+                 price-scout|amistad|base-template|brain)"
+            ),
+        ));
+    }
+
+    // --- Controlled vocab: status (scalar; absent is OK) ---
+    if let Some(status) = non_empty(&fm.status)
+        && !is_valid_status(status)
+    {
+        diags.push(Diagnostic::error(
+            mf.rel.clone(),
+            "status",
+            format!(
+                "status value '{status}' is not in the closed set \
+                 (active|draft|deprecated|superseded|archived)"
+            ),
+        ));
+    }
+
+    // --- doc_id: kebab-case when present ---
+    if let Some(doc_id) = non_empty(&fm.doc_id)
+        && !is_kebab_case(doc_id)
+    {
+        diags.push(Diagnostic::error(
+            mf.rel.clone(),
+            "doc_id",
+            format!("doc_id must be kebab-case (^[a-z0-9]+(-[a-z0-9]+)*$): {doc_id}"),
+        ));
+    }
+
+    // --- keywords: count 3–7 warning when present ---
+    if let Some(keywords) = &fm.keywords {
+        let count = keywords.len();
+        if !(3..=7).contains(&count) {
+            diags.push(Diagnostic::warning(
+                mf.rel.clone(),
+                "keywords",
+                format!("keywords should contain 3–7 entries (found {count})"),
+            ));
+        }
+    }
+
+    diags
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Severity;
+    use crate::brain::crawl::MdFile;
+    use std::path::PathBuf;
+
+    // --- Helper: build an MdFile pointing at a temp file ---
+
+    fn temp_dir(suffix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("mev-okf-{suffix}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_md(dir: &PathBuf, name: &str, content: &str) -> MdFile {
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        MdFile {
+            path: path.clone(),
+            rel: PathBuf::from(name),
+            stem: name.trim_end_matches(".md").to_string(),
+        }
+    }
+
+    /// A fully-valid OKF frontmatter body (all required + optional fields).
+    fn good_okf_body() -> &'static str {
+        "---\ntype: Decision\ntitle: My Decision\ndescription: A one-line summary.\ndoc_id: my-decision\nlayer: [brain]\nproject: bastion\nstatus: active\nkeywords: [rust, cli, validation]\nrelated: [context]\n---\n\n# Body\n"
+    }
+
+    /// Validate a YAML string (not a file) by writing to a temp file first.
+    fn validate_yaml(yaml_body: &str, suffix: &str) -> Vec<Diagnostic> {
+        let dir = temp_dir(suffix);
+        let mf = write_md(&dir, "test.md", yaml_body);
+        let diags = validate_md_file(&mf);
+        let _ = std::fs::remove_dir_all(&dir);
+        diags
+    }
+
+    // --- Vocab helpers ---
+
+    #[test]
+    fn layer_helper_accepts_all_valid_values() {
+        for v in [
+            "brain", "engine", "factory", "console", "surface", "infra", "business", "content",
+            "meta",
+        ] {
+            assert!(is_valid_layer(v), "expected '{v}' to be valid");
+        }
+    }
+
+    #[test]
+    fn layer_helper_rejects_unknown_value() {
+        assert!(!is_valid_layer("unknown"));
+        assert!(!is_valid_layer("Brain")); // case-sensitive
+        assert!(!is_valid_layer(""));
+    }
+
+    #[test]
+    fn project_helper_accepts_all_valid_values() {
+        for v in [
+            "bastion",
+            "bastion-ui",
+            "python-orchestration",
+            "learn-ai",
+            "rag-engine-rs",
+            "claude-sdk-rs",
+            "workflow-engine-rs",
+            "markdown-engine-validator",
+            "bella",
+            "price-scout",
+            "amistad",
+            "base-template",
+            "brain",
+        ] {
+            assert!(is_valid_project(v), "expected '{v}' to be valid");
+        }
+    }
+
+    #[test]
+    fn project_helper_rejects_unknown_value() {
+        assert!(!is_valid_project("unknown-project"));
+        assert!(!is_valid_project("Bastion")); // case-sensitive
+    }
+
+    #[test]
+    fn status_helper_accepts_all_valid_values() {
+        for v in ["active", "draft", "deprecated", "superseded", "archived"] {
+            assert!(is_valid_status(v), "expected '{v}' to be valid");
+        }
+    }
+
+    #[test]
+    fn status_helper_rejects_unknown_value() {
+        assert!(!is_valid_status("pending"));
+        assert!(!is_valid_status("Active")); // case-sensitive
+    }
+
+    // --- Good document is clean ---
+
+    #[test]
+    fn good_okf_document_is_clean() {
+        let diags = validate_yaml(good_okf_body(), "good");
+        assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
+    }
+
+    // --- Required fields ---
+
+    #[test]
+    fn missing_type_emits_error_at_type_locator() {
+        let body = "---\ntitle: T\ndescription: D\n---\nbody\n";
+        let diags = validate_yaml(body, "no-type");
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].locator, "type");
+        assert_eq!(diags[0].message, "missing required field");
+    }
+
+    #[test]
+    fn missing_title_emits_error_at_title_locator() {
+        let body = "---\ntype: Decision\ndescription: D\n---\nbody\n";
+        let diags = validate_yaml(body, "no-title");
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].locator, "title");
+    }
+
+    #[test]
+    fn missing_description_emits_error_at_description_locator() {
+        let body = "---\ntype: Decision\ntitle: T\n---\nbody\n";
+        let diags = validate_yaml(body, "no-desc");
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].locator, "description");
+    }
+
+    #[test]
+    fn type_value_is_not_vocab_checked() {
+        // Any non-empty type value must be accepted.
+        let body = "---\ntype: SomeArbitraryType\ntitle: T\ndescription: D\n---\nbody\n";
+        let diags = validate_yaml(body, "any-type");
+        assert!(
+            diags.is_empty(),
+            "type value should not be vocab-checked, got: {diags:?}"
+        );
+    }
+
+    // --- Controlled vocab: layer ---
+
+    #[test]
+    fn bad_layer_member_emits_error_at_layer_locator() {
+        let body =
+            "---\ntype: T\ntitle: T\ndescription: D\nlayer: [brain, invalid-layer]\n---\nbody\n";
+        let diags = validate_yaml(body, "bad-layer");
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].locator, "layer");
+        assert!(diags[0].message.contains("invalid-layer"));
+    }
+
+    #[test]
+    fn two_bad_layer_members_emit_two_errors() {
+        let body = "---\ntype: T\ntitle: T\ndescription: D\nlayer: [bad1, bad2]\n---\nbody\n";
+        let diags = validate_yaml(body, "two-bad-layers");
+        assert_eq!(diags.len(), 2, "got: {diags:?}");
+        assert!(diags.iter().all(|d| d.locator == "layer"));
+    }
+
+    #[test]
+    fn absent_layer_is_not_an_error() {
+        let body = "---\ntype: T\ntitle: T\ndescription: D\n---\nbody\n";
+        let diags = validate_yaml(body, "no-layer");
+        assert!(
+            diags.is_empty(),
+            "absent layer should not be flagged, got: {diags:?}"
+        );
+    }
+
+    // --- Controlled vocab: project ---
+
+    #[test]
+    fn bad_project_emits_error_at_project_locator() {
+        let body = "---\ntype: T\ntitle: T\ndescription: D\nproject: unknown-project\n---\nbody\n";
+        let diags = validate_yaml(body, "bad-project");
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].locator, "project");
+    }
+
+    #[test]
+    fn absent_project_is_not_an_error() {
+        let body = "---\ntype: T\ntitle: T\ndescription: D\n---\nbody\n";
+        let diags = validate_yaml(body, "no-project");
+        assert!(
+            diags.is_empty(),
+            "absent project should not be flagged, got: {diags:?}"
+        );
+    }
+
+    // --- Controlled vocab: status ---
+
+    #[test]
+    fn bad_status_emits_error_at_status_locator() {
+        let body = "---\ntype: T\ntitle: T\ndescription: D\nstatus: pending\n---\nbody\n";
+        let diags = validate_yaml(body, "bad-status");
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].locator, "status");
+    }
+
+    #[test]
+    fn absent_status_is_not_an_error() {
+        let body = "---\ntype: T\ntitle: T\ndescription: D\n---\nbody\n";
+        let diags = validate_yaml(body, "no-status");
+        assert!(
+            diags.is_empty(),
+            "absent status should not be flagged, got: {diags:?}"
+        );
+    }
+
+    // --- doc_id kebab-case ---
+
+    #[test]
+    fn non_kebab_doc_id_emits_error_at_doc_id_locator() {
+        let body = "---\ntype: T\ntitle: T\ndescription: D\ndoc_id: My_Bad_Id\n---\nbody\n";
+        let diags = validate_yaml(body, "bad-doc-id");
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].locator, "doc_id");
+    }
+
+    #[test]
+    fn valid_kebab_doc_id_is_clean() {
+        let body = "---\ntype: T\ntitle: T\ndescription: D\ndoc_id: my-valid-id\n---\nbody\n";
+        let diags = validate_yaml(body, "good-doc-id");
+        assert!(
+            diags.is_empty(),
+            "valid doc_id should not be flagged, got: {diags:?}"
+        );
+    }
+
+    // --- keywords count warning ---
+
+    #[test]
+    fn keywords_fewer_than_3_emits_warning() {
+        let body = "---\ntype: T\ntitle: T\ndescription: D\nkeywords: [one, two]\n---\nbody\n";
+        let diags = validate_yaml(body, "keywords-low");
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Warning);
+        assert_eq!(diags[0].locator, "keywords");
+    }
+
+    #[test]
+    fn keywords_more_than_7_emits_warning() {
+        let body = "---\ntype: T\ntitle: T\ndescription: D\nkeywords: [a, b, c, d, e, f, g, h]\n---\nbody\n";
+        let diags = validate_yaml(body, "keywords-high");
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Warning);
+        assert_eq!(diags[0].locator, "keywords");
+    }
+
+    #[test]
+    fn keywords_exactly_3_is_clean() {
+        let body = "---\ntype: T\ntitle: T\ndescription: D\nkeywords: [a, b, c]\n---\nbody\n";
+        let diags = validate_yaml(body, "keywords-3");
+        assert!(
+            diags.is_empty(),
+            "3 keywords should be clean, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn keywords_exactly_7_is_clean() {
+        let body =
+            "---\ntype: T\ntitle: T\ndescription: D\nkeywords: [a, b, c, d, e, f, g]\n---\nbody\n";
+        let diags = validate_yaml(body, "keywords-7");
+        assert!(
+            diags.is_empty(),
+            "7 keywords should be clean, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn absent_keywords_is_not_flagged() {
+        let body = "---\ntype: T\ntitle: T\ndescription: D\n---\nbody\n";
+        let diags = validate_yaml(body, "no-keywords");
+        assert!(
+            diags.is_empty(),
+            "absent keywords should not be flagged, got: {diags:?}"
+        );
+    }
+
+    // --- Missing frontmatter ---
+
+    #[test]
+    fn missing_frontmatter_block_emits_single_error() {
+        let body = "# Just a heading, no frontmatter\n";
+        let diags = validate_yaml(body, "no-fm");
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].locator, "frontmatter");
+        assert!(diags[0].message.contains("missing or unterminated"));
+    }
+
+    // --- Malformed YAML ---
+
+    #[test]
+    fn malformed_yaml_emits_single_error() {
+        let body = "---\ntitle: [unclosed bracket\n---\nbody\n";
+        let diags = validate_yaml(body, "bad-yaml");
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].locator, "frontmatter");
+        assert!(diags[0].message.contains("malformed YAML"));
+    }
+
+    // --- Read failure ---
+
+    #[test]
+    fn unreadable_file_emits_single_error() {
+        let mf = MdFile {
+            path: PathBuf::from("/nonexistent/mev/missing.md"),
+            rel: PathBuf::from("missing.md"),
+            stem: "missing".to_string(),
+        };
+        let diags = validate_md_file(&mf);
+        assert_eq!(diags.len(), 1, "got: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].locator, "");
+        assert!(diags[0].message.starts_with("could not read file:"));
+    }
+}
