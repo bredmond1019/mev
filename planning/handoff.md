@@ -1,110 +1,98 @@
 ---
 type: Handoff
-created: 2026-06-26
+created: 2026-06-27
 ---
 
-# Handoff — Crawl hardening done; Block J (graph integrity) is next
+# Handoff — Block 2.M shipped; docs bootstrapped; harness fixed; 2.J is next
 
 > **For the next agent:** Read this immediately after `/prime`. Delete this file once consumed.
 
 ---
 
-## ⟨2026-06-27⟩ Cross-program directive — start HQ Restructure **Block M** next
+## What we're doing and why
 
-> **This takes precedence over the mev-local Phase 3 work below.** Everything beneath this banner
-> (the graph/link/structural integrity blocks) still stands and is unchanged — but the immediate
-> priority is a different, *program-level* block.
-
-**Naming caution:** the HQ Restructure program (in the parent brain repo,
-`agentic-portfolio/planning/hq-restructure/master-plan.md`) labels its blocks A–Q. Its **Block M** is
-**not** the same as this repo's local Phase 3 "Block J/K/L" below — different numbering, different program.
-
-**HQ-R Block M — "mev reads `brain.toml` (vocab + crawl + manifest)":**
-- **What:** add the `toml` crate; have `validate-brain` read **`brain.toml`** for `[vocab]` (layer +
-  status) and the **project slugs derived from `[[repos]]`**, for `[crawl].skip_dirs`, and for the
-  `[[repos]]` manifest — **retiring the hardcoded `is_valid_*` match arms and skip-lists**. Resolve
-  `brain.toml` by **walk-up** (same convention the orchestrator indexer already shipped in HQ-R Block I —
-  mirror its `_find_brain_root`).
-- **This realizes mev's own D3** (`planning/decisions/D3-corpus-config-system.md`) — but via the shared
-  **`brain.toml`** at the HQ root, **not** a separate `.mev.toml`. So Block M's wrap-up **marks D3
-  superseded by `brain.toml`** (append-only: don't edit D3, supersede it). The interim hardcodes the
-  current handoff notes (skip-lists, `doc_id` patterns, vocab sets) are exactly what move into config here.
-- **Where the file lives:** `agentic-portfolio/brain.toml` (HQ root, the parent of `core/mev/`). It holds
-  `[vocab]`, `[crawl].skip_dirs`, and one `[[repos]]` block per repo (`slug`/`tier`/`repo_path`/
-  `status_file`/`cache_doc`/`heading`). Project vocab = the set of `[[repos]]` slugs (not a separate list).
-- **Deps:** Block A (brain.toml authored) ✅ and Block D (mev renamed) ✅ — **both done, ready now.**
-  Sequenced after Block I (done) so both readers share the walk-up convention.
-- **Out of scope (later program blocks):** the `synced_from` `--sync` watermark check + git hooks is
-  **HQ-R Block N** (comes after M, needs M + the brain's Block J). The graph/link/structural integrity
-  work is this repo's separate Phase 3 (below).
-- **Acceptance:** `mev validate-brain` accepts/rejects vocab per `brain.toml` (proven by a **config-only**
-  edit flipping a result with no source change); **no `is_valid_*` literal vocab remains**; `cargo fmt
-  --check && cargo clippy -- -D warnings && cargo test` pass; mev **D3 marked superseded**.
-- **First command:** `Read planning/decisions/D3-corpus-config-system.md + ../../planning/hq-restructure/master-plan.md (Block M) + ../../brain.toml`, then `/generate-tasks` for Block M.
+`mev` is a Rust CLI that validates Markdown/MDX — Phase 1 (learn-ai content) is done, Phase 2
+(Brain OKF frontmatter) is fully complete as of this session with block 2.M (brain.toml config
+reader). The repo now has a GitHub remote (`bredmond1019/mev`). This session also fixed a
+systemic gap in the SDLC harness: the `/document` pipeline phase never created docs from scratch,
+so projects with no initial docs silently accumulated code with zero coverage. Three harness files
+were updated across `base-template`, `brain`, and `mev` to close this. The next block is
+**2.J — graph integrity** (`related:` edge validation against the doc_id corpus index).
 
 ---
 
-## What we're doing and why
-
-Phase 3 of `mev` adds corpus-wide integrity checks on top of the OKF frontmatter validator
-(Phase 2). Before starting Block J we did a live run of `mev validate-brain` against the
-actual Brain repo and triaged every diagnostic. The crawl skip-lists were too narrow —
-`.claude/`, `.repo-backups/`, `.agent/`, `CLAUDE.md`, `GEMINI.md`, and `handoff.md` were all
-being validated as OKF docs. Those are now excluded. We also discovered that the Brain's
-`doc_id` convention for decision files (`D15-okf-lowercase-doc-names`) violates the old
-kebab-case regex, so we widened the validator to accept the `D<n>-…` format. A config-system
-decision (D3) was written to track eventual extraction of all these corpus-specific rules into
-a `.mev.toml` file (sequenced after Phase 3). The Brain now validates to **0 errors, 3 warnings**
-(the warnings are honest: three files have 8 keywords where the rule is 3–7).
-
 ## Completed this session
 
-- **Live triage of `mev validate-brain ~/Dev/agentic-portfolio`** — diagnosed all 145 original
-  errors; reduced to 0 errors / 3 warnings across three targeted fixes
-- **`fix(brain/crawl)`: dir skip-list** (`4cd7843`) — added `.claude`, `.repo-backups`, `.agent`
-  to `is_blocklisted_name` in `src/brain/crawl.rs`; 3 new unit tests
-- **`fix(brain/okf)`: decision-id format** (`1790c64`) — added `is_decision_id` and
-  `is_valid_doc_id` helpers in `src/brain/okf.rs` to accept `D<n>-…` alongside standard
-  kebab-case; removed unused `is_kebab_case` import; 7 new unit tests; 152 total tests pass
-- **`docs(decisions)`: D3 — corpus config system** (`d727c7c`) — written as `planning/decisions/D3-corpus-config-system.md`; registered in `planning/decisions/index.md`; status `draft`, sequenced post-Phase 3
-- **File-level skip-list** (uncommitted) — added `is_blocklisted_file` to `src/brain/crawl.rs`
-  blocking `CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`, `handoff.md`; 4 new unit tests;
-  154 total tests pass
+- **Block 2.M via sdlc-flow** — TOML config reader for `brain.toml`; 6 tasks, all passed on first
+  run (verdict: PASS). `BrainConfig` + `CrawlConfig` + `VocabConfig` + `RepoEntry`; `find_brain_config`
+  walk-up resolver; all vocab validation config-driven (no hardcoded `is_valid_*` arrays remain);
+  `tests/brain_config.rs` + `tests/brain_validate.rs` (188 lines total); D3 marked superseded.
+  PR #1 merged → `main`.
+
+- **GitHub repo created** — `gh repo create bredmond1019/mev --private`. Remote is `origin`.
+  `main` is tracking `origin/main`. All commits pushed.
+
+- **Full codebase documentation written** (none existed before) — `/update-docs` audit identified
+  zero project-facing docs. Created:
+  - `docs/index.md` — navigation hub
+  - `docs/cli.md` — CLI reference (subcommands, `--json`, exit codes, JSON envelope shape)
+  - `docs/architecture.md` — module map, `ContentValidator` trait, `Diagnostic`/`Report`/`JsonReport`
+    types, data flow diagram
+  - `docs/brain-toml.md` — full `brain.toml` schema (`[vocab]`, `[crawl]`, `[[repos]]`, lookup order)
+  - `docs/okf-schema.md` — OKF frontmatter field reference, validation rules, full diagnostic table
+  - `README.md` patched: added `config.rs` to brain module listing; `--json` output example; expanded docs table
+
+- **SDLC harness doc pipeline fixed** (systemic) — three repos updated + committed:
+  - `base-template/.claude/commands/update-docs.md`: added `--bootstrap` flag (skip audit, create all
+    missing docs from source); expanded `--patch` to also create MISSING docs (not just fix STALE);
+    updated Phase 6 + Rules
+  - `base-template/.claude/commands/document.md`: replaced "No invention — that is `/generate-new-docs`
+    territory" dead-end with pointer to `/update-docs --patch` / `--bootstrap`
+  - `base-template/scaffold/docs/index.md`: new stub with OKF frontmatter + `{{PROJECT_NAME}}`/`{{SLUG}}`
+    tokens — every new project now gets a `docs/index.md` from day one
+  - `agentic-portfolio/.claude/commands/new-project.md` (brain): added Stack parameter
+    (`Rust`/`Next.js`/`FastAPI`/`Other`) to step 1; added step 9 — creates stack-appropriate doc stubs
+    (`docs/architecture.md` + `docs/cli.md` for Rust, `docs/api-reference.md` for FastAPI, `docs/pages.md`
+    for Next.js) with OKF frontmatter and section headings; updates `docs/index.md`
+  - Propagated `update-docs.md` + `document.md` to `mev` and `learn-ai`
+
+---
 
 ## Remaining work
 
-- **Block J — Graph integrity (`related:` edges)** (start here)
-  - Build a corpus-wide `doc_id` index (every `.md`'s `doc_id`, defaulting to filename stem)
+- **Block 2.J — Graph integrity** (`related:` edge validation) — START HERE
+  - Build corpus-wide `doc_id` index (every `.md`'s `doc_id`, defaulting to filename stem)
   - Flag every `related:` entry pointing at an undefined `doc_id` (dangling edge)
-  - Flag duplicate `doc_id`s
+  - Flag duplicate `doc_id`s across the corpus
   - Acceptance: renamed/deleted `doc_id` is flagged; duplicate `doc_id`s are flagged; clean corpus passes
-- **Block K — Link integrity** (markdown `[text](path)`, `file:///`, `[[wikilinks]]`)
-- **Block L — Structural coverage** (`index.md` ↔ directory bidirectional check, D17)
-- **Keyword warnings** (3 warnings in Brain corpus) — left as honest signal; will become
-  configurable via D3 config system. Not a blocker.
+  - Likely needs `src/brain/graph.rs` with `build_doc_id_index` and `check_related_edges`
+
+- **Block 2.K — Link integrity** (markdown `[text](path)`, `file:///`, `[[wikilinks]]`)
+- **Block 2.L — Structural coverage** (`index.md` ↔ directory bidirectional check, D17)
+
+---
 
 ## Open questions / choices
 
-None — clear to proceed with Block J.
+None — clear to proceed with 2.J.
+
+---
 
 ## Context the next agent needs
 
-- Repo is on `main`; no open worktrees. No GitHub remote.
-- Harness gates: `cargo fmt --check && cargo clippy -- -D warnings && cargo test && cargo build --release`
-- **154 tests currently passing** (after this session's uncommitted crawl.rs changes land).
-  Keep all green after every block.
-- `mev validate-brain ~/Dev/agentic-portfolio` now exits 0 (0 errors, 3 warnings).
-- The 3 remaining warnings are `keywords` count > 7 in:
-  - `planning/bastion-ui/plan.md`
-  - `planning/brain-rag-improvements/plan.md`
-  - `docs/projects/mev.md`
-  These are real minor violations in the Brain corpus, not validator bugs.
-- D3 decision (`planning/decisions/D3-corpus-config-system.md`) captures the plan to move
-  all current hardcodes (skip-lists, doc_id patterns, vocab sets) into a per-corpus `.mev.toml`.
-  Current hardcodes are interim and should eventually carry `// TODO(D3): move to config`.
-- Block J will likely need `src/brain/graph.rs` with `build_doc_id_index` and
-  `check_related_edges`; wire into `BrainValidator::run()` or a new `validate_brain_graph()`
-  entry point.
+- **GitHub remote:** `origin → git@github.com:bredmond1019/mev.git` (private). `main` is tracking.
+- **Test count:** ~174+ tests, all green. Harness: `cargo fmt --check && cargo clippy -- -D warnings && cargo test && cargo build --release`.
+- **`mev validate-brain ~/Dev/agentic-portfolio`** exits 0 (0 errors, 3 warnings). The 3 warnings are
+  honest `keywords` count violations in the Brain corpus — not validator bugs. Leave them.
+- **D3 is superseded** — `planning/decisions/D3-corpus-config-system.md` status updated. The
+  `.mev.toml` per-corpus proposal was retired; `brain.toml` is the config source.
+- **Phase 2 is complete** — all blocks (F, G, H, I, 2.M) done. Phase 3 = graph/link/structural integrity.
+- **learn-ai** also received the propagated `update-docs.md` + `document.md` updates this session
+  (in its own `.claude/commands/`) — those are committed in that repo separately.
+- Block 2.J will wire into `BrainValidator::run()` — see `src/brain/mod.rs:crawl` + `validate_item`
+  pattern; graph check is likely a post-item-validation pass over the full collected `MdFile` list.
+
+---
 
 ## First command after `/prime`
 

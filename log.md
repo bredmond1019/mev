@@ -8,12 +8,18 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-06-26"
+timestamp: "2026-06-27"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## 2026-06-27 — Block 2.M complete; GitHub repo created; docs bootstrapped; harness fixed
+
+Block 2.M shipped (PASS, 6 tasks). GitHub repo created and code pushed. Wrote the first complete round of codebase docs: `cli`, `architecture`, `brain-toml`, and `okf-schema` reference pages. Fixed the SDLC harness doc pipeline — added `--bootstrap` mode to `/update-docs` (skips invention check when scaffolding from scratch), tightened the `/document` no-invention rule, wired `/new-project` to generate stack-aware doc stubs, and propagated all harness changes to `mev` and `learn-ai`.
 
 ---
 
