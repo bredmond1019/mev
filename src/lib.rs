@@ -5,7 +5,7 @@
 //! future check emits. Phase 1, Block B adds content-tree crawl + classification (see
 //! `planning/master-plan.md`).
 
-mod brain;
+pub mod brain;
 mod learn_ai;
 mod shared;
 mod validator;
