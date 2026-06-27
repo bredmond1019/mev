@@ -28,3 +28,6 @@ Validated: gating checks (fast tripwire)
 What: Task 6 validation: fixed path-style skip_dirs matching in crawl.rs so brain.toml's "planning/archive" entry prunes the archive subtree; all harness gates green and mev validate-brain exits 0 with 0 errors.
 Decisions: is_blocklisted_name was updated to accept an optional relative path parameter so path-style skip_dirs entries (e.g. 'planning/archive') can be matched against the directory's relative path from root, while name-only entries (no separator) continue to match by leaf name; this avoids breaking the existing name-match contract while adding path-match support.; The fix surfaces a latent bug introduced in Task 2: brain.toml already had 'planning/archive' as a skip_dirs entry but the name-only comparison silently ignored it, causing the archived markdown-engine-validator.md to generate a false-positive error diagnostic.
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: /Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/planning/status.md

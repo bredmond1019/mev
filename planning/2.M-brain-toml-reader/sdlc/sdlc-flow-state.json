@@ -2,9 +2,9 @@
   "spec_slug": "2.M-brain-toml-reader",
   "branch": "2.M-brain-toml-reader-flow-2",
   "started_at": "2026-06-27T21:44:47Z",
-  "updated_at": "2026-06-27T22:16:10Z",
+  "updated_at": "2026-06-27T22:20:44Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2",
-  "status": "running",
+  "status": "docs",
   "current_task": 6,
   "tasks": {
     "1": {
@@ -123,12 +123,14 @@
     }
   },
   "review": {
-    "verdict": null,
+    "verdict": "PASS",
     "findings": [],
-    "attempts": 0
+    "attempts": 1
   },
   "docs": {
-    "changed": [],
+    "changed": [
+      "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/planning/status.md"
+    ],
     "created": []
   },
   "bail_reason": null,
@@ -297,13 +299,29 @@
         "filesReadKb": null,
         "inTokEst": 578,
         "outTok": 3555
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 991,
+        "filesReadKb": null,
+        "inTokEst": 991,
+        "outTok": 2818
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 562,
+        "filesReadKb": null,
+        "inTokEst": 562,
+        "outTok": 4945
       }
     ],
     "total": {
-      "promptTokEst": 11383,
+      "promptTokEst": 12936,
       "filesReadKb": 0,
-      "inTokEst": 11383,
-      "outTok": 111645
+      "inTokEst": 12936,
+      "outTok": 119408
     }
   }
 }
