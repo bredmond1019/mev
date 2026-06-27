@@ -17,6 +17,18 @@ timestamp: "2026-06-26"
 
 ---
 
+## 2026-06-26 — Close-out for Block 2.G: Brain crawl (verification + docs + handoff)
+
+Completed Block 2.G close-out activities: verified all 96 tests pass (61 unit + 35 integration), ran coverage scan with no gaps flagged, and patched `README.md` to add `src/brain/` to the directory map (was missing the new module from the source-tree overview). Wrote `planning/handoff.md` to orient Block 2.H work: context on the OKF frontmatter schema, pointers to the Brain docs in the parent repo, test fixtures, and the validation rules needed. Block 2.G is fully closed; ready to hand off to Block 2.H (Brain OKF frontmatter validator).
+
+```diff
+ README.md           |  3 ++-
+ planning/handoff.md | 72 +++++++++++++++++++++++++----------------------------
+ 2 files changed, 36 insertions(+), 39 deletions(-)
+```
+
+---
+
 ## 2026-06-26 — 2.G-brain-crawl: Brain crawl entry point (PASS)
 
 Completed Phase 2, Block G: added a parallel Brain crawl entry point alongside the existing learn-ai crawl. Created `src/brain/mod.rs` and `src/brain/crawl.rs` defining `MdFile { path, rel, stem }`, two pruning helpers (`is_blocklisted_name` for `target/`, `node_modules/`, `.git/` dirs, and `has_nested_git` for the depth>0 nested-git rule), and `pub fn crawl_brain(root: &Path) -> (Vec<MdFile>, Vec<Diagnostic>)` using `filter_entry`-based directory pruning. Re-exported `MdFile` and `crawl_brain` from `src/lib.rs`. Eight integration tests in `tests/brain_crawl.rs` cover root-level finds, all blocklist prunes, nested-git pruning, non-.md skips, and `rel`/`stem` correctness. All 96 tests (61 unit + 35 integration) pass; all four harness gates green. Review passed on first attempt with all 7 acceptance criteria MET. The document pass flagged `README.md` as needing a `src/brain/` row in the source-tree directory map (manual follow-up). Next: Block 2.H (Brain OKF frontmatter validator).
