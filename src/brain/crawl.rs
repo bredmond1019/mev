@@ -2,8 +2,8 @@
 //!
 //! Walks a directory tree collecting every `*.md` file, applying a two-layer skip-list:
 //!
-//! **Name blocklist** — any directory named `target`, `node_modules`, or `.git` is pruned
-//! (its entire subtree is skipped).
+//! **Name blocklist** — any directory named `target`, `node_modules`, `.git`, `.claude`,
+//! `.repo-backups`, or `.agent` is pruned (its entire subtree is skipped).
 //!
 //! **Nested-git rule** — any directory at `depth() > 0` that contains its own `.git` entry
 //! is pruned.  The `depth() > 0` guard exempts the brain root itself, which is a git repo
@@ -37,9 +37,12 @@ pub struct MdFile {
 
 /// Return `true` if a directory name is on the name blocklist.
 ///
-/// Blocklisted names: `target`, `node_modules`, `.git`.
+/// Blocklisted names: `target`, `node_modules`, `.git`, `.claude`, `.repo-backups`, `.agent`.
 pub(crate) fn is_blocklisted_name(name: &str) -> bool {
-    matches!(name, "target" | "node_modules" | ".git")
+    matches!(
+        name,
+        "target" | "node_modules" | ".git" | ".claude" | ".repo-backups" | ".agent"
+    )
 }
 
 /// Return `true` if `dir_path` contains a `.git` entry (file or directory).
@@ -58,7 +61,7 @@ pub(crate) fn has_nested_git(dir_path: &Path) -> bool {
 /// walk-error diagnostics.
 ///
 /// Pruning rules (applied at the directory level so entire subtrees are skipped):
-/// - Any directory named `target`, `node_modules`, or `.git`.
+/// - Any directory named `target`, `node_modules`, `.git`, `.claude`, `.repo-backups`, or `.agent`.
 /// - Any directory at depth > 0 that contains its own `.git` entry.
 pub fn crawl_brain(root: &Path) -> (Vec<MdFile>, Vec<Diagnostic>) {
     let mut files = Vec::new();
@@ -148,6 +151,9 @@ mod tests {
         assert!(is_blocklisted_name("target"));
         assert!(is_blocklisted_name("node_modules"));
         assert!(is_blocklisted_name(".git"));
+        assert!(is_blocklisted_name(".claude"));
+        assert!(is_blocklisted_name(".repo-backups"));
+        assert!(is_blocklisted_name(".agent"));
     }
 
     #[test]
