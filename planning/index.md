@@ -50,6 +50,12 @@ at the top; only pipeline state lives under `sdlc/`.
 2. `status.md` — where things stand right now
 3. The relevant phase section of `master-plan.md`
 
+## Active Concept Folders
+
+| Folder | What | Status |
+|---|---|---|
+| `2.M-brain-toml-reader/` | HQ-R Block M — mev reads `brain.toml` for vocab + crawl + project slugs | Not started |
+
 ## What's NOT Here
 
 - Application code (lives in the source tree, not `planning/`)
