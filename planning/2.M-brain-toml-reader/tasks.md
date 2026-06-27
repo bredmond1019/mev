@@ -71,7 +71,7 @@ Add the `toml` crate and have `validate-brain` resolve and read `brain.toml` (vi
 - Update existing `tests/brain_crawl.rs` tests that call `crawl_brain` to pass a skip_dirs slice (can use a hard-coded slice in tests, or a minimal `BrainConfig` from the fixture).
 - All harness gates must pass after this task alone.
 
-### 3. Config-driven vocab validation
+### 3. [~] Config-driven vocab validation
 
 **Files:** `src/brain/okf.rs` (modified), `src/brain/mod.rs` (modified — `run()` wiring)
 

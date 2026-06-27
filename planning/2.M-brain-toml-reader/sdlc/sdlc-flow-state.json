@@ -2,10 +2,10 @@
   "spec_slug": "2.M-brain-toml-reader",
   "branch": "2.M-brain-toml-reader-flow-2",
   "started_at": "2026-06-27T21:44:47Z",
-  "updated_at": "2026-06-27T21:51:22Z",
+  "updated_at": "2026-06-27T21:59:21Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2",
   "status": "running",
-  "current_task": 2,
+  "current_task": 3,
   "tasks": {
     "1": {
       "status": "passed",
@@ -48,6 +48,26 @@
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/src/lib.rs",
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/tests/brain_crawl.rs",
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/tests/brain_okf.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "3": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Config-driven vocab validation: is_valid_layer/status/project now accept &BrainConfig and look up values from brain.toml; validate_md_file propagates config; all hardcoded vocabulary arrays removed from production code.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Changed good_okf_body() in tests/brain_okf.rs to use project: brain (in fixture) instead of project: bastion (not in fixture repos) to avoid needing to expand the fixture.",
+        "Added full_test_config() helper inside okf.rs inline tests constructing the full standard vocabulary inline — avoids file I/O in unit tests while covering all 13 standard project slugs.",
+        "Error messages now dynamically list config values via config.vocab.layer.join('|') and config.projects().join('|') instead of hardcoded strings.",
+        "BrainValidator tests that use good_okf_body() now use fixture_config() instead of BrainConfig::default() so vocab fields validate correctly."
+      ],
+      "files_changed": [
+        "src/brain/okf.rs",
+        "src/brain/mod.rs",
+        "tests/brain_okf.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -132,13 +152,37 @@
         "filesReadKb": null,
         "inTokEst": 578,
         "outTok": 3463
+      },
+      {
+        "label": "update-task-3",
+        "model": "haiku",
+        "promptTokEst": 258,
+        "filesReadKb": null,
+        "inTokEst": 258,
+        "outTok": 1137
+      },
+      {
+        "label": "implement-3-1",
+        "model": "sonnet",
+        "promptTokEst": 894,
+        "filesReadKb": null,
+        "inTokEst": 894,
+        "outTok": 22527
+      },
+      {
+        "label": "test-3-1",
+        "model": "haiku",
+        "promptTokEst": 578,
+        "filesReadKb": null,
+        "inTokEst": 578,
+        "outTok": 2303
       }
     ],
     "total": {
-      "promptTokEst": 4463,
+      "promptTokEst": 6193,
       "filesReadKb": 0,
-      "inTokEst": 4463,
-      "outTok": 42559
+      "inTokEst": 6193,
+      "outTok": 68526
     }
   }
 }
