@@ -22,14 +22,15 @@ use std::path::PathBuf;
 /// Severity of a single finding. Drives the process exit code: any [`Severity::Error`]
 /// makes a run fail (exit 1); warnings are reported but do not fail the run (exit 0).
 /// This mirrors the error/warning split of the site's existing `scripts/validate-content.ts`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Severity {
     Error,
     Warning,
 }
 
 /// A single validation finding. Every check produces `Diagnostic`s; only the reporter prints.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Diagnostic {
     pub severity: Severity,
     /// File the finding concerns, relative to the content root where possible.
@@ -104,4 +105,48 @@ impl Report {
 /// Delegates to [`LearnAiValidator`] via the [`ContentValidator`] trait's default `run` driver.
 pub fn validate(root: &std::path::Path) -> anyhow::Result<Report> {
     Ok(LearnAiValidator.run(root))
+}
+
+/// Validate the company-brain repo rooted at `root` for OKF frontmatter compliance.
+///
+/// Phase 2, Block I: mirrors [`validate`] for the brain consumer — delegates to
+/// [`BrainValidator`] which applies the Block G crawl skip-list (nested-git + `target/`)
+/// and Block H's OKF checks.
+pub fn validate_brain(root: &std::path::Path) -> anyhow::Result<Report> {
+    Ok(BrainValidator.run(root))
+}
+
+/// Machine-readable envelope emitted by the `--json` flag for any `mev` subcommand.
+///
+/// Consumed by the Brain RAG indexer as a pre-`--rebuild` gate.
+#[derive(Debug, serde::Serialize)]
+pub struct JsonReport {
+    /// Which validator produced this report (`"brain"` or `"learn-ai"`).
+    pub validator: String,
+    /// Display path of the root that was validated.
+    pub root: String,
+    /// Number of error-severity diagnostics.
+    pub errors: usize,
+    /// Number of warning-severity diagnostics.
+    pub warnings: usize,
+    /// All diagnostics emitted during the run.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl JsonReport {
+    /// Build a [`JsonReport`] from the component pieces.
+    pub fn new(validator: &str, root: &std::path::Path, report: &Report) -> Self {
+        Self {
+            validator: validator.to_owned(),
+            root: root.display().to_string(),
+            errors: report.error_count(),
+            warnings: report.warning_count(),
+            diagnostics: report.diagnostics.clone(),
+        }
+    }
+
+    /// Serialize to a pretty-printed JSON string.
+    pub fn to_json(&self) -> anyhow::Result<String> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
 }
