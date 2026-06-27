@@ -17,6 +17,23 @@ timestamp: "2026-06-26"
 
 ---
 
+## 2026-06-27 — Block 2.M: brain.toml config reader (HQ-R)
+
+Implemented the `brain.toml` TOML config reader end-to-end across six tasks, all passing in a single SDLC-flow run (verdict: PASS). Task 1 added `BrainConfig` struct, `load_brain_config`, and `find_brain_config` walk-up resolver with 10 integration tests and the `toml` crate. Task 2 wired `crawl_brain` skip_dirs to config, converting `BrainValidator` from a unit struct to a config-bearing struct. Task 3 made all vocab validation (`is_valid_layer`, `is_valid_status`, `is_valid_project`) config-driven, removing every hardcoded string array from production source. Task 4 threaded `find_brain_config` through `validate_brain` in `lib.rs` and added a config-flip integration test proving a vocab-only `brain.toml` edit flips validation results without touching Rust source. Task 5 marked `planning/decisions/D3-corpus-config-system.md` as superseded (the `.mev.toml` per-corpus proposal retired in favour of the shared `brain.toml`). Task 6 fixed a latent bug where path-style `skip_dirs` entries (e.g. `planning/archive`) were silently ignored because `is_blocklisted_name` only compared leaf names; extended the helper to accept a relative-path parameter so path-style entries prune correctly. All four harness gates green; 174+ tests pass; `mev validate-brain` exits 0 with 0 errors against the live company-brain repo. Next: Block 2.J graph-integrity check.
+
+```
+a52e3f0 chore: flow state — docs
+80f4c60 docs: update docs for 2.M-brain-toml-reader
+3386b62 chore: flow state — task 6 passed
+07845a9 fix(brain/crawl): support path-style skip_dirs entries from brain.toml
+4f76797 chore: flow state — task 5 passed
+553ea17 docs(decisions): mark D3 superseded by brain.toml Block M
+6a0da1e chore: flow state — task 4 passed
+17604d7 feat(brain/lib): thread find_brain_config through validate_brain; config-flip integration test (Task 4)
+```
+
+---
+
 ## 2026-06-26 — Crawl hardening + validate-brain live triage
 
 Ran a live `mev validate-brain` pass against the actual company-brain repo to validate Phase 2 readiness. Starting point: 145 original errors cascading from three root issues. Diagnosed and fixed all three: (1) Directory skip-list hardening — added `.claude`, `.repo-backups`, `.agent` to the crawl blocklist in `src/brain/crawl.rs` (these directories contain non-OKF files that were flagged as missing frontmatter). (2) Decision-file doc_id pattern — implemented `is_decision_id()` and `is_valid_doc_id()` helpers in `src/brain/okf.rs` to accept the Brain's `D<n>-…` convention (e.g., `D3-corpus-config-system`) in addition to standard kebab-case, fixing validation false-positives on decision files. (3) Corpus config design — wrote `planning/decisions/D3-corpus-config-system.md` capturing the long-term architecture for moving hardcoded corpus rules into per-corpus `.mev.toml` config, planned post-Phase 3. Live run now passes with 0 errors / 3 warnings (benign: keywords count edge cases). Current focus remains 2.J-graph-integrity.
