@@ -2,8 +2,8 @@
 //!
 //! Walks a directory tree collecting every `*.md` file, applying a two-layer skip-list:
 //!
-//! **Name blocklist** — any directory named `target`, `node_modules`, `.git`, `.claude`,
-//! `.repo-backups`, or `.agent` is pruned (its entire subtree is skipped).
+//! **Name blocklist** — any directory whose name appears in the caller-supplied `skip_dirs`
+//! slice (sourced from `brain.toml`'s `[crawl].skip_dirs`) is pruned.
 //!
 //! **Nested-git rule** — any directory at `depth() > 0` that contains its own `.git` entry
 //! is pruned.  The `depth() > 0` guard exempts the brain root itself, which is a git repo
@@ -35,14 +35,11 @@ pub struct MdFile {
 // Pruning helpers
 // ---------------------------------------------------------------------------
 
-/// Return `true` if a directory name is on the name blocklist.
+/// Return `true` if a directory name appears in the caller-supplied `skip_dirs` slice.
 ///
-/// Blocklisted names: `target`, `node_modules`, `.git`, `.claude`, `.repo-backups`, `.agent`.
-pub(crate) fn is_blocklisted_name(name: &str) -> bool {
-    matches!(
-        name,
-        "target" | "node_modules" | ".git" | ".claude" | ".repo-backups" | ".agent"
-    )
+/// The slice is sourced from `brain.toml`'s `[crawl].skip_dirs` — no names are hardcoded here.
+pub(crate) fn is_blocklisted_name(name: &str, skip_dirs: &[String]) -> bool {
+    skip_dirs.iter().any(|d| d == name)
 }
 
 /// Return `true` if a file name is on the file blocklist.
@@ -50,7 +47,10 @@ pub(crate) fn is_blocklisted_name(name: &str) -> bool {
 /// Blocklisted files: tool config files (`CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`) and
 /// transient session artifacts (`handoff.md`) that are never OKF docs.
 pub(crate) fn is_blocklisted_file(name: &str) -> bool {
-    matches!(name, "CLAUDE.md" | "CLAUDE.local.md" | "GEMINI.md" | "handoff.md")
+    matches!(
+        name,
+        "CLAUDE.md" | "CLAUDE.local.md" | "GEMINI.md" | "handoff.md"
+    )
 }
 
 /// Return `true` if `dir_path` contains a `.git` entry (file or directory).
@@ -68,10 +68,13 @@ pub(crate) fn has_nested_git(dir_path: &Path) -> bool {
 /// Walk `root`, collect every `*.md` file, and return an [`MdFile`] list plus any
 /// walk-error diagnostics.
 ///
+/// `skip_dirs` is the list of directory names to prune (sourced from
+/// `brain.toml`'s `[crawl].skip_dirs` via [`BrainConfig`][crate::brain::config::BrainConfig]).
+///
 /// Pruning rules (applied at the directory level so entire subtrees are skipped):
-/// - Any directory named `target`, `node_modules`, `.git`, `.claude`, `.repo-backups`, or `.agent`.
+/// - Any directory whose name is in `skip_dirs`.
 /// - Any directory at depth > 0 that contains its own `.git` entry.
-pub fn crawl_brain(root: &Path) -> (Vec<MdFile>, Vec<Diagnostic>) {
+pub fn crawl_brain(root: &Path, skip_dirs: &[String]) -> (Vec<MdFile>, Vec<Diagnostic>) {
     let mut files = Vec::new();
     let mut diags = Vec::new();
 
@@ -84,7 +87,7 @@ pub fn crawl_brain(root: &Path) -> (Vec<MdFile>, Vec<Diagnostic>) {
         // For directories: apply the two-layer skip-list.
         if e.file_type().is_dir() {
             let name = e.file_name().to_string_lossy();
-            if is_blocklisted_name(&name) {
+            if is_blocklisted_name(&name, skip_dirs) {
                 return false;
             }
             // Nested-git rule: prune any sub-directory that is itself a git repo.
@@ -117,10 +120,7 @@ pub fn crawl_brain(root: &Path) -> (Vec<MdFile>, Vec<Diagnostic>) {
         }
 
         // Skip blocklisted file names.
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if is_blocklisted_file(file_name) {
             continue;
         }
@@ -163,23 +163,55 @@ mod tests {
 
     // --- is_blocklisted_name ---
 
+    fn standard_skip_dirs() -> Vec<String> {
+        [
+            "target",
+            "node_modules",
+            ".git",
+            ".claude",
+            ".repo-backups",
+            ".agent",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
     #[test]
     fn blocklisted_names_are_rejected() {
-        assert!(is_blocklisted_name("target"));
-        assert!(is_blocklisted_name("node_modules"));
-        assert!(is_blocklisted_name(".git"));
-        assert!(is_blocklisted_name(".claude"));
-        assert!(is_blocklisted_name(".repo-backups"));
-        assert!(is_blocklisted_name(".agent"));
+        let skip = standard_skip_dirs();
+        assert!(is_blocklisted_name("target", &skip));
+        assert!(is_blocklisted_name("node_modules", &skip));
+        assert!(is_blocklisted_name(".git", &skip));
+        assert!(is_blocklisted_name(".claude", &skip));
+        assert!(is_blocklisted_name(".repo-backups", &skip));
+        assert!(is_blocklisted_name(".agent", &skip));
     }
 
     #[test]
     fn ordinary_names_are_allowed() {
-        assert!(!is_blocklisted_name("docs"));
-        assert!(!is_blocklisted_name("src"));
-        assert!(!is_blocklisted_name("planning"));
-        assert!(!is_blocklisted_name("README.md"));
-        assert!(!is_blocklisted_name("target-extra")); // prefix match must not fire
+        let skip = standard_skip_dirs();
+        assert!(!is_blocklisted_name("docs", &skip));
+        assert!(!is_blocklisted_name("src", &skip));
+        assert!(!is_blocklisted_name("planning", &skip));
+        assert!(!is_blocklisted_name("README.md", &skip));
+        assert!(!is_blocklisted_name("target-extra", &skip)); // prefix match must not fire
+    }
+
+    #[test]
+    fn empty_skip_dirs_allows_all_names() {
+        let skip: Vec<String> = vec![];
+        assert!(!is_blocklisted_name("target", &skip));
+        assert!(!is_blocklisted_name(".git", &skip));
+        assert!(!is_blocklisted_name("node_modules", &skip));
+    }
+
+    #[test]
+    fn custom_skip_dirs_are_respected() {
+        let skip = vec!["custom-dir".to_string(), "another".to_string()];
+        assert!(is_blocklisted_name("custom-dir", &skip));
+        assert!(is_blocklisted_name("another", &skip));
+        assert!(!is_blocklisted_name("target", &skip));
     }
 
     // --- is_blocklisted_file ---

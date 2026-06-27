@@ -113,7 +113,10 @@ pub fn validate(root: &std::path::Path) -> anyhow::Result<Report> {
 /// [`BrainValidator`] which applies the Block G crawl skip-list (nested-git + `target/`)
 /// and Block H's OKF checks.
 pub fn validate_brain(root: &std::path::Path) -> anyhow::Result<Report> {
-    Ok(BrainValidator.run(root))
+    // Task 4 will replace this with `find_brain_config(root)?` to load the real brain.toml.
+    // For now, use a default config so the function compiles while Tasks 2–3 are wired up.
+    use brain::config::BrainConfig;
+    Ok(BrainValidator::new(BrainConfig::default()).run(root))
 }
 
 /// Machine-readable envelope emitted by the `--json` flag for any `mev` subcommand.

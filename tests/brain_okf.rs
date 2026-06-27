@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use mev::ContentValidator;
+use mev::brain::config::BrainConfig;
 use mev::{BrainValidator, MdFile, Severity, validate_md_file};
 
 // ---------------------------------------------------------------------------
@@ -183,7 +184,7 @@ fn brain_validator_run_clean_tree_returns_empty_report() {
     // Write one good OKF doc.
     write_md(&dir, "status.md", good_okf_body());
 
-    let report = BrainValidator.run(&dir);
+    let report = BrainValidator::new(BrainConfig::default()).run(&dir);
     assert!(
         report.diagnostics.is_empty(),
         "expected empty report for valid doc, got: {:?}",
@@ -198,7 +199,7 @@ fn brain_validator_run_violation_tree_returns_errors() {
     // Write one doc that is missing all required fields.
     write_md(&dir, "bare.md", "---\nextra: tolerated\n---\nbody\n");
 
-    let report = BrainValidator.run(&dir);
+    let report = BrainValidator::new(BrainConfig::default()).run(&dir);
     assert!(
         report.is_failure(),
         "expected failure for missing required fields, got: {:?}",
@@ -226,7 +227,7 @@ fn brain_validator_run_mixed_tree_collects_all_diagnostics() {
     // Bad doc — missing title.
     write_md(&dir, "bad.md", "---\ntype: T\ndescription: D\n---\nbody\n");
 
-    let report = BrainValidator.run(&dir);
+    let report = BrainValidator::new(BrainConfig::default()).run(&dir);
     // Should have exactly one error: missing title on bad.md.
     assert_eq!(report.error_count(), 1, "got: {:?}", report.diagnostics);
     assert_eq!(report.diagnostics[0].locator, "title");
@@ -253,7 +254,7 @@ fn brain_validator_prunes_nested_git_repos() {
     // One valid .md at the root.
     write_md(&dir, "root.md", good_okf_body());
 
-    let report = BrainValidator.run(&dir);
+    let report = BrainValidator::new(BrainConfig::default()).run(&dir);
     assert!(
         report.diagnostics.is_empty(),
         "nested-git docs must be pruned; got: {:?}",
