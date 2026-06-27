@@ -56,7 +56,7 @@ Examples:
 
 - **Surgical only.** Never rewrite a doc section not covered by the changed source files.
 - **Source is authoritative.** If the doc and source disagree, the source wins.
-- **No invention.** Do not add new sections or cover APIs not already in the doc — that is `/generate-new-docs` territory.
+- **No invention in pipeline mode.** Do not add new sections or cover APIs not already in the doc. If `docs/` is empty or missing coverage, use `/update-docs --patch` (ad-hoc sweep) or `/update-docs --bootstrap` (full creation from scratch) to create docs first — then re-run `/document` to keep them current.
 - **Never touch** `planning/`, `log.md`, `status.md`, or `CLAUDE.md`.
 - **Flag** architecture-level docs as `NEEDS_REVIEW` if architecture-level source files changed (core libraries, routing/config, or other foundational modules the project treats as architecture). Never edit them automatically.
 - **Gate strictly on PASS.** Never run doc updates if the review verdict is not PASS.

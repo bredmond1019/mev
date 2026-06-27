@@ -1,17 +1,23 @@
-# Update Docs — Documentation health sweep: find stale sections and missing coverage.
+# Update Docs — Documentation health sweep: find stale sections and create missing coverage.
 
 Audits the entire documentation set against the current codebase and recent git history.
 Produces a structured gap report (stale sections, missing coverage, confirmed-current).
-Optionally applies surgical patches for clear-cut staleness with `--patch`.
+Optionally fixes STALE sections and creates MISSING docs with `--patch`, or skips the audit
+and creates all missing docs from scratch with `--bootstrap`.
 
 This is the **ad-hoc maintenance** counterpart to `/document` (which gates on a PASS verdict
-and is driven by a pipeline report). Use `/update-docs` for periodic doc health checks outside
-the SDLC pipeline; use `/document` inside it.
+and is driven by a pipeline report). Use `/update-docs` for periodic doc health checks and
+bootstrapping outside the SDLC pipeline; use `/document` inside it.
 
 ## Variables
 
 $ARGUMENTS — optional flags:
-  - `--patch`        — after the audit, apply surgical fixes for clear-cut stale sections
+  - `--patch`        — after the audit, (1) apply surgical fixes for clear-cut STALE sections,
+                       and (2) create new docs for MISSING capabilities flagged by the audit.
+                       Conservative: only creates user-facing docs the audit confidently identifies.
+  - `--bootstrap`    — skip the audit; create all missing project docs from scratch based on the
+                       current codebase state. Use on new projects or after large blocks with no
+                       prior doc coverage. Reads source, creates files, updates `docs/index.md`.
   - `--since <ref>`  — limit git history to commits after this ref (default: last 20 commits)
   - A bare git ref/range (e.g. `HEAD~10`, `main..HEAD`) also sets the history window
 
@@ -99,8 +105,13 @@ Output a structured report in this format:
   docs/ inventory
 - Adding a doc entry would reduce real confusion (not just increase coverage for its own sake)
 
-### Phase 6 — Patch (only if `--patch` was passed)
+### Phase 6 — Patch and Create (only if `--patch` or `--bootstrap` was passed)
 
+If `--bootstrap` was passed, skip Phases 1–5 and go directly to Part B using the full
+codebase inventory as the MISSING list — treat all undocumented user-facing capabilities
+as MISSING.
+
+**Part A — Fix STALE** (skip if `--bootstrap`):
 For each **STALE** item where the fix is clear-cut (a count is wrong, a flag was renamed,
 a field was added to a table):
 - Apply the surgical edit described in the report.
@@ -108,17 +119,30 @@ a field was added to a table):
 - Skip items marked as architecture-level changes — flag as `NEEDS_REVIEW` instead.
 - Never touch `planning/` files, `log.md`, `status.md`, or `CLAUDE.md`.
 
-After patching, list every doc edited with the specific sections changed.
+**Part B — Create MISSING docs** (runs for both `--patch` and `--bootstrap`):
+For each **MISSING** item from the Phase 4 report (or the full codebase scan for `--bootstrap`):
+- Read the source file(s) that implement the capability before writing anything.
+- Create the doc at the suggested location. Write real content — not stubs — based on what
+  the source actually contains.
+- Include OKF frontmatter: required fields `type`, `title`, `description`; encouraged:
+  `doc_id`, `layer`, `project`, `status`, `keywords`, `related`.
+- Do not create docs for NO-DOC items.
+- After creating each doc, add an entry row to `docs/index.md`. Create `docs/index.md` if
+  it does not exist.
+
+After all changes, list every doc edited or created with the specific sections affected.
 
 ## Rules
 
-- **Audit first, patch only on request.** Without `--patch`, this command is read-only.
+- **Audit first, apply only on request.** Without `--patch` or `--bootstrap`, this command
+  is read-only.
 - **Source is authoritative.** If a doc and the source disagree, the source wins.
-- **Conservative on MISSING.** Prefer fewer, high-value doc additions over comprehensive coverage
-  of every internal detail. Three lines in an existing table beats a new standalone doc.
-- **Surgical only when patching.** Never rewrite a doc section that wasn't identified as STALE.
-- **Architecture-level changes → flag, don't edit.** Cross-cutting changes (engine dispatch
-  logic, schema structure, OKF naming conventions) go to `NEEDS_REVIEW`, not auto-edited.
+- **Conservative on MISSING.** Prefer fewer, high-value doc additions over comprehensive
+  coverage of every internal detail. Three lines in an existing table beats a new standalone doc.
+- **Surgical on STALE, generative on MISSING.** Fix STALE sections surgically; create MISSING
+  docs from scratch. Never rewrite a STALE section beyond the identified fix.
+- **Architecture-level changes → flag, don't edit.** Cross-cutting changes to existing docs
+  go to `NEEDS_REVIEW`. Creating new architecture docs is fine.
 - **Do not touch** `planning/` files, `log.md`, `status.md`, or `CLAUDE.md`.
 
 ## Context / Files to Read
