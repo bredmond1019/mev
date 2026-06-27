@@ -1,4 +1,4 @@
-# CLAUDE.md — markdown-engine-validator
+# CLAUDE.md — mev
 
 A Rust CLI tool (`mev`) that parses and validates Markdown/MDX against a pluggable set of content
 schemas. Two consumers today behind one `ContentValidator` core: **learn-ai content** (frontmatter +
@@ -25,7 +25,7 @@ is the current priority.
      `title` (human-readable), `description` (one-line summary written for a searcher).
    - **Optional but strongly encouraged:** `doc_id` (kebab-case stable id; defaults to filename stem),
      `layer` (closed list — one or more of: `brain` · `engine` · `factory` · `console` · `surface` · `infra` · `business` · `content` · `meta`),
-     `project` (closed slug — use `markdown-engine-validator` for this repo; omit for genuinely cross-cutting docs),
+     `project` (closed slug — use `mev` for this repo; omit for genuinely cross-cutting docs),
      `status` (one of: `active` · `draft` · `deprecated` · `superseded` · `archived`),
      `keywords` (3–7 free-form topic terms),
      `related` (list of `doc_id`s of other docs this file depends on or cross-references).
@@ -72,7 +72,7 @@ cargo run -- validate ../learn-ai/content/learn
 ## Directory map
 
 ```
-markdown-engine-validator/
+mev/
 ├── .claude/        ← Claude Code commands + SDLC workflow engines
 ├── planning/       ← context, status, master-plan, harness.json, decisions/, <concept>/
 └── <source dirs>   ← add as the project grows

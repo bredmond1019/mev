@@ -73,12 +73,12 @@ pub(crate) fn is_valid_project(s: &str) -> bool {
         s,
         "bastion"
             | "bastion-ui"
-            | "python-orchestration"
+            | "orchestrator"
             | "learn-ai"
             | "rag-engine-rs"
             | "claude-sdk-rs"
             | "workflow-engine-rs"
-            | "markdown-engine-validator"
+            | "mev"
             | "bella"
             | "price-scout"
             | "amistad"
@@ -235,8 +235,8 @@ pub fn validate_md_file(mf: &MdFile) -> Vec<Diagnostic> {
             "project",
             format!(
                 "project value '{project}' is not in the closed set \
-                 (bastion|bastion-ui|python-orchestration|learn-ai|rag-engine-rs|\
-                 claude-sdk-rs|workflow-engine-rs|markdown-engine-validator|bella|\
+                 (bastion|bastion-ui|orchestrator|learn-ai|rag-engine-rs|\
+                 claude-sdk-rs|workflow-engine-rs|mev|bella|\
                  price-scout|amistad|base-template|brain)"
             ),
         ));
@@ -350,12 +350,12 @@ mod tests {
         for v in [
             "bastion",
             "bastion-ui",
-            "python-orchestration",
+            "orchestrator",
             "learn-ai",
             "rag-engine-rs",
             "claude-sdk-rs",
             "workflow-engine-rs",
-            "markdown-engine-validator",
+            "mev",
             "bella",
             "price-scout",
             "amistad",

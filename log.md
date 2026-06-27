@@ -1,17 +1,17 @@
 ---
 type: Log
-title: markdown-engine-validator Development Log
-description: Chronological log of work completed for markdown-engine-validator.
+title: mev Development Log
+description: Chronological log of work completed for mev.
 doc_id: log
 layer: [factory]
-project: markdown-engine-validator
+project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
 timestamp: "2026-06-26"
 ---
 
-# Log — markdown-engine-validator
+# Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
 

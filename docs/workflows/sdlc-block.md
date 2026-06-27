@@ -4,7 +4,7 @@ title: /sdlc-block — block-level roadmap orchestrator
 description: Reads a master-plan-format file, fans out one /sdlc-flow per independent block across dependency-ordered waves, and produces a branch train of reviewable PRs (D39/D40/D43).
 doc_id: sdlc-block
 layer: [factory]
-project: markdown-engine-validator
+project: mev
 status: active
 keywords: [roadmap orchestrator, branch train, PR train, master-plan, parallel blocks]
 related: [workflows-index, workflows-commands, sdlc-flow, sdlc-run]

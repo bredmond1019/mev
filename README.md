@@ -1,16 +1,16 @@
 ---
 type: Index
-title: markdown-engine-validator
+title: mev
 description: A Rust CLI tool (`mev`) that validates Markdown/MDX content — learn-ai frontmatter + struct validation and Bastion Brain OKF frontmatter validation, with JSON output for RAG indexer integration
 doc_id: mev-readme
 layer: [factory, meta]
-project: markdown-engine-validator
+project: mev
 status: active
 keywords: [markdown validation, MDX, Rust CLI, mev, learn-ai, OKF frontmatter]
 related: [context, master-plan, status]
 ---
 
-# markdown-engine-validator
+# mev
 
 A Rust CLI tool (`mev`) that validates Markdown/MDX content across two consumers: **learn-ai** (frontmatter + struct validation for learn-agentic-ai.com) and **Bastion Brain** (OKF frontmatter validation for the company-brain RAG index). Machine-readable `--json` output lets the RAG indexer use `mev` as a pre-rebuild gate.
 
@@ -23,7 +23,7 @@ A Rust CLI tool (`mev`) that validates Markdown/MDX content across two consumers
 ## Setup
 
 ```bash
-git clone <this repo> && cd markdown-engine-validator
+git clone <this repo> && cd mev
 cargo build --release    # produces target/release/mev
 ```
 
@@ -54,7 +54,7 @@ cargo fmt --check && cargo clippy -- -D warnings && cargo test && cargo build --
 ## Directory map
 
 ```
-markdown-engine-validator/
+mev/
 ├── .claude/        ← Claude Code commands + SDLC workflow engines
 ├── planning/       ← context, status, master-plan, harness.json, decisions/, <concept>/
 ├── src/
