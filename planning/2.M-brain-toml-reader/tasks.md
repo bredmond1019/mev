@@ -108,7 +108,7 @@ Add the `toml` crate and have `validate-brain` resolve and read `brain.toml` (vi
     This test is the direct evidence for the acceptance criterion "config-only change flipping a result".
 - All harness gates must pass after this task alone.
 
-### 5. Mark D3 superseded (additive doc edit)
+### 5. [~] Mark D3 superseded (additive doc edit)
 
 **Files:** `planning/decisions/D3-corpus-config-system.md` (additive append)
 
