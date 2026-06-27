@@ -17,6 +17,17 @@ timestamp: "2026-06-26"
 
 ---
 
+## 2026-06-26 — Close-out for Block 2.H (Brain OKF frontmatter validator)
+
+Completed Block 2.H close-out activities: verified the validation suite with all 142 tests passing (all four harness gates green: fmt, clippy, test, build), performed a doc health sweep (no stale sections identified; flagged `docs/harness-json.md` as NEEDS_REVIEW for future attention), and wrote `planning/handoff.md` to orient Block 2.I work on the validate-brain subcommand and --json flag. Block 2.H is fully closed; ready to hand off to Block 2.I.
+
+```diff
+ planning/handoff.md | 78 ++++++++++++++++++++++++++++++-----------------------
+ 1 file changed, 45 insertions(+), 33 deletions(-)
+```
+
+---
+
 ## 2026-06-26 — 2.H-brain-okf-validator: Brain OKF frontmatter validator (PASS)
 
 Completed Phase 2, Block H: added the Brain OKF frontmatter validation layer on top of Block G's crawl infrastructure. Created `src/brain/okf.rs` with the `OkfFrontmatter` serde struct (all fields `Option`, `layer` as `Option<Vec<String>>`, extras tolerated), the `validate_md_file` entry point (read → extract → parse → field-check pipeline with short-circuit errors for missing/malformed frontmatter), and three vocab helpers (`is_valid_layer`, `is_valid_project`, `is_valid_status`) covering the three closed sets from D27. Required-field checks (`type`, `title`, `description`) each emit their own `error` with precise locators; controlled-vocab errors fire only when a field is present; `doc_id` uses `is_kebab_case` from shared; `keywords` count outside 3–7 emits a `warning`. `BrainValidator` was assembled in `src/brain/mod.rs` as the second `ContentValidator` impl (`type Item = MdFile`, crawl delegates to `crawl_brain`, validate_item delegates to `okf::validate_md_file`). Re-exports added to `src/lib.rs`. 30 unit tests in `src/brain/okf.rs` and 14 integration tests in `tests/brain_okf.rs` cover every rule, boundary cases, and end-to-end `BrainValidator::run`. Total test count: 142 (91 unit + 51 integration) — all pass. Review passed on first attempt with all 8 acceptance criteria MET. Next: Block 2.I (validate-brain subcommand + --json flag).
