@@ -3,6 +3,10 @@
 //! Verifies that `validate_brain` honors the crawl skip-list end-to-end (nested-git sub-dirs
 //! are pruned), that OKF violations are detected, and that the JSON envelope serializes
 //! correctly with the expected keys and counts.
+//!
+//! Task 4: `validate_brain` now resolves `brain.toml` via walk-up. All tests that need a
+//! real validation pass (no spurious `E_CONFIG_NOT_FOUND`) must write a minimal `brain.toml`
+//! to the temp directory before calling `validate_brain`.
 
 use std::fs;
 use std::path::Path;
@@ -26,6 +30,55 @@ fn temp_dir(suffix: &str) -> std::path::PathBuf {
     dir
 }
 
+/// Write a minimal `brain.toml` to `root` so that `find_brain_config` finds it immediately.
+///
+/// The vocab matches the standard controlled sets; project slugs include the common ones used
+/// in tests. Tests that need custom vocab must write their own `brain.toml` instead.
+fn write_brain_toml(root: &Path) {
+    write_brain_toml_with_layers(
+        root,
+        &[
+            "brain", "engine", "factory", "console", "surface", "infra", "business", "content",
+            "meta",
+        ],
+    );
+}
+
+/// Write a `brain.toml` to `root` with a custom `layer` list (and standard status + repos).
+fn write_brain_toml_with_layers(root: &Path, layers: &[&str]) {
+    let layer_toml = layers
+        .iter()
+        .map(|s| format!("\"{s}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let toml = format!(
+        r#"[vocab]
+layer = [{layer_toml}]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "brain"
+tier = "primary"
+repo_path = "."
+status_file = "planning/status.md"
+cache_doc = "docs/projects/brain.md"
+heading = "Brain"
+
+[[repos]]
+slug = "mev"
+tier = "primary"
+repo_path = "core/mev"
+status_file = "planning/status.md"
+cache_doc = "docs/projects/mev.md"
+heading = "mev"
+"#
+    );
+    fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
+}
+
 /// Minimal valid OKF frontmatter.
 const VALID_OKF: &str =
     "---\ntype: Reference\ntitle: Test Doc\ndescription: A test doc.\n---\n\nBody text.\n";
@@ -42,9 +95,21 @@ const MISSING_TITLE: &str =
 fn validate_brain_detects_missing_title() {
     let dir = temp_dir("missing-title");
 
+    write_brain_toml(&dir);
     write_file(&dir, "doc.md", MISSING_TITLE);
 
     let report = mev::validate_brain(&dir).expect("validate_brain should not error");
+
+    // Confirm no E_CONFIG_NOT_FOUND error masked the real validation.
+    let config_errs: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator == "E_CONFIG_NOT_FOUND")
+        .collect();
+    assert!(
+        config_errs.is_empty(),
+        "unexpected E_CONFIG_NOT_FOUND: {config_errs:#?}"
+    );
 
     assert!(
         report.error_count() > 0,
@@ -62,6 +127,8 @@ fn validate_brain_detects_missing_title() {
 #[test]
 fn validate_brain_skips_nested_git_subdir() {
     let dir = temp_dir("nested-git-skip");
+
+    write_brain_toml(&dir);
 
     // Root-level file with a violation — must be flagged.
     write_file(&dir, "root.md", MISSING_TITLE);
@@ -106,6 +173,7 @@ fn validate_brain_skips_nested_git_subdir() {
 fn validate_brain_no_errors_for_valid_file() {
     let dir = temp_dir("valid-okf");
 
+    write_brain_toml(&dir);
     write_file(&dir, "valid.md", VALID_OKF);
 
     let report = mev::validate_brain(&dir).expect("validate_brain should not error");
@@ -128,6 +196,7 @@ fn validate_brain_no_errors_for_valid_file() {
 fn json_report_valid_json_with_expected_keys() {
     let dir = temp_dir("json-envelope");
 
+    write_brain_toml(&dir);
     write_file(&dir, "doc.md", MISSING_TITLE);
 
     let report = mev::validate_brain(&dir).expect("validate_brain should not error");
@@ -186,6 +255,7 @@ fn json_report_valid_json_with_expected_keys() {
 fn json_report_severity_is_lowercase() {
     let dir = temp_dir("severity-lowercase");
 
+    write_brain_toml(&dir);
     write_file(&dir, "bad.md", MISSING_TITLE);
 
     let report = mev::validate_brain(&dir).expect("validate_brain should not error");
@@ -206,6 +276,88 @@ fn json_report_severity_is_lowercase() {
             "severity must be 'error' or 'warning', got: {sev}"
         );
     }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// 6. E_CONFIG_NOT_FOUND: validate_brain surfaces a fatal error when brain.toml
+//    is not found by walk-up (no brain.toml in any ancestor of an isolated temp dir).
+//
+//    NOTE: On a developer machine the temp dir's ancestor chain may eventually reach
+//    the portfolio root which contains a real brain.toml — in that case no E_CONFIG_NOT_FOUND
+//    is emitted. The assertion here is primarily a no-panic smoke test: validate_brain must
+//    return Ok regardless.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn validate_brain_no_panic_when_brain_toml_may_be_absent() {
+    // Create a dir without brain.toml — walk-up may or may not find one.
+    let dir = temp_dir("no-brain-toml-ancestor");
+    // Do NOT call write_brain_toml.
+
+    // Must not panic — validate_brain always returns Ok.
+    let result = mev::validate_brain(&dir);
+    assert!(
+        result.is_ok(),
+        "validate_brain must return Ok, got: {result:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// 7. Config-flip: a config-only change to brain.toml flips a validation result
+//    without any Rust source change.
+//    This is the direct acceptance-criterion test for Task 4.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn validate_brain_config_flip_changes_result() {
+    let dir = temp_dir("config-flip");
+
+    // --- Step 1: brain.toml with custom-layer in the vocabulary. ---
+    write_brain_toml_with_layers(&dir, &["custom-layer"]);
+
+    // A .md file that uses the custom layer value — should be valid with the first config.
+    let doc_content = "---\ntype: Reference\ntitle: Custom Layer Doc\ndescription: Tests config-flip.\nlayer: [custom-layer]\n---\n\nBody.\n";
+    write_file(&dir, "doc.md", doc_content);
+
+    let report_with_layer = mev::validate_brain(&dir).expect("validate_brain should not error");
+
+    // No layer errors or config errors expected.
+    let layer_errors_before: Vec<_> = report_with_layer
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator == "layer" || d.locator == "E_CONFIG_NOT_FOUND")
+        .collect();
+    assert!(
+        layer_errors_before.is_empty(),
+        "expected no layer/config errors when custom-layer is in vocab, got: {layer_errors_before:#?}"
+    );
+
+    // --- Step 2: Rewrite brain.toml WITHOUT custom-layer (config-only change, no source edit). ---
+    write_brain_toml_with_layers(&dir, &["brain", "engine"]); // custom-layer removed
+
+    let report_without_layer = mev::validate_brain(&dir).expect("validate_brain should not error");
+
+    // Now a layer error for 'custom-layer' must appear.
+    let layer_errors_after: Vec<_> = report_without_layer
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator == "layer")
+        .collect();
+    assert!(
+        !layer_errors_after.is_empty(),
+        "expected a layer error after removing custom-layer from vocab; got: {:#?}",
+        report_without_layer.diagnostics
+    );
+    assert!(
+        layer_errors_after
+            .iter()
+            .any(|d| d.message.contains("custom-layer")),
+        "expected layer error message to mention 'custom-layer'; got: {layer_errors_after:#?}"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }

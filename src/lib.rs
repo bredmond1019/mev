@@ -5,7 +5,7 @@
 //! future check emits. Phase 1, Block B adds content-tree crawl + classification (see
 //! `planning/master-plan.md`).
 
-mod brain;
+pub mod brain;
 mod learn_ai;
 mod shared;
 mod validator;
@@ -112,8 +112,28 @@ pub fn validate(root: &std::path::Path) -> anyhow::Result<Report> {
 /// Phase 2, Block I: mirrors [`validate`] for the brain consumer — delegates to
 /// [`BrainValidator`] which applies the Block G crawl skip-list (nested-git + `target/`)
 /// and Block H's OKF checks.
+///
+/// Resolves `brain.toml` by walking up from `root` via [`brain::config::find_brain_config`].
+/// If no `brain.toml` is found, a fatal `Error`-severity diagnostic with locator
+/// `E_CONFIG_NOT_FOUND` is returned in the report rather than panicking — the caller
+/// should treat this as a configuration error (exit 1).
 pub fn validate_brain(root: &std::path::Path) -> anyhow::Result<Report> {
-    Ok(BrainValidator.run(root))
+    use brain::config::find_brain_config;
+
+    let config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            let mut report = Report::default();
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    Ok(BrainValidator::new(config).run(root))
 }
 
 /// Machine-readable envelope emitted by the `--json` flag for any `mev` subcommand.

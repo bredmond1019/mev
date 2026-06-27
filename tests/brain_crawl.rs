@@ -28,6 +28,21 @@ fn temp_dir(suffix: &str) -> std::path::PathBuf {
     dir
 }
 
+/// The standard skip-dirs list sourced from brain.toml for use in integration tests.
+fn standard_skip_dirs() -> Vec<String> {
+    [
+        "target",
+        "node_modules",
+        ".git",
+        ".claude",
+        ".repo-backups",
+        ".agent",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 // ---------------------------------------------------------------------------
 // (a) A root-level .md file is found
 // ---------------------------------------------------------------------------
@@ -38,7 +53,7 @@ fn root_level_md_is_found() {
 
     touch(&dir, "README.md");
 
-    let (files, diags) = crawl_brain(&dir);
+    let (files, diags) = crawl_brain(&dir, &standard_skip_dirs());
 
     assert_eq!(diags.len(), 0, "expected no diagnostics, got: {diags:#?}");
     assert_eq!(files.len(), 1, "expected 1 MdFile, got {files:#?}");
@@ -59,7 +74,7 @@ fn md_inside_target_is_pruned() {
     touch(&dir, "docs/notes.md");
     touch(&dir, "target/release/something.md");
 
-    let (files, diags) = crawl_brain(&dir);
+    let (files, diags) = crawl_brain(&dir, &standard_skip_dirs());
 
     assert_eq!(diags.len(), 0, "expected no diagnostics, got: {diags:#?}");
     assert_eq!(files.len(), 1, "expected only notes.md to be found");
@@ -75,7 +90,7 @@ fn md_inside_node_modules_is_pruned() {
     touch(&dir, "index.md");
     touch(&dir, "node_modules/pkg/README.md");
 
-    let (files, diags) = crawl_brain(&dir);
+    let (files, diags) = crawl_brain(&dir, &standard_skip_dirs());
 
     assert_eq!(diags.len(), 0, "expected no diagnostics");
     assert_eq!(files.len(), 1, "expected only index.md to be found");
@@ -91,7 +106,7 @@ fn md_inside_dot_git_is_pruned() {
     touch(&dir, "plan.md");
     touch(&dir, ".git/COMMIT_EDITMSG.md");
 
-    let (files, diags) = crawl_brain(&dir);
+    let (files, diags) = crawl_brain(&dir, &standard_skip_dirs());
 
     assert_eq!(diags.len(), 0, "expected no diagnostics");
     assert_eq!(files.len(), 1, "expected only plan.md to be found");
@@ -119,7 +134,7 @@ fn md_in_nested_git_subdir_is_pruned_root_md_found() {
     // A .md inside the sub-project — must be pruned.
     fs::write(sub.join("README.md"), b"").unwrap();
 
-    let (files, diags) = crawl_brain(&dir);
+    let (files, diags) = crawl_brain(&dir, &standard_skip_dirs());
 
     assert_eq!(diags.len(), 0, "expected no diagnostics, got: {diags:#?}");
     assert_eq!(
@@ -145,7 +160,7 @@ fn non_md_files_are_skipped() {
     touch(&dir, "script.rs");
     touch(&dir, "readme.md"); // only this should be found
 
-    let (files, diags) = crawl_brain(&dir);
+    let (files, diags) = crawl_brain(&dir, &standard_skip_dirs());
 
     assert_eq!(diags.len(), 0, "expected no diagnostics");
     assert_eq!(files.len(), 1, "only .md files should be collected");
@@ -164,7 +179,7 @@ fn md_file_rel_and_stem_are_correct() {
 
     touch(&dir, "docs/planning/status.md");
 
-    let (files, diags) = crawl_brain(&dir);
+    let (files, diags) = crawl_brain(&dir, &standard_skip_dirs());
 
     assert_eq!(diags.len(), 0, "expected no diagnostics");
     assert_eq!(files.len(), 1, "expected one MdFile");
@@ -193,10 +208,52 @@ fn md_file_rel_and_stem_are_correct() {
 fn empty_tree_returns_no_files_and_no_diagnostics() {
     let dir = temp_dir("empty");
 
-    let (files, diags) = crawl_brain(&dir);
+    let (files, diags) = crawl_brain(&dir, &standard_skip_dirs());
 
     assert_eq!(files.len(), 0, "expected empty file list");
     assert_eq!(diags.len(), 0, "expected no diagnostics");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// (f) Config-supplied skip_dirs are respected (custom list)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn config_supplied_skip_dirs_prune_custom_directories() {
+    let dir = temp_dir("custom-skip");
+
+    touch(&dir, "included.md");
+    touch(&dir, "custom-cache/data.md");
+    touch(&dir, "another-skip/notes.md");
+
+    let custom_skip = vec!["custom-cache".to_string(), "another-skip".to_string()];
+    let (files, diags) = crawl_brain(&dir, &custom_skip);
+
+    assert_eq!(diags.len(), 0, "expected no diagnostics, got {diags:#?}");
+    assert_eq!(
+        files.len(),
+        1,
+        "expected only included.md; custom-skip dirs should be pruned. Got: {files:#?}"
+    );
+    assert_eq!(files[0].stem, "included");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn empty_skip_dirs_collects_all_md_files() {
+    let dir = temp_dir("empty-skip");
+
+    touch(&dir, "a.md");
+    touch(&dir, "sub/b.md");
+
+    // With an empty skip list, no dirs are pruned by name (nested-git rule still applies).
+    let (files, diags) = crawl_brain(&dir, &[]);
+
+    assert_eq!(diags.len(), 0, "expected no diagnostics");
+    assert_eq!(files.len(), 2, "expected both .md files. Got: {files:#?}");
 
     let _ = fs::remove_dir_all(&dir);
 }
