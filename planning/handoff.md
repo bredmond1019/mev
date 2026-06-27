@@ -74,7 +74,51 @@ were updated across `base-template`, `brain`, and `mev` to close this. The next 
 
 ## Open questions / choices
 
-None — clear to proceed with 2.J.
+None — clear to proceed.
+
+---
+
+## HQ Restructure Block N — priority track (Opus)
+
+> **This is the primary ask for the next session.** Block N is now unblocked (Block M ✓, Block J/log-work ✓, Block B ✓).
+> Designated **Opus** in the HQ Restructure master plan. In mev's local phase numbering this is
+> **Phase 3 Block M** (Sync integrity — `synced_from` watermark check).
+
+### What Block N entails
+
+**mev side (this repo):**
+1. Add `synced_from: Option<String>` to `OkfFrontmatter` with full-ISO datetime parse (`chrono` crate — add if not present)
+2. Implement `mev validate-brain --sync` subcommand:
+   - Per `[[repos]]` entry in `brain.toml`: read the sub-repo's `planning/status.md` `timestamp` field
+   - Read its HQ cache doc (`cache_doc`) `synced_from` field
+   - Datetime compare (not string compare — catches same-day drift); emit a `Sync` diagnostic per mismatch
+   - Also assert each tier rollup row matches its cache's `synced_from`
+3. Extend `--json` output for the `Sync` diagnostic type (existing JSON envelope in Block I)
+4. Tests: fixture with a bumped `timestamp` that's unsynced → exactly one `Sync` error; fixture after sync → 0 errors
+
+**brain side (HQ repo — separate commit there):**
+- `hooks/pre-commit` → fast `mev validate-brain` schema check
+- `hooks/pre-push` → full `mev validate-brain --sync` check
+- Wire via `core.hooksPath hooks`; update `hooks/README.md`
+
+### Acceptance criteria (from HQ master plan Block N)
+
+> Bumping a sub-repo `status.md` `timestamp` without syncing makes `mev validate-brain --sync --json`
+> report exactly one `Sync` error for that repo; running `/log-work` clears it; the `pre-commit` hook
+> blocks a staged schema violation; `cargo test`, `cargo clippy -- -D warnings` pass.
+
+### Key files to read before generating tasks
+
+- `planning/hq-restructure/master-plan.md` Block N spec (in the brain repo, `~/Dev/agentic-portfolio/`)
+- `src/brain/okf.rs` — `OkfFrontmatter` struct (add `synced_from` here)
+- `src/brain/config.rs` — `BrainConfig`/`RepoEntry` (has the `[[repos]]` fields needed for `--sync`)
+- `src/brain/mod.rs` — `BrainValidator::run()` (wire `--sync` mode here)
+
+### Note on parallel track
+
+mev Phase 3 Block J (graph integrity — `related:` edges) is independent and can run after Block N or
+interleaved. The HQ Restructure Block N is the gating priority — Block J doesn't block anything in the
+HQ-R program.
 
 ---
 
@@ -96,4 +140,13 @@ None — clear to proceed with 2.J.
 
 ## First command after `/prime`
 
-`/generate-tasks 2.J-graph-integrity`
+**Priority: Block N (HQ Restructure — Opus session)**
+
+```
+/generate-tasks block-n-sync-watermark
+```
+
+Then `sdlc-flow` or `sdlc-run` on the generated tasks. The brain-side hook edits (pre-commit / pre-push)
+commit separately in the brain repo.
+
+**After Block N:** `/generate-tasks 2.J-graph-integrity` for the mev-local graph integrity work.

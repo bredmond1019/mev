@@ -9,12 +9,38 @@ status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
 timestamp: "2026-06-27"
+now: "Block 2.J — graph integrity (next block up)"
+next: "Block 2.J cross-file graph integrity; then Block D cross-file integrity, Block E pt-BR parity & reporter polish"
+blocked: []
 ---
 
 # STATUS — Current State & Progress
 
 **Last updated:** 2026-06-27 — Block 2.M complete; brain.toml config wired; all hardcoded vocab/skip_dirs retired
 **Current focus:** 2.J-graph-integrity (next block)
+
+---
+
+## Momentum
+
+> Working board — keep all five queues live. **Never end a meaningful session with every queue
+> empty.** The headlines of **now / next / blocked** mirror the frontmatter scalars above.
+
+- **now** — Block 2.J — cross-file graph integrity (next block up)
+- **next** — Block 2.J graph integrity; then Block D cross-file integrity, Block E pt-BR parity & reporter polish
+- **blocked** — nothing blocked
+- **improve** — no eval/workflow gaps logged yet; backlog empty
+- **recurring** — none yet
+
+## Metrics
+
+> Cheap, hand-maintained signals (leading + lagging). Do **not** push these into frontmatter —
+> they are multi-valued and volatile.
+
+- tasks completed / verified this period; intervention rate; retry rate; regression rate
+- reusable assets created since last milestone
+- days since last eval improvement; days since last new skill/workflow
+- % of runs ending with an explicit next action
 
 ---
 
