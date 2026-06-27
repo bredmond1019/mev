@@ -35,11 +35,28 @@ pub struct MdFile {
 // Pruning helpers
 // ---------------------------------------------------------------------------
 
-/// Return `true` if a directory name appears in the caller-supplied `skip_dirs` slice.
+/// Return `true` if a directory should be skipped based on the caller-supplied `skip_dirs` slice.
 ///
 /// The slice is sourced from `brain.toml`'s `[crawl].skip_dirs` — no names are hardcoded here.
-pub(crate) fn is_blocklisted_name(name: &str, skip_dirs: &[String]) -> bool {
-    skip_dirs.iter().any(|d| d == name)
+///
+/// Two matching modes are supported:
+/// - **Name match** — a simple name like `"target"` matches any directory whose leaf name equals it.
+/// - **Path match** — a path like `"planning/archive"` matches a directory whose path relative to
+///   `root` equals that entry (using platform path separators).  `rel` must be the directory's path
+///   relative to the crawl root; pass `None` to skip path-style matching (name-only mode).
+pub(crate) fn is_blocklisted_name(name: &str, rel: Option<&Path>, skip_dirs: &[String]) -> bool {
+    skip_dirs.iter().any(|d| {
+        // Name-only entry: matches the directory leaf name.
+        if !d.contains('/') && !d.contains(std::path::MAIN_SEPARATOR) {
+            return d == name;
+        }
+        // Path-style entry: matches the relative path from root (normalised to platform separators).
+        if let Some(rel_path) = rel {
+            let d_path = Path::new(d);
+            return rel_path == d_path;
+        }
+        false
+    })
 }
 
 /// Return `true` if a file name is on the file blocklist.
@@ -87,7 +104,9 @@ pub fn crawl_brain(root: &Path, skip_dirs: &[String]) -> (Vec<MdFile>, Vec<Diagn
         // For directories: apply the two-layer skip-list.
         if e.file_type().is_dir() {
             let name = e.file_name().to_string_lossy();
-            if is_blocklisted_name(&name, skip_dirs) {
+            // Compute relative path for path-style skip_dirs entries (e.g. "planning/archive").
+            let rel = e.path().strip_prefix(root).ok();
+            if is_blocklisted_name(&name, rel, skip_dirs) {
                 return false;
             }
             // Nested-git rule: prune any sub-directory that is itself a git repo.
@@ -180,38 +199,60 @@ mod tests {
     #[test]
     fn blocklisted_names_are_rejected() {
         let skip = standard_skip_dirs();
-        assert!(is_blocklisted_name("target", &skip));
-        assert!(is_blocklisted_name("node_modules", &skip));
-        assert!(is_blocklisted_name(".git", &skip));
-        assert!(is_blocklisted_name(".claude", &skip));
-        assert!(is_blocklisted_name(".repo-backups", &skip));
-        assert!(is_blocklisted_name(".agent", &skip));
+        assert!(is_blocklisted_name("target", None, &skip));
+        assert!(is_blocklisted_name("node_modules", None, &skip));
+        assert!(is_blocklisted_name(".git", None, &skip));
+        assert!(is_blocklisted_name(".claude", None, &skip));
+        assert!(is_blocklisted_name(".repo-backups", None, &skip));
+        assert!(is_blocklisted_name(".agent", None, &skip));
     }
 
     #[test]
     fn ordinary_names_are_allowed() {
         let skip = standard_skip_dirs();
-        assert!(!is_blocklisted_name("docs", &skip));
-        assert!(!is_blocklisted_name("src", &skip));
-        assert!(!is_blocklisted_name("planning", &skip));
-        assert!(!is_blocklisted_name("README.md", &skip));
-        assert!(!is_blocklisted_name("target-extra", &skip)); // prefix match must not fire
+        assert!(!is_blocklisted_name("docs", None, &skip));
+        assert!(!is_blocklisted_name("src", None, &skip));
+        assert!(!is_blocklisted_name("planning", None, &skip));
+        assert!(!is_blocklisted_name("README.md", None, &skip));
+        assert!(!is_blocklisted_name("target-extra", None, &skip)); // prefix match must not fire
     }
 
     #[test]
     fn empty_skip_dirs_allows_all_names() {
         let skip: Vec<String> = vec![];
-        assert!(!is_blocklisted_name("target", &skip));
-        assert!(!is_blocklisted_name(".git", &skip));
-        assert!(!is_blocklisted_name("node_modules", &skip));
+        assert!(!is_blocklisted_name("target", None, &skip));
+        assert!(!is_blocklisted_name(".git", None, &skip));
+        assert!(!is_blocklisted_name("node_modules", None, &skip));
     }
 
     #[test]
     fn custom_skip_dirs_are_respected() {
         let skip = vec!["custom-dir".to_string(), "another".to_string()];
-        assert!(is_blocklisted_name("custom-dir", &skip));
-        assert!(is_blocklisted_name("another", &skip));
-        assert!(!is_blocklisted_name("target", &skip));
+        assert!(is_blocklisted_name("custom-dir", None, &skip));
+        assert!(is_blocklisted_name("another", None, &skip));
+        assert!(!is_blocklisted_name("target", None, &skip));
+    }
+
+    #[test]
+    fn path_style_skip_dirs_match_relative_path() {
+        let skip = vec!["planning/archive".to_string()];
+        // "archive" directory at relative path "planning/archive" should be blocked.
+        let rel = Path::new("planning/archive");
+        assert!(is_blocklisted_name("archive", Some(rel), &skip));
+        // "archive" directory at a different relative path should not be blocked.
+        let rel2 = Path::new("docs/archive");
+        assert!(!is_blocklisted_name("archive", Some(rel2), &skip));
+        // "planning" directory itself should not be blocked by a path-style entry.
+        let rel3 = Path::new("planning");
+        assert!(!is_blocklisted_name("planning", Some(rel3), &skip));
+    }
+
+    #[test]
+    fn path_style_skip_dirs_without_rel_do_not_match() {
+        let skip = vec!["planning/archive".to_string()];
+        // With no rel (None), path-style entries are skipped — name won't match because
+        // the entry contains a separator.
+        assert!(!is_blocklisted_name("archive", None, &skip));
     }
 
     // --- is_blocklisted_file ---
