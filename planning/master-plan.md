@@ -1,16 +1,16 @@
 ---
 type: Plan
-title: markdown-engine-validator Master Plan
-description: Strategic roadmap and phase specifications for markdown-engine-validator — a general Markdown validator with two consumers (learn-ai content and Bastion Brain OKF frontmatter).
+title: mev Master Plan
+description: Strategic roadmap and phase specifications for mev — a general Markdown validator with two consumers (learn-ai content and Bastion Brain OKF frontmatter).
 doc_id: master-plan
 layer: [factory, brain, meta]
-project: markdown-engine-validator
+project: mev
 status: active
 keywords: [roadmap, phases, ContentValidator, Brain OKF, learn-ai content, mev]
 related: [D2-scope-and-sequence, D1-initial-okf, status, context]
 ---
 
-# markdown-engine-validator — Master Plan
+# mev — Master Plan
 
 *Living document. Created 2026-06-18. Reframed 2026-06-26 from a learn-ai-only validator to a
 general Markdown validator with two consumers (see "The Reframe" below).*

@@ -1,18 +1,18 @@
 ---
 type: LocalContext
-title: markdown-engine-validator Project Context
-description: Core context, governing principles, and documentation router for markdown-engine-validator.
+title: mev Project Context
+description: Core context, governing principles, and documentation router for mev.
 doc_id: context
 layer: [factory]
-project: markdown-engine-validator
+project: mev
 status: active
 keywords: [project orientation, governing principles, sequence, Rust CLI, MDX validation]
 related: [status, master-plan, decisions-index]
 ---
 
-# CONTEXT — markdown-engine-validator
+# CONTEXT — mev
 
-> **Read this first.** Stable orientation for markdown-engine-validator: *why* this body of work
+> **Read this first.** Stable orientation for mev: *why* this body of work
 > exists, the rules that govern how it is built, and a router to the rest of `planning/`.
 > This file orients; it does not track. For state, open `status.md`. For why choices were
 > made, open `decisions/`.

@@ -1,18 +1,18 @@
 ---
 type: Index
-title: markdown-engine-validator — Planning Docs
-description: Navigation index for the markdown-engine-validator planning folder.
+title: mev — Planning Docs
+description: Navigation index for the mev planning folder.
 doc_id: planning-index
 layer: [factory]
-project: markdown-engine-validator
+project: mev
 status: active
 keywords: [planning navigation, context, master plan, SDLC, concept folders]
 related: [context, status, master-plan]
 ---
 
-# markdown-engine-validator — Planning Docs
+# mev — Planning Docs
 
-The strategy, state, and decision record for markdown-engine-validator. Code lives elsewhere; this
+The strategy, state, and decision record for mev. Code lives elsewhere; this
 folder is the map.
 
 ## Files

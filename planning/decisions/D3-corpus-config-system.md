@@ -4,7 +4,7 @@ title: D3 — Corpus-level config file for validator rules
 description: Plan to move hardcoded corpus rules (skip-lists, doc_id patterns, vocab sets) into a per-corpus config file, making mev a generic engine driven by config rather than baked-in assumptions.
 doc_id: D3-corpus-config-system
 layer: [factory]
-project: markdown-engine-validator
+project: mev
 status: draft
 keywords: [config, corpus, skip-list, vocab, doc_id, extensibility]
 related: [D2-scope-and-sequence, decisions-index]
@@ -47,7 +47,7 @@ extra_patterns = ["D\\d+(-[a-z0-9]+)*"]
 [vocab]
 layer   = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
 project = ["bastion", "bastion-ui", "python-orchestration", "learn-ai", "rag-engine-rs",
-           "claude-sdk-rs", "workflow-engine-rs", "markdown-engine-validator",
+           "claude-sdk-rs", "workflow-engine-rs", "mev",
            "bella", "price-scout", "amistad", "base-template", "brain"]
 status  = ["active", "draft", "deprecated", "superseded", "archived"]
 ```

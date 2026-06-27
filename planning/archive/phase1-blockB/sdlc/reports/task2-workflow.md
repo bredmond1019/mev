@@ -5,7 +5,7 @@
 **Task scope:** Task 2 — Classify files during the walk
 **Pipeline started from:** implement
 **Review attempts:** 1 of 3 max
-**Worktree:** /Users/brandon/Dev/agentic-portfolio/markdown-engine-validator/trees/phase1-blockb-task2
+**Worktree:** /Users/brandon/Dev/agentic-portfolio/mev/trees/phase1-blockb-task2
 **Branch:** phase1-blockb-task2
 
 ## Final Verdict

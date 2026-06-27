@@ -3,7 +3,7 @@ type: Log
 title: Documentation Report — 2.I-validate-brain-subcommand
 description: Documentation update report for Phase 2 Block I — validate-brain subcommand and JSON reporter.
 doc_id: document-report-2i-validate-brain-subcommand
-project: markdown-engine-validator
+project: mev
 status: active
 keywords: [documentation, validate-brain, json, subcommand, cli]
 ---

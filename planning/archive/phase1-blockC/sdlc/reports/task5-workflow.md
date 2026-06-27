@@ -5,7 +5,7 @@
 **Task scope:** Task 5
 **Pipeline started from:** implement
 **Review attempts:** 1 of 3 max
-**Worktree:** /Users/brandon/Dev/agentic-portfolio/markdown-engine-validator/trees/phase1-blockc-task5
+**Worktree:** /Users/brandon/Dev/agentic-portfolio/mev/trees/phase1-blockc-task5
 **Branch:** phase1-blockc-task5
 
 ## Final Verdict

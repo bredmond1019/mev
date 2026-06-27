@@ -2,7 +2,7 @@
 type: Log
 title: Implementation Report — 2.G-brain-crawl
 description: Record of implementation work for Phase 2 Block G (brain crawl entry point).
-project: markdown-engine-validator
+project: mev
 status: active
 ---
 

@@ -4,7 +4,7 @@ title: Phase 2, Block F — ContentValidator trait + shared core
 description: Introduce the associated-type ContentValidator trait, extract shared helpers into a shared module, and relocate the learn-ai code behind a LearnAiValidator — preserving the public API and the full existing test suite.
 doc_id: 2-F-content-validator-trait
 layer: [engine]
-project: markdown-engine-validator
+project: mev
 status: active
 keywords: [content-validator, trait, refactor, shared-core, learn-ai, module-layout]
 related: [master-plan]

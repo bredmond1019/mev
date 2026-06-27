@@ -3,7 +3,7 @@
   "branch": "2.F-content-validator-trait-flow",
   "started_at": "2026-06-26T21:58:22Z",
   "updated_at": "2026-06-26T22:17:14Z",
-  "worktree_path": "/Users/brandon/Dev/agentic-portfolio/markdown-engine-validator/trees/2.F-content-validator-trait-flow",
+  "worktree_path": "/Users/brandon/Dev/agentic-portfolio/mev/trees/2.F-content-validator-trait-flow",
   "status": "done",
   "current_task": 5,
   "tasks": {
@@ -35,8 +35,8 @@
         "Kept trait free of any learn-ai domain types as specified; Item = () in tests avoids any domain dependency"
       ],
       "files_changed": [
-        "/Users/brandon/Dev/agentic-portfolio/markdown-engine-validator/trees/2.F-content-validator-trait-flow/src/validator.rs",
-        "/Users/brandon/Dev/agentic-portfolio/markdown-engine-validator/trees/2.F-content-validator-trait-flow/src/lib.rs"
+        "/Users/brandon/Dev/agentic-portfolio/mev/trees/2.F-content-validator-trait-flow/src/validator.rs",
+        "/Users/brandon/Dev/agentic-portfolio/mev/trees/2.F-content-validator-trait-flow/src/lib.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -68,7 +68,7 @@
       "fixes": [],
       "decisions": [],
       "files_changed": [
-        "/Users/brandon/Dev/agentic-portfolio/markdown-engine-validator/trees/2.F-content-validator-trait-flow/src/lib.rs"
+        "/Users/brandon/Dev/agentic-portfolio/mev/trees/2.F-content-validator-trait-flow/src/lib.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -94,7 +94,7 @@
   },
   "docs": {
     "changed": [
-      "/Users/brandon/Dev/agentic-portfolio/markdown-engine-validator/trees/2.F-content-validator-trait-flow/README.md"
+      "/Users/brandon/Dev/agentic-portfolio/mev/trees/2.F-content-validator-trait-flow/README.md"
     ],
     "created": []
   },

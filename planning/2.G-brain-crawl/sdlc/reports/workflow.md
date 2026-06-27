@@ -2,7 +2,7 @@
 type: Log
 title: SDLC Workflow Report — 2.G-brain-crawl
 description: Full pipeline run record for Phase 2 Block G (brain crawl entry point).
-project: markdown-engine-validator
+project: mev
 status: active
 ---
 

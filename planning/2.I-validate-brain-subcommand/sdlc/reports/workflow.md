@@ -3,7 +3,7 @@ type: Log
 title: SDLC Workflow Report — 2.I-validate-brain-subcommand
 description: Pipeline execution summary for Phase 2 Block I — validate-brain subcommand and JSON reporter.
 doc_id: workflow-report-2i-validate-brain-subcommand
-project: markdown-engine-validator
+project: mev
 status: active
 keywords: [workflow, sdlc, validate-brain, json, pipeline]
 ---
@@ -34,7 +34,7 @@ PASS — All 8 acceptance criteria met on the first review attempt; all four har
 - Added `serde::Serialize` to `Severity` (with `#[serde(rename_all = "lowercase")]`) and `Diagnostic` in `src/lib.rs`, enabling machine-readable output without a custom serializer.
 - `JsonReport` owns its `diagnostics: Vec<Diagnostic>` by value (cloned from `Report`) to avoid lifetime parameters on the struct — acceptable for typical brain corpus sizes.
 - The global `--json` flag (`#[arg(long, global = true)]` on `Cli`) applies identically to both `validate` and `validate-brain` without duplication.
-- `validate-brain` default path is `..` (parent of cwd), matching the plan's intent that the binary be run from inside `markdown-engine-validator` to gate the parent brain repo.
+- `validate-brain` default path is `..` (parent of cwd), matching the plan's intent that the binary be run from inside `mev` to gate the parent brain repo.
 - Five integration tests in `tests/brain_validate.rs` provide end-to-end coverage of the public library surface including nested-git skip-list enforcement and JSON envelope correctness.
 
 ## Files Modified

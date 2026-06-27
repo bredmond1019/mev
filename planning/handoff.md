@@ -60,7 +60,7 @@ None — clear to proceed with Block J.
 - The 3 remaining warnings are `keywords` count > 7 in:
   - `planning/bastion-ui/plan.md`
   - `planning/brain-rag-improvements/plan.md`
-  - `docs/projects/markdown-engine-validator.md`
+  - `docs/projects/mev.md`
   These are real minor violations in the Brain corpus, not validator bugs.
 - D3 decision (`planning/decisions/D3-corpus-config-system.md`) captures the plan to move
   all current hardcodes (skip-lists, doc_id patterns, vocab sets) into a per-corpus `.mev.toml`.

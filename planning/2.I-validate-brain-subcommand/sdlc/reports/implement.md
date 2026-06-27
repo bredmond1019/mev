@@ -3,7 +3,7 @@ type: Log
 title: Implementation Report — 2.I-validate-brain-subcommand
 description: Implementation report for Phase 2 Block I — validate-brain subcommand and JSON reporter.
 doc_id: impl-report-2i-validate-brain-subcommand
-project: markdown-engine-validator
+project: mev
 status: active
 keywords: [implementation, validate-brain, json, subcommand, cli]
 ---
@@ -71,7 +71,7 @@ Status: PASSED
 
 - `JsonReport` owns its `diagnostics: Vec<Diagnostic>` by value (cloned from `Report`). Cloning is cheap for typical brain corpus sizes; avoids lifetime parameters on the struct, which would complicate `serde::Serialize`.
 - The `--json` flag is placed on `Cli` with `global = true` as specified, so it works identically for both `validate` and `validate-brain` without duplication.
-- `validate-brain` default path is `..` (the parent directory of the cwd), matching the plan's intent that the binary be run from inside the `markdown-engine-validator` sub-project to gate the parent brain repo.
+- `validate-brain` default path is `..` (the parent directory of the cwd), matching the plan's intent that the binary be run from inside the `mev` sub-project to gate the parent brain repo.
 - `Severity` derives `serde::Serialize` directly rather than a manual impl; `#[serde(rename_all = "lowercase")]` is the idiomatic way to produce `"error"`/`"warning"` without a custom serializer.
 
 ## Follow-up Work

@@ -4,7 +4,7 @@ title: "D1: Initial OKF Scaffold"
 description: Project initialized on the standard OKF documentation structure.
 doc_id: D1-initial-okf
 layer: [factory, meta]
-project: markdown-engine-validator
+project: mev
 status: active
 keywords: [OKF scaffold, planning structure, SDLC harness, base-template, initialization]
 related: [decisions-index, context]
@@ -17,7 +17,7 @@ related: [decisions-index, context]
 
 ## Decision
 
-markdown-engine-validator is initialized on the standard **OKF (Open Knowledge Format)** documentation
+mev is initialized on the standard **OKF (Open Knowledge Format)** documentation
 structure: a `planning/` folder with `context.md`, `status.md`, `master-plan.md`, a
 `harness.json` pipeline config, an atomic `decisions/` registry, and per-spec concept folders
 `planning/<concept>/` (with pipeline state under a reserved `<concept>/sdlc/`); OKF YAML

@@ -1,4 +1,4 @@
-//! markdown-engine-validator (`mev`) — parses, validates, and (later) compiles the
+//! mev (`mev`) — parses, validates, and (later) compiles the
 //! MDX/Markdown content for learn-agentic-ai.com.
 //!
 //! Phase 0 lays the testable skeleton: a CLI surface and the `Diagnostic` type that every

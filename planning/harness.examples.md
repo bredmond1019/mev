@@ -4,7 +4,7 @@ title: harness.json — copy-paste profiles
 description: Ready-made planning/harness.json profiles (Rust, Python/FastAPI, Next.js) for adapting the SDLC pipeline to this project's stack.
 doc_id: harness-examples
 layer: [factory]
-project: markdown-engine-validator
+project: mev
 status: active
 keywords: [harness.json, SDLC pipeline, Rust, Python, Next.js, validation commands]
 related: [planning-index]

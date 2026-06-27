@@ -1,10 +1,10 @@
 ---
 type: ProjectStatus
-title: markdown-engine-validator Status
-description: Current state and progress tracker for markdown-engine-validator.
+title: mev Status
+description: Current state and progress tracker for mev.
 doc_id: status
 layer: [factory]
-project: markdown-engine-validator
+project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]

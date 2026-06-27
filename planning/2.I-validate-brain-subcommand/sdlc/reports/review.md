@@ -3,7 +3,7 @@ type: Log
 title: Review Report — 2.I-validate-brain-subcommand
 description: Review verdict for Phase 2 Block I — validate-brain subcommand and JSON reporter.
 doc_id: review-report-2i-validate-brain-subcommand
-project: markdown-engine-validator
+project: mev
 status: active
 keywords: [review, validate-brain, json, subcommand, cli]
 ---

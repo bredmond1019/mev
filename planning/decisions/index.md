@@ -1,10 +1,10 @@
 ---
 type: Index
-title: markdown-engine-validator Decisions Registry
-description: Index of atomic, append-only architectural decision records for markdown-engine-validator.
+title: mev Decisions Registry
+description: Index of atomic, append-only architectural decision records for mev.
 doc_id: decisions-index
 layer: [factory]
-project: markdown-engine-validator
+project: mev
 status: active
 keywords: [decision records, ADR, architectural decisions, OKF, append-only]
 related: [D1-initial-okf, D2-scope-and-sequence]
@@ -12,7 +12,7 @@ related: [D1-initial-okf, D2-scope-and-sequence]
 
 # Decisions Registry
 
-Architectural decision records (ADRs) for markdown-engine-validator. Each decision is **one atomic
+Architectural decision records (ADRs) for mev. Each decision is **one atomic
 file**, append-only — never edit a settled decision; supersede it with a new one and link back.
 
 ## Decisions
