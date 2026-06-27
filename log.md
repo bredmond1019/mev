@@ -17,6 +17,18 @@ timestamp: "2026-06-26"
 
 ---
 
+## 2026-06-26 — 2.G-brain-crawl: Brain crawl entry point (PASS)
+
+Completed Phase 2, Block G: added a parallel Brain crawl entry point alongside the existing learn-ai crawl. Created `src/brain/mod.rs` and `src/brain/crawl.rs` defining `MdFile { path, rel, stem }`, two pruning helpers (`is_blocklisted_name` for `target/`, `node_modules/`, `.git/` dirs, and `has_nested_git` for the depth>0 nested-git rule), and `pub fn crawl_brain(root: &Path) -> (Vec<MdFile>, Vec<Diagnostic>)` using `filter_entry`-based directory pruning. Re-exported `MdFile` and `crawl_brain` from `src/lib.rs`. Eight integration tests in `tests/brain_crawl.rs` cover root-level finds, all blocklist prunes, nested-git pruning, non-.md skips, and `rel`/`stem` correctness. All 96 tests (61 unit + 35 integration) pass; all four harness gates green. Review passed on first attempt with all 7 acceptance criteria MET. The document pass flagged `README.md` as needing a `src/brain/` row in the source-tree directory map (manual follow-up). Next: Block 2.H (Brain OKF frontmatter validator).
+
+```
+d64c0dd docs: update docs for 2.G-brain-crawl
+52daf32 feat: implement 2.G-brain-crawl
+6fc27de chore: add spec for 2.G-brain-crawl
+```
+
+---
+
 ## 2026-06-26 — 2.F-content-validator-trait: ContentValidator trait + shared core (PASS)
 
 Completed Phase 2, Block F: the full refactor to introduce a generic `ContentValidator` trait. Extracted shared helpers (`extract_frontmatter`, `is_kebab_case`, `non_empty`) into `src/shared.rs`, defined the associated-type `ContentValidator` trait in `src/validator.rs`, moved the learn-ai code (`crawl.rs`, `meta.rs`) into a new `src/learn_ai/` module, implemented `LearnAiValidator` behind the trait, and rewrote `validate()` as a thin wrapper. All 27 tests pass. A post-flow code review fixed a misleading `non_empty` docstring. The public API (`mev::{ContentFile, Corpus, FileKind, Locale, crawl, validate_file, validate, Diagnostic, Severity}`) is preserved via `pub use`, so all existing integration tests pass unchanged. Next: Block 2.G (Brain crawl).
