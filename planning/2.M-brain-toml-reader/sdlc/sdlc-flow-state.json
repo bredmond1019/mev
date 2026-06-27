@@ -2,9 +2,9 @@
   "spec_slug": "2.M-brain-toml-reader",
   "branch": "2.M-brain-toml-reader-flow-2",
   "started_at": "2026-06-27T21:44:47Z",
-  "updated_at": "2026-06-27T22:20:44Z",
+  "updated_at": "2026-06-27T22:24:07Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2",
-  "status": "docs",
+  "status": "done",
   "current_task": 6,
   "tasks": {
     "1": {
@@ -315,13 +315,21 @@
         "filesReadKb": null,
         "inTokEst": 562,
         "outTok": 4945
+      },
+      {
+        "label": "wrap-up",
+        "model": "sonnet",
+        "promptTokEst": 827,
+        "filesReadKb": null,
+        "inTokEst": 827,
+        "outTok": 4578
       }
     ],
     "total": {
-      "promptTokEst": 12936,
+      "promptTokEst": 13763,
       "filesReadKb": 0,
-      "inTokEst": 12936,
-      "outTok": 119408
+      "inTokEst": 13763,
+      "outTok": 123986
     }
   }
 }
