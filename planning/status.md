@@ -13,8 +13,8 @@ timestamp: "2026-06-26"
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-26 — Block 2.G Done (Brain crawl: MdFile + crawl_brain); Block 2.H next (Brain OKF frontmatter validator)
-**Current focus:** Block 2.H — Planned (Brain OKF frontmatter validator)
+**Last updated:** 2026-06-26 — Block 2.H Done (Brain OKF frontmatter validator: OkfFrontmatter, validate_md_file, BrainValidator, 142 tests); Block 2.I next (validate-brain subcommand + --json)
+**Current focus:** Block 2.I — Planned (validate-brain subcommand + --json output flag)
 
 ---
 
@@ -46,7 +46,7 @@ timestamp: "2026-06-26"
 |---|---|---|---|
 | Block F | `ContentValidator` trait + shared core | Done | All tasks (1–5) complete: extracted `extract_frontmatter`, `is_kebab_case`, `non_empty` into `src/shared.rs`; defined associated-type `ContentValidator` trait in `src/validator.rs`; moved learn-ai code (`crawl.rs`, `meta.rs`) into `src/learn_ai/` module with `LearnAiValidator` impl; rewrote `validate()` as thin wrapper; public API preserved; all 27 tests pass (including post-flow code-review fix to `non_empty` docstring); all harness gates green. |
 | Block G | Brain crawl | Done | `MdFile { path, rel, stem }` + `crawl_brain(root)` with two-layer skip-list (name blocklist + nested-git rule); 8 integration tests + unit tests for pruning helpers; all 96 tests pass |
-| Block H | Brain OKF frontmatter validator | Planned | Validate OKF YAML frontmatter (type, title, description, layer, project, status, keywords, doc_id) |
+| Block H | Brain OKF frontmatter validator | Done | OkfFrontmatter struct, validate_md_file, BrainValidator (ContentValidator impl), vocab helpers, 30 unit tests + 14 integration tests; 142 total tests pass |
 | Block I | `validate-brain` subcommand + `--json` | Planned | Wire `BrainValidator` to CLI; add global `--json` flag for RAG indexer |
 
 ---

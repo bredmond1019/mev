@@ -1,6 +1,6 @@
 # Task Spec — Phase 2, Block H
 
-**Status:** Not started · **Last run:** never
+**Status:** Done · **Last run:** 2026-06-26
 
 ## Goal
 Add an `OkfFrontmatter` serde struct and an OKF frontmatter validator that checks required fields, controlled-vocab membership, kebab-case `doc_id`, and keyword count on every brain `.md` file, assembled behind a `BrainValidator` that ties Block G's crawl to these checks.
