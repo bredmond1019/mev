@@ -5,9 +5,11 @@
 //! future check emits. Phase 1, Block B adds content-tree crawl + classification (see
 //! `planning/master-plan.md`).
 
+mod brain;
 mod learn_ai;
 mod shared;
 mod validator;
+pub use brain::crawl::{MdFile, crawl_brain};
 pub use learn_ai::LearnAiValidator;
 pub use learn_ai::crawl::{ContentFile, Corpus, FileKind, Locale, crawl};
 pub use learn_ai::meta::validate_file;
