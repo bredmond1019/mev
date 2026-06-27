@@ -1,0 +1,52 @@
+{
+  "spec_slug": "2.G-brain-crawl",
+  "started_at": "2026-06-27T00:20:53Z",
+  "updated_at": "2026-06-27T00:24:48Z",
+  "current_phase": "wrap-up",
+  "completed_phases": ["implement","test","review","ui-test","document","wrap-up"],
+  "failed_phase": null,
+  "task_number": null,
+  "resume_from": null,
+  "tokens": {
+    "stages": [
+      {
+        "label": "implement",
+        "model": "sonnet",
+        "promptTokEst": 999,
+        "filesReadKb": null,
+        "inTokEst": 999,
+        "outTok": 8132
+      },
+      {
+        "label": "test",
+        "model": "haiku",
+        "promptTokEst": 565,
+        "filesReadKb": null,
+        "inTokEst": 565,
+        "outTok": 2103
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 1094,
+        "filesReadKb": null,
+        "inTokEst": 1094,
+        "outTok": 3441
+      },
+      {
+        "label": "document",
+        "model": "sonnet",
+        "promptTokEst": 881,
+        "filesReadKb": null,
+        "inTokEst": 881,
+        "outTok": 2397
+      }
+    ],
+    "total": {
+      "promptTokEst": 3539,
+      "filesReadKb": 0,
+      "inTokEst": 3539,
+      "outTok": 16073
+    }
+  }
+}

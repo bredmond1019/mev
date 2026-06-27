@@ -1,6 +1,6 @@
 # Task Spec — Phase 2, Block G
 
-**Status:** Not started · **Last run:** never
+**Status:** Done · **Last run:** 2026-06-26
 
 ## Goal
 Add a parallel Brain crawl entry point — `MdFile { path, rel, stem }` + `crawl_brain(root)` that walks all `.md` under a root, pruning a name blocklist (`target/`, `node_modules/`, `.git/`) and any non-root directory containing its own `.git`.
