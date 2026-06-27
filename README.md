@@ -56,7 +56,7 @@ markdown-engine-validator/
 │   ├── shared.rs       ← shared helpers: extract_frontmatter, is_kebab_case, non_empty
 │   ├── validator.rs    ← ContentValidator trait (crawl + validate_item + run driver)
 │   ├── learn_ai/       ← LearnAiValidator: crawl.rs, meta.rs, mod.rs
-│   └── brain/          ← BrainValidator: crawl.rs (crawl_brain, MdFile), mod.rs
+│   └── brain/          ← BrainValidator: crawl.rs (crawl_brain, MdFile), mod.rs, okf.rs (OkfFrontmatter, validate_md_file)
 ├── tests/          ← integration tests + fixtures
 └── Cargo.toml
 ```
