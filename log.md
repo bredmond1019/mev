@@ -17,6 +17,18 @@ timestamp: "2026-06-26"
 
 ---
 
+## 2026-06-26 — 2.I-validate-brain-subcommand: validate-brain subcommand + --json flag (PASS)
+
+Completed Phase 2, Block I: wired `BrainValidator` to a `mev validate-brain <root>` subcommand and added a global `--json` flag emitting a machine-readable `JsonReport` envelope. Added `serde::Serialize` to `Severity` (lowercase via `rename_all`) and `Diagnostic` in `src/lib.rs`, plus `pub fn validate_brain(root)` and `pub struct JsonReport` with `new()` constructor and `to_json()` method. In `src/main.rs`, added the `ValidateBrain { path }` subcommand variant (default `..`), a global `--json` flag on `Cli`, dispatch to `validate_brain`, JSON/human branching in both subcommand arms, and updated `about` text naming both consumers. Five new integration tests in `tests/brain_validate.rs` cover OKF violation detection, nested-git skip enforcement, clean-file no-error case, JSON envelope key/count validation, and `Severity` lowercase serialization. Total tests: 145 (91 unit + 54 integration) — all pass. All four harness gates green. Review passed on first attempt with all 8 acceptance criteria MET. Next: Block 2.J (graph integrity).
+
+```
+232bd3f docs: update docs for 2.I-validate-brain-subcommand
+97ebe48 feat: implement 2.I-validate-brain-subcommand
+f8da0c4 chore: add spec for 2.I-validate-brain-subcommand
+```
+
+---
+
 ## 2026-06-26 — Close-out for Block 2.H (Brain OKF frontmatter validator)
 
 Completed Block 2.H close-out activities: verified the validation suite with all 142 tests passing (all four harness gates green: fmt, clippy, test, build), performed a doc health sweep (no stale sections identified; flagged `docs/harness-json.md` as NEEDS_REVIEW for future attention), and wrote `planning/handoff.md` to orient Block 2.I work on the validate-brain subcommand and --json flag. Block 2.H is fully closed; ready to hand off to Block 2.I.

@@ -1,6 +1,6 @@
 # Task Spec — Phase 2, Block I
 
-**Status:** Not started · **Last run:** never
+**Status:** Done · **Last run:** 2026-06-26
 
 ## Goal
 Wire `BrainValidator` to a `mev validate-brain <brain-root>` subcommand and add a global `--json` flag emitting a machine-readable envelope the Brain RAG indexer can consume as a pre-`--rebuild` gate.
