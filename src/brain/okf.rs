@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::Diagnostic;
 use crate::brain::crawl::MdFile;
-use crate::shared::{extract_frontmatter, is_kebab_case, non_empty};
+use crate::shared::{extract_frontmatter, non_empty};
 
 // ---------------------------------------------------------------------------
 // OKF frontmatter struct
@@ -93,6 +93,40 @@ pub(crate) fn is_valid_status(s: &str) -> bool {
         s,
         "active" | "draft" | "deprecated" | "superseded" | "archived"
     )
+}
+
+// ---------------------------------------------------------------------------
+// doc_id helpers
+// ---------------------------------------------------------------------------
+
+/// `true` if `s` matches the Brain decision-file convention: `D` followed by one or more
+/// digits, optionally followed by lowercase kebab segments (e.g. `D15-okf-lowercase-doc-names`).
+pub(crate) fn is_decision_id(s: &str) -> bool {
+    let rest = match s.strip_prefix('D') {
+        Some(r) => r,
+        None => return false,
+    };
+    // Must have at least one digit after 'D'.
+    let rest = match rest.find(|c: char| !c.is_ascii_digit()) {
+        Some(0) => return false, // nothing consumed — no digit follows 'D'
+        Some(i) => &rest[i..],
+        None if !rest.is_empty() => return true, // "D7", "D29" — digits only
+        None => return false,                     // rest is empty → bare "D"
+    };
+    // Remaining portion (if any) must be `-<kebab-segment>+`.
+    rest.strip_prefix('-')
+        .map(|tail| {
+            // Every hyphen-separated segment is non-empty all-lowercase-or-digit.
+            tail.split('-').all(|seg| {
+                !seg.is_empty() && seg.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9'))
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// `true` if `s` is a valid OKF `doc_id`: either standard kebab-case or a decision file id.
+pub(crate) fn is_valid_doc_id(s: &str) -> bool {
+    crate::shared::is_kebab_case(s) || is_decision_id(s)
 }
 
 // ---------------------------------------------------------------------------
@@ -222,14 +256,14 @@ pub fn validate_md_file(mf: &MdFile) -> Vec<Diagnostic> {
         ));
     }
 
-    // --- doc_id: kebab-case when present ---
+    // --- doc_id: kebab-case or decision-id (D\d+…) when present ---
     if let Some(doc_id) = non_empty(&fm.doc_id)
-        && !is_kebab_case(doc_id)
+        && !is_valid_doc_id(doc_id)
     {
         diags.push(Diagnostic::error(
             mf.rel.clone(),
             "doc_id",
-            format!("doc_id must be kebab-case (^[a-z0-9]+(-[a-z0-9]+)*$): {doc_id}"),
+            format!("doc_id must be kebab-case or a decision id (D<n>-…): {doc_id}"),
         ));
     }
 
@@ -473,7 +507,42 @@ mod tests {
         );
     }
 
-    // --- doc_id kebab-case ---
+    // --- is_decision_id ---
+
+    #[test]
+    fn decision_id_accepts_bare_number() {
+        assert!(is_decision_id("D7"));
+        assert!(is_decision_id("D29"));
+    }
+
+    #[test]
+    fn decision_id_accepts_full_form() {
+        assert!(is_decision_id("D1-solo-practice"));
+        assert!(is_decision_id("D15-okf-lowercase-doc-names"));
+        assert!(is_decision_id("D29-mev-brain-validation-engine"));
+    }
+
+    #[test]
+    fn decision_id_rejects_bare_d() {
+        assert!(!is_decision_id("D"));
+    }
+
+    #[test]
+    fn decision_id_rejects_missing_digit_after_d() {
+        assert!(!is_decision_id("D-foo"));
+    }
+
+    #[test]
+    fn decision_id_rejects_lowercase_d() {
+        assert!(!is_decision_id("d15-foo"));
+    }
+
+    #[test]
+    fn decision_id_rejects_uppercase_segment() {
+        assert!(!is_decision_id("D15-Foo"));
+    }
+
+    // --- doc_id: kebab or decision-id ---
 
     #[test]
     fn non_kebab_doc_id_emits_error_at_doc_id_locator() {
@@ -491,6 +560,17 @@ mod tests {
         assert!(
             diags.is_empty(),
             "valid doc_id should not be flagged, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn decision_style_doc_id_is_clean() {
+        let body =
+            "---\ntype: T\ntitle: T\ndescription: D\ndoc_id: D15-okf-lowercase-doc-names\n---\nbody\n";
+        let diags = validate_yaml(body, "decision-doc-id");
+        assert!(
+            diags.is_empty(),
+            "decision-style doc_id should not be flagged, got: {diags:?}"
         );
     }
 
