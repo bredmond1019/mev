@@ -45,6 +45,14 @@ pub(crate) fn is_blocklisted_name(name: &str) -> bool {
     )
 }
 
+/// Return `true` if a file name is on the file blocklist.
+///
+/// Blocklisted files: tool config files (`CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`) and
+/// transient session artifacts (`handoff.md`) that are never OKF docs.
+pub(crate) fn is_blocklisted_file(name: &str) -> bool {
+    matches!(name, "CLAUDE.md" | "CLAUDE.local.md" | "GEMINI.md" | "handoff.md")
+}
+
 /// Return `true` if `dir_path` contains a `.git` entry (file or directory).
 ///
 /// Used to detect nested sub-project repos.  Only called for directories at `depth() > 0`
@@ -108,6 +116,15 @@ pub fn crawl_brain(root: &Path) -> (Vec<MdFile>, Vec<Diagnostic>) {
             continue;
         }
 
+        // Skip blocklisted file names.
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        if is_blocklisted_file(file_name) {
+            continue;
+        }
+
         let rel = match path.strip_prefix(root) {
             Ok(r) => r.to_path_buf(),
             Err(_) => {
@@ -163,6 +180,24 @@ mod tests {
         assert!(!is_blocklisted_name("planning"));
         assert!(!is_blocklisted_name("README.md"));
         assert!(!is_blocklisted_name("target-extra")); // prefix match must not fire
+    }
+
+    // --- is_blocklisted_file ---
+
+    #[test]
+    fn blocklisted_files_are_rejected() {
+        assert!(is_blocklisted_file("CLAUDE.md"));
+        assert!(is_blocklisted_file("CLAUDE.local.md"));
+        assert!(is_blocklisted_file("GEMINI.md"));
+        assert!(is_blocklisted_file("handoff.md"));
+    }
+
+    #[test]
+    fn ordinary_files_are_allowed() {
+        assert!(!is_blocklisted_file("status.md"));
+        assert!(!is_blocklisted_file("README.md"));
+        assert!(!is_blocklisted_file("context.md"));
+        assert!(!is_blocklisted_file("claude-notes.md")); // prefix match must not fire
     }
 
     // --- has_nested_git ---
