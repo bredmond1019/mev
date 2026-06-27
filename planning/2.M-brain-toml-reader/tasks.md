@@ -131,7 +131,7 @@ Add the `toml` crate and have `validate-brain` resolve and read `brain.toml` (vi
 - Do NOT edit any other content in D3 (decisions are append-only).
 - This task is safe to run in parallel with Tasks 1–4 since it touches only a planning doc.
 
-### 6. Validate
+### 6. [~] Validate
 
 - Run the Validation Commands listed below and confirm all pass.
 - Manually run `mev validate-brain ~/Dev/agentic-portfolio` and confirm it exits 0 with the same or fewer diagnostics as before this block (the Brain corpus still validates to 0 errors, ≤3 warnings).
