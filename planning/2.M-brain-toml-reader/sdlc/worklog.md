@@ -19,3 +19,7 @@ Validated: gating checks (fast tripwire)
 What: validate_brain now resolves brain.toml via find_brain_config walk-up; missing config surfaces as E_CONFIG_NOT_FOUND diagnostic; config-flip integration test proves vocab-only edits change validation results
 Decisions: Existing tests updated to write brain.toml to their temp dirs (rather than relying on walk-up finding the real portfolio brain.toml) so they test actual OKF logic, not config resolution; The 'no brain.toml ancestor' test is a no-panic smoke test with a lenient assertion — on developer machines the real brain.toml may be found by walk-up, so E_CONFIG_NOT_FOUND is not guaranteed in that environment; E_CONFIG_NOT_FOUND surfaced as locator string (not a separate enum variant) to match the existing Diagnostic.locator pattern used for in-file locators
 Validated: gating checks (fast tripwire)
+
+## Task 5 — PASSED (1 attempt)
+What: Mark D3-corpus-config-system.md as superseded: updated frontmatter status from draft to superseded and appended ## Superseded section citing HQ Restructure Block M
+Validated: gating checks (fast tripwire)
