@@ -55,7 +55,8 @@ markdown-engine-validator/
 │   ├── main.rs         ← clap CLI entry point
 │   ├── shared.rs       ← shared helpers: extract_frontmatter, is_kebab_case, non_empty
 │   ├── validator.rs    ← ContentValidator trait (crawl + validate_item + run driver)
-│   └── learn_ai/       ← LearnAiValidator: crawl.rs, meta.rs, mod.rs
+│   ├── learn_ai/       ← LearnAiValidator: crawl.rs, meta.rs, mod.rs
+│   └── brain/          ← BrainValidator: crawl.rs (crawl_brain, MdFile), mod.rs
 ├── tests/          ← integration tests + fixtures
 └── Cargo.toml
 ```
