@@ -7,6 +7,43 @@ created: 2026-06-26
 
 > **For the next agent:** Read this immediately after `/prime`. Delete this file once consumed.
 
+---
+
+## ⟨2026-06-27⟩ Cross-program directive — start HQ Restructure **Block M** next
+
+> **This takes precedence over the mev-local Phase 3 work below.** Everything beneath this banner
+> (the graph/link/structural integrity blocks) still stands and is unchanged — but the immediate
+> priority is a different, *program-level* block.
+
+**Naming caution:** the HQ Restructure program (in the parent brain repo,
+`agentic-portfolio/planning/hq-restructure/master-plan.md`) labels its blocks A–Q. Its **Block M** is
+**not** the same as this repo's local Phase 3 "Block J/K/L" below — different numbering, different program.
+
+**HQ-R Block M — "mev reads `brain.toml` (vocab + crawl + manifest)":**
+- **What:** add the `toml` crate; have `validate-brain` read **`brain.toml`** for `[vocab]` (layer +
+  status) and the **project slugs derived from `[[repos]]`**, for `[crawl].skip_dirs`, and for the
+  `[[repos]]` manifest — **retiring the hardcoded `is_valid_*` match arms and skip-lists**. Resolve
+  `brain.toml` by **walk-up** (same convention the orchestrator indexer already shipped in HQ-R Block I —
+  mirror its `_find_brain_root`).
+- **This realizes mev's own D3** (`planning/decisions/D3-corpus-config-system.md`) — but via the shared
+  **`brain.toml`** at the HQ root, **not** a separate `.mev.toml`. So Block M's wrap-up **marks D3
+  superseded by `brain.toml`** (append-only: don't edit D3, supersede it). The interim hardcodes the
+  current handoff notes (skip-lists, `doc_id` patterns, vocab sets) are exactly what move into config here.
+- **Where the file lives:** `agentic-portfolio/brain.toml` (HQ root, the parent of `core/mev/`). It holds
+  `[vocab]`, `[crawl].skip_dirs`, and one `[[repos]]` block per repo (`slug`/`tier`/`repo_path`/
+  `status_file`/`cache_doc`/`heading`). Project vocab = the set of `[[repos]]` slugs (not a separate list).
+- **Deps:** Block A (brain.toml authored) ✅ and Block D (mev renamed) ✅ — **both done, ready now.**
+  Sequenced after Block I (done) so both readers share the walk-up convention.
+- **Out of scope (later program blocks):** the `synced_from` `--sync` watermark check + git hooks is
+  **HQ-R Block N** (comes after M, needs M + the brain's Block J). The graph/link/structural integrity
+  work is this repo's separate Phase 3 (below).
+- **Acceptance:** `mev validate-brain` accepts/rejects vocab per `brain.toml` (proven by a **config-only**
+  edit flipping a result with no source change); **no `is_valid_*` literal vocab remains**; `cargo fmt
+  --check && cargo clippy -- -D warnings && cargo test` pass; mev **D3 marked superseded**.
+- **First command:** `Read planning/decisions/D3-corpus-config-system.md + ../../planning/hq-restructure/master-plan.md (Block M) + ../../brain.toml`, then `/generate-tasks` for Block M.
+
+---
+
 ## What we're doing and why
 
 Phase 3 of `mev` adds corpus-wide integrity checks on top of the OKF frontmatter validator
