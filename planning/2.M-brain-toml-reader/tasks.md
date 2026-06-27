@@ -87,7 +87,7 @@ Add the `toml` crate and have `validate-brain` resolve and read `brain.toml` (vi
 - Update `tests/brain_okf.rs` to pass a `BrainConfig` (loaded from `tests/fixtures/brain.toml` or constructed inline with `BrainConfig { vocab: VocabConfig { layer: vec![...], ... }, ... }`) everywhere `is_valid_*` or `validate_md_file` is called.
 - All harness gates must pass after this task alone.
 
-### 4. Thread config through public API + CLI; integration-test the config-flip criterion
+### 4. [~] Thread config through public API + CLI; integration-test the config-flip criterion
 
 **Files:** `src/lib.rs` (modified), `src/main.rs` (modified), `tests/brain_validate.rs` (modified)
 
