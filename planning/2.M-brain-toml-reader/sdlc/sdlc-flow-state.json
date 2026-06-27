@@ -2,10 +2,10 @@
   "spec_slug": "2.M-brain-toml-reader",
   "branch": "2.M-brain-toml-reader-flow-2",
   "started_at": "2026-06-27T21:44:47Z",
-  "updated_at": "2026-06-27T21:44:47Z",
+  "updated_at": "2026-06-27T21:51:22Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2",
   "status": "running",
-  "current_task": 1,
+  "current_task": 2,
   "tasks": {
     "1": {
       "status": "passed",
@@ -27,6 +27,27 @@
         "src/lib.rs",
         "tests/brain_config.rs",
         "tests/fixtures/brain.toml"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "crawl_brain now takes skip_dirs from BrainConfig instead of hardcoded matches; BrainValidator gains a config field and new() constructor; 174 tests pass, all four harness gates green",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Used BrainConfig::default() in validate_brain (lib.rs) as a temporary placeholder — Task 4 replaces this with find_brain_config(root)",
+        "Updated tests/brain_okf.rs BrainValidator call sites (not explicitly listed in Task 2 spec) because changing BrainValidator from unit struct to struct-with-field broke compilation there",
+        "is_blocklisted_name kept as a named helper (not inlined) so it remains independently unit-testable"
+      ],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/src/brain/crawl.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/src/brain/mod.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/src/lib.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/tests/brain_crawl.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.M-brain-toml-reader-flow-2/tests/brain_okf.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -87,13 +108,37 @@
         "filesReadKb": null,
         "inTokEst": 578,
         "outTok": 2092
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 258,
+        "filesReadKb": null,
+        "inTokEst": 258,
+        "outTok": 2083
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 894,
+        "filesReadKb": null,
+        "inTokEst": 894,
+        "outTok": 18664
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 578,
+        "filesReadKb": null,
+        "inTokEst": 578,
+        "outTok": 3463
       }
     ],
     "total": {
-      "promptTokEst": 2733,
+      "promptTokEst": 4463,
       "filesReadKb": 0,
-      "inTokEst": 2733,
-      "outTok": 18349
+      "inTokEst": 4463,
+      "outTok": 42559
     }
   }
 }
