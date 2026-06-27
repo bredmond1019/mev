@@ -4,8 +4,11 @@
 //! entry point; Block H adds OKF frontmatter parsing and [`BrainValidator`]; Block I
 //! adds the `validate-brain` subcommand.
 
+pub mod config;
 pub mod crawl;
 pub mod okf;
+
+pub use config::BrainConfig;
 
 use std::path::Path;
 
