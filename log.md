@@ -8,12 +8,18 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-06-27"
+timestamp: "2026-06-28"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## 2026-06-28 — Block N (sync-watermark) shipped via PR #2; code-review fix landed
+
+Block N (sync-watermark) shipped via PR #2. Code-review caught E_SYNC_FILE_MISSING misclassification for read/parse errors on existing files — fixed to E_SYNC_WATERMARK_MALFORMED at src/brain/sync.rs:126,139. All 196 tests pass. Worktree cleaned, rebased main pushed. Next: Block 2.J cross-file graph integrity.
 
 ---
 

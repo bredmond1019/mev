@@ -16,7 +16,7 @@ blocked: []
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-28 — Block N (sync-watermark) complete; `mev validate-brain --sync` shipped; 196 tests pass
+**Last updated:** 2026-06-28 — Block N (sync-watermark) complete; code-review fix (E_SYNC_WATERMARK_MALFORMED); 196 tests pass
 **Current focus:** 2.J-graph-integrity (next block)
 
 ---

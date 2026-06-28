@@ -1,152 +1,56 @@
 ---
 type: Handoff
-created: 2026-06-27
+created: 2026-06-28
 ---
 
-# Handoff — Block 2.M shipped; docs bootstrapped; harness fixed; 2.J is next
+# Handoff — Block N shipped; next is Block 2.J graph integrity
 
 > **For the next agent:** Read this immediately after `/prime`. Delete this file once consumed.
 
----
-
 ## What we're doing and why
 
-`mev` is a Rust CLI that validates Markdown/MDX — Phase 1 (learn-ai content) is done, Phase 2
-(Brain OKF frontmatter) is fully complete as of this session with block 2.M (brain.toml config
-reader). The repo now has a GitHub remote (`bredmond1019/mev`). This session also fixed a
-systemic gap in the SDLC harness: the `/document` pipeline phase never created docs from scratch,
-so projects with no initial docs silently accumulated code with zero coverage. Three harness files
-were updated across `base-template`, `brain`, and `mev` to close this. The next block is
-**2.J — graph integrity** (`related:` edge validation against the doc_id corpus index).
-
----
+`mev` is a Rust CLI that validates Markdown/MDX for two consumers: the learn-ai content tree and
+the Bastion Brain OKF docs. Block N (`synced_from` watermark check) is now complete and merged —
+`mev validate-brain --sync` compares each sub-repo `status_file` `timestamp` against the brain
+cache doc `synced_from` field, emitting `E_SYNC_DRIFT` when they diverge. This gates Brain RAG
+freshness. The next block is **2.J — cross-file graph integrity**: validate `related:` doc_id
+edges across the Brain so every pointer resolves to a real file. See `planning/master-plan.md`
+Phase 3 for the full sequence.
 
 ## Completed this session
 
-- **Block 2.M via sdlc-flow** — TOML config reader for `brain.toml`; 6 tasks, all passed on first
-  run (verdict: PASS). `BrainConfig` + `CrawlConfig` + `VocabConfig` + `RepoEntry`; `find_brain_config`
-  walk-up resolver; all vocab validation config-driven (no hardcoded `is_valid_*` arrays remain);
-  `tests/brain_config.rs` + `tests/brain_validate.rs` (188 lines total); D3 marked superseded.
-  PR #1 merged → `main`.
-
-- **GitHub repo created** — `gh repo create bredmond1019/mev --private`. Remote is `origin`.
-  `main` is tracking `origin/main`. All commits pushed.
-
-- **Full codebase documentation written** (none existed before) — `/update-docs` audit identified
-  zero project-facing docs. Created:
-  - `docs/index.md` — navigation hub
-  - `docs/cli.md` — CLI reference (subcommands, `--json`, exit codes, JSON envelope shape)
-  - `docs/architecture.md` — module map, `ContentValidator` trait, `Diagnostic`/`Report`/`JsonReport`
-    types, data flow diagram
-  - `docs/brain-toml.md` — full `brain.toml` schema (`[vocab]`, `[crawl]`, `[[repos]]`, lookup order)
-  - `docs/okf-schema.md` — OKF frontmatter field reference, validation rules, full diagnostic table
-  - `README.md` patched: added `config.rs` to brain module listing; `--json` output example; expanded docs table
-
-- **SDLC harness doc pipeline fixed** (systemic) — three repos updated + committed:
-  - `base-template/.claude/commands/update-docs.md`: added `--bootstrap` flag (skip audit, create all
-    missing docs from source); expanded `--patch` to also create MISSING docs (not just fix STALE);
-    updated Phase 6 + Rules
-  - `base-template/.claude/commands/document.md`: replaced "No invention — that is `/generate-new-docs`
-    territory" dead-end with pointer to `/update-docs --patch` / `--bootstrap`
-  - `base-template/scaffold/docs/index.md`: new stub with OKF frontmatter + `{{PROJECT_NAME}}`/`{{SLUG}}`
-    tokens — every new project now gets a `docs/index.md` from day one
-  - `agentic-portfolio/.claude/commands/new-project.md` (brain): added Stack parameter
-    (`Rust`/`Next.js`/`FastAPI`/`Other`) to step 1; added step 9 — creates stack-appropriate doc stubs
-    (`docs/architecture.md` + `docs/cli.md` for Rust, `docs/api-reference.md` for FastAPI, `docs/pages.md`
-    for Next.js) with OKF frontmatter and section headings; updates `docs/index.md`
-  - Propagated `update-docs.md` + `document.md` to `mev` and `learn-ai`
-
----
+- **Block N via `/sdlc-flow`** — 5 tasks, all PASS, 196 tests, PR #2 merged to main (commit `74a1c05`).
+  - Task 1: `chrono` dep, `synced_from: Option<String>` on `OkfFrontmatter` (`src/brain/okf.rs`), `src/brain/sync.rs` with strict RFC3339 `parse_watermark` + 5 unit tests.
+  - Task 2: `check_sync` core per-`[[repos]]` loop; 4 locator codes: `E_SYNC_FILE_MISSING`, `E_SYNC_WATERMARK_MISSING`, `E_SYNC_WATERMARK_MALFORMED`, `E_SYNC_DRIFT`; 8 unit tests.
+  - Task 3: `validate_brain_sync()` in `lib.rs`; `--sync` CLI flag on `validate-brain`; `BrainConfig` derived `Clone`.
+  - Task 4: `tests/brain_sync.rs` — 4 integration tests (in-sync, drift, re-align, JSON round-trip).
+  - Task 5: full harness pass (`fmt`, `clippy -D warnings`, 196 tests, `build --release`).
+- **Code-review fix** — `E_SYNC_FILE_MISSING` was misclassified for read/parse errors on files that exist; corrected to `E_SYNC_WATERMARK_MALFORMED` at `src/brain/sync.rs:126,139` (commit `920256d`). All 196 tests still pass.
+- **Worktree cleanup** — resolved rebase conflict in `planning/status.md` (kept `timestamp: "2026-06-28"`) and `planning/block-n-sync-watermark/tasks.md` (took origin/main completed version); rebased + pushed `main` (`8b68097`).
 
 ## Remaining work
 
-- **Block 2.J — Graph integrity** (`related:` edge validation) — START HERE
-  - Build corpus-wide `doc_id` index (every `.md`'s `doc_id`, defaulting to filename stem)
-  - Flag every `related:` entry pointing at an undefined `doc_id` (dangling edge)
+- **Block 2.J** — cross-file graph integrity (START HERE):
+  - Build corpus-wide `doc_id` index from every `.md`'s frontmatter (`doc_id`, defaulting to filename stem)
+  - Flag `related:` entries pointing at an undefined `doc_id` → `E_GRAPH_BROKEN_EDGE` (or similar)
   - Flag duplicate `doc_id`s across the corpus
-  - Acceptance: renamed/deleted `doc_id` is flagged; duplicate `doc_id`s are flagged; clean corpus passes
-  - Likely needs `src/brain/graph.rs` with `build_doc_id_index` and `check_related_edges`
-
-- **Block 2.K — Link integrity** (markdown `[text](path)`, `file:///`, `[[wikilinks]]`)
-- **Block 2.L — Structural coverage** (`index.md` ↔ directory bidirectional check, D17)
-
----
+  - Acceptance: renamed/deleted doc_id flagged; duplicate doc_ids flagged; clean corpus passes
+  - Likely `src/brain/graph.rs` with `build_doc_id_index` + `check_related_edges`
+- **Block D** — cross-file integrity for learn-ai (anchor-slice, pair existence, ID coherence, callout types)
+- **Block E** — pt-BR parity & reporter polish (locale mirror checks; ANSI + `--json` output)
 
 ## Open questions / choices
 
-None — clear to proceed.
-
----
-
-## HQ Restructure Block N — priority track (Opus)
-
-> **This is the primary ask for the next session.** Block N is now unblocked (Block M ✓, Block J/log-work ✓, Block B ✓).
-> Designated **Opus** in the HQ Restructure master plan. In mev's local phase numbering this is
-> **Phase 3 Block M** (Sync integrity — `synced_from` watermark check).
-
-### What Block N entails
-
-**mev side (this repo):**
-1. Add `synced_from: Option<String>` to `OkfFrontmatter` with full-ISO datetime parse (`chrono` crate — add if not present)
-2. Implement `mev validate-brain --sync` subcommand:
-   - Per `[[repos]]` entry in `brain.toml`: read the sub-repo's `planning/status.md` `timestamp` field
-   - Read its HQ cache doc (`cache_doc`) `synced_from` field
-   - Datetime compare (not string compare — catches same-day drift); emit a `Sync` diagnostic per mismatch
-   - Also assert each tier rollup row matches its cache's `synced_from`
-3. Extend `--json` output for the `Sync` diagnostic type (existing JSON envelope in Block I)
-4. Tests: fixture with a bumped `timestamp` that's unsynced → exactly one `Sync` error; fixture after sync → 0 errors
-
-**brain side (HQ repo — separate commit there):**
-- `hooks/pre-commit` → fast `mev validate-brain` schema check
-- `hooks/pre-push` → full `mev validate-brain --sync` check
-- Wire via `core.hooksPath hooks`; update `hooks/README.md`
-
-### Acceptance criteria (from HQ master plan Block N)
-
-> Bumping a sub-repo `status.md` `timestamp` without syncing makes `mev validate-brain --sync --json`
-> report exactly one `Sync` error for that repo; running `/log-work` clears it; the `pre-commit` hook
-> blocks a staged schema violation; `cargo test`, `cargo clippy -- -D warnings` pass.
-
-### Key files to read before generating tasks
-
-- `planning/hq-restructure/master-plan.md` Block N spec (in the brain repo, `~/Dev/agentic-portfolio/`)
-- `src/brain/okf.rs` — `OkfFrontmatter` struct (add `synced_from` here)
-- `src/brain/config.rs` — `BrainConfig`/`RepoEntry` (has the `[[repos]]` fields needed for `--sync`)
-- `src/brain/mod.rs` — `BrainValidator::run()` (wire `--sync` mode here)
-
-### Note on parallel track
-
-mev Phase 3 Block J (graph integrity — `related:` edges) is independent and can run after Block N or
-interleaved. The HQ Restructure Block N is the gating priority — Block J doesn't block anything in the
-HQ-R program.
-
----
+None — clear to proceed. The `check_sync` pattern in `src/brain/sync.rs` is the template for 2.J.
 
 ## Context the next agent needs
 
-- **GitHub remote:** `origin → git@github.com:bredmond1019/mev.git` (private). `main` is tracking.
-- **Test count:** ~174+ tests, all green. Harness: `cargo fmt --check && cargo clippy -- -D warnings && cargo test && cargo build --release`.
-- **`mev validate-brain ~/Dev/agentic-portfolio`** exits 0 (0 errors, 3 warnings). The 3 warnings are
-  honest `keywords` count violations in the Brain corpus — not validator bugs. Leave them.
-- **D3 is superseded** — `planning/decisions/D3-corpus-config-system.md` status updated. The
-  `.mev.toml` per-corpus proposal was retired; `brain.toml` is the config source.
-- **Phase 2 is complete** — all blocks (F, G, H, I, 2.M) done. Phase 3 = graph/link/structural integrity.
-- **learn-ai** also received the propagated `update-docs.md` + `document.md` updates this session
-  (in its own `.claude/commands/`) — those are committed in that repo separately.
-- Block 2.J will wire into `BrainValidator::run()` — see `src/brain/mod.rs:crawl` + `validate_item`
-  pattern; graph check is likely a post-item-validation pass over the full collected `MdFile` list.
-
----
+- `src/brain/okf.rs` — `OkfFrontmatter` has `related: Option<Vec<String>>` — raw input for 2.J edge check.
+- `src/brain/crawl.rs` — `crawl_brain(root)` returns `Vec<MdFile>` — use to build the `doc_id → path` index.
+- `src/brain/sync.rs` — cleanest example of the per-entry diagnostic pattern; 2.J follows the same structure.
+- 196 tests pass on `main` (`8b68097`). Harness: `cargo fmt --check && cargo clippy -- -D warnings && cargo test && cargo build --release`.
+- **Brain-side hooks (Block N acceptance)** — the `pre-commit` + `pre-push` hooks in the brain repo (`~/Dev/agentic-portfolio/hooks/`) were part of the original Block N HQ-Restructure spec but were not implemented this session (mev side is complete). These are separate brain-repo commits; check HQ master plan if the next session covers them.
 
 ## First command after `/prime`
 
-**Priority: Block N (HQ Restructure — Opus session)**
-
-```
-/generate-tasks block-n-sync-watermark
-```
-
-Then `sdlc-flow` or `sdlc-run` on the generated tasks. The brain-side hook edits (pre-commit / pre-push)
-commit separately in the brain repo.
-
-**After Block N:** `/generate-tasks 2.J-graph-integrity` for the mev-local graph integrity work.
+`/generate-tasks 2.J-graph-integrity`
