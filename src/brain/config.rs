@@ -130,17 +130,18 @@ pub fn load_brain_config(path: &Path) -> Result<BrainConfig, ConfigError> {
     })
 }
 
-/// Walk up from `start`, looking for `brain.toml`, and return the parsed config.
+/// Walk up from `start`, looking for `brain.toml`, and return its containing directory.
 ///
 /// Starts at `start` itself, then walks to each parent in turn until a `brain.toml`
 /// is found or the filesystem root is reached (in which case [`ConfigError::NotFound`]
 /// is returned).
-pub fn find_brain_config(start: &Path) -> Result<BrainConfig, ConfigError> {
-    let mut current = start.to_path_buf();
+pub fn find_brain_root(start: &Path) -> Result<PathBuf, ConfigError> {
+    let mut current = start
+        .canonicalize()
+        .unwrap_or_else(|_| start.to_path_buf());
     loop {
-        let candidate = current.join("brain.toml");
-        if candidate.exists() {
-            return load_brain_config(&candidate);
+        if current.join("brain.toml").exists() {
+            return Ok(current);
         }
         match current.parent() {
             Some(parent) => current = parent.to_path_buf(),
@@ -151,6 +152,16 @@ pub fn find_brain_config(start: &Path) -> Result<BrainConfig, ConfigError> {
             }
         }
     }
+}
+
+/// Walk up from `start`, looking for `brain.toml`, and return the parsed config.
+///
+/// Starts at `start` itself, then walks to each parent in turn until a `brain.toml`
+/// is found or the filesystem root is reached (in which case [`ConfigError::NotFound`]
+/// is returned).
+pub fn find_brain_config(start: &Path) -> Result<BrainConfig, ConfigError> {
+    let root = find_brain_root(start)?;
+    load_brain_config(&root.join("brain.toml"))
 }
 
 // ---------------------------------------------------------------------------
