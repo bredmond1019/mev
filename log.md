@@ -17,6 +17,23 @@ timestamp: "2026-06-28T19:38:22-0300"
 
 ---
 
+## 2026-06-28 — Block 2.J-corpus-crawl complete (PASS): multi-root corpus crawl + scope registry
+
+Implemented the full registry-driven corpus crawl foundation (all 5 tasks, PASS). Task 1 added `src/brain/scope.rs` with `scope_units`, `scope_for`, and `owning_unit` (longest-prefix registry match, root-unit fallback, 9 unit tests). Task 2 added owned serializable `Corpus`/`CorpusEntry` types and `crawl_corpus()` to `src/brain/crawl.rs`, with `CLAUDE.md` removed from the file blocklist so root instruction files join the corpus. Task 3 wired `crawl_corpus` into `BrainValidator::crawl` and added the OKF exemption for root files (`README.md`/`CLAUDE.md`) — they are valid corpus leaves without frontmatter; existing integration tests updated to place files under `planning/` as corpus members. Task 4 delivered a 13-test integration suite (`tests/brain_corpus.rs`) over a 3-unit fixture tree (brain/core/mev), covering all positive corpus members, all spec-listed exclusions, scope correctness, and `serde_json` round-trip. Task 5 confirmed all four harness gates green: `fmt`, `clippy -D warnings`, 159 tests across 10 suites, release build. The `Corpus` struct is `Serialize`-able (D4 forward-compat) — Phase 3B Block Q can emit it as the embedder manifest with no re-crawl. Next: `2.J-graph-integrity` — global `scope:doc_id` node index, extensible edge model, `related:` resolution, leaf lint via `--graph`.
+
+```
+fa68e1e chore: flow state — docs
+73d2580 docs: update docs for 2.J-corpus-crawl
+d57545e chore: flow state — task 5 passed
+9d3e538 feat: validate 2.J-corpus-crawl-task5 — all harness gates green
+e220baf chore: flow state — task 4 passed
+b4d8ccc feat: implement 2.J-corpus-crawl-task4
+d425e38 chore: flow state — task 3 passed
+6d1e166 feat: wire crawl_corpus into BrainValidator + exempt root files from OKF
+```
+
+---
+
 ## 2026-06-28 — Destination architecture settled (D4): mev as corpus engine; graph as emitted product
 
 ### Reviewed knowledge_graph service; settled corpus-engine + knowledge-graph architecture (D4)
