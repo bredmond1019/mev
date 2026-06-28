@@ -8,6 +8,7 @@
 pub mod brain;
 mod learn_ai;
 mod shared;
+pub mod theme;
 mod validator;
 pub use brain::BrainValidator;
 pub use brain::crawl::{MdFile, crawl_brain};
