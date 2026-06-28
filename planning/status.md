@@ -9,15 +9,15 @@ status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
 timestamp: "2026-06-28"
-now: "Block 2.J — graph integrity (next block up)"
-next: "Block 2.J cross-file graph integrity; then Block D cross-file integrity, Block E pt-BR parity & reporter polish"
+now: "Block J reshaped into a global knowledge graph — specs ready (2.J-corpus-crawl → 2.J-graph-integrity); review knowledge_graph service first"
+next: "Review workflow-engine-rs/services/knowledge_graph; then /sdlc-flow 2.J-corpus-crawl, then 2.J-graph-integrity"
 blocked: []
 ---
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-28 — Block N (sync-watermark) complete; code-review fix (E_SYNC_WATERMARK_MALFORMED); 196 tests pass
-**Current focus:** 2.J-graph-integrity (next block)
+**Last updated:** 2026-06-28 — Block J reshaped into a global scope:doc_id knowledge graph; split into 2.J-corpus-crawl (foundation) + 2.J-graph-integrity; specs ready, handoff written
+**Current focus:** Review knowledge_graph service, then 2.J-corpus-crawl
 
 ---
 
@@ -26,10 +26,10 @@ blocked: []
 > Working board — keep all five queues live. **Never end a meaningful session with every queue
 > empty.** The headlines of **now / next / blocked** mirror the frontmatter scalars above.
 
-- **now** — Block 2.J — cross-file graph integrity (next block up)
-- **next** — Block 2.J graph integrity; then Block D cross-file integrity, Block E pt-BR parity & reporter polish (Block N sync-watermark done)
+- **now** — Block J reshaped into a global `scope:doc_id` knowledge graph; specs ready (2.J-corpus-crawl → 2.J-graph-integrity)
+- **next** — Review `workflow-engine-rs/services/knowledge_graph` (how it fits); then `/sdlc-flow 2.J-corpus-crawl`, then `2.J-graph-integrity`
 - **blocked** — nothing blocked
-- **improve** — no eval/workflow gaps logged yet; backlog empty
+- **improve** — align mev corpus crawl as single source of truth for `index_brain.py` (orchestrator); register tier units + bare-bloat `skip_dirs` in `brain.toml` (brain repo)
 - **recurring** — none yet
 
 ## Metrics
@@ -76,6 +76,14 @@ blocked: []
 | Block I | `validate-brain` subcommand + `--json` | Done | `mev validate-brain <root>` (default `..`), global `--json` flag, `JsonReport` envelope, `Serialize` on `Severity`/`Diagnostic`, `validate_brain()` public fn; 5 integration tests; 145 total tests pass |
 | Block 2.M | brain.toml config reader (HQ-R) | Done | `BrainConfig` (toml crate), `load_brain_config`/`find_brain_config` walk-up; `crawl_brain` skip_dirs from config; `is_valid_layer`/`is_valid_status`/`is_valid_project` config-driven; `validate_brain` resolves config via walk-up; path-style skip_dirs matching (`planning/archive`); D3 superseded; 10 config + 5 validate integration tests; all harness gates green |
 | Block N | `synced_from` watermark check (HQ-R) | Done | `mev validate-brain --sync`; `synced_from` on `OkfFrontmatter`; `parse_watermark` (strict RFC3339); `check_sync` emitting `E_SYNC_FILE_MISSING`/`E_SYNC_WATERMARK_MISSING`/`E_SYNC_WATERMARK_MALFORMED`/`E_SYNC_DRIFT`; `validate_brain_sync()` public API; `--sync` CLI flag; 4 integration tests (in-sync, drift, re-align, JSON); 196 total tests pass |
+
+### Phase 3 — Brain integrity: graph + sync
+| Block | What | Status | Notes |
+|---|---|---|---|
+| Block J-crawl | Multi-root corpus crawl + scope registry | Not started | Spec ready (`planning/2.J-corpus-crawl/`). Registry-driven `scope_for`; `crawl_corpus` over all registered units (planning/+docs/+root, minus bloat/ephemeral); OKF-exemption for root files. Foundation — runs first. |
+| Block J | Graph integrity (global `scope:doc_id`) | Not started | Spec ready (`planning/2.J-graph-integrity/`). Global node index + extensible edge model + uniqueness + `related:` resolution (bare=same scope, qualified=cross) + leaf lint; `--graph`. Depends on J-crawl. See `namespacing-and-corpus-decision.md`. |
+| Block K | Link integrity (markdown/`file://`/`[[wiki]]`) | Not started | Per master-plan |
+| Block L | Structural coverage (`index.md` ↔ dir, D17) | Not started | Per master-plan |
 
 ---
 
