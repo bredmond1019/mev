@@ -1165,6 +1165,18 @@ the surface this run changed. All Bash from the worktree root.
 2. For each changed source file, find docs/*.md that reference it (component/function/route/file names):
    Run: cd ${worktreePath} && grep -rl "<name>" docs/ 2>/dev/null
 
+2b. CHECK — does docs/ have any project-facing docs?
+   Run: cd ${worktreePath} && ls docs/ 2>/dev/null | grep -v '^workflows$' | grep '\\.md$' | wc -l
+   If the count is 0 (no project docs exist yet), switch to BOOTSTRAP MODE:
+   - Read every source file from step 1's git diff (full read, not just stat).
+   - Create appropriate reference docs from scratch based on what the source actually contains.
+     At minimum: docs/architecture.md (module map, key types, data flow). Add docs/cli.md for
+     CLIs, docs/api-reference.md for servers/APIs, docs/pages.md for web apps — as applicable.
+   - Create docs/index.md if it does not exist; add a row per created doc.
+   - Every new file must include OKF frontmatter (required: type, title, description).
+   - Skip step 3 and go directly to step 4 (NEEDS_REVIEW flag check) then step 5 (commit).
+   If count > 0: proceed with surgical patch in step 3.
+
 3. Surgically patch ONLY the affected sections (Edit tool — never rewrite whole files). Update changed
    signatures/prop tables/route lists/descriptions; add docs for new public APIs. Never delete documented
    items that still exist. Never edit CLAUDE.md. No emoji.

@@ -1562,6 +1562,18 @@ Instructions:
 2. Read the implement report: ${implementReport}
    Find the "## Files Created or Modified" table. This scopes which source files changed.
 
+2b. CHECK — does docs/ have any project-facing docs?
+   Run: ls docs/ 2>/dev/null | grep -v '^workflows$' | grep '\\.md$' | wc -l
+   If the count is 0 (no project docs exist yet), switch to BOOTSTRAP MODE:
+   - Read every source file listed in step 2's table.
+   - Create appropriate reference docs from scratch based on what the source actually contains.
+     At minimum: docs/architecture.md (module map, key types, data flow). Add docs/cli.md for
+     CLIs, docs/api-reference.md for servers/APIs, docs/pages.md for web apps — as applicable.
+   - Create docs/index.md if it does not exist; add a row per created doc.
+   - Every new file must include OKF frontmatter (required: type, title, description).
+   - Skip steps 3–5 and go directly to step 6 (report + commit) after creating docs.
+   If count > 0: proceed with surgical patch in steps 3–5.
+
 3. For each source file in that table, identify which docs/*.md files reference it.
    Search for the filename and the key component/function/route names that changed.
    Use Bash: grep -rl "ComponentName\\|function_name\\|filename" docs/ 2>/dev/null
