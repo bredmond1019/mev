@@ -123,7 +123,7 @@ pub fn check_sync(root: &Path, config: &BrainConfig) -> Vec<Diagnostic> {
             Err(e) => {
                 diags.push(Diagnostic::error(
                     source_path.clone(),
-                    "E_SYNC_FILE_MISSING",
+                    "E_SYNC_WATERMARK_MALFORMED",
                     format!("repo '{}': could not read status_file: {e}", repo.slug),
                 ));
                 continue;
@@ -136,7 +136,7 @@ pub fn check_sync(root: &Path, config: &BrainConfig) -> Vec<Diagnostic> {
             Err(e) => {
                 diags.push(Diagnostic::error(
                     cache_path.clone(),
-                    "E_SYNC_FILE_MISSING",
+                    "E_SYNC_WATERMARK_MALFORMED",
                     format!("repo '{}': could not read cache_doc: {e}", repo.slug),
                 ));
                 continue;
