@@ -2,7 +2,7 @@
   "spec_slug": "block-n-sync-watermark",
   "branch": "block-n-sync-watermark-flow-3",
   "started_at": "2026-06-28T00:20:17Z",
-  "updated_at": "2026-06-28T00:40:46Z",
+  "updated_at": "2026-06-28T00:42:38Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3",
   "status": "done",
   "current_task": 5,
@@ -104,8 +104,8 @@
   },
   "bail_reason": null,
   "pr": {
-    "url": null,
-    "number": null
+    "url": "https://github.com/bredmond1019/mev/pull/2",
+    "number": 2
   },
   "tokens": {
     "stages": [
@@ -268,13 +268,21 @@
         "filesReadKb": null,
         "inTokEst": 829,
         "outTok": 4403
+      },
+      {
+        "label": "pr-create",
+        "model": "sonnet",
+        "promptTokEst": 758,
+        "filesReadKb": null,
+        "inTokEst": 758,
+        "outTok": 1798
       }
     ],
     "total": {
-      "promptTokEst": 12079,
+      "promptTokEst": 12837,
       "filesReadKb": 0,
-      "inTokEst": 12079,
-      "outTok": 67365
+      "inTokEst": 12837,
+      "outTok": 69163
     }
   }
 }

@@ -29,3 +29,6 @@ Patched: /Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-waterm
 
 ## Wrap-up — PASS
 Next: Block 2.J — cross-file graph integrity
+
+## PR
+https://github.com/bredmond1019/mev/pull/2
