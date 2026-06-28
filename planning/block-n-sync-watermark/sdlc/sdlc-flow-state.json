@@ -2,10 +2,10 @@
   "spec_slug": "block-n-sync-watermark",
   "branch": "block-n-sync-watermark-flow-3",
   "started_at": "2026-06-28T00:20:17Z",
-  "updated_at": "2026-06-28T00:20:17Z",
+  "updated_at": "2026-06-28T00:23:39Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3",
   "status": "running",
-  "current_task": 1,
+  "current_task": 2,
   "tasks": {
     "1": {
       "status": "passed",
@@ -22,6 +22,23 @@
         "Cargo.lock",
         "src/brain/mod.rs",
         "src/brain/okf.rs",
+        "src/brain/sync.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Implement check_sync logic in src/brain/sync.rs: WatermarkFrontmatter struct, read_watermark file reader, pub fn check_sync emitting E_SYNC_FILE_MISSING / E_SYNC_WATERMARK_MISSING / E_SYNC_WATERMARK_MALFORMED / E_SYNC_DRIFT diagnostics per [[repos]] entry, with 8 unit tests covering all locator codes.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "read_watermark uses extract_frontmatter (existing shared helper) + serde_yaml to avoid duplicating YAML parsing logic",
+        "WatermarkFrontmatter uses #[serde(default)] so missing fields deserialize to None rather than erroring, matching the spec's 'extras tolerated' requirement",
+        "check_sync continues to next repo on first error per repo rather than accumulating multiple errors for the same repo — consistent with how OKF validation short-circuits on read failure"
+      ],
+      "files_changed": [
         "src/brain/sync.rs"
       ],
       "commit": "",
@@ -83,13 +100,37 @@
         "filesReadKb": null,
         "inTokEst": 580,
         "outTok": 1446
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 259,
+        "filesReadKb": null,
+        "inTokEst": 259,
+        "outTok": 910
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 898,
+        "filesReadKb": null,
+        "inTokEst": 898,
+        "outTok": 9628
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 580,
+        "filesReadKb": null,
+        "inTokEst": 580,
+        "outTok": 2125
       }
     ],
     "total": {
-      "promptTokEst": 2743,
+      "promptTokEst": 4480,
       "filesReadKb": 0,
-      "inTokEst": 2743,
-      "outTok": 15624
+      "inTokEst": 4480,
+      "outTok": 28287
     }
   }
 }
