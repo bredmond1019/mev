@@ -128,7 +128,7 @@ both OKF validation and the graph check consume.
   negative case; assert `CLAUDE.md`/`README.md` are included.
 - Files: `tests/brain_corpus.rs`.
 
-### 5. Validate
+### 5. [x] Validate
 - Run the Validation Commands listed below and confirm all pass.
 
 ## Acceptance Criteria
