@@ -2,10 +2,10 @@
   "spec_slug": "2.J-corpus-crawl",
   "branch": "2.J-corpus-crawl-flow",
   "started_at": "2026-06-28T23:17:04Z",
-  "updated_at": "2026-06-28T23:17:04Z",
+  "updated_at": "2026-06-28T23:23:47Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-corpus-crawl-flow",
   "status": "running",
-  "current_task": 1,
+  "current_task": 2,
   "tasks": {
     "1": {
       "status": "passed",
@@ -23,6 +23,23 @@
         "src/brain/mod.rs",
         "src/brain/config.rs",
         "tests/brain_config.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Add owned serializable Corpus/CorpusEntry types and crawl_corpus() to src/brain/crawl.rs; remove CLAUDE.md from is_blocklisted_file so it joins the corpus as a root leaf",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Named the brain corpus struct Corpus (in brain::crawl module) rather than BrainCorpus — no lib.rs re-export added, so no collision with the existing learn_ai::crawl::Corpus export",
+        "rel_to_unit_root returns Option<&Path> (None on prefix mismatch) rather than panicking — unexpected mismatches surface as a diagnostic and are skipped",
+        "Kept crawl_brain unchanged (still uses nested-git pruning and is_blocklisted_file) since it is still called by BrainValidator::crawl and has existing integration tests that rely on its current semantics"
+      ],
+      "files_changed": [
+        "src/brain/crawl.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -83,13 +100,37 @@
         "filesReadKb": null,
         "inTokEst": 564,
         "outTok": 1734
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 251,
+        "filesReadKb": null,
+        "inTokEst": 251,
+        "outTok": 1086
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 873,
+        "filesReadKb": null,
+        "inTokEst": 873,
+        "outTok": 17257
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 564,
+        "filesReadKb": null,
+        "inTokEst": 564,
+        "outTok": 2181
       }
     ],
     "total": {
-      "promptTokEst": 2675,
+      "promptTokEst": 4363,
       "filesReadKb": 0,
-      "inTokEst": 2675,
-      "outTok": 13852
+      "inTokEst": 4363,
+      "outTok": 34376
     }
   }
 }
