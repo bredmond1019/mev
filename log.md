@@ -17,6 +17,36 @@ timestamp: "2026-06-28"
 
 ---
 
+## 2026-06-28 — Block J reshaped into a global knowledge graph; split into corpus-crawl + graph specs
+
+Design session with Brandon that substantially reshaped Phase 3 Block J. Confirmed Block N
+(`--sync` watermark) was already done/merged (PR #2); cleaned up a stale handoff and a redundant
+regenerated spec. Then pressure-tested the `doc_id` concept: separated **embedding** (keys on
+`file_path`, needs no `doc_id`) from the **`related:` graph** (the only thing `doc_id` is for), and
+settled on a **global cross-repo knowledge graph** built to scale and to be reusable for client
+knowledge bases. Decisions: canonical node id = **`scope:doc_id`** with **registry-driven stable
+slugs** from `brain.toml` (never inferred from tier/path); **mev becomes a multi-root validator**;
+**extensible edge model** (`Edge { from, to_ref, kind }`, `related` first, typed edges later);
+**corpus = planning/ + docs/ + root README/CLAUDE** across all registered repos minus bloat/ephemeral;
+**root-file OKF frontmatter is optional** (embed-as-leaf, promote-by-`doc_id`); **mev owns the single
+corpus definition** the embedder should consume.
+
+Split Block J into two specs (committed): `planning/2.J-corpus-crawl/` (foundation: scope registry +
+`scope_for` + multi-root `crawl_corpus` + root-file OKF exemption) → `planning/2.J-graph-integrity/`
+(global `scope:doc_id` node index + edge integrity + leaf lint via `--graph`). Appended the 2026-06-28
+refinements to `namespacing-and-corpus-decision.md`; updated `master-plan.md` (inserted Block J-crawl,
+reshaped Block J) and `index.md`. Wrote `planning/handoff.md` flagging the **priority review of
+`workflow-engine-rs/services/knowledge_graph/`** (existing Dgraph-backed graph service) before
+building — to settle division of labor (mev validates; that service stores/queries) and a shared
+node-id/edge contract. Removed the stale `/sdlc-flow` worktree (init commit only; nothing lost). No
+production code changed this session — planning only.
+
+```
+(planning docs only — specs, decision doc, master-plan, status, log, handoff)
+```
+
+---
+
 ## 2026-06-28 — Block N (sync-watermark) shipped via PR #2; code-review fix landed
 
 Block N (sync-watermark) shipped via PR #2. Code-review caught E_SYNC_FILE_MISSING misclassification for read/parse errors on existing files — fixed to E_SYNC_WATERMARK_MALFORMED at src/brain/sync.rs:126,139. All 196 tests pass. Worktree cleaned, rebased main pushed. Next: Block 2.J cross-file graph integrity.
