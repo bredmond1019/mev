@@ -120,11 +120,14 @@ client knowledge bases**. These refine (and in two places supersede) the rules a
    represents an edge generically (`from-node`, `to-ref`, `kind`) so typed edges
    (`supersedes`, `depends-on`, `parent`, …) drop in as a later block with no refactor.
 
-4. **Root instruction files require OKF frontmatter (supersedes "CLAUDE.md is a leaf").**
-   `CLAUDE.md` / `README.md` are embedded **and** carry OKF frontmatter, so they validate as
-   full nodes. mev stops file-blocklisting `CLAUDE.md`. `handoff.md` and `_`-prefixed files
-   stay ephemeral/excluded. *Consequence:* `validate-brain` reports errors until frontmatter
-   is backfilled onto every repo's `CLAUDE.md`/`README.md` (companion content work).
+4. **Root instruction files are embedded; OKF frontmatter is *optional* on them.**
+   `CLAUDE.md` / `README.md` are always in the corpus (mev stops file-blocklisting `CLAUDE.md`).
+   Frontmatter is **not** required: a root file *without* frontmatter is a searchable **leaf**;
+   a root file *with* a `doc_id` is promoted to a full **node** (addressable `related:` target).
+   This is per-file and reversible — no backfill required, and it matches HQ CLAUDE.md Standing
+   Rule 6, which already exempts root `README`/`CLAUDE` from the OKF requirement. `handoff.md`
+   and `_`-prefixed files stay ephemeral/excluded. *(The earlier "require OKF on root files"
+   stance is withdrawn in favour of optional, 2026-06-28.)*
 
 5. **Single corpus definition.** mev owns the canonical corpus crawl (the file-list); the
    embedder (`index_brain.py`) should *consume* that list rather than re-implement the rules,

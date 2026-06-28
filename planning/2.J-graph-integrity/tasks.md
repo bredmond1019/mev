@@ -46,8 +46,9 @@ duplicate canonical id and every `related:` edge that fails to resolve, surfaced
 1. **Canonical node id = `scope:doc_id`**, scope from `scope_for` (crawl block), `doc_id` the authored,
    location-independent frontmatter field. A file **with** an authored `doc_id` is a **node** (globally
    unique canonical id; legal `related:` target); a file **without** one is a **leaf** (tracked by
-   `scope:stem` for the leaf lint; never a node). Root files (`CLAUDE.md`/`README.md`) now carry OKF
-   frontmatter, so they are ordinary nodes here.
+   `scope:stem` for the leaf lint; never a node). Root files (`CLAUDE.md`/`README.md`) follow the same
+   rule: frontmatter is optional, so one without a `doc_id` is a leaf and one with a `doc_id` is a node —
+   no special-casing needed in this block.
 2. **One global graph.** Uniqueness is checked across the whole corpus; edges resolve across scopes.
 3. **Edge model is extensible.** Represent edges as `{ from: canonical_id, to_ref: String, kind }` with
    a `kind` enum that today has a single `Related` variant. Block J extracts edges from `related:` only;

@@ -52,11 +52,14 @@ both OKF validation and the graph check consume.
    **bare components at any depth** — `target`, `node_modules`, `.git`, `.claude`, `.agent(s)`,
    `.repo-backups`, `archive`, `archived`, `trees`, `sdlc`, `venv`, `.venv`); exclude ephemeral files
    `handoff.md` and any `_`-prefixed `.md`.
-4. **Root files are included** — remove `CLAUDE.md` from the file blocklist (it now carries OKF
-   frontmatter and is a corpus node). `handoff.md` stays blocklisted.
-5. **OKF backfill is companion content work, not this block.** Once root files are crawled,
-   `validate-brain` will flag any `CLAUDE.md`/`README.md` lacking frontmatter — expected; the backfill
-   lands per-repo separately.
+4. **Root files are included; OKF frontmatter on them is *optional*.** Remove `CLAUDE.md` from the file
+   blocklist so it joins the corpus. A root file (`CLAUDE.md`/`README.md`) **without** frontmatter is a
+   valid **leaf** — it must **not** raise the OKF "missing frontmatter" error; one **with** a `doc_id`
+   is treated as a normal node. `handoff.md` stays blocklisted. (No frontmatter backfill is required;
+   this matches HQ CLAUDE.md Standing Rule 6, which exempts root `README`/`CLAUDE`.)
+5. **OKF-exemption mechanism.** The OKF validator must skip the "missing/!frontmatter" error for
+   root instruction files (`README.md`, `CLAUDE.md`) — they are corpus members but not required to be
+   OKF docs. All other corpus files keep the existing required-frontmatter behaviour.
 
 ## Step-by-Step Tasks
 
@@ -85,11 +88,16 @@ both OKF validation and the graph check consume.
   `src/x.md` / stray root `.md` / unregistered-dir file → out).
 - Files: `src/brain/crawl.rs`.
 
-### 3. Wire the corpus crawl into `BrainValidator`
+### 3. Wire the corpus crawl into `BrainValidator` + exempt root files from OKF
 - In `src/brain/mod.rs`, change `BrainValidator::crawl` to call `crawl_corpus(root, &self.config)`.
   Confirm `validate_brain` / `validate_brain_sync` (in `src/lib.rs`) still compile and behave; update
   any doc comments naming the old single-root walk.
-- Files: `src/brain/mod.rs`, `src/lib.rs`.
+- **OKF exemption for root files:** in the OKF validation path (`src/brain/okf.rs::validate_md_file` or
+  the `validate_item` dispatch), when the file is a root instruction file (`README.md`/`CLAUDE.md`,
+  detected by leaf name) and has **no** frontmatter, return **no** diagnostic (it is a leaf, not a
+  required OKF doc) instead of the usual "missing frontmatter" error. A root file that *does* carry
+  frontmatter is validated normally. Unit tests cover both branches.
+- Files: `src/brain/mod.rs`, `src/lib.rs`, `src/brain/okf.rs`.
 
 ### 4. Integration tests — multi-root corpus over a fixture tree
 - Add `tests/brain_corpus.rs` building a temp HQ-root fixture: a `brain.toml` registering `brain`
@@ -114,6 +122,8 @@ both OKF validation and the graph check consume.
   ephemeral files (`handoff.md`, `_`-prefixed), unit `src/*.md`, stray root `.md`, and files under
   unregistered nested dirs are all excluded.
 - `CLAUDE.md` is included in the corpus (no longer file-blocklisted); `handoff.md` remains excluded.
+- A root `README.md`/`CLAUDE.md` **without** frontmatter produces **no** OKF "missing frontmatter"
+  error (treated as a leaf); one **with** frontmatter is validated normally.
 - `BrainValidator`/`validate-brain` use the corpus crawl; existing brain + learn-ai tests stay green.
 - All four harness gates pass (`fmt`, `clippy -D warnings`, `test`, `build`).
 
