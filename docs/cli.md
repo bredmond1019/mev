@@ -55,33 +55,57 @@ mev --json validate
 
 ---
 
-### `validate-brain [path]`
+### `validate-brain [--sync] [path]`
 
-Validate the Bastion Brain repo for OKF frontmatter compliance.
+Validate the Bastion Brain repo for OKF frontmatter compliance, and optionally check cross-repo sync watermark integrity.
 
 ```bash
-mev validate-brain [path]
+mev validate-brain [--sync] [path]
 ```
 
-| Argument | Default | Description |
+| Argument / Flag | Default | Description |
 |---|---|---|
 | `path` | `..` | Path to the company-brain repo root |
+| `--sync` | off | Also run the cross-repo sync watermark check (see below) |
 
 Resolves `brain.toml` by walking up from `path`. If no `brain.toml` is found, a fatal `Error`-severity diagnostic with locator `E_CONFIG_NOT_FOUND` is emitted and the process exits 1.
 
 See [`brain.toml` config](brain-toml.md) for the configuration format and [OKF schema](okf-schema.md) for what is validated.
 
+#### `--sync` — cross-repo watermark check
+
+When `--sync` is passed, `mev` runs the full OKF schema pass first, then appends a second pass that compares watermarks for every `[[repos]]` entry in `brain.toml`:
+
+- Reads `timestamp` from `<repo_path>/<status_file>` (the sub-repo's status file).
+- Reads `synced_from` from `<cache_doc>` (the brain cache doc for that repo).
+- Both values must be present and valid RFC3339 datetimes; they must be identical.
+
+A mismatch or missing watermark emits an `Error`-severity diagnostic and causes exit 1.
+
+| Locator | Condition |
+|---|---|
+| `E_SYNC_FILE_MISSING` | `status_file` or `cache_doc` does not exist, or cannot be read |
+| `E_SYNC_WATERMARK_MISSING` | `timestamp` or `synced_from` field is absent from the frontmatter |
+| `E_SYNC_WATERMARK_MALFORMED` | A watermark is present but is not a valid RFC3339 datetime |
+| `E_SYNC_DRIFT` | Both watermarks parse successfully but their values differ |
+
 **Examples:**
 
 ```bash
-# Default: validates the sibling brain repo at ..
+# Default: validates OKF frontmatter in the sibling brain repo at ..
 mev validate-brain
 
-# Explicit path
-mev validate-brain ~/Dev/agentic-portfolio
+# OKF pass + sync watermark check
+mev validate-brain --sync
+
+# Explicit path with sync check
+mev validate-brain --sync ~/Dev/agentic-portfolio
 
 # Machine-readable output (consumed by the Brain RAG indexer)
 mev --json validate-brain ~/Dev/agentic-portfolio
+
+# Machine-readable output including sync diagnostics
+mev --json validate-brain --sync ~/Dev/agentic-portfolio
 ```
 
 ---
