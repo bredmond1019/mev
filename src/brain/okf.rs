@@ -46,6 +46,10 @@ pub struct OkfFrontmatter {
     pub keywords: Option<Vec<String>>,
     /// Tolerated but not validated.
     pub related: Option<Vec<String>>,
+    /// Cross-repo sync watermark: the `synced_from` date the brain cache was last synced from.
+    /// Tolerated by the OKF schema (presence-only, not format-checked here); consumed by the
+    /// `--sync` watermark check in `brain::sync`.
+    pub synced_from: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +431,18 @@ mod tests {
     fn good_okf_document_is_clean() {
         let diags = validate_yaml(good_okf_body(), "good");
         assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
+    }
+
+    #[test]
+    fn doc_with_synced_from_validates_clean() {
+        // A brain cache doc that carries `synced_from` must still pass OKF validation — the
+        // field is tolerated (presence-only) and not format-checked by the OKF schema.
+        let body = "---\ntype: ProjectContext\ntitle: Cache\ndescription: Brain cache doc.\nsynced_from: \"2026-06-27T12:00:00+00:00\"\n---\nbody\n";
+        let diags = validate_yaml(body, "synced-from");
+        assert!(
+            diags.is_empty(),
+            "doc with synced_from should validate clean, got: {diags:?}"
+        );
     }
 
     // --- Required fields ---
