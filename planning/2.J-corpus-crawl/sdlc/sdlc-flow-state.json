@@ -2,9 +2,9 @@
   "spec_slug": "2.J-corpus-crawl",
   "branch": "2.J-corpus-crawl-flow",
   "started_at": "2026-06-28T23:17:04Z",
-  "updated_at": "2026-06-28T23:40:49Z",
+  "updated_at": "2026-06-28T23:45:13Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-corpus-crawl-flow",
-  "status": "running",
+  "status": "docs",
   "current_task": 5,
   "tasks": {
     "1": {
@@ -97,12 +97,14 @@
     }
   },
   "review": {
-    "verdict": null,
+    "verdict": "PASS",
     "findings": [],
-    "attempts": 0
+    "attempts": 1
   },
   "docs": {
-    "changed": [],
+    "changed": [
+      "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-corpus-crawl-flow/docs/architecture.md"
+    ],
     "created": []
   },
   "bail_reason": null,
@@ -247,13 +249,29 @@
         "filesReadKb": null,
         "inTokEst": 564,
         "outTok": 2034
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 968,
+        "filesReadKb": null,
+        "inTokEst": 968,
+        "outTok": 3100
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 785,
+        "filesReadKb": null,
+        "inTokEst": 785,
+        "outTok": 4673
       }
     ],
     "total": {
-      "promptTokEst": 9427,
+      "promptTokEst": 11180,
       "filesReadKb": 0,
-      "inTokEst": 9427,
-      "outTok": 82371
+      "inTokEst": 11180,
+      "outTok": 90144
     }
   }
 }

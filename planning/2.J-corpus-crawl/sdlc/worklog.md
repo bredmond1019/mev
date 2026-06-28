@@ -23,3 +23,6 @@ Validated: gating checks (fast tripwire)
 ## Task 5 — PASSED (1 attempt)
 What: Task 5 (validate): all four harness gates pass — fmt, clippy -D warnings, 159 tests (unit + integration across 10 test suites), release build
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: /Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-corpus-crawl-flow/docs/architecture.md
