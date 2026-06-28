@@ -29,3 +29,6 @@ Patched: /Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-corpus-crawl-fl
 
 ## Wrap-up — PASS
 Next: 2.J-graph-integrity — global scope:doc_id node index + extensible edge model + related: resolution + leaf lint via --graph
+
+## PR
+https://github.com/bredmond1019/mev/pull/3
