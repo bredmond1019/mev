@@ -23,3 +23,6 @@ Validated: gating checks (fast tripwire)
 ## Task 5 — PASSED (1 attempt)
 What: Task 5 (Validate): all four harness gates pass — fmt, clippy -D warnings, cargo test (196 tests, 0 failures), cargo build --release
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: /Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3/docs/cli.md, /Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3/docs/okf-schema.md, /Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3/docs/brain-toml.md

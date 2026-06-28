@@ -2,9 +2,9 @@
   "spec_slug": "block-n-sync-watermark",
   "branch": "block-n-sync-watermark-flow-3",
   "started_at": "2026-06-28T00:20:17Z",
-  "updated_at": "2026-06-28T00:33:39Z",
+  "updated_at": "2026-06-28T00:38:08Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3",
-  "status": "running",
+  "status": "docs",
   "current_task": 5,
   "tasks": {
     "1": {
@@ -90,12 +90,16 @@
     }
   },
   "review": {
-    "verdict": null,
+    "verdict": "PASS",
     "findings": [],
-    "attempts": 0
+    "attempts": 1
   },
   "docs": {
-    "changed": [],
+    "changed": [
+      "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3/docs/cli.md",
+      "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3/docs/okf-schema.md",
+      "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3/docs/brain-toml.md"
+    ],
     "created": []
   },
   "bail_reason": null,
@@ -240,13 +244,29 @@
         "filesReadKb": null,
         "inTokEst": 580,
         "outTok": 1861
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 994,
+        "filesReadKb": null,
+        "inTokEst": 994,
+        "outTok": 2832
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 565,
+        "filesReadKb": null,
+        "inTokEst": 565,
+        "outTok": 6294
       }
     ],
     "total": {
-      "promptTokEst": 9691,
+      "promptTokEst": 11250,
       "filesReadKb": 0,
-      "inTokEst": 9691,
-      "outTok": 53836
+      "inTokEst": 11250,
+      "outTok": 62962
     }
   }
 }
