@@ -2,9 +2,9 @@
   "spec_slug": "2.J-corpus-crawl",
   "branch": "2.J-corpus-crawl-flow",
   "started_at": "2026-06-28T23:17:04Z",
-  "updated_at": "2026-06-28T23:45:13Z",
+  "updated_at": "2026-06-28T23:49:17Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-corpus-crawl-flow",
-  "status": "docs",
+  "status": "done",
   "current_task": 5,
   "tasks": {
     "1": {
@@ -265,13 +265,21 @@
         "filesReadKb": null,
         "inTokEst": 785,
         "outTok": 4673
+      },
+      {
+        "label": "wrap-up",
+        "model": "sonnet",
+        "promptTokEst": 797,
+        "filesReadKb": null,
+        "inTokEst": 797,
+        "outTok": 5254
       }
     ],
     "total": {
-      "promptTokEst": 11180,
+      "promptTokEst": 11977,
       "filesReadKb": 0,
-      "inTokEst": 11180,
-      "outTok": 90144
+      "inTokEst": 11977,
+      "outTok": 95398
     }
   }
 }
