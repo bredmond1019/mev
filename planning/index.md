@@ -57,7 +57,8 @@ at the top; only pipeline state lives under `sdlc/`.
 
 | Folder | What | Status |
 |---|---|---|
-| `2.M-brain-toml-reader/` | HQ-R Block M — mev reads `brain.toml` for vocab + crawl + project slugs | Not started |
+| `2.M-brain-toml-reader/` | HQ-R Block M — mev reads `brain.toml` for vocab + crawl + project slugs | Done |
+| `block-n-sync-watermark/` | HQ-R Block N (mev Phase 3 Block M) — `mev validate-brain --sync` watermark check | Not started |
 
 ## What's NOT Here
 
