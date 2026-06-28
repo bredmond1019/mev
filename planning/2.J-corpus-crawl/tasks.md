@@ -7,7 +7,7 @@ layer: [factory, brain]
 project: mev
 status: active
 keywords: [corpus crawl, multi-root, scope registry, brain.toml, skip_dirs, single source of truth]
-related: [master-plan, status, block-j-namespacing-decision, D29-mev-brain-validation-engine]
+related: [master-plan, status, block-j-namespacing-decision, D4-corpus-engine-and-knowledge-graph, D29-mev-brain-validation-engine]
 ---
 
 # Task Spec — Phase 3, Block J-crawl — Multi-root corpus crawl + scope registry
@@ -25,7 +25,12 @@ both OKF validation and the graph check consume.
 - **Authoritative design:** `planning/2.J-graph-integrity/namespacing-and-corpus-decision.md`, esp. the
   **"Corpus rules"** section and the **2026-06-28 Update** (registry-driven stable slugs; mev as
   multi-root validator; root files carry OKF frontmatter; single corpus definition). Read it first.
-- **Plan:** `planning/master-plan.md` → Phase 3, **Block J-crawl**. Governed by brain **D29**.
+- **Destination architecture:** `planning/decisions/D4-corpus-engine-and-knowledge-graph.md` — mev is the
+  **single corpus engine** (one crawl → diagnostics + **manifest** + graph). This block's crawl is the
+  shared walk that, in Phase 3B Block Q, also emits the manifest the embedder (`index_brain.py`) consumes
+  instead of re-crawling. Honor the forward-compat constraint below (decision 6).
+- **Plan:** `planning/master-plan.md` → Phase 3, **Block J-crawl** (+ Phase 3B Block Q manifest emit).
+  Governed by brain **D29**.
 - **Repo files that apply:**
   - `src/brain/config.rs` — `BrainConfig` / `RepoEntry` already carry `slug` + `repo_path`; this block
     treats each `[[repos]]` entry as a **scope unit** (the root entry `repo_path = "."` → slug `brain`).
@@ -60,6 +65,13 @@ both OKF validation and the graph check consume.
 5. **OKF-exemption mechanism.** The OKF validator must skip the "missing/!frontmatter" error for
    root instruction files (`README.md`, `CLAUDE.md`) — they are corpus members but not required to be
    OKF docs. All other corpus files keep the existing required-frontmatter behaviour.
+6. **D4 forward-compat — the crawl yields a clean owned corpus result.** `crawl_corpus` must return a
+   first-class, **owned** corpus structure (not state buried inside a validation pass), with each entry
+   carrying its computed `scope` (resolved once, here — the graph block and the manifest both need it).
+   Derive `serde::Serialize` on that structure so Phase 3B Block Q can emit it as the manifest with no
+   re-crawl, and so "what's validated == what's embedded" holds by construction. Keep diagnostics a
+   **separate** return value from the corpus data. Do *not* build the manifest emitter here — only ensure
+   the crawl produces the consumable, serializable result.
 
 ## Step-by-Step Tasks
 
@@ -75,22 +87,29 @@ both OKF validation and the graph check consume.
   stability — the same file keyed by slug regardless of a simulated tier rename in the fixture.
 - Files: `src/brain/scope.rs`, `src/brain/mod.rs`.
 
-### 2. Canonical corpus crawl
-- In `src/brain/crawl.rs`, add `crawl_corpus(root, config) -> (Vec<MdFile>, Vec<Diagnostic>)`:
-  walk `root` once, pruning `skip_dirs` (bare-component match at any depth — the existing
-  `is_blocklisted_name` name-mode already does this) so bloat subtrees never descend. For each `.md`
-  file, compute its owning unit (Task 1) and keep it only if its path relative to that unit is under
-  `planning/` or `docs/`, or equals `README.md`/`CLAUDE.md`; drop ephemeral (`handoff.md`,
-  `_`-prefixed). Remove `CLAUDE.md` from `is_blocklisted_file`; keep `handoff.md`.
+### 2. Canonical corpus crawl (owned, serializable result)
+- In `src/brain/crawl.rs`, define an owned corpus result per **decision 6**: a `CorpusEntry`
+  (`path`, `rel`, `stem`, `scope: String`) and a `Corpus { entries: Vec<CorpusEntry> }` (or equivalent),
+  both `#[derive(serde::Serialize)]` — this is the manifest seed Phase 3B Block Q will emit.
+- Add `crawl_corpus(root, config) -> (Corpus, Vec<Diagnostic>)`: walk `root` once, pruning `skip_dirs`
+  (bare-component match at any depth — the existing `is_blocklisted_name` name-mode already does this) so
+  bloat subtrees never descend. For each `.md` file, compute its owning unit + `scope` (Task 1) and keep
+  it only if its path relative to that unit is under `planning/` or `docs/`, or equals
+  `README.md`/`CLAUDE.md`; drop ephemeral (`handoff.md`, `_`-prefixed). Each kept file becomes a
+  `CorpusEntry` carrying its resolved `scope`. Diagnostics are returned **separately** from `Corpus`.
+  Remove `CLAUDE.md` from `is_blocklisted_file`; keep `handoff.md`.
 - Drop the nested-git pruning for the corpus crawl (unit-ownership now bounds membership); keep
   `crawl_brain` if still referenced, or migrate callers — no dead code, clippy clean.
 - Unit/inline tests for the membership helper (under-planning / under-docs / root-file → in;
-  `src/x.md` / stray root `.md` / unregistered-dir file → out).
+  `src/x.md` / stray root `.md` / unregistered-dir file → out) and for `scope` being populated per entry;
+  a `serde_json::to_string(&corpus)` round-trip proves the result is serializable.
 - Files: `src/brain/crawl.rs`.
 
 ### 3. Wire the corpus crawl into `BrainValidator` + exempt root files from OKF
-- In `src/brain/mod.rs`, change `BrainValidator::crawl` to call `crawl_corpus(root, &self.config)`.
-  Confirm `validate_brain` / `validate_brain_sync` (in `src/lib.rs`) still compile and behave; update
+- In `src/brain/mod.rs`, change `BrainValidator::crawl` to call `crawl_corpus(root, &self.config)` and
+  feed its `Corpus` entries into the validation pass (map each `CorpusEntry` to the trait's `Item`, or
+  validate entries directly — keep the owned `Corpus` intact so callers that want the manifest can reuse
+  it). Confirm `validate_brain` / `validate_brain_sync` (in `src/lib.rs`) still compile and behave; update
   any doc comments naming the old single-root walk.
 - **OKF exemption for root files:** in the OKF validation path (`src/brain/okf.rs::validate_md_file` or
   the `validate_item` dispatch), when the file is a root instruction file (`README.md`/`CLAUDE.md`,
@@ -124,6 +143,8 @@ both OKF validation and the graph check consume.
 - `CLAUDE.md` is included in the corpus (no longer file-blocklisted); `handoff.md` remains excluded.
 - A root `README.md`/`CLAUDE.md` **without** frontmatter produces **no** OKF "missing frontmatter"
   error (treated as a leaf); one **with** frontmatter is validated normally.
+- `crawl_corpus` returns an **owned, `Serialize`-able** `Corpus` (each entry carries its resolved
+  `scope`), separate from the diagnostics, and `serde_json` serializes it cleanly (D4 manifest seed).
 - `BrainValidator`/`validate-brain` use the corpus crawl; existing brain + learn-ai tests stay green.
 - All four harness gates pass (`fmt`, `clippy -D warnings`, `test`, `build`).
 
@@ -136,7 +157,8 @@ cargo build --release
 ```
 
 ## Notes
-<filled in as work happens>
+- Amended 2026-06-28 for **D4**: `crawl_corpus` returns an owned, `Serialize`-able `Corpus` (entries carry
+  `scope`), separate from diagnostics — the manifest seed Phase 3B Block Q emits for the embedder.
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the spec. -->

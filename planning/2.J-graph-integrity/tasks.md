@@ -7,7 +7,7 @@ layer: [factory, brain]
 project: mev
 status: active
 keywords: [graph integrity, knowledge graph, scope namespacing, doc_id, related edges, validate-brain]
-related: [master-plan, status, block-j-namespacing-decision, 2j-corpus-crawl-tasks, D29-mev-brain-validation-engine]
+related: [master-plan, status, block-j-namespacing-decision, 2j-corpus-crawl-tasks, D4-corpus-engine-and-knowledge-graph, D29-mev-brain-validation-engine]
 ---
 
 # Task Spec — Phase 3, Block J — Graph integrity (global `scope:doc_id` graph)
@@ -27,8 +27,12 @@ duplicate canonical id and every `related:` edge that fails to resolve, surfaced
 - **Depends on `2.J-corpus-crawl`** (run that block first): it provides `crawl_corpus`, the scope
   registry, and `scope_for(rel, config)` in `src/brain/scope.rs`. This block consumes them — do **not**
   re-derive scope here.
-- **Plan:** `planning/master-plan.md` → Phase 3, **Block J**. Governed by brain **D29** (mev is the
-  single validation engine; checks are read-only and `--json`-able).
+- **Destination architecture:** `planning/decisions/D4-corpus-engine-and-knowledge-graph.md` — the graph
+  is a **first-class emitted artifact**, not a build-and-discard structure. The same graph this block
+  *validates* is the graph Phase 3B Block R *emits* (loaded into Postgres beside the embeddings). Honor
+  the forward-compat constraint below (decision 6).
+- **Plan:** `planning/master-plan.md` → Phase 3, **Block J** (+ Phase 3B Block R graph emit). Governed by
+  brain **D29** (mev is the single validation engine; checks are read-only and `--json`-able).
 - **Repo files that apply:**
   - `src/brain/scope.rs` — `scope_for` (from the crawl block); reuse for canonical ids.
   - `src/brain/okf.rs` — `OkfFrontmatter` exposes `doc_id` + `related`; reuse it + `extract_frontmatter`.
@@ -57,6 +61,14 @@ duplicate canonical id and every `related:` edge that fails to resolve, surfaced
    schema pass **plus** the graph check over `crawl_corpus`.
 5. **`Graph` findings reuse the `Diagnostic` currency:** `E_GRAPH_*` errors and a `W_GRAPH_LEAF_TARGET`
    warning. No new `Severity` variant; `--json` needs no envelope change.
+6. **D4 forward-compat — graph construction is a reusable, serializable, emittable module.** Separate
+   **building** the graph from **checking** it: a `build_graph(corpus, config) -> Graph` produces an
+   owned `Graph { nodes, edges }`, and `check_graph` takes that built `Graph` and returns diagnostics.
+   `Graph`, the node struct, `Edge`, and `EdgeKind` all derive `serde::Serialize` so the *validated*
+   graph is byte-for-byte the *emittable* graph (Phase 3B Block R loads it into Postgres). The `kind`
+   discriminant is on `Edge` from day one so typed edges extend the same emitted schema with no reshape.
+   Do *not* build the emitter/persistence here — only ensure the in-memory graph is the serializable
+   artifact a later block emits.
 
 ### Locator codes (the `Graph` diagnostic vocabulary)
 
@@ -66,24 +78,29 @@ duplicate canonical id and every `related:` edge that fails to resolve, surfaced
 
 ## Step-by-Step Tasks
 
-### 1. Node/leaf index + extensible edge model
+### 1. Serializable graph model + `build_graph`
 - Create `src/brain/graph.rs` and register `pub mod graph;` in `src/brain/mod.rs`.
-- Define the edge representation: `enum EdgeKind { Related }` and `struct Edge { from: String, to_ref: String, kind: EdgeKind }` (room for future kinds).
+- Define the **serializable, emittable** graph model (all `#[derive(serde::Serialize)]`, per decision 6):
+  `enum EdgeKind { Related }`; `struct Edge { from: String, to_ref: String, kind: EdgeKind }`;
+  a node struct (e.g. `Node { id: canonical_id, scope, doc_id, rel }`); and
+  `struct Graph { nodes: Vec<Node>, edges: Vec<Edge> }` — the artifact Phase 3B Block R emits.
 - Add a per-file parse helper (reuse `extract_frontmatter` + `OkfFrontmatter`) returning
   `(scope, doc_id: Option<String>, related: Vec<String>)`; scope via `scope_for`.
-- Add `build_node_index(items, config)` → (a) `node_map: canonical_id -> Vec<rel>` over files with a
-  non-empty authored `doc_id` (canonical id = `format!("{scope}:{doc_id}")`); (b) `leaf_keys:
-  Set<scope:stem>` for files without a `doc_id`; (c) `edges: Vec<Edge>` collected from each node's
-  `related:` entries (`from` = the node's canonical id).
-- Unit tests: authored doc becomes `scope:doc_id`; a no-`doc_id` file is a leaf (not in `node_map`);
-  `related:` entries are captured as `Related` edges; same `doc_id` under two scopes yields two distinct
-  canonical ids.
+- Add `build_graph(corpus, config) -> Graph` (consuming the owned `Corpus`/entries from `2.J-corpus-crawl`)
+  that populates nodes (files with a non-empty authored `doc_id`; canonical id = `format!("{scope}:{doc_id}")`)
+  and edges (each node's `related:` entries → `Edge { from: canonical_id, to_ref, kind: Related }`). Also
+  expose the lookup structures the checks need — `node ids` and `leaf_keys: Set<scope:stem>` for
+  no-`doc_id` files — derived from / alongside the `Graph` (keep `build_graph` the single construction site).
+- Unit tests: authored doc becomes a `Node` with `scope:doc_id`; a no-`doc_id` file is a leaf (no `Node`);
+  `related:` entries become `Related` edges; same `doc_id` under two scopes → two distinct node ids;
+  `serde_json::to_string(&graph)` round-trips (the graph is emittable).
 - Files: `src/brain/graph.rs`, `src/brain/mod.rs`.
 
 ### 2. Graph checks — uniqueness + edge resolution + leaf lint
-- In `src/brain/graph.rs`, add `pub fn check_graph(items: &[MdFile], config: &BrainConfig) -> Vec<Diagnostic>`
-  built on the Task 1 index:
-  - **Uniqueness:** any canonical id with ≥2 nodes → one `E_GRAPH_DUPLICATE_DOC_ID` (lists the rel paths).
+- In `src/brain/graph.rs`, add `pub fn check_graph(graph: &Graph, leaf_keys: &Set, ...) -> Vec<Diagnostic>`
+  that **consumes the built `Graph`** from Task 1 (build once, check separately — do not re-walk the
+  corpus here):
+  - **Uniqueness:** any canonical id held by ≥2 nodes → one `E_GRAPH_DUPLICATE_DOC_ID` (lists the rel paths).
   - **Edge resolution** for each `Edge`: normalise `to_ref` — if it contains `:` it is qualified
     (`scope:doc_id`); otherwise bare, qualifying to `<from-scope>:<to_ref>`. Then:
     1. in `node_map` → resolved (no diagnostic);
@@ -98,9 +115,9 @@ duplicate canonical id and every `related:` edge that fails to resolve, surfaced
 ### 3. Public API + `--graph` CLI flag
 - In `src/lib.rs`, add `pub fn validate_brain_graph(root: &Path) -> anyhow::Result<Report>` beside
   `validate_brain_sync`: resolve config (reuse the `E_CONFIG_NOT_FOUND` fallback), crawl once via
-  `crawl_corpus`, run the per-item OKF schema validation, then append
-  `brain::graph::check_graph(&items, &config)` into the same `Report`. Re-export `check_graph` (or expose
-  only `validate_brain_graph`) consistent with the module's `pub use` style.
+  `crawl_corpus`, run the per-item OKF schema validation, then `let graph = brain::graph::build_graph(&corpus, &config)`
+  and append `brain::graph::check_graph(&graph, …)` into the same `Report`. Re-export `build_graph` +
+  `Graph` (so Phase 3B Block R can emit) and `check_graph`, consistent with the module's `pub use` style.
 - In `src/main.rs`, add a `--graph` flag to `ValidateBrain`; when set, dispatch to
   `mev::validate_brain_graph`; `--json` / human / exit-code branches unchanged (a graph error → exit 1;
   the leaf warning does not). Update the subcommand help text.
@@ -134,6 +151,9 @@ duplicate canonical id and every `related:` edge that fails to resolve, surfaced
   `doc_id` under different scopes is **not** flagged.
 - A `related:` entry pointing at a real file lacking a `doc_id` is flagged `W_GRAPH_LEAF_TARGET`.
 - The edge model carries a `kind` so typed edges extend it without reshaping `Edge`/`check_graph`.
+- Graph construction is a reusable module: `build_graph` returns an owned `Graph { nodes, edges }`;
+  `Graph`/`Node`/`Edge`/`EdgeKind` derive `Serialize` and `serde_json` round-trips (D4 emittable artifact);
+  `check_graph` consumes the built `Graph` rather than re-walking the corpus.
 - All four harness gates pass; existing tests stay green.
 
 ## Validation Commands
@@ -147,6 +167,9 @@ cargo build --release
 ## Notes
 - Reworked 2026-06-28: split the corpus crawl into `2.J-corpus-crawl` (run first); this block is now the
   global `scope:doc_id` graph on top of it, per `namespacing-and-corpus-decision.md`.
+- Amended 2026-06-28 for **D4**: graph build is a reusable, `Serialize`-able, emittable module
+  (`build_graph` → `Graph`), separate from `check_graph` — the validated graph == the graph Phase 3B
+  Block R emits to Postgres.
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the spec. -->
