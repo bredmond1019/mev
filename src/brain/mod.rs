@@ -7,6 +7,7 @@
 pub mod config;
 pub mod crawl;
 pub mod okf;
+pub mod scope;
 pub mod sync;
 
 pub use config::BrainConfig;
