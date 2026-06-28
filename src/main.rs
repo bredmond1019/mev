@@ -57,6 +57,15 @@ fn main() -> ExitCode {
                         }
                     }
                 } else {
+                    for d in &report.diagnostics {
+                        println!(
+                            "{} [{}] {} — {}",
+                            d.severity,
+                            d.locator,
+                            d.file.display(),
+                            d.message
+                        );
+                    }
                     println!(
                         "validated {}: {} error(s), {} warning(s)",
                         path.display(),
@@ -93,6 +102,15 @@ fn main() -> ExitCode {
                             }
                         }
                     } else {
+                        for d in &report.diagnostics {
+                            println!(
+                                "{} [{}] {} — {}",
+                                d.severity,
+                                d.locator,
+                                d.file.display(),
+                                d.message
+                            );
+                        }
                         println!(
                             "validated {}: {} error(s), {} warning(s)",
                             path.display(),

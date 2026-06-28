@@ -40,6 +40,15 @@ pub struct Diagnostic {
     pub message: String,
 }
 
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Severity::Error => f.write_str("error"),
+            Severity::Warning => f.write_str("warning"),
+        }
+    }
+}
+
 impl Diagnostic {
     pub fn error(
         file: impl Into<PathBuf>,
