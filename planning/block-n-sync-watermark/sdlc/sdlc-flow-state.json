@@ -2,10 +2,10 @@
   "spec_slug": "block-n-sync-watermark",
   "branch": "block-n-sync-watermark-flow-3",
   "started_at": "2026-06-28T00:20:17Z",
-  "updated_at": "2026-06-28T00:26:52Z",
+  "updated_at": "2026-06-28T00:31:11Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3",
   "status": "running",
-  "current_task": 3,
+  "current_task": 4,
   "tasks": {
     "1": {
       "status": "passed",
@@ -57,6 +57,22 @@
       "files_changed": [
         "src/lib.rs",
         "src/main.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added tests/brain_sync.rs with 4 integration tests covering validate_brain_sync over a temp HQ-root fixture: in-sync (0 errors), drift detection (exactly 1 E_SYNC_DRIFT), cache re-alignment clearing the error, and JSON round-trip serialization of the Sync diagnostic.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Used two custom repo slugs (alpha, beta) in the fixture brain.toml to avoid any collision with real repos that could interfere with walk-up config resolution",
+        "Filtered Sync errors by E_SYNC_ locator prefix rather than asserting total error count of 1 in the drift test, to remain robust if the OKF schema pass ever emits additional diagnostics for other fixture content"
+      ],
+      "files_changed": [
+        "tests/brain_sync.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -165,13 +181,37 @@
         "filesReadKb": null,
         "inTokEst": 580,
         "outTok": 1737
+      },
+      {
+        "label": "update-task-4",
+        "model": "haiku",
+        "promptTokEst": 259,
+        "filesReadKb": null,
+        "inTokEst": 259,
+        "outTok": 904
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 898,
+        "filesReadKb": null,
+        "inTokEst": 898,
+        "outTok": 8981
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 580,
+        "filesReadKb": null,
+        "inTokEst": 580,
+        "outTok": 2457
       }
     ],
     "total": {
-      "promptTokEst": 6217,
+      "promptTokEst": 7954,
       "filesReadKb": 0,
-      "inTokEst": 6217,
-      "outTok": 37092
+      "inTokEst": 7954,
+      "outTok": 49434
     }
   }
 }
