@@ -207,8 +207,9 @@ fn malformed_yaml_emits_single_error() {
 #[test]
 fn brain_validator_run_clean_tree_returns_empty_report() {
     let dir = temp_dir("brain-run-clean");
-    // Write one good OKF doc (uses project: brain, which is in the fixture config).
-    write_md(&dir, "status.md", good_okf_body());
+    // Write one good OKF doc under planning/ — corpus member for the brain scope unit.
+    std::fs::create_dir_all(dir.join("planning")).unwrap();
+    write_md(&dir, "planning/status.md", good_okf_body());
 
     let report = BrainValidator::new(fixture_config()).run(&dir);
     assert!(
@@ -222,8 +223,13 @@ fn brain_validator_run_clean_tree_returns_empty_report() {
 #[test]
 fn brain_validator_run_violation_tree_returns_errors() {
     let dir = temp_dir("brain-run-violations");
-    // Write one doc that is missing all required fields.
-    write_md(&dir, "bare.md", "---\nextra: tolerated\n---\nbody\n");
+    // Write a doc missing all required fields under planning/ so it is a corpus member.
+    std::fs::create_dir_all(dir.join("planning")).unwrap();
+    write_md(
+        &dir,
+        "planning/bare.md",
+        "---\nextra: tolerated\n---\nbody\n",
+    );
 
     let report = BrainValidator::new(BrainConfig::default()).run(&dir);
     assert!(
@@ -248,42 +254,51 @@ fn brain_validator_run_violation_tree_returns_errors() {
 #[test]
 fn brain_validator_run_mixed_tree_collects_all_diagnostics() {
     let dir = temp_dir("brain-run-mixed");
+    // Both docs are corpus members — place them under planning/.
+    std::fs::create_dir_all(dir.join("planning")).unwrap();
     // Good doc (project: brain is in the fixture config).
-    write_md(&dir, "good.md", good_okf_body());
+    write_md(&dir, "planning/good.md", good_okf_body());
     // Bad doc — missing title.
-    write_md(&dir, "bad.md", "---\ntype: T\ndescription: D\n---\nbody\n");
+    write_md(
+        &dir,
+        "planning/bad.md",
+        "---\ntype: T\ndescription: D\n---\nbody\n",
+    );
 
     let report = BrainValidator::new(fixture_config()).run(&dir);
-    // Should have exactly one error: missing title on bad.md.
+    // Should have exactly one error: missing title on planning/bad.md.
     assert_eq!(report.error_count(), 1, "got: {:?}", report.diagnostics);
     assert_eq!(report.diagnostics[0].locator, "title");
     assert_eq!(
         report.diagnostics[0].file,
-        PathBuf::from("bad.md"),
-        "diagnostic should point at bad.md"
+        PathBuf::from("planning/bad.md"),
+        "diagnostic should point at planning/bad.md"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn brain_validator_prunes_nested_git_repos() {
-    // Confirms that Block G's nested-git pruning integrates end-to-end with BrainValidator.
+fn brain_validator_prunes_non_corpus_files() {
+    // Confirms that corpus membership excludes files outside planning/, docs/, and unit-root
+    // README.md/CLAUDE.md — replacing the old nested-git pruning test with the corpus rules.
     let dir = temp_dir("brain-pruning");
-    // A nested sub-project (contains .git) — its .md files must be skipped.
-    let subproject = dir.join("subproject");
-    std::fs::create_dir_all(subproject.join(".git")).unwrap();
+    // A file under src/ — not a corpus member, must never be validated.
+    std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
-        subproject.join("README.md"),
+        dir.join("src/notes.md"),
         "# no frontmatter — would fail if read",
     )
     .unwrap();
-    // One valid .md at the root.
-    write_md(&dir, "root.md", good_okf_body());
+    // A stray root-level .md (not README.md/CLAUDE.md) — also excluded.
+    std::fs::write(dir.join("NOTES.md"), "# also excluded — would fail if read").unwrap();
+    // One valid corpus member under planning/.
+    std::fs::create_dir_all(dir.join("planning")).unwrap();
+    write_md(&dir, "planning/status.md", good_okf_body());
 
     let report = BrainValidator::new(fixture_config()).run(&dir);
     assert!(
         report.diagnostics.is_empty(),
-        "nested-git docs must be pruned; got: {:?}",
+        "non-corpus files must be excluded; got: {:?}",
         report.diagnostics
     );
     let _ = std::fs::remove_dir_all(&dir);
