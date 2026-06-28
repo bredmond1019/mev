@@ -17,6 +17,26 @@ timestamp: "2026-06-27"
 
 ---
 
+## 2026-06-28 — Block N complete: `synced_from` watermark check shipped (verdict: PASS)
+
+Implemented `mev validate-brain --sync` end-to-end across five tasks, all passing in a single SDLC-flow run (verdict: PASS, 196 tests). Task 1 added the `chrono` crate, a `synced_from: Option<String>` field to `OkfFrontmatter`, and `src/brain/sync.rs` with a strict RFC3339 `parse_watermark` function and 5 unit tests. Task 2 implemented `check_sync` — the core per-`[[repos]]` loop that reads each sub-repo `status_file` and cache `cache_doc`, compares `timestamp` vs `synced_from`, and emits `E_SYNC_FILE_MISSING`, `E_SYNC_WATERMARK_MISSING`, `E_SYNC_WATERMARK_MALFORMED`, or `E_SYNC_DRIFT` diagnostics; 8 unit tests covering all four locator codes. Task 3 wired everything into the public API: `validate_brain_sync()` in `lib.rs` and a `--sync` flag on the `validate-brain` subcommand in `main.rs`; `BrainConfig` derived `Clone` to allow both the OKF schema pass and the watermark check to run without borrow conflicts. Task 4 added `tests/brain_sync.rs` with 4 integration tests over a temp HQ-root fixture: in-sync (0 errors), drift detection (exactly 1 `E_SYNC_DRIFT`), cache re-alignment clearing the error, and JSON round-trip of a `Sync` diagnostic. Task 5 was a full harness validation pass confirming all four gates green (`fmt`, `clippy -D warnings`, 196 tests, `build --release`). Next: Block 2.J cross-file graph integrity.
+
+```
+22b03c3 chore: flow state — docs
+93cf905 docs: update docs for block-n-sync-watermark
+2c6139e chore: flow state — task 5 passed
+e35bb2e chore: flow state — task 4 passed
+3c90758 feat(block-n): Task 4 — integration tests for validate_brain_sync end-to-end
+9e1cc73 chore: flow state — task 3 passed
+9b294cc feat(block-n): Task 3 — validate_brain_sync public API + --sync CLI flag
+f492670 chore: flow state — task 2 passed
+823f8c0 feat(block-n): Task 2 — check_sync logic, WatermarkFrontmatter, unit tests
+2fc70b6 chore: flow state — task 1 passed
+dd15112 feat(block-n): Task 1 — chrono dep, synced_from field, parse_watermark
+```
+
+---
+
 ## 2026-06-27 — Block 2.M complete; GitHub repo created; docs bootstrapped; harness fixed
 
 Block 2.M shipped (PASS, 6 tasks). GitHub repo created and code pushed. Wrote the first complete round of codebase docs: `cli`, `architecture`, `brain-toml`, and `okf-schema` reference pages. Fixed the SDLC harness doc pipeline — added `--bootstrap` mode to `/update-docs` (skips invention check when scaffolding from scratch), tightened the `/document` no-invention rule, wired `/new-project` to generate stack-aware doc stubs, and propagated all harness changes to `mev` and `learn-ai`.

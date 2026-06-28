@@ -99,15 +99,15 @@ In addition to `skip_dirs`, the crawler always applies these rules regardless of
 
 An array of repo entries. The `slug` field of each entry becomes a valid value for the OKF `project` field — any `.md` file with `project: foo` where `foo` is not a known slug gets an error diagnostic.
 
-The remaining fields are metadata reserved for future `--sync` functionality (Block N).
+The remaining fields are consumed by `mev validate-brain --sync` to check cross-repo sync watermarks.
 
 | Key | Type | Required | Description |
 |---|---|---|---|
 | `slug` | string | yes | Short identifier; drives the `project` vocabulary |
 | `tier` | string | no | Classification, e.g. `"primary"`, `"secondary"` |
 | `repo_path` | string | no | Path relative to the brain root |
-| `status_file` | string | no | Path to the status file within the repo |
-| `cache_doc` | string | no | Path to the brain cache doc for this repo |
+| `status_file` | string | no | Path (relative to brain root) to the sub-repo's status file; must contain a `timestamp` RFC3339 scalar in its frontmatter — consumed by `--sync` |
+| `cache_doc` | string | no | Path (relative to brain root) to the brain cache doc for this repo; must contain a `synced_from` RFC3339 scalar in its frontmatter — consumed by `--sync` |
 | `heading` | string | no | Heading used in the brain README quick-status table |
 
 ---
