@@ -29,10 +29,16 @@ enum Command {
         path: PathBuf,
     },
     /// Validate the Bastion Brain repo for OKF frontmatter compliance (Phase 2).
+    /// With --sync, also checks cross-repo synced_from watermark integrity (Phase 3, Block M).
     ValidateBrain {
         /// Path to the company-brain repo root (defaults to the parent directory).
         #[arg(default_value = "..")]
         path: PathBuf,
+        /// Also run the cross-repo sync watermark check: compares each sub-repo's
+        /// planning/status.md `timestamp` against its brain cache doc's `synced_from`.
+        /// A mismatch emits an E_SYNC_DRIFT error (exit 1).
+        #[arg(long)]
+        sync: bool,
     },
 }
 
@@ -69,35 +75,42 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Command::ValidateBrain { path } => match mev::validate_brain(&path) {
-            Ok(report) => {
-                if cli.json {
-                    let envelope = mev::JsonReport::new("brain", &path, &report);
-                    match envelope.to_json() {
-                        Ok(s) => println!("{s}"),
-                        Err(err) => {
-                            eprintln!("error serializing JSON: {err:#}");
-                            return ExitCode::FAILURE;
+        Command::ValidateBrain { path, sync } => {
+            let result = if sync {
+                mev::validate_brain_sync(&path)
+            } else {
+                mev::validate_brain(&path)
+            };
+            match result {
+                Ok(report) => {
+                    if cli.json {
+                        let envelope = mev::JsonReport::new("brain", &path, &report);
+                        match envelope.to_json() {
+                            Ok(s) => println!("{s}"),
+                            Err(err) => {
+                                eprintln!("error serializing JSON: {err:#}");
+                                return ExitCode::FAILURE;
+                            }
                         }
+                    } else {
+                        println!(
+                            "validated {}: {} error(s), {} warning(s)",
+                            path.display(),
+                            report.error_count(),
+                            report.warning_count()
+                        );
                     }
-                } else {
-                    println!(
-                        "validated {}: {} error(s), {} warning(s)",
-                        path.display(),
-                        report.error_count(),
-                        report.warning_count()
-                    );
+                    if report.is_failure() {
+                        ExitCode::FAILURE
+                    } else {
+                        ExitCode::SUCCESS
+                    }
                 }
-                if report.is_failure() {
+                Err(err) => {
+                    eprintln!("error: {err:#}");
                     ExitCode::FAILURE
-                } else {
-                    ExitCode::SUCCESS
                 }
             }
-            Err(err) => {
-                eprintln!("error: {err:#}");
-                ExitCode::FAILURE
-            }
-        },
+        }
     }
 }

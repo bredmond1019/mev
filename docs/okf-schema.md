@@ -175,6 +175,20 @@ Errors drive exit 1. Warnings are reported but do not fail the run.
 
 ---
 
+### `synced_from` — Tolerated (not OKF-validated)
+
+The `synced_from` field is a cross-repo sync watermark written by the auto-sync pipeline into brain cache docs (`docs/projects/<project>.md`). It records the `timestamp` value from the sub-repo's `planning/status.md` at the time the cache was last synced.
+
+| | |
+|---|---|
+| Required | no |
+| Format | RFC3339 datetime string (e.g. `"2026-06-27T12:00:00+00:00"`) |
+| OKF violation | none — the OKF schema tolerates this field; format enforcement is done by `mev validate-brain --sync` |
+
+The `--sync` flag reads `synced_from` and compares it against the sub-repo's current `timestamp`; a mismatch emits `E_SYNC_DRIFT`. See the [CLI reference](cli.md) for the full locator table.
+
+---
+
 ## Unknown fields
 
 Unknown frontmatter keys are tolerated — `mev` does not reject files for having extra fields. This allows the live corpus to carry fields defined by future schema versions without failing validation.

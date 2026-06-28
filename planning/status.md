@@ -8,13 +8,39 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-06-27"
+timestamp: "2026-06-28"
+now: "Block 2.J — graph integrity (next block up)"
+next: "Block 2.J cross-file graph integrity; then Block D cross-file integrity, Block E pt-BR parity & reporter polish"
+blocked: []
 ---
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-27 — Block 2.M complete; brain.toml config wired; all hardcoded vocab/skip_dirs retired
+**Last updated:** 2026-06-28 — Block N (sync-watermark) complete; `mev validate-brain --sync` shipped; 196 tests pass
 **Current focus:** 2.J-graph-integrity (next block)
+
+---
+
+## Momentum
+
+> Working board — keep all five queues live. **Never end a meaningful session with every queue
+> empty.** The headlines of **now / next / blocked** mirror the frontmatter scalars above.
+
+- **now** — Block 2.J — cross-file graph integrity (next block up)
+- **next** — Block 2.J graph integrity; then Block D cross-file integrity, Block E pt-BR parity & reporter polish (Block N sync-watermark done)
+- **blocked** — nothing blocked
+- **improve** — no eval/workflow gaps logged yet; backlog empty
+- **recurring** — none yet
+
+## Metrics
+
+> Cheap, hand-maintained signals (leading + lagging). Do **not** push these into frontmatter —
+> they are multi-valued and volatile.
+
+- tasks completed / verified this period; intervention rate; retry rate; regression rate
+- reusable assets created since last milestone
+- days since last eval improvement; days since last new skill/workflow
+- % of runs ending with an explicit next action
 
 ---
 
@@ -49,6 +75,7 @@ timestamp: "2026-06-27"
 | Block H | Brain OKF frontmatter validator | Done | OkfFrontmatter struct, validate_md_file, BrainValidator (ContentValidator impl), vocab helpers, 30 unit tests + 14 integration tests; 142 total tests pass |
 | Block I | `validate-brain` subcommand + `--json` | Done | `mev validate-brain <root>` (default `..`), global `--json` flag, `JsonReport` envelope, `Serialize` on `Severity`/`Diagnostic`, `validate_brain()` public fn; 5 integration tests; 145 total tests pass |
 | Block 2.M | brain.toml config reader (HQ-R) | Done | `BrainConfig` (toml crate), `load_brain_config`/`find_brain_config` walk-up; `crawl_brain` skip_dirs from config; `is_valid_layer`/`is_valid_status`/`is_valid_project` config-driven; `validate_brain` resolves config via walk-up; path-style skip_dirs matching (`planning/archive`); D3 superseded; 10 config + 5 validate integration tests; all harness gates green |
+| Block N | `synced_from` watermark check (HQ-R) | Done | `mev validate-brain --sync`; `synced_from` on `OkfFrontmatter`; `parse_watermark` (strict RFC3339); `check_sync` emitting `E_SYNC_FILE_MISSING`/`E_SYNC_WATERMARK_MISSING`/`E_SYNC_WATERMARK_MALFORMED`/`E_SYNC_DRIFT`; `validate_brain_sync()` public API; `--sync` CLI flag; 4 integration tests (in-sync, drift, re-align, JSON); 196 total tests pass |
 
 ---
 

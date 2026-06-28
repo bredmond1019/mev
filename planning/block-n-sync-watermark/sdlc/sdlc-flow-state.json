@@ -1,0 +1,288 @@
+{
+  "spec_slug": "block-n-sync-watermark",
+  "branch": "block-n-sync-watermark-flow-3",
+  "started_at": "2026-06-28T00:20:17Z",
+  "updated_at": "2026-06-28T00:42:38Z",
+  "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3",
+  "status": "done",
+  "current_task": 5,
+  "tasks": {
+    "1": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Task 1: added chrono dep, synced_from field to OkfFrontmatter, and src/brain/sync.rs with parse_watermark (strict RFC3339) plus 5 unit tests; all four harness gates green.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Used #[allow(dead_code)] on parse_watermark since it will be called from Task 2's check_sync — avoids a dead_code clippy error while keeping the gate green in Task 1.",
+        "Removed unused imports (Path, Diagnostic) from sync.rs since they are only needed in Task 2; they will be added back then."
+      ],
+      "files_changed": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "src/brain/mod.rs",
+        "src/brain/okf.rs",
+        "src/brain/sync.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Implement check_sync logic in src/brain/sync.rs: WatermarkFrontmatter struct, read_watermark file reader, pub fn check_sync emitting E_SYNC_FILE_MISSING / E_SYNC_WATERMARK_MISSING / E_SYNC_WATERMARK_MALFORMED / E_SYNC_DRIFT diagnostics per [[repos]] entry, with 8 unit tests covering all locator codes.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "read_watermark uses extract_frontmatter (existing shared helper) + serde_yaml to avoid duplicating YAML parsing logic",
+        "WatermarkFrontmatter uses #[serde(default)] so missing fields deserialize to None rather than erroring, matching the spec's 'extras tolerated' requirement",
+        "check_sync continues to next repo on first error per repo rather than accumulating multiple errors for the same repo — consistent with how OKF validation short-circuits on read failure"
+      ],
+      "files_changed": [
+        "src/brain/sync.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "3": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added validate_brain_sync() public API (OKF schema pass + watermark check) and --sync flag on the validate-brain subcommand; all four harness gates pass (123 tests).",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "validate_brain_sync clones BrainConfig (derives Clone) so it can run both BrainValidator::new(config.clone()) and check_sync(root, &config) without borrow conflicts",
+        "CLI dispatches via if/else on the sync bool rather than a separate subcommand, keeping the --json and exit-code paths unchanged"
+      ],
+      "files_changed": [
+        "src/lib.rs",
+        "src/main.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added tests/brain_sync.rs with 4 integration tests covering validate_brain_sync over a temp HQ-root fixture: in-sync (0 errors), drift detection (exactly 1 E_SYNC_DRIFT), cache re-alignment clearing the error, and JSON round-trip serialization of the Sync diagnostic.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Used two custom repo slugs (alpha, beta) in the fixture brain.toml to avoid any collision with real repos that could interfere with walk-up config resolution",
+        "Filtered Sync errors by E_SYNC_ locator prefix rather than asserting total error count of 1 in the drift test, to remain robust if the OKF schema pass ever emits additional diagnostics for other fixture content"
+      ],
+      "files_changed": [
+        "tests/brain_sync.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "5": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Task 5 (Validate): all four harness gates pass — fmt, clippy -D warnings, cargo test (196 tests, 0 failures), cargo build --release",
+      "issues": [],
+      "fixes": [],
+      "decisions": [],
+      "files_changed": [],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    }
+  },
+  "review": {
+    "verdict": "PASS",
+    "findings": [],
+    "attempts": 1
+  },
+  "docs": {
+    "changed": [
+      "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3/docs/cli.md",
+      "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3/docs/okf-schema.md",
+      "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3/docs/brain-toml.md"
+    ],
+    "created": []
+  },
+  "bail_reason": null,
+  "pr": {
+    "url": "https://github.com/bredmond1019/mev/pull/2",
+    "number": 2
+  },
+  "tokens": {
+    "stages": [
+      {
+        "label": "worktree-setup",
+        "model": "haiku",
+        "promptTokEst": 776,
+        "filesReadKb": null,
+        "inTokEst": 776,
+        "outTok": 4605
+      },
+      {
+        "label": "enumerate",
+        "model": "haiku",
+        "promptTokEst": 230,
+        "filesReadKb": null,
+        "inTokEst": 230,
+        "outTok": 938
+      },
+      {
+        "label": "update-task-1",
+        "model": "haiku",
+        "promptTokEst": 259,
+        "filesReadKb": null,
+        "inTokEst": 259,
+        "outTok": 1165
+      },
+      {
+        "label": "implement-1-1",
+        "model": "sonnet",
+        "promptTokEst": 898,
+        "filesReadKb": null,
+        "inTokEst": 898,
+        "outTok": 7470
+      },
+      {
+        "label": "test-1-1",
+        "model": "haiku",
+        "promptTokEst": 580,
+        "filesReadKb": null,
+        "inTokEst": 580,
+        "outTok": 1446
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 259,
+        "filesReadKb": null,
+        "inTokEst": 259,
+        "outTok": 910
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 898,
+        "filesReadKb": null,
+        "inTokEst": 898,
+        "outTok": 9628
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 580,
+        "filesReadKb": null,
+        "inTokEst": 580,
+        "outTok": 2125
+      },
+      {
+        "label": "update-task-3",
+        "model": "haiku",
+        "promptTokEst": 259,
+        "filesReadKb": null,
+        "inTokEst": 259,
+        "outTok": 870
+      },
+      {
+        "label": "implement-3-1",
+        "model": "sonnet",
+        "promptTokEst": 898,
+        "filesReadKb": null,
+        "inTokEst": 898,
+        "outTok": 6198
+      },
+      {
+        "label": "test-3-1",
+        "model": "haiku",
+        "promptTokEst": 580,
+        "filesReadKb": null,
+        "inTokEst": 580,
+        "outTok": 1737
+      },
+      {
+        "label": "update-task-4",
+        "model": "haiku",
+        "promptTokEst": 259,
+        "filesReadKb": null,
+        "inTokEst": 259,
+        "outTok": 904
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 898,
+        "filesReadKb": null,
+        "inTokEst": 898,
+        "outTok": 8981
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 580,
+        "filesReadKb": null,
+        "inTokEst": 580,
+        "outTok": 2457
+      },
+      {
+        "label": "update-task-5",
+        "model": "haiku",
+        "promptTokEst": 259,
+        "filesReadKb": null,
+        "inTokEst": 259,
+        "outTok": 958
+      },
+      {
+        "label": "implement-5-1",
+        "model": "sonnet",
+        "promptTokEst": 898,
+        "filesReadKb": null,
+        "inTokEst": 898,
+        "outTok": 1583
+      },
+      {
+        "label": "test-5-1",
+        "model": "haiku",
+        "promptTokEst": 580,
+        "filesReadKb": null,
+        "inTokEst": 580,
+        "outTok": 1861
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 994,
+        "filesReadKb": null,
+        "inTokEst": 994,
+        "outTok": 2832
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 565,
+        "filesReadKb": null,
+        "inTokEst": 565,
+        "outTok": 6294
+      },
+      {
+        "label": "wrap-up",
+        "model": "sonnet",
+        "promptTokEst": 829,
+        "filesReadKb": null,
+        "inTokEst": 829,
+        "outTok": 4403
+      },
+      {
+        "label": "pr-create",
+        "model": "sonnet",
+        "promptTokEst": 758,
+        "filesReadKb": null,
+        "inTokEst": 758,
+        "outTok": 1798
+      }
+    ],
+    "total": {
+      "promptTokEst": 12837,
+      "filesReadKb": 0,
+      "inTokEst": 12837,
+      "outTok": 69163
+    }
+  }
+}
