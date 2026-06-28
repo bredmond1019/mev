@@ -12,7 +12,7 @@ related: [master-plan, status, block-j-namespacing-decision, D4-corpus-engine-an
 
 # Task Spec — Phase 3, Block J-crawl — Multi-root corpus crawl + scope registry
 
-**Status:** Not started · **Last run:** never
+**Status:** Done · **Last run:** 2026-06-28 (PASS, all 5 tasks)
 
 ## Goal
 Make mev a multi-root validator: a registry-driven `scope_for(path)` resolver plus a canonical corpus
@@ -162,4 +162,6 @@ cargo build --release
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the spec. -->
-_No amendments yet._
+- 2026-06-28 [task 2] `rel_to_unit_root` returns `Option<&Path>` (None on prefix mismatch) rather than panicking — unexpected mismatches surface as a diagnostic and are skipped; spec implied a simpler string-based path model.
+- 2026-06-28 [task 3] Integration tests in `brain_okf.rs` and `brain_validate.rs` updated to place files under `planning/` so they are corpus members; the new corpus-membership rule excludes root-level stray `.md` files, which prior tests assumed were valid validation targets.
+- 2026-06-28 [task 3] `BrainValidator::crawl` kept `Item=MdFile` and maps `CorpusEntry→MdFile` rather than changing the trait `Item` type — avoids touching the `ContentValidator` trait definition and `validate_item` signatures across all callers; not specified in the original task.

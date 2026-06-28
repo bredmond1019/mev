@@ -8,16 +8,16 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-06-28T19:38:22-0300"
-now: "knowledge_graph service reviewed (don't adopt); destination architecture settled in D4 — mev as corpus engine, graph as emitted product in Postgres. Ready to build 2.J-corpus-crawl"
-next: "/sdlc-flow 2.J-corpus-crawl (honor D4 forward-compat: owned crawl result), then 2.J-graph-integrity (serializable graph module)"
+timestamp: "2026-06-28"
+now: "2.J-corpus-crawl complete (PASS); multi-root corpus crawl + scope registry live; OKF root-file exemption in place. Ready to build 2.J-graph-integrity"
+next: "/sdlc-flow 2.J-graph-integrity (global scope:doc_id node index + edge integrity + leaf lint via --graph)"
 blocked: []
 ---
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-28 — Reviewed the knowledge_graph service (reject for the brain); settled the destination architecture in D4 (mev = corpus engine: crawl→validate→emit; graph is an emitted product in Postgres beside embeddings; two retrieval modes). Master-plan refreshed with Phase 3B (Blocks Q–S). Ready to build 2.J-corpus-crawl.
-**Current focus:** 2.J-corpus-crawl (with D4 forward-compat constraints), then 2.J-graph-integrity
+**Last updated:** 2026-06-28 — Completed 2.J-corpus-crawl (PASS). Multi-root corpus crawl + registry-driven scope resolver implemented; `crawl_corpus` returns an owned, `Serialize`-able `Corpus`; `BrainValidator` rewired; OKF root-file exemption for `README.md`/`CLAUDE.md`; 159 tests pass across 10 suites.
+**Current focus:** 2.J-graph-integrity — global `scope:doc_id` node index + edge integrity + leaf lint (`--graph`)
 
 ---
 
@@ -26,8 +26,8 @@ blocked: []
 > Working board — keep all five queues live. **Never end a meaningful session with every queue
 > empty.** The headlines of **now / next / blocked** mirror the frontmatter scalars above.
 
-- **now** — Destination architecture settled in **D4** (mev = corpus engine; graph = emitted product in Postgres; two retrieval modes). knowledge_graph service reviewed → don't adopt (UUID/Dgraph/inferred edges; wrong model for an authored `scope:doc_id` graph). Specs ready: 2.J-corpus-crawl → 2.J-graph-integrity.
-- **next** — `/sdlc-flow 2.J-corpus-crawl` (D4 forward-compat: return an owned crawl result, not buried state); then `2.J-graph-integrity` (serializable, reusable graph module)
+- **now** — **2.J-corpus-crawl DONE** (PASS, all 5 tasks). Registry-driven `scope_for`/`scope_units`, `crawl_corpus` (owned serializable `Corpus`), `BrainValidator` rewired to corpus crawl, OKF root-file exemption, 13-test integration suite over 3-unit fixture tree. 159 tests pass across 10 suites.
+- **next** — `/sdlc-flow 2.J-graph-integrity` (global `scope:doc_id` node index + extensible edge model + `related:` resolution + leaf lint via `--graph`)
 - **blocked** — nothing blocked
 - **improve** — Phase 3B (D4): **Block Q** manifest emit → `index_brain.py` consumes it (kill double crawl); **Block R** graph emit → Postgres edges table + structural query surface (bastion/MCP); **Block S** graph-aware RAG (orchestrator). Companion: register tier units + bare-bloat `skip_dirs` in `brain.toml`.
 - **recurring** — none yet
@@ -80,7 +80,7 @@ blocked: []
 ### Phase 3 — Brain integrity: graph + sync
 | Block | What | Status | Notes |
 |---|---|---|---|
-| Block J-crawl | Multi-root corpus crawl + scope registry | Not started | Spec ready (`planning/2.J-corpus-crawl/`). Registry-driven `scope_for`; `crawl_corpus` over all registered units (planning/+docs/+root, minus bloat/ephemeral); OKF-exemption for root files. Foundation — runs first. |
+| Block J-crawl | Multi-root corpus crawl + scope registry | Done | `scope_units`/`scope_for`/`owning_unit` in `src/brain/scope.rs`; `crawl_corpus` → owned serializable `Corpus`; `BrainValidator` rewired; OKF root-file exemption; 13-test integration suite; all 159 tests pass. |
 | Block J | Graph integrity (global `scope:doc_id`) | Not started | Spec ready (`planning/2.J-graph-integrity/`). Global node index + extensible edge model + uniqueness + `related:` resolution (bare=same scope, qualified=cross) + leaf lint; `--graph`. Depends on J-crawl. See `namespacing-and-corpus-decision.md`. |
 | Block K | Link integrity (markdown/`file://`/`[[wiki]]`) | Not started | Per master-plan |
 | Block L | Structural coverage (`index.md` ↔ dir, D17) | Not started | Per master-plan |
