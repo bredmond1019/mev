@@ -12,7 +12,7 @@ related: [master-plan, status, D29-mev-brain-validation-engine]
 
 # Task Spec — Phase 3, Block M (HQ-Restructure Block N) — `synced_from` watermark check
 
-**Status:** Done · **Last run:** 2026-06-28 (PASS, 5/5 tasks, 196 tests)
+**Status:** Not started · **Last run:** never
 
 ## Goal
 Implement `mev validate-brain --sync`: per `brain.toml` `[[repos]]` entry, assert the sub-repo's
