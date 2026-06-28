@@ -1,0 +1,95 @@
+{
+  "spec_slug": "block-n-sync-watermark",
+  "branch": "block-n-sync-watermark-flow-3",
+  "started_at": "2026-06-28T00:20:17Z",
+  "updated_at": "2026-06-28T00:20:17Z",
+  "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3",
+  "status": "running",
+  "current_task": 1,
+  "tasks": {
+    "1": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Task 1: added chrono dep, synced_from field to OkfFrontmatter, and src/brain/sync.rs with parse_watermark (strict RFC3339) plus 5 unit tests; all four harness gates green.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Used #[allow(dead_code)] on parse_watermark since it will be called from Task 2's check_sync — avoids a dead_code clippy error while keeping the gate green in Task 1.",
+        "Removed unused imports (Path, Diagnostic) from sync.rs since they are only needed in Task 2; they will be added back then."
+      ],
+      "files_changed": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "src/brain/mod.rs",
+        "src/brain/okf.rs",
+        "src/brain/sync.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    }
+  },
+  "review": {
+    "verdict": null,
+    "findings": [],
+    "attempts": 0
+  },
+  "docs": {
+    "changed": [],
+    "created": []
+  },
+  "bail_reason": null,
+  "pr": {
+    "url": null,
+    "number": null
+  },
+  "tokens": {
+    "stages": [
+      {
+        "label": "worktree-setup",
+        "model": "haiku",
+        "promptTokEst": 776,
+        "filesReadKb": null,
+        "inTokEst": 776,
+        "outTok": 4605
+      },
+      {
+        "label": "enumerate",
+        "model": "haiku",
+        "promptTokEst": 230,
+        "filesReadKb": null,
+        "inTokEst": 230,
+        "outTok": 938
+      },
+      {
+        "label": "update-task-1",
+        "model": "haiku",
+        "promptTokEst": 259,
+        "filesReadKb": null,
+        "inTokEst": 259,
+        "outTok": 1165
+      },
+      {
+        "label": "implement-1-1",
+        "model": "sonnet",
+        "promptTokEst": 898,
+        "filesReadKb": null,
+        "inTokEst": 898,
+        "outTok": 7470
+      },
+      {
+        "label": "test-1-1",
+        "model": "haiku",
+        "promptTokEst": 580,
+        "filesReadKb": null,
+        "inTokEst": 580,
+        "outTok": 1446
+      }
+    ],
+    "total": {
+      "promptTokEst": 2743,
+      "filesReadKb": 0,
+      "inTokEst": 2743,
+      "outTok": 15624
+    }
+  }
+}
