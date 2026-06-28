@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use mev::brain::config::{ConfigError, find_brain_config, load_brain_config};
+use mev::brain::config::{ConfigError, find_brain_config, find_brain_root, load_brain_config};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -175,6 +175,103 @@ fn find_brain_config_returns_err_when_no_brain_toml() {
     }
 
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ---------------------------------------------------------------------------
+// find_brain_root tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn find_brain_root_returns_fixture_dir_when_brain_toml_is_there() {
+    // Passing the fixture dir (which contains brain.toml) should return that dir, canonicalized.
+    let root = find_brain_root(&fixture_dir()).expect("should find brain.toml in fixture dir");
+    assert!(
+        root.join("brain.toml").exists(),
+        "returned root should contain brain.toml; got {root:?}"
+    );
+    // The returned path should canonicalize to the same location as fixture_dir().
+    assert_eq!(
+        root.canonicalize().unwrap(),
+        fixture_dir().canonicalize().unwrap(),
+        "find_brain_root should return the directory containing brain.toml"
+    );
+}
+
+#[test]
+fn find_brain_root_walks_up_from_subdirectory() {
+    // Create a nested subdirectory inside the fixture dir. find_brain_root should walk up
+    // and return the fixture dir (where brain.toml lives), not the subdir.
+    let subdir = fixture_dir().join("root-walk-up-subdir");
+    let _ = std::fs::remove_dir_all(&subdir);
+    std::fs::create_dir_all(&subdir).expect("could not create test subdirectory");
+
+    let root = find_brain_root(&subdir).expect("should find brain.toml by walking up");
+    assert!(
+        root.join("brain.toml").exists(),
+        "walked-up root should contain brain.toml; got {root:?}"
+    );
+    assert_eq!(
+        root.canonicalize().unwrap(),
+        fixture_dir().canonicalize().unwrap(),
+        "walk-up should stop at the directory containing brain.toml"
+    );
+
+    let _ = std::fs::remove_dir_all(&subdir);
+}
+
+#[test]
+fn find_brain_root_canonicalizes_relative_input() {
+    // Passing a relative path that resolves to the fixture dir should still find brain.toml.
+    // We change into the fixture dir and pass "." to exercise the canonicalize branch.
+    let original = std::env::current_dir().unwrap();
+    std::env::set_current_dir(fixture_dir()).expect("could not cd to fixture dir");
+
+    let root = find_brain_root(std::path::Path::new("."))
+        .expect("find_brain_root('.') should find brain.toml after canonicalize");
+    assert!(
+        root.join("brain.toml").exists(),
+        "canonicalized root should contain brain.toml; got {root:?}"
+    );
+
+    std::env::set_current_dir(original).expect("could not restore cwd");
+}
+
+#[test]
+fn find_brain_root_returns_err_when_no_brain_toml() {
+    let tmp = std::env::temp_dir().join("mev-find-brain-root-no-toml");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("could not create temp dir");
+
+    let result = find_brain_root(&tmp);
+    match result {
+        Err(ConfigError::NotFound { .. }) => {
+            // Expected on most machines.
+        }
+        Ok(root) => {
+            // A brain.toml exists somewhere above /tmp on this machine — skip.
+            eprintln!(
+                "SKIP: find_brain_root found brain.toml above temp dir at {root:?} — skipping NotFound assertion"
+            );
+        }
+        Err(e) => panic!("expected NotFound, got unexpected error: {e}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn find_brain_config_delegates_to_find_brain_root_correctly() {
+    // Confirm that find_brain_config (which now delegates to find_brain_root) still
+    // returns a correctly parsed config when called from the fixture dir.
+    let cfg = find_brain_config(&fixture_dir()).expect("should resolve and parse via find_brain_root");
+    assert!(
+        cfg.vocab.layer.contains(&"brain".to_string()),
+        "config via find_brain_root should have 'brain' layer"
+    );
+    assert!(
+        !cfg.repos.is_empty(),
+        "config via find_brain_root should have at least one repo entry"
+    );
 }
 
 #[test]
