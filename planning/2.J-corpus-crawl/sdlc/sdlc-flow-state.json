@@ -2,10 +2,10 @@
   "spec_slug": "2.J-corpus-crawl",
   "branch": "2.J-corpus-crawl-flow",
   "started_at": "2026-06-28T23:17:04Z",
-  "updated_at": "2026-06-28T23:23:47Z",
+  "updated_at": "2026-06-28T23:32:35Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-corpus-crawl-flow",
   "status": "running",
-  "current_task": 2,
+  "current_task": 3,
   "tasks": {
     "1": {
       "status": "passed",
@@ -40,6 +40,27 @@
       ],
       "files_changed": [
         "src/brain/crawl.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "3": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Wired crawl_corpus into BrainValidator::crawl and added OKF exemption for root instruction files (README.md/CLAUDE.md) without frontmatter",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Kept Item=MdFile on ContentValidator and mapped CorpusEntry->MdFile in crawl() rather than changing the trait Item type — avoids touching the trait definition and validate_item signature",
+        "Integration tests in brain_okf.rs and brain_validate.rs updated to place files under planning/ so they are corpus members (root-level stray .md files are no longer corpus members under the new crawl rules)",
+        "Renamed brain_validator_prunes_nested_git_repos to _prunes_non_corpus_files since corpus membership exclusion now serves the same pruning purpose"
+      ],
+      "files_changed": [
+        "src/brain/mod.rs",
+        "src/brain/okf.rs",
+        "src/lib.rs",
+        "tests/brain_okf.rs",
+        "tests/brain_validate.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -124,13 +145,37 @@
         "filesReadKb": null,
         "inTokEst": 564,
         "outTok": 2181
+      },
+      {
+        "label": "update-task-3",
+        "model": "haiku",
+        "promptTokEst": 251,
+        "filesReadKb": null,
+        "inTokEst": 251,
+        "outTok": 1213
+      },
+      {
+        "label": "implement-3-1",
+        "model": "sonnet",
+        "promptTokEst": 873,
+        "filesReadKb": null,
+        "inTokEst": 873,
+        "outTok": 24419
+      },
+      {
+        "label": "test-3-1",
+        "model": "haiku",
+        "promptTokEst": 564,
+        "filesReadKb": null,
+        "inTokEst": 564,
+        "outTok": 2300
       }
     ],
     "total": {
-      "promptTokEst": 4363,
+      "promptTokEst": 6051,
       "filesReadKb": 0,
-      "inTokEst": 4363,
-      "outTok": 34376
+      "inTokEst": 6051,
+      "outTok": 62308
     }
   }
 }
