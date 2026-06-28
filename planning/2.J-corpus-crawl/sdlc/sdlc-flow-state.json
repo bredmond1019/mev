@@ -2,10 +2,10 @@
   "spec_slug": "2.J-corpus-crawl",
   "branch": "2.J-corpus-crawl-flow",
   "started_at": "2026-06-28T23:17:04Z",
-  "updated_at": "2026-06-28T23:32:35Z",
+  "updated_at": "2026-06-28T23:37:43Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-corpus-crawl-flow",
   "status": "running",
-  "current_task": 3,
+  "current_task": 4,
   "tasks": {
     "1": {
       "status": "passed",
@@ -61,6 +61,23 @@
         "src/lib.rs",
         "tests/brain_okf.rs",
         "tests/brain_validate.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Add tests/brain_corpus.rs: 13 integration tests for the multi-root corpus crawl over a 3-unit fixture tree (brain/core/mev), covering all positive corpus members, all spec-listed negative cases, scope correctness, and serde_json serialization.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Used in-process BrainConfig construction (not a brain.toml file) for the fixture config, consistent with how other integration tests in this codebase are written — keeps tests self-contained and fast.",
+        "Included all 13 bloat skip_dirs from the spec (target, node_modules, .git, .claude, .repo-backups, .agent, .agents, archive, archived, trees, sdlc, venv, .venv) in the fixture config to match the canonical brain.toml list."
+      ],
+      "files_changed": [
+        "tests/brain_corpus.rs",
+        "planning/2.J-corpus-crawl/tasks.md"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -169,13 +186,37 @@
         "filesReadKb": null,
         "inTokEst": 564,
         "outTok": 2300
+      },
+      {
+        "label": "update-task-4",
+        "model": "haiku",
+        "promptTokEst": 251,
+        "filesReadKb": null,
+        "inTokEst": 251,
+        "outTok": 1214
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 873,
+        "filesReadKb": null,
+        "inTokEst": 873,
+        "outTok": 12001
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 564,
+        "filesReadKb": null,
+        "inTokEst": 564,
+        "outTok": 1577
       }
     ],
     "total": {
-      "promptTokEst": 6051,
+      "promptTokEst": 7739,
       "filesReadKb": 0,
-      "inTokEst": 6051,
-      "outTok": 62308
+      "inTokEst": 7739,
+      "outTok": 77100
     }
   }
 }

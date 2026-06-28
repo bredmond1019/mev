@@ -14,3 +14,8 @@ Validated: gating checks (fast tripwire)
 What: Wired crawl_corpus into BrainValidator::crawl and added OKF exemption for root instruction files (README.md/CLAUDE.md) without frontmatter
 Decisions: Kept Item=MdFile on ContentValidator and mapped CorpusEntry->MdFile in crawl() rather than changing the trait Item type — avoids touching the trait definition and validate_item signature; Integration tests in brain_okf.rs and brain_validate.rs updated to place files under planning/ so they are corpus members (root-level stray .md files are no longer corpus members under the new crawl rules); Renamed brain_validator_prunes_nested_git_repos to _prunes_non_corpus_files since corpus membership exclusion now serves the same pruning purpose
 Validated: gating checks (fast tripwire)
+
+## Task 4 — PASSED (1 attempt)
+What: Add tests/brain_corpus.rs: 13 integration tests for the multi-root corpus crawl over a 3-unit fixture tree (brain/core/mev), covering all positive corpus members, all spec-listed negative cases, scope correctness, and serde_json serialization.
+Decisions: Used in-process BrainConfig construction (not a brain.toml file) for the fixture config, consistent with how other integration tests in this codebase are written — keeps tests self-contained and fast.; Included all 13 bloat skip_dirs from the spec (target, node_modules, .git, .claude, .repo-backups, .agent, .agents, archive, archived, trees, sdlc, venv, .venv) in the fixture config to match the canonical brain.toml list.
+Validated: gating checks (fast tripwire)
