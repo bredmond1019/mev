@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use mev::Severity;
+use mev::theme;
 
 #[derive(Parser)]
 #[command(
@@ -43,6 +45,20 @@ enum Command {
     },
 }
 
+fn print_diagnostic(d: &mev::Diagnostic) {
+    let sev = match d.severity {
+        Severity::Error => theme::severity_error("error"),
+        Severity::Warning => theme::severity_warning("warning"),
+    };
+    println!(
+        "{} [{}] {} — {}",
+        sev,
+        theme::locator(&d.locator),
+        d.file.display(),
+        theme::message(&d.message),
+    );
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
@@ -59,13 +75,7 @@ fn main() -> ExitCode {
                     }
                 } else {
                     for d in &report.diagnostics {
-                        println!(
-                            "{} [{}] {} — {}",
-                            d.severity,
-                            d.locator,
-                            d.file.display(),
-                            d.message
-                        );
+                        print_diagnostic(d);
                     }
                     println!(
                         "validated {}: {} error(s), {} warning(s)",
@@ -111,13 +121,7 @@ fn main() -> ExitCode {
                         }
                     } else {
                         for d in &report.diagnostics {
-                            println!(
-                                "{} [{}] {} — {}",
-                                d.severity,
-                                d.locator,
-                                d.file.display(),
-                                d.message
-                            );
+                            print_diagnostic(d);
                         }
                         println!(
                             "validated {}: {} error(s), {} warning(s)",
