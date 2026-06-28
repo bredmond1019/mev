@@ -8,16 +8,16 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-06-28"
-now: "Block J reshaped into a global knowledge graph — specs ready (2.J-corpus-crawl → 2.J-graph-integrity); review knowledge_graph service first"
-next: "Review workflow-engine-rs/services/knowledge_graph; then /sdlc-flow 2.J-corpus-crawl, then 2.J-graph-integrity"
+timestamp: "2026-06-28T19:38:22-0300"
+now: "knowledge_graph service reviewed (don't adopt); destination architecture settled in D4 — mev as corpus engine, graph as emitted product in Postgres. Ready to build 2.J-corpus-crawl"
+next: "/sdlc-flow 2.J-corpus-crawl (honor D4 forward-compat: owned crawl result), then 2.J-graph-integrity (serializable graph module)"
 blocked: []
 ---
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-28 — Block J reshaped into a global scope:doc_id knowledge graph; split into 2.J-corpus-crawl (foundation) + 2.J-graph-integrity; specs ready, handoff written
-**Current focus:** Review knowledge_graph service, then 2.J-corpus-crawl
+**Last updated:** 2026-06-28 — Reviewed the knowledge_graph service (reject for the brain); settled the destination architecture in D4 (mev = corpus engine: crawl→validate→emit; graph is an emitted product in Postgres beside embeddings; two retrieval modes). Master-plan refreshed with Phase 3B (Blocks Q–S). Ready to build 2.J-corpus-crawl.
+**Current focus:** 2.J-corpus-crawl (with D4 forward-compat constraints), then 2.J-graph-integrity
 
 ---
 
@@ -26,10 +26,10 @@ blocked: []
 > Working board — keep all five queues live. **Never end a meaningful session with every queue
 > empty.** The headlines of **now / next / blocked** mirror the frontmatter scalars above.
 
-- **now** — Block J reshaped into a global `scope:doc_id` knowledge graph; specs ready (2.J-corpus-crawl → 2.J-graph-integrity)
-- **next** — Review `workflow-engine-rs/services/knowledge_graph` (how it fits); then `/sdlc-flow 2.J-corpus-crawl`, then `2.J-graph-integrity`
+- **now** — Destination architecture settled in **D4** (mev = corpus engine; graph = emitted product in Postgres; two retrieval modes). knowledge_graph service reviewed → don't adopt (UUID/Dgraph/inferred edges; wrong model for an authored `scope:doc_id` graph). Specs ready: 2.J-corpus-crawl → 2.J-graph-integrity.
+- **next** — `/sdlc-flow 2.J-corpus-crawl` (D4 forward-compat: return an owned crawl result, not buried state); then `2.J-graph-integrity` (serializable, reusable graph module)
 - **blocked** — nothing blocked
-- **improve** — align mev corpus crawl as single source of truth for `index_brain.py` (orchestrator); register tier units + bare-bloat `skip_dirs` in `brain.toml` (brain repo)
+- **improve** — Phase 3B (D4): **Block Q** manifest emit → `index_brain.py` consumes it (kill double crawl); **Block R** graph emit → Postgres edges table + structural query surface (bastion/MCP); **Block S** graph-aware RAG (orchestrator). Companion: register tier units + bare-bloat `skip_dirs` in `brain.toml`.
 - **recurring** — none yet
 
 ## Metrics
@@ -84,6 +84,13 @@ blocked: []
 | Block J | Graph integrity (global `scope:doc_id`) | Not started | Spec ready (`planning/2.J-graph-integrity/`). Global node index + extensible edge model + uniqueness + `related:` resolution (bare=same scope, qualified=cross) + leaf lint; `--graph`. Depends on J-crawl. See `namespacing-and-corpus-decision.md`. |
 | Block K | Link integrity (markdown/`file://`/`[[wiki]]`) | Not started | Per master-plan |
 | Block L | Structural coverage (`index.md` ↔ dir, D17) | Not started | Per master-plan |
+
+### Phase 3B — The Brain as a queryable product (corpus engine outputs, D4)
+| Block | What | Status | Notes |
+|---|---|---|---|
+| Block Q | Manifest emit (file-list + metadata JSON) | Not started | mev emits canonical file-list; `index_brain.py` consumes it → "validated == embedded" by construction. Depends on 2.J-corpus-crawl. |
+| Block R | Graph emit + structural query surface | Not started | mev emits graph JSON; orchestrator loads Postgres edges table beside `brain_documents`; bastion/MCP structural queries (free/exact). Depends on 2.J-graph-integrity. |
+| Block S | Graph-aware RAG (orchestrator) | Not started | Retrieval traverses edges to expand/rerank semantic hits + query router. Orchestrator-side; mev's edge model is the contract. |
 
 ---
 

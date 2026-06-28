@@ -3,130 +3,84 @@ type: Handoff
 created: 2026-06-28
 ---
 
-# Handoff — Block J reshaped into a global knowledge graph (corpus-crawl → graph); specs ready
+# Handoff — Destination architecture settled (D4); ready to build Block J
 
-> **For the next agent:** Read this after `/prime`. Delete this file once consumed.
-
----
+> **For the next agent:** Read this immediately after `/prime`. Delete this file once consumed.
 
 ## What we're doing and why
 
-`mev` is the validation engine for the Bastion Brain. Phase 2 (OKF schema) + Block N (`--sync`
-watermark) are **done and merged**. The active work is **Phase 3 graph integrity** — and this session
-substantially reshaped it through a design discussion with Brandon.
+`mev` is the validation engine for the Bastion Brain. Phase 2 (OKF schema) + sync watermark are
+done/merged. The active work is **Phase 3 graph integrity** — building a global, cross-repo
+`scope:doc_id` knowledge graph. This session did **not** write mev code; it resolved the *destination
+architecture* so the upcoming blocks build toward the right end-state instead of just the next block.
 
-The headline: **Block J is no longer a small dangling-link checker. It is the integrity engine for a
-global, cross-repo knowledge graph** that has to stay foolproof as the Brain scales and gets reused for
-client knowledge bases. The settled architecture lives in
-`planning/2.J-graph-integrity/namespacing-and-corpus-decision.md` (read it first — esp. the **2026-06-28
-Update** section) and in the two specs below.
-
-### Settled design decisions (do not relitigate — confirmed by Brandon this session)
-
-1. **Global graph, not per-repo.** One cross-repo `related:` graph. Brandon explicitly wants rich
-   knowledge graphs, built "as sophisticated as we can / with room to grow," reusable for clients.
-2. **Canonical node id = `scope:doc_id`.** `scope` = a **registry-driven stable slug** from `brain.toml`
-   (HQ, each tier sub-brain, each repo), resolved by **longest-prefix** over the registry — **never**
-   inferred from tier/path position (so reorgs/renames don't break edges). `doc_id` stays authored +
-   location-independent.
-3. **mev is a multi-root validator** — walks every registered unit from HQ via `brain.toml`.
-4. **Edge model built to grow** — generic `Edge { from, to_ref, kind }`; Block J validates `related:`
-   (kind `Related`) only; typed edges (`supersedes`/`depends-on`/`parent`) extend it later.
-5. **Corpus = `planning/**` + `docs/**` + root `README`/`CLAUDE`**, across all registered repos, minus
-   bloat (`sdlc`/`archive`/`archived`/`trees`/`target`/…) and ephemeral (`handoff.md`, `_`-prefixed).
-6. **Root files: OKF frontmatter is *optional*.** `CLAUDE.md`/`README.md` are always embedded; without a
-   `doc_id` they are searchable **leaves**, with one they are **nodes**. No backfill. (We considered
-   "require OKF" and withdrew it — see decision doc point 4.)
-7. **Single corpus definition** — mev owns the canonical corpus crawl; `index_brain.py` (embedder)
-   should *consume* mev's file-list rather than re-implement it. (Orchestrator alignment, tracked
-   separately.)
-
----
+The headline, now captured in **`planning/decisions/D4-corpus-engine-and-knowledge-graph.md`**: mev is
+the **single corpus engine** — one Rust crawl produces three outputs (diagnostics + manifest + graph) —
+and is a **pure, side-effect-free compiler** (JSON out; no DB, no network). The knowledge graph is a
+**first-class emitted artifact**, stored in **Postgres beside the embeddings** (one joinable store), which
+enables **two retrieval modes**: *semantic* (vector/RAG, fuzzy, costs tokens) and *structural* (graph/SQL,
+exact, free), fusing into graph-aware RAG. Division of labor: **Rust owns the deterministic and free;
+Python (orchestrator) owns the embedding/AI layer.** Read D4 first — it is the source of truth for the
+end-state. It refines (does not supersede) `2.J-graph-integrity/namespacing-and-corpus-decision.md`.
 
 ## Completed this session
 
-- **Block N confirmed done/merged** (it had already shipped in `74a1c05` / PR #2). Cleaned up a stale
-  handoff and a redundant regenerated spec; restored Block N's real "Done" status.
-- **Block J split into two specs + reshaped**, all committed on `main`:
-  - `planning/2.J-corpus-crawl/tasks.md` — **NEW foundation block** (runs first): scope-unit registry +
-    `scope_for` resolver (`src/brain/scope.rs`), multi-root `crawl_corpus` (`src/brain/crawl.rs`),
-    wire into `BrainValidator` + OKF-exemption for root files. 5 tasks.
-  - `planning/2.J-graph-integrity/tasks.md` — **REWORKED**: global `scope:doc_id` node index +
-    extensible edge model + uniqueness + `related:` resolution (bare = same scope, qualified =
-    cross-scope) + leaf-as-target lint, surfaced via `--graph`. 5 tasks. Depends on 2.J-corpus-crawl.
-  - `namespacing-and-corpus-decision.md` — appended the 2026-06-28 refinements (append-only).
-  - `planning/master-plan.md` — inserted Block J-crawl; reshaped Block J. `planning/index.md` updated.
-- The previously-running `/sdlc-flow 2.J-graph-integrity` worktree was removed (it had only the init
-  commit; nothing lost). **The old worktree is gone — start fresh.**
+- **Reviewed `workflow-engine-rs/services/knowledge_graph`** (the priority review item from the prior
+  handoff): a UUID-keyed, Dgraph-backed service with edges *inferred* from concept properties. **Verdict:
+  do NOT adopt it for the brain** — wrong model for an *authored* `scope:doc_id` doc graph. Borrow its
+  algorithms (Dijkstra/topo-sort/PageRank) as ideas later if needed; not the service or its Dgraph backend.
+- **Read the embedder** (`core/orchestrator/scripts/index_brain.py`) and confirmed the **double-crawl
+  problem**: mev and `index_brain.py` independently re-implement the same corpus rules and will drift.
+- **Wrote `planning/decisions/D4-corpus-engine-and-knowledge-graph.md`** (new) — the 5 settled decisions
+  (Brandon confirmed all via the question prompt): (1) mev = single corpus engine; (2) mev = pure compiler,
+  no DB/network; (3) graph = emitted, serializable, reusable module, **edge model `Edge { from, to_ref,
+  kind }` built to grow** (related → supersedes/depends-on/parent, no refactor); (4) graph in Postgres
+  beside embeddings (not Dgraph); (5) two retrieval modes fuse at retrieval.
+- **Refreshed `planning/master-plan.md`** — "bigger destination (D4)" framing; D4 note on Phase 3; two
+  **forward-compat constraints** stamped on the queued blocks (J-crawl returns an owned crawl result; J's
+  graph module is reusable + `Serialize`-able); new **Phase 3B** with Blocks **Q** (manifest emit), **R**
+  (graph emit + structural query surface), **S** (graph-aware RAG, orchestrator); sequence table updated.
+- **Updated `status.md`** (frontmatter scalars, momentum board, Phase 3B progress rows) and
+  **`decisions/index.md`** (D4 entry; marked D3 superseded).
+- Deleted the prior `planning/handoff.md` (consumed).
 
----
+## Remaining work
 
-## Remaining work (in order)
+In order:
 
-1. **REVIEW `portfolio/workflow-engine-rs/services/knowledge_graph/` first** (see next section) — it may
-   change how we build the graph layer. Do this *before* running the specs.
-2. **`/sdlc-flow 2.J-corpus-crawl`** — the foundation (registry + scope + multi-root crawl). Must land
-   before the graph block.
-3. **`/sdlc-flow 2.J-graph-integrity`** — the global `scope:doc_id` graph checks on top.
-4. **Companion work (not mev code, flag to Brandon):**
-   - brain repo: register tier sub-brains as scope units in `brain.toml`; switch `skip_dirs` to the
-     bare-component bloat list (`archive`/`archived`/`trees`/`sdlc`/…).
-   - orchestrator: have `index_brain.py` consume mev's corpus file-list (single source of truth).
-   - per-repo: optionally add OKF frontmatter to any `CLAUDE.md`/`README.md` you want addressable as
-     graph nodes (optional — leaves are fine).
+1. **`/sdlc-flow 2.J-corpus-crawl`** — the foundation: scope-unit registry (`brain.toml`) + longest-prefix
+   `scope_for` resolver + multi-root `crawl_corpus`. **Honor D4 forward-compat:** return a clean *owned
+   crawl result* (not state buried in a validation pass) — it will feed the manifest emit + the embedder.
+2. **`/sdlc-flow 2.J-graph-integrity`** — global `scope:doc_id` node index + edge integrity. **Honor D4
+   forward-compat:** graph construction is a reusable module with `Serialize`-able node/edge structs, and
+   the edge carries `kind` from day one.
+3. **Phase 3B (additive, after J):** Block Q (manifest emit → `index_brain.py` consumes it), Block R
+   (graph emit → Postgres edges table + bastion/MCP structural query), Block S (graph-aware RAG,
+   orchestrator-side).
+4. **Companion work (not mev code — flag to Brandon):** register tier sub-brains as scope units in
+   `brain.toml`; switch `skip_dirs` to bare-component bloat list; refactor `index_brain.py` to consume
+   mev's manifest; add the Postgres edges table.
 
----
+## Open questions / choices
 
-## ⭐ Priority review item — the existing `knowledge_graph` service
-
-**Before building Block J, review `/Users/brandon/Dev/agentic-portfolio/portfolio/workflow-engine-rs/services/knowledge_graph/`
-and figure out how it fits what we're doing here.** It is an existing, real Rust knowledge-graph
-service and may overlap with — or become the home of — the graph layer we're specifying.
-
-What it is (from its README): a standalone Rust service managing concept relationships + learning paths
-over a **Dgraph** backend, with:
-- **Graph algorithms** (`src/algorithms/`): A*, Dijkstra (min-heap), topological sort, ranking, traversal.
-- **Dgraph client** (`src/client/`): connection pooling, query/mutation parsing.
-- **APIs**: async-graphql `/graphql` + REST (`/api/v1/search`, `/concept/:id`, `/learning-path`,
-  `/related/:id`).
-- `dgraph/schema.graphql`, `test-data/`, integration tests.
-
-**Questions to resolve:**
-- Is this the **query/retrieval layer** over the same graph mev *validates*? (mev = integrity gate that
-  the graph is well-formed; knowledge_graph = stores/queries/traverses it.) If so, do the **node-id and
-  edge models need to agree** — does `knowledge_graph` key nodes the same way our `scope:doc_id` scheme
-  does? Should mev's `Edge { from, to_ref, kind }` map onto its Dgraph schema?
-- Does it change **where** the graph lives — Dgraph vs deriving the graph from frontmatter at validate
-  time? mev's Block J only needs the in-memory graph to *validate*; persistence/traversal could be this
-  service's job. Avoid building a second, divergent graph model.
-- Is it portfolio-only demo code, or substrate to harvest (like `workflow-engine-rs`/`claude-sdk-rs`
-  are harvested into Bastion)? That determines whether we align to it or just borrow ideas.
-
-Net: confirm the **division of labor** (mev validates; knowledge_graph stores/queries) and the **shared
-contract** (node id + edge shape) before committing Block J's edge model, so the two don't diverge.
-
----
+None — the architecture is settled per **D4** (all 5 decisions confirmed by Brandon this session).
+Clear to proceed to `2.J-corpus-crawl`.
 
 ## Context the next agent needs
 
-- **Branch:** `main` (clean). Remote `origin` (`bredmond1019/mev`, private). One worktree (main only).
+- **Branch:** `main`. This session's planning changes are committed (see the commit from `/commit`).
 - **Tests:** ~196 green pre-Block-J. Harness: `cargo fmt --check && cargo clippy -- -D warnings &&
   cargo test && cargo build --release`.
-- **Key source:** `src/brain/{config.rs (registry: RepoEntry slug+repo_path), okf.rs, crawl.rs,
-  sync.rs, mod.rs}`, `src/lib.rs` (`validate_brain`, `validate_brain_sync`; add `validate_brain_graph`),
-  `src/main.rs` (`--sync` is the sibling pattern for `--graph`).
-- **brain.toml** lives at HQ root (`~/Dev/agentic-portfolio/brain.toml`) — currently lists 9 repos, no
-  tier units yet (that registration is companion work). mev reads whatever the registry declares.
-
----
+- **Key source:** `src/brain/{config.rs (registry: slug + repo_path), okf.rs, crawl.rs, sync.rs, mod.rs}`,
+  `src/lib.rs` (`validate_brain`, `validate_brain_sync`), `src/main.rs` (`--sync` is the sibling pattern
+  for the eventual `--graph`/`--emit-manifest` flags).
+- **brain.toml** at HQ root (`~/Dev/agentic-portfolio/brain.toml`): 9 repos, no tier units yet (companion
+  work). mev reads whatever the registry declares.
+- **Both specs already exist and are correct as written** — D4 only adds the two forward-compat
+  constraints above; no spec rewrite needed.
 
 ## First command after `/prime`
 
 ```
-# 1. Review the existing graph service and report how it fits (do this first):
-#    portfolio/workflow-engine-rs/services/knowledge_graph/
-# 2. Then run the foundation block:
 /sdlc-flow 2.J-corpus-crawl
-# 3. Then the graph block:
-/sdlc-flow 2.J-graph-integrity
 ```

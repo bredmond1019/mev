@@ -8,12 +8,33 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-06-28"
+timestamp: "2026-06-28T19:38:22-0300"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## 2026-06-28 — Destination architecture settled (D4): mev as corpus engine; graph as emitted product
+
+### Reviewed knowledge_graph service; settled corpus-engine + knowledge-graph architecture (D4)
+- **What:** Reviewed the `workflow-engine-rs` `knowledge_graph` service — verdict: **don't adopt**
+  for the brain (UUID/Dgraph/inferred edges; wrong model for an authored `scope:doc_id` graph).
+  Settled the destination architecture in new decision **D4**: mev becomes the single **corpus
+  engine** (one crawl → diagnostics + manifest + graph), a pure side-effect-free compiler; the
+  knowledge graph is a **first-class emitted artifact** stored in **Postgres beside the embeddings**;
+  an **extensible `Edge { from, to_ref, kind }`** model; **two retrieval modes** (semantic +
+  structural) fusing into graph-aware RAG. Refreshed `master-plan.md` with **Phase 3B (Blocks
+  Q/R/S)** and added forward-compat constraints on the queued Block J specs; updated `status.md`
+  and `decisions/index.md`.
+- **Why:** Before building the graph specs, needed to settle division of labor against the existing
+  Dgraph-backed graph service and lock the destination (where the graph lives, its node/edge
+  contract, how retrieval uses it) so the queued Block J work is built forward-compatible.
+- **Refs:** [D4](./planning/decisions/D4-corpus-engine-and-knowledge-graph.md) ·
+  `planning/master-plan.md` (Phase 3B, Blocks Q/R/S) · `planning/2.J-corpus-crawl/` ·
+  `planning/2.J-graph-integrity/` · `planning/status.md`
 
 ---
 
