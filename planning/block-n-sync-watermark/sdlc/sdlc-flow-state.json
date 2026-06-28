@@ -2,10 +2,10 @@
   "spec_slug": "block-n-sync-watermark",
   "branch": "block-n-sync-watermark-flow-3",
   "started_at": "2026-06-28T00:20:17Z",
-  "updated_at": "2026-06-28T00:23:39Z",
+  "updated_at": "2026-06-28T00:26:52Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3",
   "status": "running",
-  "current_task": 2,
+  "current_task": 3,
   "tasks": {
     "1": {
       "status": "passed",
@@ -40,6 +40,23 @@
       ],
       "files_changed": [
         "src/brain/sync.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "3": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added validate_brain_sync() public API (OKF schema pass + watermark check) and --sync flag on the validate-brain subcommand; all four harness gates pass (123 tests).",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "validate_brain_sync clones BrainConfig (derives Clone) so it can run both BrainValidator::new(config.clone()) and check_sync(root, &config) without borrow conflicts",
+        "CLI dispatches via if/else on the sync bool rather than a separate subcommand, keeping the --json and exit-code paths unchanged"
+      ],
+      "files_changed": [
+        "src/lib.rs",
+        "src/main.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -124,13 +141,37 @@
         "filesReadKb": null,
         "inTokEst": 580,
         "outTok": 2125
+      },
+      {
+        "label": "update-task-3",
+        "model": "haiku",
+        "promptTokEst": 259,
+        "filesReadKb": null,
+        "inTokEst": 259,
+        "outTok": 870
+      },
+      {
+        "label": "implement-3-1",
+        "model": "sonnet",
+        "promptTokEst": 898,
+        "filesReadKb": null,
+        "inTokEst": 898,
+        "outTok": 6198
+      },
+      {
+        "label": "test-3-1",
+        "model": "haiku",
+        "promptTokEst": 580,
+        "filesReadKb": null,
+        "inTokEst": 580,
+        "outTok": 1737
       }
     ],
     "total": {
-      "promptTokEst": 4480,
+      "promptTokEst": 6217,
       "filesReadKb": 0,
-      "inTokEst": 4480,
-      "outTok": 28287
+      "inTokEst": 6217,
+      "outTok": 37092
     }
   }
 }

@@ -9,3 +9,8 @@ Validated: gating checks (fast tripwire)
 What: Implement check_sync logic in src/brain/sync.rs: WatermarkFrontmatter struct, read_watermark file reader, pub fn check_sync emitting E_SYNC_FILE_MISSING / E_SYNC_WATERMARK_MISSING / E_SYNC_WATERMARK_MALFORMED / E_SYNC_DRIFT diagnostics per [[repos]] entry, with 8 unit tests covering all locator codes.
 Decisions: read_watermark uses extract_frontmatter (existing shared helper) + serde_yaml to avoid duplicating YAML parsing logic; WatermarkFrontmatter uses #[serde(default)] so missing fields deserialize to None rather than erroring, matching the spec's 'extras tolerated' requirement; check_sync continues to next repo on first error per repo rather than accumulating multiple errors for the same repo — consistent with how OKF validation short-circuits on read failure
 Validated: gating checks (fast tripwire)
+
+## Task 3 — PASSED (1 attempt)
+What: Added validate_brain_sync() public API (OKF schema pass + watermark check) and --sync flag on the validate-brain subcommand; all four harness gates pass (123 tests).
+Decisions: validate_brain_sync clones BrainConfig (derives Clone) so it can run both BrainValidator::new(config.clone()) and check_sync(root, &config) without borrow conflicts; CLI dispatches via if/else on the sync bool rather than a separate subcommand, keeping the --json and exit-code paths unchanged
+Validated: gating checks (fast tripwire)
