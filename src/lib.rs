@@ -136,6 +136,43 @@ pub fn validate_brain(root: &std::path::Path) -> anyhow::Result<Report> {
     Ok(BrainValidator::new(config).run(root))
 }
 
+/// Validate the company-brain repo for OKF frontmatter compliance **plus** cross-repo
+/// sync watermark integrity.
+///
+/// Phase 3, Block M (HQ-Restructure Block N): runs the full schema pass (identical to
+/// [`validate_brain`]) and then appends [`brain::sync::check_sync`] diagnostics into
+/// the same [`Report`].  A `Sync` error (any `E_SYNC_*` locator) is `Error`-severity
+/// and causes `report.is_failure()` to return `true`, producing exit code 1.
+///
+/// Resolves `brain.toml` the same way as [`validate_brain`] — see that function's
+/// doc for the `E_CONFIG_NOT_FOUND` fallback behaviour.
+pub fn validate_brain_sync(root: &std::path::Path) -> anyhow::Result<Report> {
+    use brain::config::find_brain_config;
+    use brain::sync::check_sync;
+
+    let config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            let mut report = Report::default();
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    // Schema pass (OKF frontmatter)
+    let mut report = BrainValidator::new(config.clone()).run(root);
+
+    // Sync watermark pass
+    let sync_diags = check_sync(root, &config);
+    report.diagnostics.extend(sync_diags);
+
+    Ok(report)
+}
+
 /// Machine-readable envelope emitted by the `--json` flag for any `mev` subcommand.
 ///
 /// Consumed by the Brain RAG indexer as a pre-`--rebuild` gate.
