@@ -2,10 +2,10 @@
   "spec_slug": "block-n-sync-watermark",
   "branch": "block-n-sync-watermark-flow-3",
   "started_at": "2026-06-28T00:20:17Z",
-  "updated_at": "2026-06-28T00:31:11Z",
+  "updated_at": "2026-06-28T00:33:39Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3",
   "status": "running",
-  "current_task": 4,
+  "current_task": 5,
   "tasks": {
     "1": {
       "status": "passed",
@@ -74,6 +74,17 @@
       "files_changed": [
         "tests/brain_sync.rs"
       ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "5": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Task 5 (Validate): all four harness gates pass — fmt, clippy -D warnings, cargo test (196 tests, 0 failures), cargo build --release",
+      "issues": [],
+      "fixes": [],
+      "decisions": [],
+      "files_changed": [],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
     }
@@ -205,13 +216,37 @@
         "filesReadKb": null,
         "inTokEst": 580,
         "outTok": 2457
+      },
+      {
+        "label": "update-task-5",
+        "model": "haiku",
+        "promptTokEst": 259,
+        "filesReadKb": null,
+        "inTokEst": 259,
+        "outTok": 958
+      },
+      {
+        "label": "implement-5-1",
+        "model": "sonnet",
+        "promptTokEst": 898,
+        "filesReadKb": null,
+        "inTokEst": 898,
+        "outTok": 1583
+      },
+      {
+        "label": "test-5-1",
+        "model": "haiku",
+        "promptTokEst": 580,
+        "filesReadKb": null,
+        "inTokEst": 580,
+        "outTok": 1861
       }
     ],
     "total": {
-      "promptTokEst": 7954,
+      "promptTokEst": 9691,
       "filesReadKb": 0,
-      "inTokEst": 7954,
-      "outTok": 49434
+      "inTokEst": 9691,
+      "outTok": 53836
     }
   }
 }

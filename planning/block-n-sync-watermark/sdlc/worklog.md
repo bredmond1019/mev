@@ -19,3 +19,7 @@ Validated: gating checks (fast tripwire)
 What: Added tests/brain_sync.rs with 4 integration tests covering validate_brain_sync over a temp HQ-root fixture: in-sync (0 errors), drift detection (exactly 1 E_SYNC_DRIFT), cache re-alignment clearing the error, and JSON round-trip serialization of the Sync diagnostic.
 Decisions: Used two custom repo slugs (alpha, beta) in the fixture brain.toml to avoid any collision with real repos that could interfere with walk-up config resolution; Filtered Sync errors by E_SYNC_ locator prefix rather than asserting total error count of 1 in the drift test, to remain robust if the OKF schema pass ever emits additional diagnostics for other fixture content
 Validated: gating checks (fast tripwire)
+
+## Task 5 — PASSED (1 attempt)
+What: Task 5 (Validate): all four harness gates pass — fmt, clippy -D warnings, cargo test (196 tests, 0 failures), cargo build --release
+Validated: gating checks (fast tripwire)
