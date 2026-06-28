@@ -2,10 +2,10 @@
   "spec_slug": "2.J-corpus-crawl",
   "branch": "2.J-corpus-crawl-flow",
   "started_at": "2026-06-28T23:17:04Z",
-  "updated_at": "2026-06-28T23:37:43Z",
+  "updated_at": "2026-06-28T23:40:49Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-corpus-crawl-flow",
   "status": "running",
-  "current_task": 4,
+  "current_task": 5,
   "tasks": {
     "1": {
       "status": "passed",
@@ -77,6 +77,19 @@
       ],
       "files_changed": [
         "tests/brain_corpus.rs",
+        "planning/2.J-corpus-crawl/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "5": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Task 5 (validate): all four harness gates pass — fmt, clippy -D warnings, 159 tests (unit + integration across 10 test suites), release build",
+      "issues": [],
+      "fixes": [],
+      "decisions": [],
+      "files_changed": [
         "planning/2.J-corpus-crawl/tasks.md"
       ],
       "commit": "",
@@ -210,13 +223,37 @@
         "filesReadKb": null,
         "inTokEst": 564,
         "outTok": 1577
+      },
+      {
+        "label": "update-task-5",
+        "model": "haiku",
+        "promptTokEst": 251,
+        "filesReadKb": null,
+        "inTokEst": 251,
+        "outTok": 968
+      },
+      {
+        "label": "implement-5-1",
+        "model": "sonnet",
+        "promptTokEst": 873,
+        "filesReadKb": null,
+        "inTokEst": 873,
+        "outTok": 2269
+      },
+      {
+        "label": "test-5-1",
+        "model": "haiku",
+        "promptTokEst": 564,
+        "filesReadKb": null,
+        "inTokEst": 564,
+        "outTok": 2034
       }
     ],
     "total": {
-      "promptTokEst": 7739,
+      "promptTokEst": 9427,
       "filesReadKb": 0,
-      "inTokEst": 7739,
-      "outTok": 77100
+      "inTokEst": 9427,
+      "outTok": 82371
     }
   }
 }
