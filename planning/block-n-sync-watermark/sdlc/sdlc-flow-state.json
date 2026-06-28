@@ -2,9 +2,9 @@
   "spec_slug": "block-n-sync-watermark",
   "branch": "block-n-sync-watermark-flow-3",
   "started_at": "2026-06-28T00:20:17Z",
-  "updated_at": "2026-06-28T00:38:08Z",
+  "updated_at": "2026-06-28T00:40:46Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/block-n-sync-watermark-flow-3",
-  "status": "docs",
+  "status": "done",
   "current_task": 5,
   "tasks": {
     "1": {
@@ -260,13 +260,21 @@
         "filesReadKb": null,
         "inTokEst": 565,
         "outTok": 6294
+      },
+      {
+        "label": "wrap-up",
+        "model": "sonnet",
+        "promptTokEst": 829,
+        "filesReadKb": null,
+        "inTokEst": 829,
+        "outTok": 4403
       }
     ],
     "total": {
-      "promptTokEst": 11250,
+      "promptTokEst": 12079,
       "filesReadKb": 0,
-      "inTokEst": 11250,
-      "outTok": 62962
+      "inTokEst": 12079,
+      "outTok": 67365
     }
   }
 }
