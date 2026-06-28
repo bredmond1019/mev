@@ -59,7 +59,8 @@ at the top; only pipeline state lives under `sdlc/`.
 |---|---|---|
 | `2.M-brain-toml-reader/` | HQ-R Block M — mev reads `brain.toml` for vocab + crawl + project slugs | Done |
 | `block-n-sync-watermark/` | HQ-R Block N (mev Phase 3 Block M) — `mev validate-brain --sync` watermark check | Done |
-| `2.J-graph-integrity/` | Phase 3 Block J — `mev validate-brain --graph` (`related:` edges + duplicate doc_id) | Not started |
+| `2.J-corpus-crawl/` | Phase 3 Block J-crawl — multi-root corpus crawl + scope registry (foundation; runs first) | Not started |
+| `2.J-graph-integrity/` | Phase 3 Block J — global `scope:doc_id` graph integrity (`--graph`); depends on 2.J-corpus-crawl | Not started |
 
 ## What's NOT Here
 

@@ -175,13 +175,34 @@ mutates the corpus — upholds D25) and `--json`-able so an agent can act on the
 implementation of the brain-program's integrity/freshness work (the `hooks/README.md` `bastion validate
 --integrity`, "Block K"), surfaced through `bastion`.
 
-### Block J — Graph integrity (`related:` edges)
-- **What:** Build a corpus-wide `doc_id` index (every `.md`'s `doc_id`, defaulting to filename stem). Flag
-  every `related:` entry that points at a `doc_id` no document defines (a dangling edge), and flag duplicate
-  `doc_id`s. This is the generalization of the learn-ai **anchor-slice contract** (Block D): "a reference
-  must resolve to a real target."
-- **Acceptance:** a `related:` ref to a renamed/deleted doc is flagged; duplicate `doc_id`s are flagged;
-  clean corpus passes.
+> **Block J reshaped 2026-06-28** into a global cross-repo knowledge graph (see
+> `planning/2.J-graph-integrity/namespacing-and-corpus-decision.md`). It now splits into a
+> corpus-crawl foundation (Block J-crawl) and the graph checks (Block J). Canonical node id =
+> `scope:doc_id`, where `scope` is a registry-driven stable slug from `brain.toml`.
+
+### Block J-crawl — Multi-root corpus crawl + scope registry  *(foundation; lands first)*
+- **What:** Make mev a **multi-root validator**. (1) A scope-unit **registry** read from `brain.toml`
+  (HQ, each tier sub-brain, each repo → immutable `slug` + path) with a longest-prefix `scope_for(path)`
+  resolver. (2) A canonical **corpus crawl** that walks every registered unit from the HQ root and includes
+  only `planning/**` + `docs/**` + root `README.md`/`CLAUDE.md`, minus `skip_dirs` bloat (`target`,
+  `node_modules`, `.git`, `archive`, `archived`, `trees`, `sdlc`, `.venv`, …) and ephemeral
+  (`handoff.md`, `_`-prefixed). Replaces the old single-root, nested-git-pruned walk; `CLAUDE.md` is no
+  longer file-blocklisted (root files now carry OKF frontmatter). This file-list is the **single corpus
+  definition** the embedder should consume.
+- **Acceptance:** the crawl returns each registered unit's `planning/`+`docs/`+root files with correct
+  scope; bloat/ephemeral/unregistered dirs are excluded; `scope_for` is stable under simulated tier/path
+  moves (slug-keyed). Companion (out of repo): `brain.toml` registers tier units; root-file frontmatter
+  backfill.
+
+### Block J — Graph integrity (`scope:doc_id` `related:` edges)
+- **What:** Over the corpus crawl, build a global **`scope:doc_id`** node index (node = a file with an
+  authored `doc_id`; files without one are leaves). Flag duplicate canonical ids, and every `related:`
+  edge that resolves to neither a node nor a leaf (**bare** id resolves within the referrer's scope;
+  qualified **`scope:doc_id`** resolves cross-scope); a `related:` pointing at a leaf is a warning. The
+  edge representation is generic (`from`, `to-ref`, `kind`) so typed edges (`supersedes`/`depends-on`/…)
+  extend it later. Generalizes the learn-ai **anchor-slice contract** (Block D): a reference must resolve.
+- **Acceptance:** a `related:` ref to a renamed/deleted node is flagged; duplicate `scope:doc_id`s are
+  flagged; the same `doc_id` under different scopes is **not** flagged; a clean corpus passes.
 
 ### Block K — Link integrity (markdown / `file://` / `[[wikilink]]`)
 - **What:** Check that markdown `[text](path)` and `file:///…` links resolve to files that exist on disk,

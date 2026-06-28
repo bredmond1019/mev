@@ -1,0 +1,133 @@
+---
+type: TaskSpec
+title: Task Spec — Phase 3, Block J-crawl — multi-root corpus crawl + scope registry
+description: Decomposed task spec for the registry-driven scope resolver and the canonical multi-root Brain corpus crawl — the shared foundation for OKF validation, the doc_id graph, and the embedder.
+doc_id: 2j-corpus-crawl-tasks
+layer: [factory, brain]
+project: mev
+status: active
+keywords: [corpus crawl, multi-root, scope registry, brain.toml, skip_dirs, single source of truth]
+related: [master-plan, status, block-j-namespacing-decision, D29-mev-brain-validation-engine]
+---
+
+# Task Spec — Phase 3, Block J-crawl — Multi-root corpus crawl + scope registry
+
+**Status:** Not started · **Last run:** never
+
+## Goal
+Make mev a multi-root validator: a registry-driven `scope_for(path)` resolver plus a canonical corpus
+crawl that walks every registered unit from the HQ root and yields exactly the Brain corpus
+(`planning/**` + `docs/**` + root `README`/`CLAUDE`, minus bloat + ephemeral) — the single file-list
+both OKF validation and the graph check consume.
+
+## Context Pointers
+
+- **Authoritative design:** `planning/2.J-graph-integrity/namespacing-and-corpus-decision.md`, esp. the
+  **"Corpus rules"** section and the **2026-06-28 Update** (registry-driven stable slugs; mev as
+  multi-root validator; root files carry OKF frontmatter; single corpus definition). Read it first.
+- **Plan:** `planning/master-plan.md` → Phase 3, **Block J-crawl**. Governed by brain **D29**.
+- **Repo files that apply:**
+  - `src/brain/config.rs` — `BrainConfig` / `RepoEntry` already carry `slug` + `repo_path`; this block
+    treats each `[[repos]]` entry as a **scope unit** (the root entry `repo_path = "."` → slug `brain`).
+  - `src/brain/crawl.rs` — `crawl_brain` + `MdFile`; the current single-root walk with nested-git pruning
+    and the `CLAUDE.md` file blocklist are what this block replaces/changes.
+  - `src/brain/mod.rs` — `BrainValidator::crawl` delegates here; rewire to the corpus crawl.
+  - `src/lib.rs` — `validate_brain` (the crawl swap flows through it).
+- **CLAUDE.md standing rules:** every behaviour change ships with tests; all four harness gates green;
+  existing brain (sync) + learn-ai tests stay green.
+
+### Scoping decisions made at authoring time (do not relitigate)
+
+1. **Scope units come from the `brain.toml` registry** (`[[repos]]` entries: `slug` + `repo_path`),
+   not inferred from tier/path position. `scope_for(rel)` = longest-prefix match of the file's path
+   against the registry; the root unit (`repo_path = "."`, slug `brain`) is the fallback. Registering
+   **tier sub-brains** as units (so `core/docs/...` → scope `core` rather than `brain`) is a brain-side
+   `brain.toml` edit — **out of scope here**; mev reads whatever units the registry declares, and the
+   fixtures include tier units to prove the resolver.
+2. **Corpus membership rule:** a `.md` file is in the corpus iff, relative to its **owning unit**
+   (longest-prefix), its path is under `planning/` or `docs/`, **or** it is the unit's root `README.md`
+   or `CLAUDE.md`. Everything else (a unit's `src/*.md`, stray root-level `.md`, files under an
+   unregistered nested dir) is excluded.
+3. **Bloat + ephemeral exclusion:** prune `skip_dirs` (from `brain.toml` `[crawl].skip_dirs`, matched as
+   **bare components at any depth** — `target`, `node_modules`, `.git`, `.claude`, `.agent(s)`,
+   `.repo-backups`, `archive`, `archived`, `trees`, `sdlc`, `venv`, `.venv`); exclude ephemeral files
+   `handoff.md` and any `_`-prefixed `.md`.
+4. **Root files are included** — remove `CLAUDE.md` from the file blocklist (it now carries OKF
+   frontmatter and is a corpus node). `handoff.md` stays blocklisted.
+5. **OKF backfill is companion content work, not this block.** Once root files are crawled,
+   `validate-brain` will flag any `CLAUDE.md`/`README.md` lacking frontmatter — expected; the backfill
+   lands per-repo separately.
+
+## Step-by-Step Tasks
+
+### 1. Scope-unit registry + `scope_for` resolver
+- Create `src/brain/scope.rs` and register `pub mod scope;` in `src/brain/mod.rs`.
+- Add `scope_units(config) -> Vec<(slug, repo_path)>` (every `[[repos]]` entry) and
+  `scope_for(rel: &Path, config: &BrainConfig) -> String`: longest-prefix match of `rel` against unit
+  `repo_path`s (excluding `"."` from prefix comparison); on no match, return the root unit's slug
+  (`repo_path == "."`, i.e. `brain`). Also expose `owning_unit(rel, config) -> (slug, repo_path)` for
+  the crawl's membership test.
+- Unit tests: `core/mev/planning/x.md` → `mev`; `core/docs/x.md` → `core` (when a `core` unit is
+  registered); `planning/x.md` and `README.md` → `brain`; longest-prefix wins (mev over core);
+  stability — the same file keyed by slug regardless of a simulated tier rename in the fixture.
+- Files: `src/brain/scope.rs`, `src/brain/mod.rs`.
+
+### 2. Canonical corpus crawl
+- In `src/brain/crawl.rs`, add `crawl_corpus(root, config) -> (Vec<MdFile>, Vec<Diagnostic>)`:
+  walk `root` once, pruning `skip_dirs` (bare-component match at any depth — the existing
+  `is_blocklisted_name` name-mode already does this) so bloat subtrees never descend. For each `.md`
+  file, compute its owning unit (Task 1) and keep it only if its path relative to that unit is under
+  `planning/` or `docs/`, or equals `README.md`/`CLAUDE.md`; drop ephemeral (`handoff.md`,
+  `_`-prefixed). Remove `CLAUDE.md` from `is_blocklisted_file`; keep `handoff.md`.
+- Drop the nested-git pruning for the corpus crawl (unit-ownership now bounds membership); keep
+  `crawl_brain` if still referenced, or migrate callers — no dead code, clippy clean.
+- Unit/inline tests for the membership helper (under-planning / under-docs / root-file → in;
+  `src/x.md` / stray root `.md` / unregistered-dir file → out).
+- Files: `src/brain/crawl.rs`.
+
+### 3. Wire the corpus crawl into `BrainValidator`
+- In `src/brain/mod.rs`, change `BrainValidator::crawl` to call `crawl_corpus(root, &self.config)`.
+  Confirm `validate_brain` / `validate_brain_sync` (in `src/lib.rs`) still compile and behave; update
+  any doc comments naming the old single-root walk.
+- Files: `src/brain/mod.rs`, `src/lib.rs`.
+
+### 4. Integration tests — multi-root corpus over a fixture tree
+- Add `tests/brain_corpus.rs` building a temp HQ-root fixture: a `brain.toml` registering `brain`
+  (`.`), a tier unit (`core`), and a repo unit (`mev` → `core/mev`); files placed across each unit's
+  `planning/`, `docs/`, root `README.md`/`CLAUDE.md`, plus negative cases — a `sdlc/` file, an
+  `archive/` file, a `trees/` file, a `handoff.md`, a `core/mev/src/notes.md`, and a file under an
+  unregistered nested dir.
+- Assert the crawl includes exactly the corpus files with correct owning scope and excludes every
+  negative case; assert `CLAUDE.md`/`README.md` are included.
+- Files: `tests/brain_corpus.rs`.
+
+### 5. Validate
+- Run the Validation Commands listed below and confirm all pass.
+
+## Acceptance Criteria
+- `scope_for` resolves a file to its owning unit's stable slug via longest-prefix over the `brain.toml`
+  registry; the root unit is the fallback (`brain`); a simulated tier/path rename in a fixture does not
+  change a file's scope when keyed by slug.
+- `crawl_corpus` returns, for every registered unit, that unit's `planning/**` + `docs/**` + root
+  `README.md`/`CLAUDE.md`, and nothing else.
+- Bloat dirs (`sdlc`, `archive`, `archived`, `trees`, `target`, `node_modules`, `.git`, `.venv`, …),
+  ephemeral files (`handoff.md`, `_`-prefixed), unit `src/*.md`, stray root `.md`, and files under
+  unregistered nested dirs are all excluded.
+- `CLAUDE.md` is included in the corpus (no longer file-blocklisted); `handoff.md` remains excluded.
+- `BrainValidator`/`validate-brain` use the corpus crawl; existing brain + learn-ai tests stay green.
+- All four harness gates pass (`fmt`, `clippy -D warnings`, `test`, `build`).
+
+## Validation Commands
+```
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
+cargo build --release
+```
+
+## Notes
+<filled in as work happens>
+
+## Amendment Log
+<!-- Append-only. Pipeline stages append one dated line here when they deviate from the spec. -->
+_No amendments yet._
