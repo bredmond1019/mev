@@ -118,7 +118,7 @@ both OKF validation and the graph check consume.
   frontmatter is validated normally. Unit tests cover both branches.
 - Files: `src/brain/mod.rs`, `src/lib.rs`, `src/brain/okf.rs`.
 
-### 4. Integration tests — multi-root corpus over a fixture tree
+### 4. Integration tests — multi-root corpus over a fixture tree (in progress)
 - Add `tests/brain_corpus.rs` building a temp HQ-root fixture: a `brain.toml` registering `brain`
   (`.`), a tier unit (`core`), and a repo unit (`mev` → `core/mev`); files placed across each unit's
   `planning/`, `docs/`, root `README.md`/`CLAUDE.md`, plus negative cases — a `sdlc/` file, an
