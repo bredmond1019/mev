@@ -17,6 +17,26 @@ timestamp: "2026-06-29"
 
 ---
 
+## 2026-06-29 — 2.J-graph-integrity complete (PASS): global scope:doc_id knowledge graph
+
+Implemented the full Block J graph integrity layer (all 5 tasks, PASS). Task 1 defined the serializable, emittable graph model (`EdgeKind`, `Edge`, `Node`, `Graph` — all `Serialize`) and `build_graph` in `src/brain/graph.rs`, with the `read_doc_metadata` seam (D5 forward-compat: the single site that calls `extract_frontmatter`/`OkfFrontmatter`, keeping future foreign-format ingest a one-function swap); `check_graph` was co-located here since its logic depended directly on `GraphArtifact`. Task 2 completed by adding the one missing unit test: bare ref to a `doc_id` that exists only in another scope correctly flags dangling. Task 3 added `validate_brain_graph()` to `src/lib.rs` and `--graph` to the `ValidateBrain` CLI subcommand (mutually exclusive with `--sync` by precedence), re-exporting `build_graph`/`Graph`/`check_graph` for Phase 3B Block R. Task 4 delivered `tests/brain_graph.rs` with 7 end-to-end integration tests over a multi-unit (brain/core/mev) fixture: clean corpus, same doc_id across scopes, duplicate detection, cross-scope resolution, dangling edges, leaf-target warnings, and JSON envelope round-trip. Task 5 confirmed all four harness gates green: `fmt`, `clippy -D warnings`, 175 unit + 57 integration = 232 tests, release build. The `Graph` struct is `Serialize`-able (D4 forward-compat) — Phase 3B Block R can emit it directly to Postgres with no re-walk. Next: Block K (link integrity) or Block Q (manifest emit / Phase 3B).
+
+```
+ce18100 docs: update docs for 2.J-graph-integrity
+7b159a1 chore: flow state — task 5 passed
+83609cc feat: implement 2.J-graph-integrity-task5
+bf19087 chore: flow state — task 4 passed
+5ec919b feat: implement 2.J-graph-integrity-task4
+51e13e6 chore: flow state — task 3 passed
+05e48e8 feat: implement 2.J-graph-integrity-task3
+11d56aa chore: flow state — task 2 passed
+0b96651 feat(graph): check_graph + uniqueness/edge-resolution/leaf-lint tests (task 2, block J)
+55817f9 chore: flow state — task 1 passed
+6bcf0e7 feat(graph): serializable graph model + build_graph (task 1, block J)
+```
+
+---
+
 ## 2026-06-29 — 2.J-corpus-crawl merged; code-review fix for is_root_instruction_file
 
 - **What:** Ran `/sdlc-flow 2.J-corpus-crawl` to completion (5 tasks, PASS). Post-flow code review found `is_root_instruction_file` in `src/brain/okf.rs` was checking only the filename — a `docs/README.md` in the corpus would be silently OKF-exempt. Fixed to use `owning_unit()` + `strip_prefix` to verify the file sits exactly at its owning unit's root; added regression test `is_root_instruction_file_false_for_deep_readme`. Commit `753be87`. 160 tests pass. PR #3 merged; worktree cleaned.
