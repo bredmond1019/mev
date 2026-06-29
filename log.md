@@ -8,12 +8,20 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-06-28T19:38:22-0300"
+timestamp: "2026-06-29"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## 2026-06-29 — 2.J-corpus-crawl merged; code-review fix for is_root_instruction_file
+
+- **What:** Ran `/sdlc-flow 2.J-corpus-crawl` to completion (5 tasks, PASS). Post-flow code review found `is_root_instruction_file` in `src/brain/okf.rs` was checking only the filename — a `docs/README.md` in the corpus would be silently OKF-exempt. Fixed to use `owning_unit()` + `strip_prefix` to verify the file sits exactly at its owning unit's root; added regression test `is_root_instruction_file_false_for_deep_readme`. Commit `753be87`. 160 tests pass. PR #3 merged; worktree cleaned.
+- **Why:** Normal post-flow quality pass; the bug was a latent false-negative that would have silently skipped OKF validation for any `docs/README.md` in the corpus.
+- **Refs:** `src/brain/okf.rs`, `planning/2.J-corpus-crawl/tasks.md`, PR #3
 
 ---
 
