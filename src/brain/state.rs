@@ -724,14 +724,9 @@ pub fn check_state_graph(
     let known_repos: HashSet<&str> = files.iter().map(|(s, _)| s.repo_slug.as_str()).collect();
 
     // Count occurrences of each "repo:id" key so we can detect duplicates.
-    // Also store the path of the *last* occurrence for the diagnostic.
-    let mut node_counts: HashMap<&str, (usize, &PathBuf)> = HashMap::new();
+    let mut node_counts: HashMap<&str, usize> = HashMap::new();
     for node in &graph.nodes {
-        let entry = node_counts
-            .entry(node.key.as_str())
-            .or_insert((0, &node.source_path));
-        entry.0 += 1;
-        entry.1 = &node.source_path;
+        *node_counts.entry(node.key.as_str()).or_insert(0) += 1;
     }
 
     // Set of all registered "repo:id" keys (for dangling checks).
@@ -741,7 +736,7 @@ pub fn check_state_graph(
     let mut duplicate_reported: HashSet<&str> = HashSet::new();
     for node in &graph.nodes {
         let key = node.key.as_str();
-        if node_counts[key].0 > 1 && !duplicate_reported.contains(key) {
+        if node_counts[key] > 1 && !duplicate_reported.contains(key) {
             duplicate_reported.insert(key);
             diags.push(Diagnostic::error(
                 &node.source_path,
