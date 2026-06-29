@@ -73,9 +73,17 @@ since `2.J-corpus-crawl` already shipped to review:
 ## Deferred (explicitly NOT now)
 
 The normalized `Document` model, the extractor trait + per-format impls, sidecar reading, `mev discover`,
-and AI edge-proposal are all **backlog**. The corpus-model refactor to fully realize the seam is a
-follow-on (corpus-crawl shipped with `CorpusEntry { path, rel, stem, scope }` and no metadata field).
-Revisit when a real heterogeneous (client) corpus is on the table.
+and AI edge-proposal are all **backlog**. Revisit when a real heterogeneous (client) corpus is on the table.
+
+The corpus-model refactor to fully realize the seam (corpus-crawl shipped with
+`CorpusEntry { path, rel, stem, scope }` and no metadata field, so the OKF pass and Block J's graph build
+each re-parse frontmatter) is **folded into Block Q (manifest emit)** — that block needs per-entry metadata
+to emit the file-list + metadata JSON, so it is the point where `CorpusEntry { …, metadata }` becomes
+load-bearing and the extract-once optimization has a real consumer. Do **not** add a speculative
+follow-on block before Block J for this: the `read_doc_metadata` seam (Decision 7 in
+`2.J-graph-integrity/tasks.md`) is already entry-keyed and I/O-internal, so when the field lands the seam
+body becomes `entry.metadata` with no call-site changes. The double-read until then is negligible at brain
+scale (hundreds of files).
 
 ## What this does not change
 

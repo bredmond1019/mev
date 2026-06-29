@@ -88,7 +88,7 @@ blocked: []
 ### Phase 3B — The Brain as a queryable product (corpus engine outputs, D4)
 | Block | What | Status | Notes |
 |---|---|---|---|
-| Block Q | Manifest emit (file-list + metadata JSON) | Not started | mev emits canonical file-list; `index_brain.py` consumes it → "validated == embedded" by construction. Depends on 2.J-corpus-crawl. |
+| Block Q | Manifest emit (file-list + metadata JSON) | Not started | mev emits canonical file-list; `index_brain.py` consumes it → "validated == embedded" by construction. Carries the D5 extract-once refactor (adds `metadata` to `CorpusEntry`, parses frontmatter once; Block J's `read_doc_metadata` seam collapses to `entry.metadata`). Depends on 2.J-corpus-crawl. |
 | Block R | Graph emit + structural query surface | Not started | mev emits graph JSON; orchestrator loads Postgres edges table beside `brain_documents`; bastion/MCP structural queries (free/exact). Depends on 2.J-graph-integrity. |
 | Block S | Graph-aware RAG (orchestrator) | Not started | Retrieval traverses edges to expand/rerank semantic hits + query router. Orchestrator-side; mev's edge model is the contract. |
 

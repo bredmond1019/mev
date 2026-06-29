@@ -271,6 +271,11 @@ JSON; never touches a DB); persistence and the AI layer are the orchestrator's. 
   repo, orchestrator): refactor `index_brain.py` to **consume mev's manifest** instead of re-implementing
   `_collect_files`/`_corpus_roots`/`_classify_doc_type`/`normalize_metadata`. After this, "what's
   validated == what's embedded" holds by construction.
+- **Carries the D5 extract-once refactor:** this block adds the metadata field to `CorpusEntry` and parses
+  frontmatter **once during the crawl** (the OKF pass and Block J's graph build currently each re-read it).
+  Manifest emit is the first consumer that genuinely needs per-entry metadata, so the corpus-model refactor
+  deferred in D5 lands here, not as a speculative block before Block J. Block J's `read_doc_metadata` seam
+  collapses to `entry.metadata` with no call-site changes.
 - **Acceptance:** the emitted manifest lists exactly the corpus crawl's files with correct scope/doc_id/
   metadata; an orchestrator dry-run driven by the manifest indexes the same file set the Python crawl did
   (parity check); mev itself still writes nothing to any DB.
