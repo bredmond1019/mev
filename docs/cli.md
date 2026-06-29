@@ -55,12 +55,12 @@ mev --json validate
 
 ---
 
-### `validate-brain [--sync] [--graph] [path]`
+### `validate-brain [--sync] [--graph] [--state] [path]`
 
-Validate the Bastion Brain repo for OKF frontmatter compliance, and optionally check cross-repo sync watermark integrity or global knowledge-graph integrity.
+Validate the Bastion Brain repo for OKF frontmatter compliance, and optionally check cross-repo sync watermark integrity, global knowledge-graph integrity, or state.json schema and block-dependency graph integrity.
 
 ```bash
-mev validate-brain [--sync] [--graph] [path]
+mev validate-brain [--sync] [--graph] [--state] [path]
 ```
 
 | Argument / Flag | Default | Description |
@@ -68,6 +68,7 @@ mev validate-brain [--sync] [--graph] [path]
 | `path` | `..` | Path to the company-brain repo root |
 | `--sync` | off | Also run the cross-repo sync watermark check (see below) |
 | `--graph` | off | Also run the global `scope:doc_id` knowledge-graph integrity check (see below). Takes precedence over `--sync` when both flags are present — `--graph` is a superset. |
+| `--state` | off | Also run the `planning/state.json` schema and cross-repo block-dependency graph integrity check (see below). Takes precedence over `--graph` and `--sync` in the dispatch chain. |
 
 Resolves `brain.toml` by walking up from `path`. If no `brain.toml` is found, a fatal `Error`-severity diagnostic with locator `E_CONFIG_NOT_FOUND` is emitted and the process exits 1.
 
@@ -110,6 +111,33 @@ Graph errors (`E_GRAPH_DUPLICATE_DOC_ID`, dangling `related:`) cause exit 1. The
 
 `--graph` takes precedence over `--sync` when both flags are given — it is a superset (runs the OKF schema pass that `--sync` also runs, plus the graph pass).
 
+#### `--state` — state.json schema and block-dependency graph check
+
+When `--state` is passed, `mev` runs the full OKF schema pass first, then appends the state-validation pipeline:
+
+1. **Discovery** — finds all `planning/state.json` files: the HQ brain state, each tier sub-brain state (via `tiers[].rollup` in the HQ state), and each leaf project state (via `[[repos]]` in `brain.toml`). Missing files emit `W_STATE_FILE_MISSING`.
+2. **Load** — deserializes each discovered file. Unparseable files emit `E_STATE_MALFORMED_JSON`.
+3. **Schema ring** — checks field validity within each file (kind membership, status enum values, blocked_by well-formedness, kind-appropriate sections).
+4. **Graph** — builds the cross-repo block-dependency graph from all loaded files and checks it for integrity violations.
+5. **Rollup** — checks that brain `repos[]` headline entries (now/next) match their children's actual `focus` values.
+
+`--state` takes the highest precedence in the dispatch chain — when `--state` is present, `--graph` and `--sync` are not separately invoked.
+
+| Locator | Severity | Condition |
+|---|---|---|
+| `W_STATE_FILE_MISSING` | Warning | A registered repo has no `planning/state.json` |
+| `E_STATE_MALFORMED_JSON` | Error | A state.json file is not valid JSON or does not match the expected schema |
+| `E_STATE_SCHEMA_BAD_KIND` | Error | `kind` is not one of `project` or `brain` |
+| `E_STATE_SCHEMA_MISSING_FIELD` | Error/Warning | A required field is absent or a kind-appropriate section is missing |
+| `E_STATE_SCHEMA_BAD_STATUS` | Error | A `status` value is not in the allowed enum |
+| `E_STATE_SCHEMA_BAD_BLOCKED_BY` | Error | A `blocked_by[]` entry has an unknown or malformed `type` |
+| `E_STATE_DUPLICATE_BLOCK_ID` | Error | Two `tracks[]` blocks in the same repo share an `id` |
+| `E_STATE_DANGLING_FOCUS` | Error | A leaf repo focus entry's `block` is absent from `tracks[]` |
+| `E_STATE_UNKNOWN_REPO` | Error | A `blocked_by` or `cross_repo` edge names an unknown repo |
+| `E_STATE_DANGLING_BLOCKED_BY` | Error | A cross-repo block dependency's block does not exist in the named repo |
+| `E_STATE_DANGLING_CROSS_REPO` | Error | A brain `cross_repo[]` edge's endpoint does not resolve to a known block |
+| `W_STATE_ROLLUP_DRIFT` | Warning | Brain `repos[]` headline differs from the child repo's actual `focus` |
+
 **Examples:**
 
 ```bash
@@ -128,6 +156,12 @@ mev validate-brain --graph
 # Explicit path with graph check
 mev validate-brain --graph ~/Dev/agentic-portfolio
 
+# OKF pass + state.json schema and block-dependency graph check
+mev validate-brain --state
+
+# Explicit path with state check
+mev validate-brain --state ~/Dev/agentic-portfolio
+
 # Machine-readable output (consumed by the Brain RAG indexer)
 mev --json validate-brain ~/Dev/agentic-portfolio
 
@@ -136,6 +170,9 @@ mev --json validate-brain --sync ~/Dev/agentic-portfolio
 
 # Machine-readable output including graph diagnostics
 mev --json validate-brain --graph ~/Dev/agentic-portfolio
+
+# Machine-readable output including state diagnostics
+mev --json validate-brain --state ~/Dev/agentic-portfolio
 ```
 
 ---
