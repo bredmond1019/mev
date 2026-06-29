@@ -155,7 +155,7 @@ duplicate canonical id and every `related:` edge that fails to resolve, surfaced
   - (Optional, if cheap) a `--json` round-trip asserting a graph diagnostic appears in the envelope.
 - Files: `tests/brain_graph.rs`. (Depends on Task 3.)
 
-### 5. Validate
+### 5. [x] Validate
 - Run the Validation Commands listed below and confirm all pass.
 
 ## Acceptance Criteria
