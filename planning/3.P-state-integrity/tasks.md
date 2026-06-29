@@ -12,7 +12,7 @@ related: [master-plan, status, state-json-schema, D29-mev-brain-validation-engin
 
 # Task Spec — Phase 3, Block P — `state.json` integrity
 
-**Status:** Draft · **Authored:** 2026-06-29
+**Status:** Done · **Authored:** 2026-06-29 · **Last run:** 2026-06-29 (PASS, 209 tests)
 
 ## Goal
 
@@ -244,4 +244,6 @@ cargo build --release
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the spec. -->
-_No amendments yet._
+- 2026-06-29 [task 3] `E_STATE_DANGLING_FOCUS` scoped to kind:project (leaf) files only — spec was silent on brain focus entries; brain focus entries reference cross-repo blocks and are excluded to avoid false positives.
+- 2026-06-29 [task 4] `check_rollup` signature takes an explicit `brain_path: &Path` parameter — the task spec omitted this parameter from the function signature, but `Diagnostic::warning` requires a path; added as the minimal change to satisfy the API contract.
+- 2026-06-29 [task 5] `StateLoadError::Io` maps to `E_STATE_MALFORMED_JSON` rather than a distinct IO error code — keeps the locator vocabulary minimal; spec did not specify a separate IO locator.
