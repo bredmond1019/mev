@@ -10,6 +10,7 @@ pub mod crawl;
 pub mod graph;
 pub mod okf;
 pub mod scope;
+pub mod state;
 pub mod sync;
 
 pub use config::BrainConfig;

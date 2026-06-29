@@ -129,7 +129,7 @@ Rollup ring (brain files):
 
 ## Step-by-Step Tasks
 
-### 1. Foundation — serde model + JSON loader
+### 1. [~] Foundation — serde model + JSON loader
 - Add `serde_json` is already a dependency (confirm). Create `src/brain/state.rs` and register it with
   `pub mod state;` in `src/brain/mod.rs`.
 - Define the serde model mirroring `state-schema.md` (all collections default-empty, extras tolerated):
