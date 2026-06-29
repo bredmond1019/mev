@@ -40,3 +40,6 @@ Patched: /Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.P-state-integrity
 
 ## Wrap-up — PASS
 Next: MV.3.K (link integrity: markdown/file:///[[wiki]]) or MV.3B.Q (manifest emit / Phase 3B) — check master-plan.md for ordering
+
+## PR
+https://github.com/bredmond1019/mev/pull/5
