@@ -1,0 +1,95 @@
+{
+  "spec_slug": "3.P-state-integrity",
+  "branch": "3.P-state-integrity-flow",
+  "started_at": "2026-06-29T19:49:30Z",
+  "updated_at": "2026-06-29T19:49:30Z",
+  "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.P-state-integrity-flow",
+  "status": "running",
+  "current_task": 1,
+  "tasks": {
+    "1": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Add src/brain/state.rs: full serde model for state.json (StateFile, Focus, Block, BlockedBy internally-tagged enum, Track, RepoRollup, CrossRepoEdge, TierEntry) plus load_state() loader; registered in mod.rs; 14 unit tests cover all five live file shapes and error paths.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "BlockedBy uses #[serde(tag = type, rename_all = snake_case)] — unknown type values fail deserialization by default (no #[serde(other)]), which is the desired E_STATE_SCHEMA_BAD_BLOCKED_BY behavior",
+        "StateFile tolerates extra fields (no deny_unknown_fields) and uses #[serde(default)] on all optional collections — matches the lenient superset design in the spec",
+        "TierEntry and top-level note field added to match the live HQ state.json which contains both",
+        "Tests use inline JSON strings (same pattern as sync.rs) rather than fixture files — simpler and self-contained for a model-only task"
+      ],
+      "files_changed": [
+        "src/brain/state.rs",
+        "src/brain/mod.rs",
+        "planning/3.P-state-integrity/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    }
+  },
+  "review": {
+    "verdict": null,
+    "findings": [],
+    "attempts": 0
+  },
+  "docs": {
+    "changed": [],
+    "created": []
+  },
+  "bail_reason": null,
+  "pr": {
+    "url": null,
+    "number": null
+  },
+  "tokens": {
+    "stages": [
+      {
+        "label": "worktree-setup",
+        "model": "haiku",
+        "promptTokEst": 770,
+        "filesReadKb": null,
+        "inTokEst": 770,
+        "outTok": 2730
+      },
+      {
+        "label": "enumerate",
+        "model": "haiku",
+        "promptTokEst": 226,
+        "filesReadKb": null,
+        "inTokEst": 226,
+        "outTok": 609
+      },
+      {
+        "label": "update-task-1",
+        "model": "haiku",
+        "promptTokEst": 254,
+        "filesReadKb": null,
+        "inTokEst": 254,
+        "outTok": 1537
+      },
+      {
+        "label": "implement-1-1",
+        "model": "sonnet",
+        "promptTokEst": 883,
+        "filesReadKb": null,
+        "inTokEst": 883,
+        "outTok": 11925
+      },
+      {
+        "label": "test-1-1",
+        "model": "haiku",
+        "promptTokEst": 570,
+        "filesReadKb": null,
+        "inTokEst": 570,
+        "outTok": 2398
+      }
+    ],
+    "total": {
+      "promptTokEst": 2703,
+      "filesReadKb": 0,
+      "inTokEst": 2703,
+      "outTok": 19199
+    }
+  }
+}
