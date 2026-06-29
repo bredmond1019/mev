@@ -8,12 +8,20 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-06-29T20:30:00-0300"
+timestamp: "2026-06-29T17:50:21-0300"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## 2026-06-29 — MV.3.P complete: post-flow code-review fix + PR #5 merged
+
+- **What:** MV.3.P (`validate-brain --state`) fully implemented and merged. All 7 tasks PASS; 209 tests green. Post-flow `/code-review low --fix` removed dead `(usize, &PathBuf)` tuple from `node_counts` in `check_state_graph` (path stored but never read). PR #5 merged, worktree cleaned, `main` pushed to origin.
+- **Why:** Block P was the planned next step after MV.3.J (graph integrity) — the work-block analogue of the document graph. Completing it gives `mev` machine-caught validation of the cross-repo block-dependency graph (`blocked_by` edges, brain rollup drift), closing a silent-rot risk in the state.json files.
+- **Refs:** `planning/3.P-state-integrity/tasks.md`; PR #5; commits `e8a6e69`–`fe94b25`.
 
 ---
 
