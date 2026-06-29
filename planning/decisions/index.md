@@ -29,6 +29,11 @@ file**, append-only — never edit a settled decision; supersede it with a new o
   manifest + graph), a pure side-effect-free compiler; the brain graph is an emitted product
   stored in Postgres beside the embeddings; two retrieval modes (semantic + structural) fuse
   at retrieval. Reject the Dgraph `knowledge_graph` service for the brain.
+- [D5: Heterogeneous-format ingest](./D5-heterogeneous-format-ingest.md) — *Draft/deferred.*
+  Forward-looking sketch for extending mev to foreign client formats (`.txt`/`.docx`/`.pdf`/`.yaml`)
+  via a normalized document model, sidecar metadata, and a deterministic `mev discover` step. Binds
+  only two guardrails now (honored in Block J): metadata behind a single extractor seam, and the graph
+  stays authored-only (never inferred).
 
 <!-- Add a row per decision as they are made. Record new ones with /log-decision-style atomic
      files (D5, D6, …). -->

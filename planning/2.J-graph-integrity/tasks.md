@@ -7,7 +7,7 @@ layer: [factory, brain]
 project: mev
 status: active
 keywords: [graph integrity, knowledge graph, scope namespacing, doc_id, related edges, validate-brain]
-related: [master-plan, status, block-j-namespacing-decision, 2j-corpus-crawl-tasks, D4-corpus-engine-and-knowledge-graph, D29-mev-brain-validation-engine]
+related: [master-plan, status, block-j-namespacing-decision, 2j-corpus-crawl-tasks, D4-corpus-engine-and-knowledge-graph, D5-heterogeneous-format-ingest, D29-mev-brain-validation-engine]
 ---
 
 # Task Spec — Phase 3, Block J — Graph integrity (global `scope:doc_id` graph)
@@ -69,6 +69,22 @@ duplicate canonical id and every `related:` edge that fails to resolve, surfaced
    discriminant is on `Edge` from day one so typed edges extend the same emitted schema with no reshape.
    Do *not* build the emitter/persistence here — only ensure the in-memory graph is the serializable
    artifact a later block emits.
+7. **D5 forward-compat — metadata through a single extractor seam.** `2.J-corpus-crawl` shipped a
+   `CorpusEntry` that carries only `path`/`rel`/`stem`/`scope` (no parsed metadata), so this block reads
+   each entry's `doc_id`/`related` itself. Route that reading through **one** helper
+   (e.g. `read_doc_metadata(entry) -> DocMeta { doc_id, related, .. }`) — the single place that knows
+   metadata comes from inline Markdown frontmatter (`extract_frontmatter` + `OkfFrontmatter`). Do **not**
+   scatter `extract_frontmatter`/inline-frontmatter assumptions through `build_graph`. This keeps the
+   future foreign-format extractor (`.docx`/`.txt`/sidecars — `D5 — heterogeneous-format ingest`) a
+   single-point swap rather than a refactor. *(The seam itself, and the corpus-model refactor, are D5
+   backlog — corpus-crawl already shipped; this block only avoids adding new hardwiring.)*
+8. **The graph is authored-only — never inferred.** Nodes and edges are built **solely** from
+   authored/confirmed metadata (frontmatter today; reviewed sidecars later). mev does **not** infer,
+   propose, or auto-apply nodes or edges — no similarity-derived `related`, no AI-suggested edges enter
+   the graph here. Proposed metadata (a future `mev discover` / orchestrator AI enrichment, per D5) lands
+   as **reviewable artifacts** and only becomes graph input once a human confirms it into authored
+   frontmatter/sidecars. This preserves the "authored, not inferred" property that made us reject the
+   Dgraph `knowledge_graph` service (D4).
 
 ### Locator codes (the `Graph` diagnostic vocabulary)
 
@@ -84,8 +100,11 @@ duplicate canonical id and every `related:` edge that fails to resolve, surfaced
   `enum EdgeKind { Related }`; `struct Edge { from: String, to_ref: String, kind: EdgeKind }`;
   a node struct (e.g. `Node { id: canonical_id, scope, doc_id, rel }`); and
   `struct Graph { nodes: Vec<Node>, edges: Vec<Edge> }` — the artifact Phase 3B Block R emits.
-- Add a per-file parse helper (reuse `extract_frontmatter` + `OkfFrontmatter`) returning
-  `(scope, doc_id: Option<String>, related: Vec<String>)`; scope via `scope_for`.
+- Add the **single metadata-extractor seam** (decision 7): one helper
+  `read_doc_metadata(entry) -> DocMeta { doc_id: Option<String>, related: Vec<String> }` that is the
+  *only* site reusing `extract_frontmatter` + `OkfFrontmatter` to read inline Markdown frontmatter
+  (`scope` comes from the `CorpusEntry`). `build_graph` calls this helper — it must not parse frontmatter
+  inline anywhere else, so a future foreign-format/sidecar extractor (D5) is a one-function swap.
 - Add `build_graph(corpus, config) -> Graph` (consuming the owned `Corpus`/entries from `2.J-corpus-crawl`)
   that populates nodes (files with a non-empty authored `doc_id`; canonical id = `format!("{scope}:{doc_id}")`)
   and edges (each node's `related:` entries → `Edge { from: canonical_id, to_ref, kind: Related }`). Also
@@ -154,6 +173,10 @@ duplicate canonical id and every `related:` edge that fails to resolve, surfaced
 - Graph construction is a reusable module: `build_graph` returns an owned `Graph { nodes, edges }`;
   `Graph`/`Node`/`Edge`/`EdgeKind` derive `Serialize` and `serde_json` round-trips (D4 emittable artifact);
   `check_graph` consumes the built `Graph` rather than re-walking the corpus.
+- Inline-frontmatter parsing is confined to one `read_doc_metadata` seam (D5 forward-compat) — no
+  `extract_frontmatter` calls scattered through `build_graph`/`check_graph`.
+- The graph is built only from authored metadata; no node or edge is inferred, proposed, or auto-applied
+  (D5 authored-only guarantee).
 - All four harness gates pass; existing tests stay green.
 
 ## Validation Commands
@@ -170,6 +193,9 @@ cargo build --release
 - Amended 2026-06-28 for **D4**: graph build is a reusable, `Serialize`-able, emittable module
   (`build_graph` → `Graph`), separate from `check_graph` — the validated graph == the graph Phase 3B
   Block R emits to Postgres.
+- Amended 2026-06-29 for **D5** (decisions 7–8): metadata reading confined to one `read_doc_metadata`
+  seam (future foreign-format swap), and the graph is authored-only (never inferred). These two
+  forward-compat guardrails moved here because `2.J-corpus-crawl` had already shipped to review.
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the spec. -->
