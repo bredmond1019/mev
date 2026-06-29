@@ -1,23 +1,36 @@
 {
   "repo": "mev",
+  "kind": "project",
   "updated": "2026-06-29",
-  "now": "MV.3.J DONE (232 tests pass, PR #4 merged); next is MV.3.K or MV.3B.Q",
-  "next": "MV.3.K (link integrity: markdown/file:///[[wiki]] links) or MV.3B.Q (manifest emit → kills double crawl)",
-  "blocked": [],
+  "focus": {
+    "now": [
+      {
+        "block": "MV.3.J",
+        "title": "Global scope:doc_id graph + check_graph diagnostics",
+        "status": "closed",
+        "note": "Landed (PR #4 merged, 232 tests pass). No block in progress — choose MV.3.K or MV.3B.Q next."
+      }
+    ],
+    "next": [
+      { "block": "MV.3.K", "title": "Link integrity (markdown / file:// / [[wiki]] links)" },
+      { "block": "MV.3B.Q", "title": "Manifest emit (index_brain.py consumes; kills double crawl)" }
+    ],
+    "blocked": []
+  },
   "tracks": [
     {
       "title": "Phase 3 — Brain graph",
       "blocks": [
-        { "id": "MV.3.J", "title": "global scope:doc_id graph + check_graph diagnostics", "status": "closed" },
-        { "id": "MV.3.K", "title": "link integrity (markdown / file:// / [[wiki]] links)", "status": "open" }
+        { "id": "MV.3.J", "title": "Global scope:doc_id graph + check_graph diagnostics", "status": "closed" },
+        { "id": "MV.3.K", "title": "Link integrity (markdown / file:// / [[wiki]] links)", "status": "open" }
       ]
     },
     {
       "title": "Phase 3B — Manifest + graph emit",
       "blocks": [
-        { "id": "MV.3B.Q", "title": "manifest emit (index_brain.py consumes; kills double crawl)",    "status": "open" },
-        { "id": "MV.3B.R", "title": "graph emit → Postgres edges table + structural query surface",    "status": "open" },
-        { "id": "MV.3B.S", "title": "graph-aware RAG (orchestrator integration)",                      "status": "open" }
+        { "id": "MV.3B.Q", "title": "Manifest emit (index_brain.py consumes; kills double crawl)", "status": "open" },
+        { "id": "MV.3B.R", "title": "Graph emit → Postgres edges table + structural query surface", "status": "open" },
+        { "id": "MV.3B.S", "title": "Graph-aware RAG (orchestrator integration)", "status": "open" }
       ]
     }
   ]
