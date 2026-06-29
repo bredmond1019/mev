@@ -8,12 +8,20 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-06-29"
+timestamp: "2026-06-29T15:59:51-0300"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## 2026-06-29 — MV.3.P spec authored: state.json integrity validator (`validate-brain --state`)
+
+- **What:** Authored and committed the task spec for a NEW Phase 3 block, **MV.3.P — State integrity** (`mev validate-brain --state`). The work-block analogue of MV.3.J (graph integrity): where MV.3.J validates the *document* graph (`scope:doc_id` nodes, `related:` edges), MV.3.P validates the *work-block* graph — it discovers every repo's `planning/state.json`, validates each against the canonical schema (`core/planning/state-schema.md`), and checks the cross-repo block-dependency graph for referential integrity. Marquee check `E_STATE_DANGLING_BLOCKED_BY` is the direct port of MV.3.J's `E_GRAPH_DANGLING_RELATED` from docs to blocks. Follows MV.3.M's cross-repo read mode (state.json files live in gitignored nested-git sub-repos invisible to the corpus walk). Four validation rings: JSON+schema, intra-repo (focus↔tracks), cross-repo (blocked_by/cross_repo edges resolve), and brain rollup drift (a warning — the rollup lags by design). Builds a Serialize-able state graph for D4 forward-compat (future emit + auto-generated brain rollup = "Direction 2"). **Spec only this session — no code written; block is Not started / spec drafted.**
+- **Why:** The user asked how mev relates to the new `planning/state.json` files (v2 self-describing schema seeded last session). The relationship: they're two graphs over one corpus, and mev is already the corpus-graph engine — so mev should validate state.json (and eventually emit/generate the brain rollup). User chose to spec the validator now. This block also mechanically closes the denormalization-cost open question in state-schema.md (rollup drift becomes machine-caught instead of silent).
+- **Refs:** spec `planning/3.P-state-integrity/tasks.md`; schema `core/planning/state-schema.md`; D29; commit `f5ca298`.
 
 ---
 
