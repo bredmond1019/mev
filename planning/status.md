@@ -8,15 +8,15 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-06-28"
-now: "2.J-corpus-crawl complete (PASS); multi-root corpus crawl + scope registry live; OKF root-file exemption in place. Ready to build 2.J-graph-integrity"
+timestamp: "2026-06-29"
+now: "2.J-corpus-crawl complete + merged (PR #3, 160 tests); is_root_instruction_file correctness fix applied. Ready to build 2.J-graph-integrity"
 next: "/sdlc-flow 2.J-graph-integrity (global scope:doc_id node index + edge integrity + leaf lint via --graph)"
 blocked: []
 ---
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-28 — Completed 2.J-corpus-crawl (PASS). Multi-root corpus crawl + registry-driven scope resolver implemented; `crawl_corpus` returns an owned, `Serialize`-able `Corpus`; `BrainValidator` rewired; OKF root-file exemption for `README.md`/`CLAUDE.md`; 159 tests pass across 10 suites.
+**Last updated:** 2026-06-29 — 2.J-corpus-crawl merged (PR #3). Post-flow code review fix: is_root_instruction_file now verifies unit-root position (not just filename) — prevents docs/README.md from being silently OKF-exempt. 160 tests pass.
 **Current focus:** 2.J-graph-integrity — global `scope:doc_id` node index + edge integrity + leaf lint (`--graph`)
 
 ---
@@ -26,7 +26,7 @@ blocked: []
 > Working board — keep all five queues live. **Never end a meaningful session with every queue
 > empty.** The headlines of **now / next / blocked** mirror the frontmatter scalars above.
 
-- **now** — **2.J-corpus-crawl DONE** (PASS, all 5 tasks). Registry-driven `scope_for`/`scope_units`, `crawl_corpus` (owned serializable `Corpus`), `BrainValidator` rewired to corpus crawl, OKF root-file exemption, 13-test integration suite over 3-unit fixture tree. 159 tests pass across 10 suites.
+- **now** — **2.J-corpus-crawl MERGED** (PR #3, all 5 tasks PASS). Registry-driven `scope_for`/`scope_units`, `crawl_corpus` (owned serializable `Corpus`), `BrainValidator` rewired to corpus crawl, OKF root-file exemption, 13-test integration suite over 3-unit fixture tree. Post-flow fix: `is_root_instruction_file` now verifies unit-root position (not just filename). 160 tests pass.
 - **next** — `/sdlc-flow 2.J-graph-integrity` (global `scope:doc_id` node index + extensible edge model + `related:` resolution + leaf lint via `--graph`)
 - **blocked** — nothing blocked
 - **improve** — Phase 3B (D4): **Block Q** manifest emit → `index_brain.py` consumes it (kill double crawl); **Block R** graph emit → Postgres edges table + structural query surface (bastion/MCP); **Block S** graph-aware RAG (orchestrator). Companion: register tier units + bare-bloat `skip_dirs` in `brain.toml`.
@@ -80,7 +80,7 @@ blocked: []
 ### Phase 3 — Brain integrity: graph + sync
 | Block | What | Status | Notes |
 |---|---|---|---|
-| Block J-crawl | Multi-root corpus crawl + scope registry | Done | `scope_units`/`scope_for`/`owning_unit` in `src/brain/scope.rs`; `crawl_corpus` → owned serializable `Corpus`; `BrainValidator` rewired; OKF root-file exemption; 13-test integration suite; all 159 tests pass. |
+| Block J-crawl | Multi-root corpus crawl + scope registry | Done | `scope_units`/`scope_for`/`owning_unit` in `src/brain/scope.rs`; `crawl_corpus` → owned serializable `Corpus`; `BrainValidator` rewired; OKF root-file exemption; 13-test integration suite; all 160 tests pass. Post-flow fix: `is_root_instruction_file` now verifies unit-root position (commit `753be87`). PR #3 merged. |
 | Block J | Graph integrity (global `scope:doc_id`) | Not started | Spec ready (`planning/2.J-graph-integrity/`). Global node index + extensible edge model + uniqueness + `related:` resolution (bare=same scope, qualified=cross) + leaf lint; `--graph`. Depends on J-crawl. See `namespacing-and-corpus-decision.md`. |
 | Block K | Link integrity (markdown/`file://`/`[[wiki]]`) | Not started | Per master-plan |
 | Block L | Structural coverage (`index.md` ↔ dir, D17) | Not started | Per master-plan |
