@@ -242,6 +242,30 @@ implementation of the brain-program's integrity/freshness work (the `hooks/READM
 - **Acceptance:** a new file not listed in its `index.md` is flagged; an `index.md` row for a deleted file is
   flagged.
 
+### MV.3.P — State integrity (`planning/state.json` schema + cross-repo block graph)
+- **What:** `mev validate-brain --state`. Discover every repo's `planning/state.json` (HQ + each tier
+  sub-brain + each `brain.toml` `[[repos]]` leaf — via the **cross-repo read mode** of `MV.3.M`, since
+  the leaf files live in gitignored nested-git sub-repos invisible to the corpus walk), validate each
+  against the canonical schema (`core/planning/state-schema.md`), and check the **work-block dependency
+  graph** for referential integrity. This is the work-block analogue of `MV.3.J`: where `MV.3.J`
+  validates the *document* graph (`scope:doc_id` nodes, `related:` edges), this validates the *block*
+  graph (block-ID nodes, `blocked_by` / `cross_repo` edges). The marquee check
+  (`E_STATE_DANGLING_BLOCKED_BY`) is the direct port of `E_GRAPH_DANGLING_RELATED` from docs to blocks.
+  Rings: (1) JSON+schema (struct validation, not an external JSON-Schema file — consistent with OKF);
+  (2) intra-repo (`focus` ↔ `tracks`, duplicate ids); (3) cross-repo (`blocked_by` / `cross_repo` edges
+  resolve to real blocks); (4) brain rollup drift (`repos[]` vs child's actual `focus` — a **warning**,
+  since the rollup lags by design between `/log-work` runs).
+- **Acceptance:** a `blocked_by` pointing at a nonexistent target block is flagged
+  (`E_STATE_DANGLING_BLOCKED_BY`); a malformed/ bad-enum state file is flagged; a drifted brain rollup
+  is a warning (exit 0); a registered repo with no state file is a warning; the five live state.json
+  files validate clean. Governed by **D29**.
+- **Forward-compat (D4):** build a **`Serialize`-able** state graph (`StateNode` = block,
+  `StateEdge { from, to_ref, kind }` with `kind` ∈ `BlockedBy` | `CrossRepo`) in a reusable
+  `build_state_graph`, separate from `check_state_graph` — the graph mev *validates* here is the graph a
+  future block *emits* (the state-graph parallel to `MV.3B.R`) and the input to mev *generating* the
+  brain `repos[]`/`cross_repo[]` rollup instead of `/log-work` hand-writing it. Spec:
+  `planning/3.P-state-integrity/tasks.md`.
+
 ### MV.3.M — Sync integrity (brain cache ↔ sub-repo canonical)
 - **What:** The `synced_from` watermark check (D29). For each project in a small **projects manifest**
   (`{project, path, status_file}` — the machine form of the CLAUDE.md sub-projects table), read the
@@ -336,6 +360,7 @@ existence — applied across content types.
 | 3 | MV.3.K | Link integrity (markdown/`file://`/`[[wiki]]`) | Catch dead links + moved files | Brain correctness (D29) |
 | 3 | MV.3.L | Structural coverage (`index.md` ↔ dir, D17) | Catch orphan files + dangling rows | Brain correctness (D29) |
 | 3 | MV.3.M | Sync integrity (`synced_from` watermark) | Catch brain↔sub-repo status drift | Brain correctness (D29) |
+| 3 | MV.3.P | State integrity (`state.json` schema + block graph) | Catch dangling `blocked_by` + rollup drift | Brain correctness (D29) |
 | 3B | MV.3B.Q | Manifest emit (file-list + metadata JSON) | Embedder consumes it; kill double crawl | Corpus engine output (D4) |
 | 3B | MV.3B.R | Graph emit + structural query surface | Free/exact "where/what's connected" answers | Knowledge graph as product (D4) |
 | 3B | MV.3B.S | Graph-aware RAG *(orchestrator)* | Fuse semantic + structural retrieval | The two-mode endgame (D4) |

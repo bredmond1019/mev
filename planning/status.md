@@ -10,7 +10,7 @@ keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
 timestamp: "2026-06-29"
 now: "MV.3.J complete (PASS, 5 tasks); global scope:doc_id graph, extensible edge model, check_graph diagnostics, --graph CLI flag, 175 unit + 57 integration tests"
-next: "MV.3.K (link integrity) or MV.3B.Q (manifest emit / Phase 3B) — see master-plan.md for ordering"
+next: "MV.3.K (link integrity), MV.3.P (state.json integrity — spec drafted), or MV.3B.Q (manifest emit / Phase 3B) — see master-plan.md for ordering"
 blocked: []
 ---
 
@@ -27,7 +27,7 @@ blocked: []
 > empty.** The headlines of **now / next / blocked** mirror the frontmatter scalars above.
 
 - **now** — **`MV.3.J` DONE** (all 5 tasks PASS). Serializable `Graph`/`Node`/`Edge`/`EdgeKind` model; `build_graph` + `read_doc_metadata` seam (D5 forward-compat); `check_graph` (E_GRAPH_DUPLICATE_DOC_ID, E_GRAPH_DANGLING_RELATED, W_GRAPH_LEAF_TARGET); `validate_brain_graph` public API; `--graph` CLI flag; 7-test end-to-end integration suite. 175 unit + 57 integration = 232 tests pass.
-- **next** — `MV.3.K` (link integrity: markdown/`file://`/`[[wiki]]`) or `MV.3B.Q` (manifest emit / Phase 3B) — check master-plan.md for ordering
+- **next** — `MV.3.K` (link integrity: markdown/`file://`/`[[wiki]]`), `MV.3.P` (state.json integrity — **spec drafted**), or `MV.3B.Q` (manifest emit / Phase 3B) — check master-plan.md for ordering
 - **blocked** — nothing blocked
 - **improve** — Phase 3B (D4): **`MV.3B.Q`** manifest emit → `index_brain.py` consumes it (kill double crawl); **`MV.3B.R`** graph emit → Postgres edges table + structural query surface (bastion/MCP); **`MV.3B.S`** graph-aware RAG (orchestrator). Companion: register tier units + bare-bloat `skip_dirs` in `brain.toml`.
 - **recurring** — none yet
@@ -84,6 +84,7 @@ blocked: []
 | MV.3.J | Graph integrity (global `scope:doc_id`) | Done | Serializable Graph model, build_graph + read_doc_metadata seam, check_graph (3 diagnostic codes), validate_brain_graph API, --graph CLI flag, 7 integration tests. 232 total tests pass. Post-flow fix: diagnostic locators corrected (`W_GRAPH_LEAF_TARGET`, `E_GRAPH_DANGLING_RELATED`); PR #4 merged. |
 | MV.3.K | Link integrity (markdown/`file://`/`[[wiki]]`) | Not started | Per master-plan |
 | MV.3.L | Structural coverage (`index.md` ↔ dir, D17) | Not started | Per master-plan |
+| MV.3.P | State integrity (`state.json` schema + block graph) | Not started | Spec drafted `planning/3.P-state-integrity/tasks.md`; `--state` flag; cross-repo read mode (mirrors MV.3.M); marquee `E_STATE_DANGLING_BLOCKED_BY` ports MV.3.J's dangling-edge check to the work-block graph |
 
 ### Phase 3B — The Brain as a queryable product (corpus engine outputs, D4)
 | Block | What | Status | Notes |
