@@ -32,6 +32,7 @@ enum Command {
     },
     /// Validate the Bastion Brain repo for OKF frontmatter compliance (Phase 2).
     /// With --sync, also checks cross-repo synced_from watermark integrity (Phase 3, Block M).
+    /// With --graph, also checks the global scope:doc_id knowledge-graph integrity (Phase 3, Block J).
     ValidateBrain {
         /// Path to search from when locating brain.toml (walks up to find it).
         /// Defaults to the current directory.
@@ -42,6 +43,12 @@ enum Command {
         /// A mismatch emits an E_SYNC_DRIFT error (exit 1).
         #[arg(long)]
         sync: bool,
+        /// Also run the global scope:doc_id knowledge-graph integrity check: flags duplicate
+        /// canonical ids (E_GRAPH_DUPLICATE_DOC_ID), dangling related: edges
+        /// (E_GRAPH_DANGLING_RELATED), and related: entries pointing at leaf files
+        /// (W_GRAPH_LEAF_TARGET). Graph errors cause exit 1; the leaf warning alone does not.
+        #[arg(long)]
+        graph: bool,
     },
 }
 
@@ -95,7 +102,7 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Command::ValidateBrain { path, sync } => {
+        Command::ValidateBrain { path, sync, graph } => {
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,
                 Err(e) => {
@@ -103,7 +110,9 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let result = if sync {
+            let result = if graph {
+                mev::validate_brain_graph(&root)
+            } else if sync {
                 mev::validate_brain_sync(&root)
             } else {
                 mev::validate_brain(&root)
