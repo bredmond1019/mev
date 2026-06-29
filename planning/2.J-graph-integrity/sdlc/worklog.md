@@ -19,3 +19,7 @@ Validated: gating checks (fast tripwire)
 What: Added tests/brain_graph.rs with 7 end-to-end integration tests for validate_brain_graph over a multi-unit (brain/core/mev) fixture, covering all acceptance criteria: clean corpus, same doc_id across scopes, duplicate detection, cross-scope resolution, dangling edges, leaf-target warnings, and JSON envelope round-trip.
 Decisions: Used validate_brain_graph public API (not the graph module directly) for true end-to-end integration coverage matching task intent; Filtered graph-specific errors (locator == 'related' or 'E_GRAPH_DUPLICATE_DOC_ID') rather than all errors in some tests to avoid OKF schema violations from test fixtures interfering with graph assertions
 Validated: gating checks (fast tripwire)
+
+## Task 5 — PASSED (1 attempt)
+What: All four harness gates pass: fmt, clippy, 175 unit + 57 integration tests green, release build clean; Task 5 marked complete.
+Validated: gating checks (fast tripwire)
