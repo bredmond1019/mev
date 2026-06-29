@@ -23,7 +23,12 @@ file**, append-only — never edit a settled decision; supersede it with a new o
   superset of the site's `validate-content.ts`; summaries/transcripts out of scope.
 - [D3: Corpus-level config file](./D3-corpus-config-system.md) — Plan to move hardcoded
   skip-lists, doc_id patterns, and vocab sets into a per-corpus `.mev.toml`; current hardcodes
-  are interim. Sequenced after Phase 3.
+  are interim. Sequenced after Phase 3. **Superseded by `brain.toml`.**
+- [D4: Corpus engine & knowledge graph](./D4-corpus-engine-and-knowledge-graph.md) —
+  Destination architecture: mev is the single corpus engine (one crawl → diagnostics +
+  manifest + graph), a pure side-effect-free compiler; the brain graph is an emitted product
+  stored in Postgres beside the embeddings; two retrieval modes (semantic + structural) fuse
+  at retrieval. Reject the Dgraph `knowledge_graph` service for the brain.
 
 <!-- Add a row per decision as they are made. Record new ones with /log-decision-style atomic
-     files (D4, D5, …). -->
+     files (D5, D6, …). -->

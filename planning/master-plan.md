@@ -7,7 +7,7 @@ layer: [factory, brain, meta]
 project: mev
 status: active
 keywords: [roadmap, phases, ContentValidator, Brain OKF, learn-ai content, mev]
-related: [D2-scope-and-sequence, D1-initial-okf, status, context]
+related: [D2-scope-and-sequence, D1-initial-okf, D4-corpus-engine-and-knowledge-graph, status, context]
 ---
 
 # mev — Master Plan
@@ -53,6 +53,17 @@ So the Brain validator slots in as a **parallel crawl + validator behind a new `
 artifact demonstrating idiomatic Rust CLI design. Long-term it can promote to a subcommand of the personal
 Rust ops CLI (`bastion validate ...`). The load-bearing idea: **one `Diagnostic` currency, many content
 schemas** — adding a third consumer (blog, another repo) is a new `ContentValidator` impl, not a fork.
+
+**The bigger destination (D4).** Beyond validation, `mev` is the **single corpus engine** for the Bastion
+Brain: one Rust crawl produces three outputs — **diagnostics** (the validation gate), a **manifest** (the
+canonical file-list + metadata the embedder consumes instead of re-crawling), and the **knowledge graph**
+(the global `scope:doc_id` node index + edges, emitted as a first-class artifact). `mev` stays a **pure,
+side-effect-free compiler** (files in → JSON out; no DB, no network), so it runs in CI with no credentials
+and drops into a client KB with zero infra. Persistence is the orchestrator's job: the graph lives in
+**Postgres beside the embeddings**, enabling **two retrieval modes over one store** — *semantic* (vector
+search, fuzzy, costs tokens) and *structural* (graph/SQL, exact, free) — that fuse into graph-aware RAG.
+This is the division of labor: **Rust owns the deterministic and free; Python owns the embedding/AI layer.**
+See [D4](./decisions/D4-corpus-engine-and-knowledge-graph.md).
 
 ## Architecture / Design Overview
 
@@ -175,13 +186,46 @@ mutates the corpus — upholds D25) and `--json`-able so an agent can act on the
 implementation of the brain-program's integrity/freshness work (the `hooks/README.md` `bastion validate
 --integrity`, "Block K"), surfaced through `bastion`.
 
-### Block J — Graph integrity (`related:` edges)
-- **What:** Build a corpus-wide `doc_id` index (every `.md`'s `doc_id`, defaulting to filename stem). Flag
-  every `related:` entry that points at a `doc_id` no document defines (a dangling edge), and flag duplicate
-  `doc_id`s. This is the generalization of the learn-ai **anchor-slice contract** (Block D): "a reference
-  must resolve to a real target."
-- **Acceptance:** a `related:` ref to a renamed/deleted doc is flagged; duplicate `doc_id`s are flagged;
-  clean corpus passes.
+> **Block J reshaped 2026-06-28** into a global cross-repo knowledge graph (see
+> `planning/2.J-graph-integrity/namespacing-and-corpus-decision.md`). It now splits into a
+> corpus-crawl foundation (Block J-crawl) and the graph checks (Block J). Canonical node id =
+> `scope:doc_id`, where `scope` is a registry-driven stable slug from `brain.toml`.
+>
+> **D4 (2026-06-28) reframes the back half of Phase 3.** The crawl and graph mev builds here are
+> not validation-only throwaways — they are the **corpus engine's outputs** (manifest + graph)
+> that the embedder and a structural-query surface consume. Two forward-compat constraints apply
+> to Blocks J-crawl and J (below); three additive blocks (Q–S) deliver the emitted products.
+> See [D4](./decisions/D4-corpus-engine-and-knowledge-graph.md).
+
+### Block J-crawl — Multi-root corpus crawl + scope registry  *(foundation; lands first)*
+- **What:** Make mev a **multi-root validator**. (1) A scope-unit **registry** read from `brain.toml`
+  (HQ, each tier sub-brain, each repo → immutable `slug` + path) with a longest-prefix `scope_for(path)`
+  resolver. (2) A canonical **corpus crawl** that walks every registered unit from the HQ root and includes
+  only `planning/**` + `docs/**` + root `README.md`/`CLAUDE.md`, minus `skip_dirs` bloat (`target`,
+  `node_modules`, `.git`, `archive`, `archived`, `trees`, `sdlc`, `.venv`, …) and ephemeral
+  (`handoff.md`, `_`-prefixed). Replaces the old single-root, nested-git-pruned walk; `CLAUDE.md` is no
+  longer file-blocklisted (root files now carry OKF frontmatter). This file-list is the **single corpus
+  definition** the embedder should consume.
+- **Acceptance:** the crawl returns each registered unit's `planning/`+`docs/`+root files with correct
+  scope; bloat/ephemeral/unregistered dirs are excluded; `scope_for` is stable under simulated tier/path
+  moves (slug-keyed). Companion (out of repo): `brain.toml` registers tier units; root-file frontmatter
+  backfill.
+- **Forward-compat (D4):** the crawl returns a **clean, owned data structure** (not state buried inside a
+  validation pass) — it is about to feed both the manifest emit (Block Q) and the embedder. Build it as a
+  reusable result, not a side effect.
+
+### Block J — Graph integrity (`scope:doc_id` `related:` edges)
+- **What:** Over the corpus crawl, build a global **`scope:doc_id`** node index (node = a file with an
+  authored `doc_id`; files without one are leaves). Flag duplicate canonical ids, and every `related:`
+  edge that resolves to neither a node nor a leaf (**bare** id resolves within the referrer's scope;
+  qualified **`scope:doc_id`** resolves cross-scope); a `related:` pointing at a leaf is a warning. The
+  edge representation is generic (`from`, `to-ref`, `kind`) so typed edges (`supersedes`/`depends-on`/…)
+  extend it later. Generalizes the learn-ai **anchor-slice contract** (Block D): a reference must resolve.
+- **Acceptance:** a `related:` ref to a renamed/deleted node is flagged; duplicate `scope:doc_id`s are
+  flagged; the same `doc_id` under different scopes is **not** flagged; a clean corpus passes.
+- **Forward-compat (D4):** graph construction is a **reusable module** and its node/edge structs are
+  **`Serialize`-able** — the same graph mev *validates* here is the graph mev *emits* in Block R. Do not
+  bury it in a build-check-discard function.
 
 ### Block K — Link integrity (markdown / `file://` / `[[wikilink]]`)
 - **What:** Check that markdown `[text](path)` and `file:///…` links resolve to files that exist on disk,
@@ -210,6 +254,47 @@ implementation of the brain-program's integrity/freshness work (the `hooks/READM
   passes; snapshot trackers are never flagged.
 - **v2 hardening (additive):** content-hash watermark (catches edits that don't bump the date); structured
   `current_block` comparison (catches an exact in-place mismatch).
+
+---
+
+## Phase 3B — The Brain as a queryable product (corpus engine outputs, D4)
+
+Where Phase 3 makes the corpus *correct*, Phase 3B makes the corpus engine's work *consumable*. These
+blocks turn mev's crawl and graph into emitted artifacts and wire the two retrieval modes. They are
+**additive** — they build on Blocks J-crawl/J without changing them. mev stays a **pure compiler** (emits
+JSON; never touches a DB); persistence and the AI layer are the orchestrator's. Governed by
+[D4](./decisions/D4-corpus-engine-and-knowledge-graph.md).
+
+### Block Q — Manifest emit (kill the double crawl)
+- **What:** `mev validate-brain --emit-manifest` (or a `mev manifest` subcommand) emits the canonical
+  **file-list + per-file OKF metadata** as JSON, straight from the Block J-crawl result. Companion (out of
+  repo, orchestrator): refactor `index_brain.py` to **consume mev's manifest** instead of re-implementing
+  `_collect_files`/`_corpus_roots`/`_classify_doc_type`/`normalize_metadata`. After this, "what's
+  validated == what's embedded" holds by construction.
+- **Acceptance:** the emitted manifest lists exactly the corpus crawl's files with correct scope/doc_id/
+  metadata; an orchestrator dry-run driven by the manifest indexes the same file set the Python crawl did
+  (parity check); mev itself still writes nothing to any DB.
+
+### Block R — Graph emit + structural query surface
+- **What:** mev emits the **graph JSON** (nodes = `scope:doc_id` + metadata; edges = `{from, to_ref, kind}`)
+  from the Block J graph module. Companion (out of repo): the orchestrator loads it into a **Postgres edges
+  table beside `brain_documents`**, and a thin **structural-query surface** (`bastion` subcommand and/or an
+  MCP tool) answers "where does X live / what is connected to Y / what's the status of Z" by SQL/recursive
+  CTE — **free, instant, no tokens**. (Algorithms like centrality/shortest-path are a later, optional graft —
+  ideas borrowable from `workflow-engine-rs/services/knowledge_graph`, not its Dgraph backend.)
+- **Acceptance:** the emitted graph round-trips (every authored node + `related:` edge present, leaves
+  marked); a structural query returns a doc's neighbors with zero embedding calls.
+
+### Block S — Graph-aware RAG *(orchestrator; mev provides the edges)*
+- **What:** the orchestrator's retrieval path uses the graph to **expand/rerank** semantic hits — traverse
+  `related:` (later `supersedes`/`parent`/`depends-on`) from the top vector matches to feed the LLM
+  *connected* context, not isolated chunks. A query **router** sends structural questions to the graph
+  (free/exact) and semantic ones to vector+LLM, with the hybrid path fusing both. The `related` column
+  already exists per-row in `brain_documents` — this is the block that finally traverses it.
+- **Acceptance:** for a query whose answer spans linked docs, graph-expanded retrieval surfaces the
+  neighbors a pure vector search misses; a purely structural query is answered without an LLM call.
+- **Note:** this block is orchestrator-side work, tracked here only because mev's emitted edge model is its
+  contract. It does not change mev.
 
 ---
 
@@ -246,11 +331,15 @@ existence — applied across content types.
 | 3 | K | Link integrity (markdown/`file://`/`[[wiki]]`) | Catch dead links + moved files | Brain correctness (D29) |
 | 3 | L | Structural coverage (`index.md` ↔ dir, D17) | Catch orphan files + dangling rows | Brain correctness (D29) |
 | 3 | M | Sync integrity (`synced_from` watermark) | Catch brain↔sub-repo status drift | Brain correctness (D29) |
+| 3B | Q | Manifest emit (file-list + metadata JSON) | Embedder consumes it; kill double crawl | Corpus engine output (D4) |
+| 3B | R | Graph emit + structural query surface | Free/exact "where/what's connected" answers | Knowledge graph as product (D4) |
+| 3B | S | Graph-aware RAG *(orchestrator)* | Fuse semantic + structural retrieval | The two-mode endgame (D4) |
 | 4 | — | Blog validation + code-block/link linting | Cover a fourth content type | Whole-tree coverage |
 | 5+ | — | `watch` (hot-reload) + `compile` (manifest.json) | Speed + precompiled index | Differentiating build |
 
 ---
 
 *Sequenced by dependency and competence, not calendar. When life gets in the way, pick up where you left
-off. Phase 2 is the current priority (Brain OKF gate); Phase 3 (Brain integrity, D29) follows; Phase 1
-Blocks D–E resume after.*
+off. Phase 2 (Brain OKF gate) is done; Phase 3 (Brain integrity) is the current priority — `2.J-corpus-crawl`
+then `2.J-graph-integrity`, built with the D4 forward-compat constraints; Phase 3B (corpus engine outputs,
+D4) follows; Phase 1 Blocks D–E and Phase 4 resume after.*

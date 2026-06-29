@@ -88,7 +88,7 @@ const MISSING_TITLE: &str =
     "---\ntype: Reference\ndescription: A test doc without a title.\n---\n\nBody text.\n";
 
 // ---------------------------------------------------------------------------
-// 1. validate_brain detects OKF violations in a root-level .md file
+// 1. validate_brain detects OKF violations in a corpus-member .md file
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -96,7 +96,8 @@ fn validate_brain_detects_missing_title() {
     let dir = temp_dir("missing-title");
 
     write_brain_toml(&dir);
-    write_file(&dir, "doc.md", MISSING_TITLE);
+    // Corpus members live under planning/ or docs/ — place the file there.
+    write_file(&dir, "planning/doc.md", MISSING_TITLE);
 
     let report = mev::validate_brain(&dir).expect("validate_brain should not error");
 
@@ -121,7 +122,7 @@ fn validate_brain_detects_missing_title() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. validate_brain skips nested-git sub-dirs (crawl skip-list honored end-to-end)
+// 2. validate_brain excludes non-corpus files (corpus membership rule end-to-end)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -130,19 +131,17 @@ fn validate_brain_skips_nested_git_subdir() {
 
     write_brain_toml(&dir);
 
-    // Root-level file with a violation — must be flagged.
-    write_file(&dir, "root.md", MISSING_TITLE);
+    // A corpus member under planning/ with a violation — must be flagged.
+    write_file(&dir, "planning/root.md", MISSING_TITLE);
 
-    // Nested-git sub-project: has its own .git marker.
+    // A .md nested under a non-planning/docs path — not a corpus member; must NOT be validated.
     let sub = dir.join("sub-project");
     fs::create_dir_all(sub.join(".git")).unwrap();
-    // A .md inside the sub-project — must NOT be validated.
     write_file(&dir, "sub-project/README.md", MISSING_TITLE);
 
     let report = mev::validate_brain(&dir).expect("validate_brain should not error");
 
-    // Only the root file should be flagged; the nested file is skipped.
-    // Count distinct files referenced in diagnostics.
+    // sub-project/README.md is not a corpus member — must not appear in diagnostics.
     let files_flagged: std::collections::HashSet<_> = report
         .diagnostics
         .iter()
@@ -152,11 +151,11 @@ fn validate_brain_skips_nested_git_subdir() {
     for file in &files_flagged {
         assert!(
             !file.contains("sub-project"),
-            "nested-git sub-dir must be skipped, but found diagnostic for: {file}"
+            "non-corpus sub-project file must be excluded, but found diagnostic for: {file}"
         );
     }
 
-    // The root file must have produced at least one diagnostic.
+    // The planning/root.md must have produced at least one diagnostic.
     assert!(
         !files_flagged.is_empty(),
         "expected diagnostics for the root file"
@@ -174,7 +173,8 @@ fn validate_brain_no_errors_for_valid_file() {
     let dir = temp_dir("valid-okf");
 
     write_brain_toml(&dir);
-    write_file(&dir, "valid.md", VALID_OKF);
+    // Corpus member under planning/ — file is crawled and validated.
+    write_file(&dir, "planning/valid.md", VALID_OKF);
 
     let report = mev::validate_brain(&dir).expect("validate_brain should not error");
 
@@ -197,7 +197,8 @@ fn json_report_valid_json_with_expected_keys() {
     let dir = temp_dir("json-envelope");
 
     write_brain_toml(&dir);
-    write_file(&dir, "doc.md", MISSING_TITLE);
+    // Corpus member under planning/ so the violation is actually detected.
+    write_file(&dir, "planning/doc.md", MISSING_TITLE);
 
     let report = mev::validate_brain(&dir).expect("validate_brain should not error");
     let envelope = mev::JsonReport::new("brain", &dir, &report);
@@ -256,7 +257,8 @@ fn json_report_severity_is_lowercase() {
     let dir = temp_dir("severity-lowercase");
 
     write_brain_toml(&dir);
-    write_file(&dir, "bad.md", MISSING_TITLE);
+    // Corpus member under planning/ so a diagnostic is actually produced.
+    write_file(&dir, "planning/bad.md", MISSING_TITLE);
 
     let report = mev::validate_brain(&dir).expect("validate_brain should not error");
     assert!(
@@ -319,9 +321,9 @@ fn validate_brain_config_flip_changes_result() {
     // --- Step 1: brain.toml with custom-layer in the vocabulary. ---
     write_brain_toml_with_layers(&dir, &["custom-layer"]);
 
-    // A .md file that uses the custom layer value — should be valid with the first config.
+    // A .md file that uses the custom layer value — placed under planning/ (corpus member).
     let doc_content = "---\ntype: Reference\ntitle: Custom Layer Doc\ndescription: Tests config-flip.\nlayer: [custom-layer]\n---\n\nBody.\n";
-    write_file(&dir, "doc.md", doc_content);
+    write_file(&dir, "planning/doc.md", doc_content);
 
     let report_with_layer = mev::validate_brain(&dir).expect("validate_brain should not error");
 

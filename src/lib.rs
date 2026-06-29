@@ -119,9 +119,11 @@ pub fn validate(root: &std::path::Path) -> anyhow::Result<Report> {
 
 /// Validate the company-brain repo rooted at `root` for OKF frontmatter compliance.
 ///
-/// Phase 2, Block I: mirrors [`validate`] for the brain consumer — delegates to
-/// [`BrainValidator`] which applies the Block G crawl skip-list (nested-git + `target/`)
-/// and Block H's OKF checks.
+/// Phase 2, Block I + Block J-crawl: mirrors [`validate`] for the brain consumer — delegates
+/// to [`BrainValidator`] which applies the registry-driven corpus crawl (`crawl_corpus`:
+/// `skip_dirs` pruning, corpus membership, scope resolution) and Block H's OKF checks.
+/// Root instruction files (`README.md`/`CLAUDE.md`) without frontmatter are exempt from the
+/// "missing frontmatter" error — they are included in the corpus as leaves.
 ///
 /// Resolves `brain.toml` by walking up from `root` via [`brain::config::find_brain_config`].
 /// If no `brain.toml` is found, a fatal `Error`-severity diagnostic with locator

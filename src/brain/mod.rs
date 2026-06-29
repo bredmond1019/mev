@@ -2,11 +2,13 @@
 //!
 //! This module groups all brain-specific code. Phase 2, Block G implements the crawl
 //! entry point; Block H adds OKF frontmatter parsing and [`BrainValidator`]; Block I
-//! adds the `validate-brain` subcommand.
+//! adds the `validate-brain` subcommand. Block J-crawl wires the registry-driven
+//! [`crawl::crawl_corpus`] multi-root walk here, replacing the single-root walk.
 
 pub mod config;
 pub mod crawl;
 pub mod okf;
+pub mod scope;
 pub mod sync;
 
 pub use config::BrainConfig;
@@ -22,9 +24,13 @@ use crawl::MdFile;
 /// Construct with [`BrainValidator::new`] supplying a [`BrainConfig`] loaded from
 /// `brain.toml`, then call `.run(root)` to walk `root`, collect every `.md` file, and
 /// validate each one's OKF frontmatter, collecting all diagnostics into a [`crate::Report`].
+///
+/// The crawl is driven by [`crawl::crawl_corpus`] — a registry-driven multi-root walk
+/// (D4 forward-compat) that yields only corpus members (`planning/**`, `docs/**`, unit-root
+/// `README.md`/`CLAUDE.md`) with each entry's owning-unit scope resolved once at walk time.
 pub struct BrainValidator {
-    /// Configuration sourced from `brain.toml` — supplies `skip_dirs` for the crawl and
-    /// vocabulary lists for OKF validation (wired in Task 3).
+    /// Configuration sourced from `brain.toml` — supplies `skip_dirs` + `[[repos]]` scope
+    /// units for the corpus crawl, and vocabulary lists for OKF validation.
     pub(crate) config: BrainConfig,
 }
 
@@ -38,10 +44,26 @@ impl BrainValidator {
 impl ContentValidator for BrainValidator {
     type Item = MdFile;
 
-    /// Walk `root`, collect every `.md` file (applying `skip_dirs` from config), and return
-    /// the items plus any crawl-time diagnostics.
+    /// Walk `root` using the registry-driven corpus crawl, returning corpus members as
+    /// [`MdFile`] items plus any walk-error diagnostics.
+    ///
+    /// Delegates to [`crawl::crawl_corpus`]: applies `skip_dirs` pruning, resolves each
+    /// file's owning scope unit, and keeps only corpus members (`planning/**`, `docs/**`,
+    /// unit-root `README.md`/`CLAUDE.md`). Ephemeral files (`handoff.md`, `_`-prefixed)
+    /// are excluded. Each [`crawl::CorpusEntry`] is mapped to an [`MdFile`] for the
+    /// trait's item type.
     fn crawl(&self, root: &Path) -> (Vec<MdFile>, Vec<Diagnostic>) {
-        crawl::crawl_brain(root, &self.config.crawl.skip_dirs)
+        let (corpus, diags) = crawl::crawl_corpus(root, &self.config);
+        let items = corpus
+            .entries
+            .into_iter()
+            .map(|e| MdFile {
+                path: e.path,
+                rel: e.rel,
+                stem: e.stem,
+            })
+            .collect();
+        (items, diags)
     }
 
     /// Validate a single brain `.md` file against the OKF frontmatter schema.
@@ -95,14 +117,13 @@ mod tests {
     fn brain_validator_skip_dirs_from_config_are_used() {
         let dir = std::env::temp_dir().join("mev-brain-validator-skip-dirs-test");
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        // Create a file in a directory that should be pruned by config skip_dirs.
+        // Create planning/ with a file that should survive, and a skip_dir that should be pruned.
+        std::fs::create_dir_all(dir.join("planning")).unwrap();
         let skip_dir = dir.join("my-skip-dir");
         std::fs::create_dir_all(&skip_dir).unwrap();
         std::fs::write(skip_dir.join("hidden.md"), b"hidden").unwrap();
-        // And a file at root level that should be found.
-        std::fs::write(dir.join("visible.md"), b"visible").unwrap();
+        // A corpus member (planning/ file) that must be returned.
+        std::fs::write(dir.join("planning/status.md"), b"visible").unwrap();
 
         use crate::brain::config::{BrainConfig, CrawlConfig};
         let config = BrainConfig {
@@ -118,9 +139,9 @@ mod tests {
         assert_eq!(
             items.len(),
             1,
-            "expected only visible.md; my-skip-dir should be pruned. Got: {items:?}"
+            "expected only planning/status.md; my-skip-dir should be pruned. Got: {items:?}"
         );
-        assert_eq!(items[0].stem, "visible");
+        assert_eq!(items[0].stem, "status");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
