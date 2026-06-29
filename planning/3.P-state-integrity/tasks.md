@@ -186,7 +186,7 @@ Rollup ring (brain files):
   `W_STATE_ROLLUP_DRIFT`.
 - Files: `src/brain/state.rs`. (Depends on Task 1.)
 
-### 5. Public API + CLI `--state` flag
+### 5. [~] Public API + CLI `--state` flag
 - In `src/lib.rs`, add `pub fn validate_brain_state(root: &Path) -> anyhow::Result<Report>` beside the
   siblings: resolve `brain.toml` via `find_brain_config`, run the normal `BrainValidator` schema pass,
   then append `discover → load → check_schema → build_state_graph → check_state_graph → check_rollup`
@@ -196,7 +196,7 @@ Rollup ring (brain files):
   `report.is_failure()` true → exit 1; a lone drift warning exits 0). Update the subcommand `about`/help.
 - Files: `src/lib.rs`, `src/main.rs`. (Depends on Tasks 2–4.)
 
-### 6. Integration tests — end-to-end `--state` over a fixture tree
+### 6. [~] Integration tests — end-to-end `--state` over a fixture tree
 - Add `tests/brain_state.rs` building a temp HQ-root fixture: a `brain.toml` with two `[[repos]]`, each
   with a leaf `planning/state.json`, plus a brain `planning/state.json` whose `repos[]` rolls them up,
   plus a `cross_repo` edge between them.
