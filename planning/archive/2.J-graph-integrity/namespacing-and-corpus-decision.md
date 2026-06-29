@@ -5,10 +5,12 @@ description: Canonical graph-node id scheme (scope:doc_id) and the widened-corpu
 doc_id: block-j-namespacing-decision
 layer: [brain, console]
 project: mev
-status: active
+status: archived
 keywords: [doc_id, namespacing, graph integrity, related edges, brain corpus, scope]
 related: [context]
 ---
+
+<!-- Archived 2026-06-29 — promoted to planning/decisions/D6-scope-doc-id-namespacing.md -->
 
 # Block J — doc_id Namespacing & Corpus Decision
 

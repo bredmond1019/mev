@@ -5,10 +5,12 @@ description: Decomposed task spec for `mev validate-brain --sync` — the cross-
 doc_id: block-n-sync-watermark-tasks
 layer: [factory, brain]
 project: mev
-status: active
+status: archived
 keywords: [sync watermark, synced_from, validate-brain, chrono, cross-repo, D29]
 related: [master-plan, status, D29-mev-brain-validation-engine]
 ---
+
+<!-- Archived 2026-06-29 — residue distilled into planning/knowledge.md and planning/memory.md -->
 
 # Task Spec — Phase 3, Block M (HQ-Restructure Block N) — `synced_from` watermark check
 

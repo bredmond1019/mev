@@ -5,14 +5,16 @@ description: Task breakdown for wiring mev's validate-brain to read vocab, crawl
 doc_id: 2.M-brain-toml-reader-tasks
 layer: [factory]
 project: mev
-status: active
+status: archived
 keywords: [brain.toml, config, vocab, crawl, toml crate, walk-up, is_valid]
 related: [D3-corpus-config-system, status, master-plan]
 ---
 
+<!-- Archived 2026-06-29 — residue distilled into planning/knowledge.md and planning/memory.md -->
+
 # Task Spec — HQ-R Block M: mev reads `brain.toml`
 
-**Status:** Not started · **Last run:** never
+**Status:** Done · **Last run:** 2026-06-27
 
 ## Goal
 

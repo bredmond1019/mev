@@ -34,6 +34,10 @@ file**, append-only — never edit a settled decision; supersede it with a new o
   via a normalized document model, sidecar metadata, and a deterministic `mev discover` step. Binds
   only two guardrails now (honored in Block J): metadata behind a single extractor seam, and the graph
   stays authored-only (never inferred).
+- [D6: scope:doc_id canonical id scheme & corpus rules](./D6-scope-doc-id-namespacing.md) —
+  Registry-driven stable `scope:doc_id` canonical node ids; corpus membership rules (docs/ +
+  planning/ + root README/CLAUDE, minus skip_dirs, minus ephemeral); nodes vs leaves; extensible
+  edge model; authored-only graph guarantee. Settled 2026-06-28 from live 503-file corpus pass.
 
 <!-- Add a row per decision as they are made. Record new ones with /log-decision-style atomic
-     files (D5, D6, …). -->
+     files (D7, D8, …). -->

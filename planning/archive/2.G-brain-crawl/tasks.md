@@ -1,3 +1,5 @@
+<!-- Archived 2026-06-29 — residue distilled into planning/knowledge.md -->
+
 # Task Spec — Phase 2, Block G
 
 **Status:** Done · **Last run:** 2026-06-26

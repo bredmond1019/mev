@@ -7,7 +7,7 @@ layer: [factory]
 project: mev
 status: active
 keywords: [planning navigation, context, master plan, SDLC, concept folders]
-related: [context, status, master-plan]
+related: [context, status, master-plan, archive-index]
 ---
 
 # mev — Planning Docs
@@ -27,6 +27,7 @@ folder is the map.
 | `artifacts/` | Working outputs / scratch artifacts produced during runs | You need a place for generated artifacts |
 | `harness.json` | Validation/UI-test config the SDLC engines read | You're adapting the pipeline to this stack |
 | `decisions/` | Atomic, append-only architectural decisions | You want to check a prior choice |
+| `archive/` | Retired concept folders — residue distilled before moving | You're reviewing completed work |
 | `<concept>/` | Per-spec planning folders (task specs + pipeline state) | You're running the SDLC pipeline |
 
 ## The concept-folder model
@@ -57,11 +58,14 @@ at the top; only pipeline state lives under `sdlc/`.
 
 | Folder | What | Status |
 |---|---|---|
-| `2.M-brain-toml-reader/` | HQ-R Block M — mev reads `brain.toml` for vocab + crawl + project slugs | Done |
-| `block-n-sync-watermark/` | HQ-R Block N (mev Phase 3 Block M) — `mev validate-brain --sync` watermark check | Done |
-| `2.J-corpus-crawl/` | Phase 3 Block J-crawl — multi-root corpus crawl + scope registry (foundation; runs first) | Done |
-| `2.J-graph-integrity/` | Phase 3 Block J — global `scope:doc_id` graph integrity (`--graph`); depends on 2.J-corpus-crawl | Done |
 | `herdr-mev-patterns/` | Research notes — herdr patterns applicable to mev graph/crawl/validation (Block J done; patterns Q/R/S/watch deferred) | Active |
+
+## Archived Concept Folders
+
+Completed blocks are in `archive/` — see [`archive/index.md`](./archive/index.md) for the full registry.
+Recent additions (distilled 2026-06-29): `2.F-content-validator-trait`, `2.G-brain-crawl`,
+`2.H-brain-okf-validator`, `2.I-validate-brain-subcommand`, `2.J-corpus-crawl`,
+`2.J-graph-integrity`, `2.M-brain-toml-reader`, `block-n-sync-watermark`.
 
 ## What's NOT Here
 

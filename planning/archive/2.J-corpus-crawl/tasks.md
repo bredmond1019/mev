@@ -5,10 +5,12 @@ description: Decomposed task spec for the registry-driven scope resolver and the
 doc_id: 2j-corpus-crawl-tasks
 layer: [factory, brain]
 project: mev
-status: active
+status: archived
 keywords: [corpus crawl, multi-root, scope registry, brain.toml, skip_dirs, single source of truth]
 related: [master-plan, status, block-j-namespacing-decision, D4-corpus-engine-and-knowledge-graph, D29-mev-brain-validation-engine]
 ---
+
+<!-- Archived 2026-06-29 — residue distilled into planning/knowledge.md, planning/memory.md -->
 
 # Task Spec — Phase 3, Block J-crawl — Multi-root corpus crawl + scope registry
 

@@ -5,10 +5,12 @@ description: Decomposed task spec for the global scope:doc_id node index, unique
 doc_id: 2j-graph-integrity-tasks
 layer: [factory, brain]
 project: mev
-status: active
+status: archived
 keywords: [graph integrity, knowledge graph, scope namespacing, doc_id, related edges, validate-brain]
 related: [master-plan, status, block-j-namespacing-decision, 2j-corpus-crawl-tasks, D4-corpus-engine-and-knowledge-graph, D5-heterogeneous-format-ingest, D29-mev-brain-validation-engine]
 ---
+
+<!-- Archived 2026-06-29 — residue distilled into planning/knowledge.md, planning/memory.md, and planning/decisions/D6-scope-doc-id-namespacing.md -->
 
 # Task Spec — Phase 3, Block J — Graph integrity (global `scope:doc_id` graph)
 

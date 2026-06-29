@@ -49,6 +49,30 @@ _Architecture digest — the main components and how they fit together._
 - **Brain crawl pruning.** `crawl_brain` uses `filter_entry`-based directory pruning with two helpers: `is_blocklisted_name` (prunes dirs like `target/`, `node_modules/`, `.git/`, `.claude/`, `.repo-backups/`, `.agent/`) and `has_nested_git` (prunes nested git repos at depth > 0, preventing accidental descend into sub-project directories).
   source: log.md (2026-06-26 Block 2.G entry) · date: 2026-06-26 · supersedes: — · freshness: 2026-06-27
 
+- **Scope resolution (multi-root corpus).** `scope_for(rel, config) -> String` = longest-prefix match of the file's path against `brain.toml` `[[repos]]` `repo_path` entries. The root unit (`repo_path = "."`, slug `brain`) is the fallback. Scope is a **registry-driven stable slug** — never inferred from path/tier position, so moving a repo between tiers does not change any node ids.
+  source: planning/archive/2.J-corpus-crawl/tasks.md · date: 2026-06-28 · supersedes: — · freshness: 2026-06-28
+
+- **Multi-root corpus crawl.** `crawl_corpus(root, config) -> (Corpus, Vec<Diagnostic>)` returns an owned, `Serialize`-able `Corpus` (each `CorpusEntry` carries `{path, rel, stem, scope: String}`), separate from diagnostics. Corpus membership rule: a `.md` file is in the corpus iff, relative to its owning unit (longest-prefix), it is under `planning/` or `docs/`, OR it is the unit's root `README.md`/`CLAUDE.md`. Ephemeral exclusions: `handoff.md` and `_`-prefixed files. Bloat dirs pruned via `skip_dirs` from `brain.toml`. This is the D4 manifest seed — the same list the embedder should consume (D4 "what's validated == what's embedded").
+  source: planning/archive/2.J-corpus-crawl/tasks.md · date: 2026-06-28 · supersedes: — · freshness: 2026-06-28
+
+- **OKF exemption for root instruction files.** `README.md`/`CLAUDE.md` without frontmatter produce **no** OKF "missing frontmatter" error — they are valid corpus leaves (per HQ CLAUDE.md Standing Rule 6). A root file that *does* carry frontmatter (and `doc_id`) is validated normally and promoted to a graph node. `handoff.md` remains ephemeral/excluded.
+  source: planning/archive/2.J-corpus-crawl/tasks.md · date: 2026-06-28 · supersedes: — · freshness: 2026-06-28
+
+- **Graph model: nodes vs leaves, `scope:doc_id`.** Canonical node id = `scope:doc_id`. A file **with** an authored `doc_id` is a **node** (globally unique; legal `related:` target). A file **without** a `doc_id` is a **leaf** (embedded for retrieval; never uniqueness-checked; flagged `W_GRAPH_LEAF_TARGET` if named as a `related:` target). See D6 for the full id scheme and corpus rules.
+  source: planning/archive/2.J-graph-integrity/tasks.md · date: 2026-06-29 · supersedes: — · freshness: 2026-06-29
+
+- **Graph artifact: build + check separation.** `build_graph(corpus, config) -> GraphArtifact` builds an owned `GraphArtifact` wrapping `Graph{nodes: Vec<Node>, edges: Vec<Edge>}` plus lookup structures (`node_map`, `leaf_keys`). `check_graph(&artifact) -> Vec<Diagnostic>` consumes the built artifact — it does **not** re-walk the corpus. All types derive `serde::Serialize` so the validated graph is the emittable graph (D4 — Phase 3B Block R loads it into Postgres). Edge model: `Edge{from: String, to_ref: String, kind: EdgeKind::Related}` designed for typed-edge extension (no reshape needed to add `supersedes`/`depends-on`/`parent`).
+  source: planning/archive/2.J-graph-integrity/tasks.md + worklog.md · date: 2026-06-29 · supersedes: — · freshness: 2026-06-29
+
+- **`read_doc_metadata` seam (D5 forward-compat).** In `src/brain/graph.rs`, a single helper `read_doc_metadata(entry) -> DocMeta{doc_id, related}` is the **only** site that reads inline Markdown frontmatter (`extract_frontmatter + OkfFrontmatter`) for graph construction. All of `build_graph`/`check_graph` route through it. This is the swap point for a future foreign-format extractor (D5 heterogeneous ingest) — one function swap rather than a refactor.
+  source: planning/archive/2.J-graph-integrity/tasks.md · date: 2026-06-29 · supersedes: — · freshness: 2026-06-29
+
+- **`validate_brain_sync` / `--sync` watermark check.** `validate_brain_sync(root) -> anyhow::Result<Report>` runs the normal OKF schema pass plus `check_sync(root, &config)` per `[[repos]]` entry. Source watermark = `timestamp` in `status_file`; cache watermark = `synced_from` in `cache_doc`; both paths from `brain.toml` `[[repos]]`, resolved relative to HQ root. Watermarks parsed strictly as RFC3339 (`DateTime::parse_from_rfc3339`); date-only strings (`"2026-06-27"`) are rejected as `E_SYNC_WATERMARK_MALFORMED`. CLI flag: `--sync` on `validate-brain`.
+  source: planning/archive/block-n-sync-watermark/tasks.md · date: 2026-06-28 · supersedes: — · freshness: 2026-06-28
+
+- **`--graph` and `--sync` are mutually exclusive by precedence.** When both flags are supplied, `--graph` wins (graph is a strict superset of the OKF schema pass that `--sync` also runs). No error is produced for combining them — simpler UX.
+  source: planning/archive/2.J-graph-integrity/sdlc/worklog.md · date: 2026-06-29 · supersedes: — · freshness: 2026-06-29
+
 - **learn-ai content tree layout.** The classifier must handle: `paths/<path-id>/metadata.json` → `PathMetadataJson`; `paths/<path-id>/modules/<NN-slug>.json` → `LearnModuleJson`; `paths/<path-id>/modules/<NN-slug>.mdx` → `ModuleMdx`; pt-BR mirror nests under `paths/<path-id>/pt-BR/`. Everything outside `paths/` (schemas, shared, top-level `.md`) is skipped.
   source: planning/archive/phase1-blockB/breakdown.md · date: 2026-06-18 · supersedes: — · freshness: 2026-06-27
 
@@ -95,6 +119,15 @@ _Non-obvious constraints, sharp edges, and hard-won lessons._
 
 - **`out of scope` content directories.** `content/summaries/` and `content/youtube-transcripts/` are source material, not in the build pipeline, and explicitly out of scope (D2). Do not add validation rules for them.
   source: planning/decisions/D2-scope-and-sequence.md · date: 2026-06-18 · supersedes: — · freshness: 2026-06-27
+
+- **Bare `related:` references resolve within scope; qualified cross-scope.** A bare `doc_id` in a `related:` list resolves within the referrer's own scope. A bare ref that names another scope's `doc_id` is **not** resolved cross-scope — it is flagged `E_GRAPH_DANGLING_RELATED`. Only `scope:doc_id` qualified refs resolve cross-scope.
+  source: planning/archive/2.J-graph-integrity/tasks.md · date: 2026-06-29 · supersedes: — · freshness: 2026-06-29
+
+- **Graph diagnostic locators.** `E_GRAPH_DUPLICATE_DOC_ID` is the diagnostic `locator` string for duplicate node checks. For dangling-edge and leaf-target diagnostics, the locator is the string `"related"` (not the vocabulary code names `E_GRAPH_DANGLING_RELATED` / `W_GRAPH_LEAF_TARGET` — those are documentation labels).
+  source: planning/archive/2.J-graph-integrity/sdlc/worklog.md · date: 2026-06-29 · supersedes: — · freshness: 2026-06-29
+
+- **`check_sync` short-circuits per repo.** For each `[[repos]]` entry, `check_sync` emits the first applicable error and moves to the next repo — it does **not** accumulate multiple errors for the same repo. This mirrors how OKF validation short-circuits on read failure.
+  source: planning/archive/block-n-sync-watermark/sdlc/worklog.md · date: 2026-06-28 · supersedes: — · freshness: 2026-06-28
 
 ---
 

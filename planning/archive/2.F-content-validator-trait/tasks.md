@@ -5,10 +5,12 @@ description: Introduce the associated-type ContentValidator trait, extract share
 doc_id: 2-F-content-validator-trait
 layer: [engine]
 project: mev
-status: active
+status: archived
 keywords: [content-validator, trait, refactor, shared-core, learn-ai, module-layout]
 related: [master-plan]
 ---
+
+<!-- Archived 2026-06-29 — residue distilled into planning/knowledge.md and planning/memory.md -->
 
 # Task Spec — Phase 2, Block F — ContentValidator trait + shared core
 
