@@ -16,7 +16,7 @@ blocked: []
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-29 — 2.J-graph-integrity PASS. Serializable graph model (EdgeKind/Edge/Node/Graph), build_graph, check_graph (E_GRAPH_DUPLICATE_DOC_ID, E_GRAPH_DANGLING_RELATED, W_GRAPH_LEAF_TARGET), validate_brain_graph public API, --graph CLI flag, 7-test integration suite. 175 unit + 57 integration = 232 total tests pass.
+**Last updated:** 2026-06-29 — 2.J-graph-integrity PASS + post-flow code-review fixes. Diagnostic locators corrected (`W_GRAPH_LEAF_TARGET`, `E_GRAPH_DANGLING_RELATED`); stale doc wording removed. PR #4 merged; worktree cleaned. 232 total tests pass.
 **Current focus:** Block J done — next is Block K (link integrity) or Block Q (manifest emit)
 
 ---
@@ -81,7 +81,7 @@ blocked: []
 | Block | What | Status | Notes |
 |---|---|---|---|
 | Block J-crawl | Multi-root corpus crawl + scope registry | Done | `scope_units`/`scope_for`/`owning_unit` in `src/brain/scope.rs`; `crawl_corpus` → owned serializable `Corpus`; `BrainValidator` rewired; OKF root-file exemption; 13-test integration suite; all 160 tests pass. Post-flow fix: `is_root_instruction_file` now verifies unit-root position (commit `753be87`). PR #3 merged. |
-| Block J | Graph integrity (global `scope:doc_id`) | Done | Serializable Graph model, build_graph + read_doc_metadata seam, check_graph (3 diagnostic codes), validate_brain_graph API, --graph CLI flag, 7 integration tests. 232 total tests pass. |
+| Block J | Graph integrity (global `scope:doc_id`) | Done | Serializable Graph model, build_graph + read_doc_metadata seam, check_graph (3 diagnostic codes), validate_brain_graph API, --graph CLI flag, 7 integration tests. 232 total tests pass. Post-flow fix: diagnostic locators corrected (`W_GRAPH_LEAF_TARGET`, `E_GRAPH_DANGLING_RELATED`); PR #4 merged. |
 | Block K | Link integrity (markdown/`file://`/`[[wiki]]`) | Not started | Per master-plan |
 | Block L | Structural coverage (`index.md` ↔ dir, D17) | Not started | Per master-plan |
 

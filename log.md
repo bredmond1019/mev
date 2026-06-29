@@ -17,6 +17,14 @@ timestamp: "2026-06-29"
 
 ---
 
+## 2026-06-29 — Post-flow code-review fixes: diagnostic locator codes + stale doc wording
+
+- **What:** Post-flow `/code-review low --fix` pass on the 2.J-graph-integrity output. Both edge-resolution diagnostic locators in `check_graph` were using the generic `"related"` string instead of the documented locator codes. Fixed: leaf-target warning → `W_GRAPH_LEAF_TARGET`; dangling-edge error → `E_GRAPH_DANGLING_RELATED`. Updated all matching tests (unit + integration) to expect the correct codes. Also removed stale "(Task 2) will accept" future-tense wording from the module doc. PR #4 merged; worktree `trees/2.J-graph-integrity-flow` cleaned; branch deleted. Main is 17 commits ahead of origin.
+- **Why:** Locator mismatch would have silently broken any downstream tooling (RAG gate, CI scripts) keying on the documented locator codes. Standard post-flow quality pass.
+- **Refs:** `src/brain/graph.rs`, `tests/brain_graph.rs`, commit `70e07dd`
+
+---
+
 ## 2026-06-29 — 2.J-graph-integrity complete (PASS): global scope:doc_id knowledge graph
 
 Implemented the full Block J graph integrity layer (all 5 tasks, PASS). Task 1 defined the serializable, emittable graph model (`EdgeKind`, `Edge`, `Node`, `Graph` — all `Serialize`) and `build_graph` in `src/brain/graph.rs`, with the `read_doc_metadata` seam (D5 forward-compat: the single site that calls `extract_frontmatter`/`OkfFrontmatter`, keeping future foreign-format ingest a one-function swap); `check_graph` was co-located here since its logic depended directly on `GraphArtifact`. Task 2 completed by adding the one missing unit test: bare ref to a `doc_id` that exists only in another scope correctly flags dangling. Task 3 added `validate_brain_graph()` to `src/lib.rs` and `--graph` to the `ValidateBrain` CLI subcommand (mutually exclusive with `--sync` by precedence), re-exporting `build_graph`/`Graph`/`check_graph` for Phase 3B Block R. Task 4 delivered `tests/brain_graph.rs` with 7 end-to-end integration tests over a multi-unit (brain/core/mev) fixture: clean corpus, same doc_id across scopes, duplicate detection, cross-scope resolution, dangling edges, leaf-target warnings, and JSON envelope round-trip. Task 5 confirmed all four harness gates green: `fmt`, `clippy -D warnings`, 175 unit + 57 integration = 232 tests, release build. The `Graph` struct is `Serialize`-able (D4 forward-compat) — Phase 3B Block R can emit it directly to Postgres with no re-walk. Next: Block K (link integrity) or Block Q (manifest emit / Phase 3B).
