@@ -29,3 +29,6 @@ Patched: /Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity
 
 ## Wrap-up — PASS
 Next: Block K (link integrity: markdown/file:///[[wiki]]) or Block Q (manifest emit / Phase 3B) — check master-plan.md for ordering
+
+## PR
+https://github.com/bredmond1019/mev/pull/4
