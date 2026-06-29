@@ -29,3 +29,8 @@ Validated: gating checks (fast tripwire)
 What: Add tests/brain_state.rs: four end-to-end integration tests for validate_brain_state covering clean fixture, dangling blocked_by, rollup drift (warning-not-error), and JSON round-trip with State diagnostic
 Decisions: Fixture uses no .md files so the OKF pass in validate_brain_state is silent, allowing assertion of zero total errors in the clean test without needing to write valid OKF docs; Tests filter by E_STATE_* locator prefix to isolate State diagnostics from any OKF noise, consistent with the brain_sync.rs precedent of filtering by E_SYNC_*; Test 3 (drift) updates the brain cross_repo edge to use AL.1.A→BE.1.A (both still valid) so only W_STATE_ROLLUP_DRIFT fires without E_STATE_DANGLING_CROSS_REPO interference
 Validated: gating checks (fast tripwire)
+
+## Task 7 — PASSED (1 attempt)
+What: Task 7 validate: all four harness gates pass (fmt, clippy, 209 tests, release build); mev validate-brain --state ~/Dev/agentic-portfolio parses all five live state.json files with 0 state-specific diagnostics
+Decisions: The exit-1 from the live run is from pre-existing OKF errors on archive files (the normal validate-brain OKF pass), not from any state check failure — confirmed by filtering JSON output for E_STATE_*/W_STATE_* codes which returned 0 results
+Validated: gating checks (fast tripwire)
