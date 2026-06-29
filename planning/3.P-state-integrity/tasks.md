@@ -146,7 +146,7 @@ Rollup ring (brain files):
   a malformed-JSON fixture surfaces the parse error; an unknown `blocked_by` `type` is rejected.
 - Files: `src/brain/state.rs`, `src/brain/mod.rs`, `Cargo.toml` (only if `serde_json` needs a feature).
 
-### 2. Registry discovery + schema-ring checks
+### 2. [~] Registry discovery + schema-ring checks
 - Add `fn discover_state_files(root: &Path, config: &BrainConfig) -> Vec<StateSource>` where
   `StateSource { repo_slug, abs_path, expected_kind }`: HQ-root `planning/state.json` (brain) + each
   tier sub-brain root (brain) + each `[[repos]]` `path`/`planning/state.json` (project). Missing file →

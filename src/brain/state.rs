@@ -23,10 +23,13 @@
 //! - `W_STATE_ROLLUP_DRIFT` — brain `repos[]` headline drifted from child `focus`.
 //! - `W_STATE_FILE_MISSING` — a registered repo has no `planning/state.json`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::Diagnostic;
+use crate::brain::config::BrainConfig;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -279,6 +282,262 @@ pub fn load_state(path: &Path) -> Result<StateFile, StateLoadError> {
         path: path.to_path_buf(),
         source: e,
     })
+}
+
+// ---------------------------------------------------------------------------
+// StateSource — discovery record
+// ---------------------------------------------------------------------------
+
+/// Metadata about a discovered `planning/state.json` file.
+///
+/// Produced by [`discover_state_files`].  The `expected_kind` allows
+/// [`check_schema`] to verify that the file's `kind` field matches its
+/// structural role (HQ/tier brain vs. leaf project).
+#[derive(Debug, Clone)]
+pub struct StateSource {
+    /// Identifying slug for this source (e.g. `"hq"`, `"core"`, `"mev"`).
+    pub repo_slug: String,
+    /// Absolute path to the `planning/state.json` file.
+    pub abs_path: PathBuf,
+    /// Expected `kind` field value: `"brain"` or `"project"`.
+    pub expected_kind: &'static str,
+}
+
+// ---------------------------------------------------------------------------
+// Discovery
+// ---------------------------------------------------------------------------
+
+/// Discover all `planning/state.json` files reachable from `root`.
+///
+/// Returns `(sources, diagnostics)`:
+/// - `sources` — every file that exists, ready to be loaded.
+/// - `diagnostics` — one [`Diagnostic`] with locator `W_STATE_FILE_MISSING`
+///   per registered path that does not exist on disk (warning severity).
+///
+/// Discovery strategy (per scoping decision 1 — cross-repo read mode):
+/// 1. HQ brain: `root/planning/state.json` (always expected; `kind:"brain"`).
+///    If found, the file is loaded internally to enumerate `tiers[]` so that
+///    tier sub-brain paths (`tiers[].rollup`) can be discovered.
+/// 2. Tier sub-brains: each `tiers[].rollup` path (relative to `root`) that is
+///    non-null is expected as a brain-kind file.
+/// 3. Leaf repos: each `[[repos]]` entry in `config` whose `repo_path` is not
+///    `"."` (the HQ root itself) → `root/{repo_path}/planning/state.json`
+///    (`kind:"project"`).
+pub fn discover_state_files(
+    root: &Path,
+    config: &BrainConfig,
+) -> (Vec<StateSource>, Vec<Diagnostic>) {
+    let mut sources: Vec<StateSource> = Vec::new();
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    // --- 1. HQ brain state ---
+    let hq_path = root.join("planning").join("state.json");
+    if hq_path.exists() {
+        // Derive the HQ slug from the [[repos]] entry with repo_path="." if
+        // present; fall back to "hq".
+        let hq_slug = config
+            .repos
+            .iter()
+            .find(|r| r.repo_path == "." || r.repo_path.is_empty())
+            .map(|r| r.slug.clone())
+            .unwrap_or_else(|| "hq".to_string());
+
+        sources.push(StateSource {
+            repo_slug: hq_slug,
+            abs_path: hq_path.clone(),
+            expected_kind: "brain",
+        });
+
+        // --- 2. Tier sub-brains (from HQ tiers[].rollup) ---
+        if let Ok(hq_state) = load_state(&hq_path) {
+            for tier_entry in &hq_state.tiers {
+                let rollup = match &tier_entry.rollup {
+                    Some(r) if !r.trim().is_empty() => r.clone(),
+                    _ => continue, // null or empty rollup → no state file expected
+                };
+                let tier_path = root.join(&rollup);
+                if tier_path.exists() {
+                    sources.push(StateSource {
+                        repo_slug: tier_entry.tier.clone(),
+                        abs_path: tier_path,
+                        expected_kind: "brain",
+                    });
+                } else {
+                    diags.push(Diagnostic::warning(
+                        tier_path,
+                        "W_STATE_FILE_MISSING",
+                        format!(
+                            "tier '{}': state.json not found at rollup path '{rollup}'",
+                            tier_entry.tier
+                        ),
+                    ));
+                }
+            }
+        }
+    } else {
+        diags.push(Diagnostic::warning(
+            hq_path,
+            "W_STATE_FILE_MISSING",
+            "HQ brain: planning/state.json not found at root".to_string(),
+        ));
+    }
+
+    // --- 3. Leaf repos from [[repos]] config ---
+    for repo in &config.repos {
+        // Skip the HQ root entry itself.
+        if repo.repo_path == "." || repo.repo_path.is_empty() {
+            continue;
+        }
+        let state_path = root
+            .join(&repo.repo_path)
+            .join("planning")
+            .join("state.json");
+        if state_path.exists() {
+            sources.push(StateSource {
+                repo_slug: repo.slug.clone(),
+                abs_path: state_path,
+                expected_kind: "project",
+            });
+        } else {
+            diags.push(Diagnostic::warning(
+                state_path,
+                "W_STATE_FILE_MISSING",
+                format!(
+                    "repo '{}': planning/state.json not found (path: '{}')",
+                    repo.slug, repo.repo_path
+                ),
+            ));
+        }
+    }
+
+    (sources, diags)
+}
+
+// ---------------------------------------------------------------------------
+// Schema-ring checks
+// ---------------------------------------------------------------------------
+
+/// Valid `status` values for `focus.now` and `focus.blocked` block entries.
+const VALID_STATUSES: &[&str] = &["open", "in_progress", "blocked", "closed"];
+
+/// Validate the schema-ring constraints for a successfully-deserialized
+/// [`StateFile`].
+///
+/// Checks performed (all against the deserialized model — JSON structural
+/// errors are already surfaced as [`StateLoadError::Parse`] before this
+/// function is called):
+///
+/// 1. **`kind` membership** (`E_STATE_SCHEMA_BAD_KIND`) — `kind` must be
+///    `"project"` or `"brain"`.  Also flags if `kind` disagrees with the
+///    source's `expected_kind`.
+/// 2. **`updated` non-empty** (`E_STATE_SCHEMA_MISSING_FIELD`) — the
+///    `updated` string must not be blank (format checked by `MV.3.M`).
+/// 3. **`status` enum** (`E_STATE_SCHEMA_BAD_STATUS`) — every `focus.now`
+///    and `focus.blocked` entry whose `status` field is present must hold a
+///    value in `{open, in_progress, blocked, closed}`.
+/// 4. **`blocked_by` well-formedness** (`E_STATE_SCHEMA_BAD_BLOCKED_BY`) —
+///    a `{type:"block"}` entry must have non-empty `repo` and `id`.
+/// 5. **Kind-appropriate sections** (`E_STATE_SCHEMA_MISSING_FIELD`, warning)
+///    — a `project` file is expected to carry `tracks[]`; a `brain` file is
+///    expected to carry `repos[]`.
+pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
+    let mut diags: Vec<Diagnostic> = Vec::new();
+    let path = &src.abs_path;
+
+    // --- 1. kind membership ---
+    match file.kind.as_str() {
+        "project" | "brain" => {
+            // Valid — also check it matches the source's expected kind.
+            if file.kind != src.expected_kind {
+                diags.push(Diagnostic::error(
+                    path,
+                    "E_STATE_SCHEMA_BAD_KIND",
+                    format!(
+                        "kind '{}' does not match expected '{}' for this source",
+                        file.kind, src.expected_kind
+                    ),
+                ));
+            }
+        }
+        other => {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_SCHEMA_BAD_KIND",
+                format!("kind '{other}' is not valid; expected 'project' or 'brain'"),
+            ));
+        }
+    }
+
+    // --- 2. updated non-empty ---
+    if file.updated.trim().is_empty() {
+        diags.push(Diagnostic::error(
+            path,
+            "E_STATE_SCHEMA_MISSING_FIELD",
+            "required field 'updated' is present but empty".to_string(),
+        ));
+    }
+
+    // --- 3. status enum + 4. blocked_by well-formedness ---
+    // Check all focus collections that carry status or blocked_by.
+    for block in file.focus.now.iter().chain(file.focus.blocked.iter()) {
+        // status enum
+        if let Some(status) = &block.status
+            && !VALID_STATUSES.contains(&status.as_str())
+        {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_SCHEMA_BAD_STATUS",
+                format!(
+                    "block '{}' has invalid status '{}'; expected one of: {}",
+                    block.block,
+                    status,
+                    VALID_STATUSES.join(", ")
+                ),
+            ));
+        }
+
+        // blocked_by well-formedness
+        for bb in &block.blocked_by {
+            if let BlockedBy::Block { repo, id, .. } = bb {
+                let repo_empty = repo.trim().is_empty();
+                let id_empty = id.trim().is_empty();
+                if repo_empty || id_empty {
+                    diags.push(Diagnostic::error(
+                        path,
+                        "E_STATE_SCHEMA_BAD_BLOCKED_BY",
+                        format!(
+                            "blocked_by entry in block '{}' is missing required \
+                             field(s): {}",
+                            block.block,
+                            [repo_empty.then_some("'repo'"), id_empty.then_some("'id'")]
+                                .into_iter()
+                                .flatten()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    // --- 5. kind-appropriate sections (warnings) ---
+    if file.kind == "project" && file.tracks.is_empty() {
+        diags.push(Diagnostic::warning(
+            path,
+            "E_STATE_SCHEMA_MISSING_FIELD",
+            "project state.json is missing 'tracks[]'; expected a roadmap catalog".to_string(),
+        ));
+    }
+    if file.kind == "brain" && file.repos.is_empty() {
+        diags.push(Diagnostic::warning(
+            path,
+            "E_STATE_SCHEMA_MISSING_FIELD",
+            "brain state.json is missing 'repos[]'; expected a child-repo rollup".to_string(),
+        ));
+    }
+
+    diags
 }
 
 // ---------------------------------------------------------------------------
@@ -599,5 +858,413 @@ mod tests {
         assert!(file.cross_repo.is_empty());
         assert!(file.tiers.is_empty());
         assert!(file.note.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 2 — discover_state_files tests
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal HQ temp dir with two leaf repos and a brain state.json.
+    fn build_hq_fixture(dir: &std::path::Path) {
+        // HQ brain planning/state.json
+        let hq_planning = std::path::Path::new(dir).join("planning");
+        std::fs::create_dir_all(&hq_planning).unwrap();
+        let hq_state = serde_json::json!({
+            "repo": "hq",
+            "kind": "brain",
+            "updated": "2026-06-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "repos": [
+                { "repo": "alpha", "now": [], "next": [], "blocked": [] }
+            ],
+            "tiers": [
+                { "tier": "core", "rollup": "core/planning/state.json" }
+            ]
+        });
+        std::fs::write(
+            hq_planning.join("state.json"),
+            serde_json::to_string_pretty(&hq_state).unwrap(),
+        )
+        .unwrap();
+
+        // Tier sub-brain: core/planning/state.json
+        let core_planning = dir.join("core").join("planning");
+        std::fs::create_dir_all(&core_planning).unwrap();
+        let core_state = serde_json::json!({
+            "repo": "core",
+            "kind": "brain",
+            "updated": "2026-06-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "repos": [{ "repo": "alpha", "now": [], "next": [], "blocked": [] }]
+        });
+        std::fs::write(
+            core_planning.join("state.json"),
+            serde_json::to_string_pretty(&core_state).unwrap(),
+        )
+        .unwrap();
+
+        // Leaf repo alpha: core/alpha/planning/state.json
+        let alpha_planning = dir.join("core").join("alpha").join("planning");
+        std::fs::create_dir_all(&alpha_planning).unwrap();
+        let alpha_state = serde_json::json!({
+            "repo": "alpha",
+            "kind": "project",
+            "updated": "2026-06-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "tracks": [{ "title": "Phase 1", "blocks": [{ "id": "AL.1.A", "title": "Start" }] }]
+        });
+        std::fs::write(
+            alpha_planning.join("state.json"),
+            serde_json::to_string_pretty(&alpha_state).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn make_config_with_alpha(alpha_repo_path: &str) -> BrainConfig {
+        use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
+        BrainConfig {
+            vocab: VocabConfig::default(),
+            crawl: CrawlConfig::default(),
+            repos: vec![
+                RepoEntry {
+                    slug: "brain".to_string(),
+                    tier: "_root".to_string(),
+                    repo_path: ".".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "alpha".to_string(),
+                    tier: "core".to_string(),
+                    repo_path: alpha_repo_path.to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn discover_finds_hq_tier_and_leaf_sources() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        build_hq_fixture(dir.path());
+        let config = make_config_with_alpha("core/alpha");
+
+        let (sources, diags) = discover_state_files(dir.path(), &config);
+
+        // 0 warnings expected (all files exist)
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for complete fixture, got: {diags:?}"
+        );
+
+        // Expect 3 sources: HQ brain, core tier brain, alpha leaf
+        assert_eq!(
+            sources.len(),
+            3,
+            "expected 3 sources (hq, core, alpha), got: {sources:?}"
+        );
+
+        let slugs: Vec<&str> = sources.iter().map(|s| s.repo_slug.as_str()).collect();
+        assert!(
+            slugs.contains(&"brain"),
+            "expected hq source with slug 'brain'"
+        );
+        assert!(
+            slugs.contains(&"core"),
+            "expected tier source with slug 'core'"
+        );
+        assert!(
+            slugs.contains(&"alpha"),
+            "expected leaf source with slug 'alpha'"
+        );
+
+        // Verify expected_kinds
+        for src in &sources {
+            match src.repo_slug.as_str() {
+                "brain" | "core" => assert_eq!(src.expected_kind, "brain"),
+                "alpha" => assert_eq!(src.expected_kind, "project"),
+                _ => panic!("unexpected slug: {}", src.repo_slug),
+            }
+        }
+    }
+
+    #[test]
+    fn discover_emits_missing_warning_for_absent_leaf() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        build_hq_fixture(dir.path());
+        // Add a second repo entry that has no state.json on disk
+        use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
+        let config = BrainConfig {
+            vocab: VocabConfig::default(),
+            crawl: CrawlConfig::default(),
+            repos: vec![
+                RepoEntry {
+                    slug: "brain".to_string(),
+                    tier: "_root".to_string(),
+                    repo_path: ".".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "alpha".to_string(),
+                    tier: "core".to_string(),
+                    repo_path: "core/alpha".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "missing-repo".to_string(),
+                    tier: "core".to_string(),
+                    repo_path: "core/missing-repo".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+            ],
+        };
+
+        let (sources, diags) = discover_state_files(dir.path(), &config);
+
+        // One W_STATE_FILE_MISSING for the missing leaf
+        let missing_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_FILE_MISSING")
+            .collect();
+        assert_eq!(
+            missing_diags.len(),
+            1,
+            "expected exactly one W_STATE_FILE_MISSING, got: {diags:?}"
+        );
+
+        // missing-repo is NOT in sources
+        assert!(
+            !sources.iter().any(|s| s.repo_slug == "missing-repo"),
+            "missing-repo should not appear in sources"
+        );
+    }
+
+    #[test]
+    fn discover_emits_missing_warning_for_absent_tier_sub_brain() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Build HQ with a tier that has no actual state.json file on disk
+        let hq_planning = dir.path().join("planning");
+        std::fs::create_dir_all(&hq_planning).unwrap();
+        let hq_state = serde_json::json!({
+            "repo": "hq",
+            "kind": "brain",
+            "updated": "2026-06-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "repos": [],
+            "tiers": [
+                { "tier": "ghost-tier", "rollup": "ghost/planning/state.json" }
+            ]
+        });
+        std::fs::write(
+            hq_planning.join("state.json"),
+            serde_json::to_string_pretty(&hq_state).unwrap(),
+        )
+        .unwrap();
+
+        let config = BrainConfig::default();
+        let (sources, diags) = discover_state_files(dir.path(), &config);
+
+        let missing: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_FILE_MISSING")
+            .collect();
+        assert_eq!(
+            missing.len(),
+            1,
+            "expected one W_STATE_FILE_MISSING for ghost-tier, got: {diags:?}"
+        );
+
+        // HQ itself is in sources
+        assert_eq!(sources.len(), 1, "only HQ brain should be in sources");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 2 — check_schema tests
+    // -----------------------------------------------------------------------
+
+    fn make_source(path: &std::path::Path, kind: &'static str) -> StateSource {
+        StateSource {
+            repo_slug: "test".to_string(),
+            abs_path: path.to_path_buf(),
+            expected_kind: kind,
+        }
+    }
+
+    fn parse_file(json: &str) -> StateFile {
+        serde_json::from_str(json).expect("fixture must parse")
+    }
+
+    #[test]
+    fn check_schema_clean_leaf_emits_no_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+        let file = parse_file(&leaf_json("mev"));
+
+        let diags = check_schema(&src, &file);
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == crate::Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "clean leaf should produce no errors, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_schema_bad_kind_emits_e_state_schema_bad_kind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{
+  "repo": "test",
+  "kind": "invalid_kind",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [{ "title": "P1", "blocks": [{ "id": "T.1", "title": "X" }] }]
+}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+
+        let bad_kind: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_KIND")
+            .collect();
+        assert_eq!(
+            bad_kind.len(),
+            1,
+            "expected exactly one E_STATE_SCHEMA_BAD_KIND, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_schema_bad_status_emits_e_state_schema_bad_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{
+  "repo": "test",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": {
+    "now": [
+      { "block": "T.1", "title": "Work", "status": "flying" }
+    ],
+    "next": [],
+    "blocked": []
+  },
+  "tracks": [{ "title": "P1", "blocks": [{ "id": "T.1", "title": "Work" }] }]
+}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+
+        let bad_status: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_STATUS")
+            .collect();
+        assert_eq!(
+            bad_status.len(),
+            1,
+            "expected exactly one E_STATE_SCHEMA_BAD_STATUS, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_schema_blocked_by_empty_id_emits_e_state_schema_bad_blocked_by() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        // blocked_by entry with type "block" but empty id — parses fine, fails schema check
+        let json = r#"{
+  "repo": "test",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": {
+    "now": [],
+    "next": [],
+    "blocked": [
+      {
+        "block": "T.1",
+        "title": "Blocked block",
+        "blocked_by": [
+          { "type": "block", "repo": "other", "id": "" }
+        ]
+      }
+    ]
+  },
+  "tracks": [{ "title": "P1", "blocks": [{ "id": "T.1", "title": "Blocked block" }] }]
+}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+
+        let bad_bb: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_BLOCKED_BY")
+            .collect();
+        assert_eq!(
+            bad_bb.len(),
+            1,
+            "expected exactly one E_STATE_SCHEMA_BAD_BLOCKED_BY for empty id, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_schema_brain_clean_emits_no_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "brain");
+        let file = parse_file(core_brain_json());
+
+        let diags = check_schema(&src, &file);
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == crate::Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "clean brain should produce no errors, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_schema_project_missing_tracks_emits_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{
+  "repo": "test",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] }
+}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+
+        // Should have a warning about missing tracks
+        let track_warnings: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                d.severity == crate::Severity::Warning
+                    && d.locator == "E_STATE_SCHEMA_MISSING_FIELD"
+            })
+            .collect();
+        assert!(
+            !track_warnings.is_empty(),
+            "should warn about missing tracks[], got: {diags:?}"
+        );
     }
 }
