@@ -12,7 +12,7 @@ related: [master-plan, status, block-j-namespacing-decision, 2j-corpus-crawl-tas
 
 # Task Spec — Phase 3, Block J — Graph integrity (global `scope:doc_id` graph)
 
-**Status:** Task 3 in progress · **Last run:** now
+**Status:** Task 4 in progress · **Last run:** now
 
 ## Goal
 Over the multi-root corpus, build a global **`scope:doc_id`** knowledge-graph node index and flag every
@@ -142,7 +142,7 @@ duplicate canonical id and every `related:` edge that fails to resolve, surfaced
   the leaf warning does not). Update the subcommand help text.
 - Files: `src/lib.rs`, `src/main.rs`. (Depends on Task 2.)
 
-### 4. Integration tests — end-to-end `--graph` over a multi-unit fixture
+### 4. [~] Integration tests — end-to-end `--graph` over a multi-unit fixture
 - Add `tests/brain_graph.rs` building a temp HQ-root fixture: `brain.toml` registering `brain` (`.`),
   a tier (`core`), and a repo (`mev` → `core/mev`); OKF-clean docs placed to exercise each scope.
 - Tests:
