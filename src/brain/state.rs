@@ -859,6 +859,110 @@ pub fn check_state_graph(
 }
 
 // ---------------------------------------------------------------------------
+// Rollup-drift check (brain files)
+// ---------------------------------------------------------------------------
+
+/// Compare a brain `repos[]` headline cache against the children's actual `focus`.
+///
+/// For each entry in `brain.repos[]`, looks up the child's actual state in
+/// `children` (keyed by repo slug).  If the cached `now`/`next`/`blocked`
+/// block-id sets don't match the child's live `focus`, emits one
+/// `W_STATE_ROLLUP_DRIFT` warning per drifted child.
+///
+/// Children absent from `children` (no loaded state.json) are silently
+/// skipped — `W_STATE_FILE_MISSING` was already emitted during discovery.
+///
+/// Per scoping decision 4, rollup drift is a **warning** (exit 0); only
+/// referential errors are `Error`-severity (exit 1).
+///
+/// Comparison is over block-id sets only; cosmetic field differences
+/// (`title`, `note`) are intentionally ignored.
+pub fn check_rollup(
+    brain_path: &Path,
+    brain: &StateFile,
+    children: &std::collections::HashMap<String, StateFile>,
+) -> Vec<Diagnostic> {
+    use std::collections::HashSet;
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    for rollup in &brain.repos {
+        let child = match children.get(&rollup.repo) {
+            Some(c) => c,
+            // No state.json loaded for this child — W_STATE_FILE_MISSING was
+            // already emitted during discovery; skip silently here.
+            None => continue,
+        };
+
+        // Compare block-id sets; ignore title/note cosmetic differences.
+        let cached_now: HashSet<&str> = rollup.now.iter().map(|b| b.block.as_str()).collect();
+        let actual_now: HashSet<&str> = child.focus.now.iter().map(|b| b.block.as_str()).collect();
+
+        let cached_next: HashSet<&str> = rollup.next.iter().map(|b| b.block.as_str()).collect();
+        let actual_next: HashSet<&str> =
+            child.focus.next.iter().map(|b| b.block.as_str()).collect();
+
+        let cached_blocked: HashSet<&str> =
+            rollup.blocked.iter().map(|b| b.block.as_str()).collect();
+        let actual_blocked: HashSet<&str> = child
+            .focus
+            .blocked
+            .iter()
+            .map(|b| b.block.as_str())
+            .collect();
+
+        if cached_now != actual_now
+            || cached_next != actual_next
+            || cached_blocked != actual_blocked
+        {
+            // Build a compact diff summary for the warning message.
+            let mut diffs: Vec<String> = Vec::new();
+            if cached_now != actual_now {
+                diffs.push(format!(
+                    "now: cached={:?} actual={:?}",
+                    sorted_set(&cached_now),
+                    sorted_set(&actual_now)
+                ));
+            }
+            if cached_next != actual_next {
+                diffs.push(format!(
+                    "next: cached={:?} actual={:?}",
+                    sorted_set(&cached_next),
+                    sorted_set(&actual_next)
+                ));
+            }
+            if cached_blocked != actual_blocked {
+                diffs.push(format!(
+                    "blocked: cached={:?} actual={:?}",
+                    sorted_set(&cached_blocked),
+                    sorted_set(&actual_blocked)
+                ));
+            }
+
+            diags.push(Diagnostic::warning(
+                brain_path,
+                "W_STATE_ROLLUP_DRIFT",
+                format!(
+                    "repos[] entry for '{}' has drifted from child's actual focus — {}",
+                    rollup.repo,
+                    diffs.join("; ")
+                ),
+            ));
+        }
+    }
+
+    diags
+}
+
+/// Return a deterministically sorted `Vec<&str>` from a `HashSet<&str>` for
+/// use in diagnostic messages (avoids non-deterministic output from Set debug).
+fn sorted_set<'a>(set: &std::collections::HashSet<&'a str>) -> Vec<&'a str> {
+    let mut v: Vec<&str> = set.iter().copied().collect();
+    v.sort_unstable();
+    v
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -1854,6 +1958,181 @@ mod tests {
             dangling_cross.len(),
             1,
             "expected exactly one E_STATE_DANGLING_CROSS_REPO for ghost 'to' endpoint, got: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 4 — check_rollup tests
+    // -----------------------------------------------------------------------
+
+    /// Build a brain StateFile with a repos[] entry for one child.
+    fn brain_with_rollup(
+        child_slug: &str,
+        now_ids: &[&str],
+        next_ids: &[&str],
+        blocked_ids: &[&str],
+    ) -> StateFile {
+        let make_blocks = |ids: &[&str]| -> Vec<Block> {
+            ids.iter()
+                .map(|id| Block {
+                    block: id.to_string(),
+                    title: "placeholder".to_string(),
+                    status: None,
+                    note: None,
+                    repo: None,
+                    blocked_by: vec![],
+                })
+                .collect()
+        };
+
+        StateFile {
+            repo: "hq".to_string(),
+            kind: "brain".to_string(),
+            updated: "2026-06-29".to_string(),
+            focus: Focus::default(),
+            tracks: vec![],
+            repos: vec![RepoRollup {
+                repo: child_slug.to_string(),
+                tier: None,
+                now: make_blocks(now_ids),
+                next: make_blocks(next_ids),
+                blocked: make_blocks(blocked_ids),
+            }],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+        }
+    }
+
+    /// Build a child StateFile with the given focus.
+    fn child_with_focus(
+        slug: &str,
+        now_ids: &[&str],
+        next_ids: &[&str],
+        blocked_ids: &[&str],
+    ) -> StateFile {
+        let make_blocks = |ids: &[&str], with_status: bool| -> Vec<Block> {
+            ids.iter()
+                .map(|id| Block {
+                    block: id.to_string(),
+                    title: "placeholder".to_string(),
+                    status: if with_status {
+                        Some("in_progress".to_string())
+                    } else {
+                        None
+                    },
+                    note: None,
+                    repo: None,
+                    blocked_by: vec![],
+                })
+                .collect()
+        };
+
+        StateFile {
+            repo: slug.to_string(),
+            kind: "project".to_string(),
+            updated: "2026-06-29".to_string(),
+            focus: Focus {
+                now: make_blocks(now_ids, true),
+                next: make_blocks(next_ids, false),
+                blocked: make_blocks(blocked_ids, false),
+            },
+            tracks: vec![],
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+        }
+    }
+
+    #[test]
+    fn check_rollup_in_sync_returns_no_diagnostics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let brain_path = dir.path().join("brain-state.json");
+
+        // Brain repos[] cache and child focus are identical (both have ["AL.1.A"]).
+        let brain = brain_with_rollup("alpha", &["AL.1.A"], &["AL.1.B"], &[]);
+        let child = child_with_focus("alpha", &["AL.1.A"], &["AL.1.B"], &[]);
+
+        let mut children = std::collections::HashMap::new();
+        children.insert("alpha".to_string(), child);
+
+        let diags = check_rollup(&brain_path, &brain, &children);
+        assert!(
+            diags.is_empty(),
+            "in-sync rollup should produce no diagnostics, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_rollup_drifted_child_emits_w_state_rollup_drift() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let brain_path = dir.path().join("brain-state.json");
+
+        // Brain cache says child.now = ["AL.1.A"] but child has advanced to ["AL.1.B"].
+        let brain = brain_with_rollup("alpha", &["AL.1.A"], &["AL.1.B"], &[]);
+        let child = child_with_focus("alpha", &["AL.1.B"], &["AL.1.C"], &[]);
+
+        let mut children = std::collections::HashMap::new();
+        children.insert("alpha".to_string(), child);
+
+        let diags = check_rollup(&brain_path, &brain, &children);
+
+        let drift: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_ROLLUP_DRIFT")
+            .collect();
+        assert_eq!(
+            drift.len(),
+            1,
+            "drifted child should produce exactly one W_STATE_ROLLUP_DRIFT, got: {diags:?}"
+        );
+        // It must be a Warning, not an Error (decision 4).
+        assert_eq!(
+            drift[0].severity,
+            crate::Severity::Warning,
+            "W_STATE_ROLLUP_DRIFT must be Warning severity"
+        );
+    }
+
+    #[test]
+    fn check_rollup_missing_child_is_skipped_silently() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let brain_path = dir.path().join("brain-state.json");
+
+        // Brain has a repos[] entry for "alpha" but children map is empty.
+        let brain = brain_with_rollup("alpha", &["AL.1.A"], &[], &[]);
+        let children: std::collections::HashMap<String, StateFile> =
+            std::collections::HashMap::new();
+
+        let diags = check_rollup(&brain_path, &brain, &children);
+        assert!(
+            diags.is_empty(),
+            "missing child (no loaded state.json) should be skipped silently; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_rollup_only_blocked_drift_emits_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let brain_path = dir.path().join("brain-state.json");
+
+        // now/next match but blocked list differs.
+        let brain = brain_with_rollup("alpha", &["AL.1.A"], &["AL.1.B"], &[]);
+        let child = child_with_focus("alpha", &["AL.1.A"], &["AL.1.B"], &["AL.1.C"]);
+
+        let mut children = std::collections::HashMap::new();
+        children.insert("alpha".to_string(), child);
+
+        let diags = check_rollup(&brain_path, &brain, &children);
+        let drift: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_ROLLUP_DRIFT")
+            .collect();
+        assert_eq!(
+            drift.len(),
+            1,
+            "blocked-only drift should also emit W_STATE_ROLLUP_DRIFT, got: {diags:?}"
         );
     }
 
