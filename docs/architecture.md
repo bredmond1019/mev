@@ -31,7 +31,8 @@ src/
     ├── okf.rs      ← OkfFrontmatter, validate_md_file() — OKF field checks; root-instruction-file exemption
     ├── scope.rs    ← scope_units(), scope_for(), owning_unit() — registry-driven scope resolver
     ├── sync.rs     ← (internal) sync helpers
-    └── graph.rs    ← EdgeKind, Edge, Node, Graph, GraphArtifact, DocMeta; build_graph(), check_graph(), read_doc_metadata() — Phase 3 Block J
+    ├── graph.rs    ← EdgeKind, Edge, Node, Graph, GraphArtifact, DocMeta; build_graph(), check_graph(), read_doc_metadata() — Phase 3 Block J
+    └── state.rs    ← StateFile, StateGraph, StateNode, StateEdge, StateSource; discover_state_files(), load_state(), check_schema(), build_state_graph(), check_state_graph(), check_rollup() — Phase 3 Block P
 
 tests/
 ├── brain_config.rs   ← integration tests for brain.toml loading + BrainConfig
@@ -39,6 +40,7 @@ tests/
 ├── brain_crawl.rs    ← integration tests for crawl_brain()
 ├── brain_graph.rs    ← integration tests for validate_brain_graph() end-to-end — Phase 3 Block J
 ├── brain_okf.rs      ← integration tests for validate_md_file()
+├── brain_state.rs    ← integration tests for validate_brain_state() end-to-end — Phase 3 Block P
 ├── brain_validate.rs ← integration tests for BrainValidator end-to-end
 ├── smoke.rs          ← integration tests for the learn-ai validate() public API
 └── fixtures/
@@ -218,3 +220,37 @@ The graph module builds and validates the serializable `scope:doc_id` knowledge 
 #### Public library entry point
 
 `validate_brain_graph(root: &Path) -> anyhow::Result<Report>` (in `src/lib.rs`) runs the full OKF schema pass followed by the graph pass — crawls the corpus once, builds the graph, and appends graph diagnostics to the same `Report`. Invoked by `mev validate-brain --graph`.
+
+---
+
+### State integrity (`src/brain/state.rs`) — Phase 3 Block P
+
+The state module discovers, loads, and validates all `planning/state.json` files across the registered repos, then builds and checks the cross-repo block-dependency graph.
+
+#### Public functions
+
+| Function | Signature | Description |
+|---|---|---|
+| `discover_state_files` | `(&Path, &BrainConfig) -> (Vec<StateSource>, Vec<Diagnostic>)` | Discovers state.json paths for the HQ brain, tier sub-brains (via `tiers[].rollup`), and leaf repos (via `[[repos]]` in `brain.toml`). Missing files emit `W_STATE_FILE_MISSING`. |
+| `load_state` | `(&Path) -> Result<StateFile, StateLoadError>` | Deserializes a `planning/state.json` file into a `StateFile`. Returns `StateLoadError::Malformed` on schema mismatch or `StateLoadError::Io` on I/O failure. |
+| `check_schema` | `(&StateSource, &StateFile) -> Vec<Diagnostic>` | Schema-ring validation: kind membership, `updated` non-empty, status enum values, `blocked_by` well-formedness, kind-appropriate section presence. |
+| `build_state_graph` | `(&[(StateSource, StateFile)]) -> StateGraph` | Builds the cross-repo block-dependency graph: nodes from `tracks[]` blocks, edges from `blocked_by` and `cross_repo[]` entries. |
+| `check_state_graph` | `(&StateGraph, &[(StateSource, StateFile)]) -> Vec<Diagnostic>` | Graph integrity checks: duplicate block IDs, dangling focus references, unknown repos, dangling blocked_by, dangling cross_repo edges. |
+| `check_rollup` | `(&Path, &StateFile, &HashMap<String, StateFile>) -> Vec<Diagnostic>` | Rollup drift check: compares brain `repos[]` now/next headline entries against each child's actual `focus` values. Emits `W_STATE_ROLLUP_DRIFT` on mismatch. |
+
+#### State types
+
+| Type | Description |
+|---|---|
+| `StateFile` | Top-level deserialized `state.json`: `kind`, `updated`, `focus`, `tracks`, `repos`, `tiers`, `cross_repo`, `note`. |
+| `Focus` | Current focus entry: `now`, `next`, `blocked_by`. |
+| `Block` | A single `tracks[]` block: `id`, `title`, `status`, `blocked_by`. |
+| `BlockedBy` | Internally-tagged enum for block dependencies: `BlockRef { repo, id }` or `External { description }`. |
+| `StateSource` | Discovery result: `abs_path`, `repo_slug`, `kind` (`hq`, `tier`, `leaf`). |
+| `StateGraph` | Cross-repo block-dependency graph: `nodes: Vec<StateNode>`, `edges: Vec<StateEdge>`. Serde-serializable. |
+| `StateNode` | Graph node: `repo`, `id`, `title`, `status`, `source_path` (skipped in serialization). |
+| `StateEdge` | Graph edge: `from_repo`, `from_id`, `to_repo`, `to_id`, `kind` (`blocked_by` or `cross_repo`), `source_path` (skipped in serialization). |
+
+#### Public library entry point
+
+`validate_brain_state(root: &Path) -> anyhow::Result<Report>` (in `src/lib.rs`) runs the full OKF schema pass followed by the five-step state pipeline (discovery → load → schema → graph → rollup) and appends all state diagnostics to the same `Report`. Invoked by `mev validate-brain --state`.
