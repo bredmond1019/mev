@@ -2,10 +2,10 @@
   "spec_slug": "3.P-state-integrity",
   "branch": "3.P-state-integrity-flow",
   "started_at": "2026-06-29T19:49:30Z",
-  "updated_at": "2026-06-29T19:49:30Z",
+  "updated_at": "2026-06-29T19:58:43Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.P-state-integrity-flow",
   "status": "running",
-  "current_task": 1,
+  "current_task": 2,
   "tasks": {
     "1": {
       "status": "passed",
@@ -22,6 +22,25 @@
       "files_changed": [
         "src/brain/state.rs",
         "src/brain/mod.rs",
+        "planning/3.P-state-integrity/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Add StateSource, discover_state_files, and check_schema to src/brain/state.rs — registry discovery from HQ brain + tier sub-brains (tiers[].rollup) + leaf repos (brain.toml [[repos]]), plus schema-ring checks for kind, status, blocked_by well-formedness, and kind-appropriate sections.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "discover_state_files returns (Vec<StateSource>, Vec<Diagnostic>) rather than just Vec<StateSource> to surface W_STATE_FILE_MISSING warnings inline with discovery",
+        "Tier sub-brain discovery loads HQ state.json internally to read tiers[].rollup paths — avoids adding a tiers config section to brain.toml",
+        "blocked_by well-formedness check (E_STATE_SCHEMA_BAD_BLOCKED_BY) catches empty repo/id strings post-deserialization since serde catches unknown types as malformed JSON at load time",
+        "kind-appropriate section checks (missing tracks for project, missing repos for brain) are warnings not errors to accommodate repos mid-rollout"
+      ],
+      "files_changed": [
+        "src/brain/state.rs",
         "planning/3.P-state-integrity/tasks.md"
       ],
       "commit": "",
@@ -83,13 +102,37 @@
         "filesReadKb": null,
         "inTokEst": 570,
         "outTok": 2398
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 254,
+        "filesReadKb": null,
+        "inTokEst": 254,
+        "outTok": 1126
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 883,
+        "filesReadKb": null,
+        "inTokEst": 883,
+        "outTok": 25297
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 570,
+        "filesReadKb": null,
+        "inTokEst": 570,
+        "outTok": 2456
       }
     ],
     "total": {
-      "promptTokEst": 2703,
+      "promptTokEst": 4410,
       "filesReadKb": 0,
-      "inTokEst": 2703,
-      "outTok": 19199
+      "inTokEst": 4410,
+      "outTok": 48078
     }
   }
 }
