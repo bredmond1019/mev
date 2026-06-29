@@ -19,3 +19,8 @@ Validated: gating checks (fast tripwire)
 What: Add check_rollup to detect brain repos[] headline drift from children's actual focus, emitting W_STATE_ROLLUP_DRIFT warnings
 Decisions: Used brain_path: &Path as an explicit parameter since the task spec's function signature omits it but Diagnostic::warning requires a path — minimal addition consistent with existing helpers; Added sorted_set helper to produce deterministic warning messages from HashSet comparisons; Added four tests: in-sync (0 diags), drifted now+next (1 warning at Warning severity), missing child (silent skip), blocked-only drift (1 warning)
 Validated: gating checks (fast tripwire)
+
+## Task 5 — PASSED (1 attempt)
+What: Added `validate_brain_state` public API function and `--state` CLI flag to wire the state pipeline (Tasks 1–4) into the `mev validate-brain` subcommand
+Decisions: --state takes precedence over --graph and --sync in the dispatch chain (most-specific check first); StateLoadError::Io after discovery emits E_STATE_MALFORMED_JSON rather than a separate IO code — keeps the locator vocabulary minimal per the spec; Brain files in the rollup check only pass project-kind children as the children map — brain-to-brain rollup is not yet in scope
+Validated: gating checks (fast tripwire)
