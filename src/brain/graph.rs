@@ -628,4 +628,40 @@ mod tests {
         assert!(errors.is_empty(), "no errors for leaf target: {diags:?}");
         assert!(warnings[0].message.contains("leaf-stem"));
     }
+
+    #[test]
+    fn bare_ref_naming_other_scope_id_is_dangling() {
+        // A bare `related:` entry that matches a doc_id in a *different* scope
+        // but not in the referrer's own scope must be flagged E_GRAPH_DANGLING_RELATED.
+        // Bare refs are always qualified to the *from-node's* scope first; they do NOT
+        // search across scopes.
+        let dir = TempDir::new().unwrap();
+        // brain-scope file references "mev-target" (bare)
+        let e1 = make_entry(
+            &dir,
+            "brain",
+            "a.md",
+            "---\ndoc_id: alpha\nrelated:\n  - mev-target\n---",
+        );
+        // mev-scope has a node with that doc_id — but bare ref won't find it
+        let e2 = make_entry(&dir, "mev", "t.md", "---\ndoc_id: mev-target\n---");
+        let corpus = corpus_from(vec![e1, e2]);
+        let artifact = build_graph(&corpus, &BrainConfig::default());
+        let diags = check_graph(&artifact);
+        // bare "mev-target" resolves to "brain:mev-target" which does not exist
+        let dangling: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "related" && d.severity == crate::Severity::Error)
+            .collect();
+        assert_eq!(
+            dangling.len(),
+            1,
+            "bare ref to other-scope id should be dangling: {diags:?}"
+        );
+        assert!(
+            dangling[0].message.contains("mev-target"),
+            "message names the target: {:?}",
+            dangling[0].message
+        );
+    }
 }
