@@ -160,7 +160,7 @@ Rollup ring (brain files):
   one `E_STATE_SCHEMA_BAD_KIND`.
 - Files: `src/brain/state.rs`. (Depends on Task 1.)
 
-### 3. State graph build + integrity checks
+### 3. [~] State graph build + integrity checks
 - Add `build_state_graph(files: &[(StateSource, StateFile)]) -> StateGraph` (Serialize-able, decision 3):
   nodes = every `tracks[]` block keyed `repo:id`; edges = `blocked_by` block deps
   (`kind: BlockedBy`) and brain `cross_repo[]` (`kind: CrossRepo`). Build the `repo:id → node` lookup
@@ -177,7 +177,7 @@ Rollup ring (brain files):
   `E_STATE_UNKNOWN_REPO`; a duplicate id yields one `E_STATE_DUPLICATE_BLOCK_ID`.
 - Files: `src/brain/state.rs`. (Depends on Task 2.)
 
-### 4. Rollup-drift check (brain files)
+### 4. [~] Rollup-drift check (brain files)
 - Add `check_rollup(brain: &StateFile, children: &HashMap<String, StateFile>) -> Vec<Diagnostic>`: for
   each `repos[]` entry, compare its cached `now`/`next`/`blocked` headline against the child's actual
   `focus` (compare on block-id sets; ignore `title`/`note` cosmetic differences). Mismatch →
