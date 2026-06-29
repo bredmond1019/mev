@@ -37,3 +37,6 @@ Validated: gating checks (fast tripwire)
 
 ## Docs
 Patched: /Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.P-state-integrity-flow/docs/cli.md, /Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.P-state-integrity-flow/docs/architecture.md
+
+## Wrap-up — PASS
+Next: MV.3.K (link integrity: markdown/file:///[[wiki]]) or MV.3B.Q (manifest emit / Phase 3B) — check master-plan.md for ordering
