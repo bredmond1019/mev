@@ -90,7 +90,7 @@ stays free of any consumer's domain types; each consumer owns its own crawl, ite
 
 ## Phase 0 — Foundation
 
-### Block A — Foundation setup — **Done**
+### MV.0.A — Foundation setup — **Done**
 - **What:** Configure the environment, scaffold the project skeleton, and verify the toolchain.
 - **Why:** Establish a clean, reproducible starting point before any feature work.
 - **Status:** `mev` binary scaffolded; `clap` CLI + `Diagnostic`/`Report` lib; smoke tests; all harness
@@ -104,20 +104,20 @@ First shippable feature set. Every block ships with tests against real fixtures 
 broken ones). The bar is a *superset of* `learn-ai/scripts/validate-content.ts` (see D2). Universal currency
 is the `Diagnostic` (`error` → exit 1, `warning` → exit 0); only the reporter prints.
 
-### Block B — Crawl & classify — **Done**
+### MV.1.B — Crawl & classify — **Done**
 - **What:** `walkdir` the content root; classify each file as `learn-module-json`, `path-metadata-json`,
   or `module-mdx`. Build a `Corpus` grouped by path-id / module-id. Filename-convention checks (no spaces,
   lowercase, modules match `^\d{2}-[a-z0-9-]+\.(json|mdx)$`).
 - **Status:** `walkdir` + `Corpus`; filename conventions; tests green.
 
-### Block C — Frontmatter & JSON struct validation — **Done**
+### MV.1.C — Frontmatter & JSON struct validation — **Done**
 - **What:** deserialize module `.json` into a strict `ModuleMeta`; validate enums (`difficulty`, section
   `type`, `level`), `duration` format, kebab-case `id`. Path `metadata.json` → `PathMeta`. MDX frontmatter
   parsed as real YAML (`title, description, duration, difficulty, lastUpdated`).
 - **Status:** all tasks (1–7) complete; serde deserialization, required-field/enum/format checks,
   fixture-driven good+broken tests; all gates green.
 
-### Block D — Cross-file integrity (learn-ai differentiator) — **Not started**
+### MV.1.D — Cross-file integrity (learn-ai differentiator) — **Not started**
 - **What:** pair existence (`.json` ↔ `.mdx`); the **anchor-slice contract** (each
   `content.source = "<file>.mdx#<anchor>"` resolves to a file containing `## …{#<anchor>}`); ID coherence;
   callout types ∈ `info|warning|success|error`.
@@ -125,12 +125,12 @@ is the `Diagnostic` (`error` → exit 1, `warning` → exit 0); only the reporte
 - **Priority note:** deeply learn-ai-specific. **Deprioritized** below Phase 2 now that the Brain OKF use
   case is the immediate driver.
 
-### Block E — pt-BR parity & reporter polish — **Not started**
+### MV.1.E — pt-BR parity & reporter polish — **Not started**
 - **What:** each EN module requires a `pt-BR/` mirror with the identical filename; flag orphans. Finalize the
   reporter: grouped-by-file ANSI human output + `--json` for CI; correct exit codes.
 - **Acceptance:** `mev validate ../learn-ai/content/learn` is green on the current corpus and reproduces every
   TS-script error plus anchor/pair/parity findings.
-- **Note:** the `--json` reporter is pulled forward into **Block I** (the Brain RAG indexer needs it); Block E
+- **Note:** the `--json` reporter is pulled forward into **`MV.2.I`** (the Brain RAG indexer needs it); `MV.1.E`
   then only adds the ANSI grouping + pt-BR parity.
 
 ---
@@ -141,7 +141,7 @@ Introduce the shared abstraction and the second consumer. This is where `mev` st
 validator" and becomes a general Markdown validator. Each block ends with `cargo fmt --check`,
 `cargo clippy -- -D warnings`, and `cargo test` green, and **must keep the existing learn-ai tests passing**.
 
-### Block F — `ContentValidator` trait + shared core
+### MV.2.F — `ContentValidator` trait + shared core
 - **What:** Add the associated-type `ContentValidator` trait (`crawl` + `validate_item` + default `run`
   driver). Extract `extract_frontmatter`, `is_kebab_case`, `non_empty` (with their unit tests) into a
   `shared` module. Relocate the learn-ai code behind a `LearnAiValidator` (move `crawl.rs`/`meta.rs` into a
@@ -149,7 +149,7 @@ validator" and becomes a general Markdown validator. Each block ends with `cargo
   `validate`, `crawl`, `validate_file`) preserved via `pub use` so all existing tests pass unchanged.
 - **Acceptance:** module layout refactored; the full existing test suite is green with no signature changes.
 
-### Block G — Brain crawl
+### MV.2.G — Brain crawl
 - **What:** A parallel crawl entry point: `MdFile { path, rel, stem }` + `crawl_brain(root)` that walks all
   `.md` under a root with a two-layer skip-list — a name blocklist (`target/`, `node_modules/`, `.git/`,
   ignored non-git dirs) and a **nested-git rule** that prunes any non-root directory containing its own
@@ -158,7 +158,7 @@ validator" and becomes a general Markdown validator. Each block ends with `cargo
 - **Acceptance:** unit tests prove nested-git dirs and `target/` are pruned, root-level `.md` is still found,
   and non-`.md` files are skipped.
 
-### Block H — Brain OKF frontmatter validator
+### MV.2.H — Brain OKF frontmatter validator
 - **What:** `OkfFrontmatter` serde struct (all fields `Option`, extras tolerated). Validate: required-field
   presence (`type`, `title`, `description` — each absence its own diagnostic); controlled-vocab membership for
   `layer` (list), `project`, `status`; kebab-case `doc_id` if present; `keywords` count 3–7 (warning); missing
@@ -167,7 +167,7 @@ validator" and becomes a general Markdown validator. Each block ends with `cargo
 - **Acceptance:** fixtures for good doc, each missing required field, bad vocab value, non-kebab `doc_id`,
   keywords out of range, and missing frontmatter emit the expected diagnostics.
 
-### Block I — `validate-brain` subcommand + JSON reporter
+### MV.2.I — `validate-brain` subcommand + JSON reporter
 - **What:** `mev validate-brain <brain-root>` (default `..`) wired to `BrainValidator`. A global `--json` flag
   emitting a machine-readable envelope (`{ validator, root, errors, warnings, diagnostics[] }`) the RAG indexer
   can consume; requires `Serialize` on `Diagnostic`/`Severity`. Update the CLI `about` text.
@@ -186,18 +186,18 @@ mutates the corpus — upholds D25) and `--json`-able so an agent can act on the
 implementation of the brain-program's integrity/freshness work (the `hooks/README.md` `bastion validate
 --integrity`, "Block K"), surfaced through `bastion`.
 
-> **Block J reshaped 2026-06-28** into a global cross-repo knowledge graph (see
+> **`MV.3.J` reshaped 2026-06-28** into a global cross-repo knowledge graph (see
 > `planning/2.J-graph-integrity/namespacing-and-corpus-decision.md`). It now splits into a
-> corpus-crawl foundation (Block J-crawl) and the graph checks (Block J). Canonical node id =
+> corpus-crawl foundation (`MV.3.J-crawl`) and the graph checks (`MV.3.J`). Canonical node id =
 > `scope:doc_id`, where `scope` is a registry-driven stable slug from `brain.toml`.
 >
 > **D4 (2026-06-28) reframes the back half of Phase 3.** The crawl and graph mev builds here are
 > not validation-only throwaways — they are the **corpus engine's outputs** (manifest + graph)
 > that the embedder and a structural-query surface consume. Two forward-compat constraints apply
-> to Blocks J-crawl and J (below); three additive blocks (Q–S) deliver the emitted products.
+> to `MV.3.J-crawl` and `MV.3.J` (below); three additive blocks (Q–S) deliver the emitted products.
 > See [D4](./decisions/D4-corpus-engine-and-knowledge-graph.md).
 
-### Block J-crawl — Multi-root corpus crawl + scope registry  *(foundation; lands first)*
+### MV.3.J-crawl — Multi-root corpus crawl + scope registry  *(foundation; lands first)*
 - **What:** Make mev a **multi-root validator**. (1) A scope-unit **registry** read from `brain.toml`
   (HQ, each tier sub-brain, each repo → immutable `slug` + path) with a longest-prefix `scope_for(path)`
   resolver. (2) A canonical **corpus crawl** that walks every registered unit from the HQ root and includes
@@ -214,7 +214,7 @@ implementation of the brain-program's integrity/freshness work (the `hooks/READM
   validation pass) — it is about to feed both the manifest emit (Block Q) and the embedder. Build it as a
   reusable result, not a side effect.
 
-### Block J — Graph integrity (`scope:doc_id` `related:` edges)
+### MV.3.J — Graph integrity (`scope:doc_id` `related:` edges)
 - **What:** Over the corpus crawl, build a global **`scope:doc_id`** node index (node = a file with an
   authored `doc_id`; files without one are leaves). Flag duplicate canonical ids, and every `related:`
   edge that resolves to neither a node nor a leaf (**bare** id resolves within the referrer's scope;
@@ -227,7 +227,7 @@ implementation of the brain-program's integrity/freshness work (the `hooks/READM
   **`Serialize`-able** — the same graph mev *validates* here is the graph mev *emits* in Block R. Do not
   bury it in a build-check-discard function.
 
-### Block K — Link integrity (markdown / `file://` / `[[wikilink]]`)
+### MV.3.K — Link integrity (markdown / `file://` / `[[wikilink]]`)
 - **What:** Check that markdown `[text](path)` and `file:///…` links resolve to files that exist on disk,
   and that `[[wikilinks]]` (where used — e.g. memory docs) resolve to a known `doc_id`. Consume
   `.brain-moves-pending` (the post-commit delete/rename log) so a rename surfaces every now-broken reference
@@ -235,14 +235,14 @@ implementation of the brain-program's integrity/freshness work (the `hooks/READM
 - **Acceptance:** a link to a moved/deleted file is flagged; a `.brain-moves-pending` entry drives a
   targeted re-check of references to that path.
 
-### Block L — Structural coverage (`index.md` ↔ directory, D17)
+### MV.3.L — Structural coverage (`index.md` ↔ directory, D17)
 - **What:** Enforce CLAUDE.md Standing Rule 7 / D17: every file in a directory appears in that directory's
   `index.md` (orphan detection), and every `index.md` row points at a file that exists (dangling-row
   detection). Bidirectional.
 - **Acceptance:** a new file not listed in its `index.md` is flagged; an `index.md` row for a deleted file is
   flagged.
 
-### Block M — Sync integrity (brain cache ↔ sub-repo canonical)
+### MV.3.M — Sync integrity (brain cache ↔ sub-repo canonical)
 - **What:** The `synced_from` watermark check (D29). For each project in a small **projects manifest**
   (`{project, path, status_file}` — the machine form of the CLAUDE.md sub-projects table), read the
   sub-repo's *live* `planning/status.md` "Last updated" and compare against the `synced_from` frontmatter on
@@ -265,24 +265,24 @@ blocks turn mev's crawl and graph into emitted artifacts and wire the two retrie
 JSON; never touches a DB); persistence and the AI layer are the orchestrator's. Governed by
 [D4](./decisions/D4-corpus-engine-and-knowledge-graph.md).
 
-### Block Q — Manifest emit (kill the double crawl)
+### MV.3B.Q — Manifest emit (kill the double crawl)
 - **What:** `mev validate-brain --emit-manifest` (or a `mev manifest` subcommand) emits the canonical
-  **file-list + per-file OKF metadata** as JSON, straight from the Block J-crawl result. Companion (out of
+  **file-list + per-file OKF metadata** as JSON, straight from the `MV.3.J-crawl` result. Companion (out of
   repo, orchestrator): refactor `index_brain.py` to **consume mev's manifest** instead of re-implementing
   `_collect_files`/`_corpus_roots`/`_classify_doc_type`/`normalize_metadata`. After this, "what's
   validated == what's embedded" holds by construction.
 - **Carries the D5 extract-once refactor:** this block adds the metadata field to `CorpusEntry` and parses
-  frontmatter **once during the crawl** (the OKF pass and Block J's graph build currently each re-read it).
+  frontmatter **once during the crawl** (the OKF pass and `MV.3.J`'s graph build currently each re-read it).
   Manifest emit is the first consumer that genuinely needs per-entry metadata, so the corpus-model refactor
-  deferred in D5 lands here, not as a speculative block before Block J. Block J's `read_doc_metadata` seam
+  deferred in D5 lands here, not as a speculative block before `MV.3.J`. `MV.3.J`'s `read_doc_metadata` seam
   collapses to `entry.metadata` with no call-site changes.
 - **Acceptance:** the emitted manifest lists exactly the corpus crawl's files with correct scope/doc_id/
   metadata; an orchestrator dry-run driven by the manifest indexes the same file set the Python crawl did
   (parity check); mev itself still writes nothing to any DB.
 
-### Block R — Graph emit + structural query surface
+### MV.3B.R — Graph emit + structural query surface
 - **What:** mev emits the **graph JSON** (nodes = `scope:doc_id` + metadata; edges = `{from, to_ref, kind}`)
-  from the Block J graph module. Companion (out of repo): the orchestrator loads it into a **Postgres edges
+  from the `MV.3.J` graph module. Companion (out of repo): the orchestrator loads it into a **Postgres edges
   table beside `brain_documents`**, and a thin **structural-query surface** (`bastion` subcommand and/or an
   MCP tool) answers "where does X live / what is connected to Y / what's the status of Z" by SQL/recursive
   CTE — **free, instant, no tokens**. (Algorithms like centrality/shortest-path are a later, optional graft —
@@ -290,7 +290,7 @@ JSON; never touches a DB); persistence and the AI layer are the orchestrator's. 
 - **Acceptance:** the emitted graph round-trips (every authored node + `related:` edge present, leaves
   marked); a structural query returns a doc's neighbors with zero embedding calls.
 
-### Block S — Graph-aware RAG *(orchestrator; mev provides the edges)*
+### MV.3B.S — Graph-aware RAG *(orchestrator; mev provides the edges)*
 - **What:** the orchestrator's retrieval path uses the graph to **expand/rerank** semantic hits — traverse
   `related:` (later `supersedes`/`parent`/`depends-on`) from the top vector matches to feed the LLM
   *connected* context, not isolated chunks. A query **router** sends structural questions to the graph
@@ -323,28 +323,28 @@ existence — applied across content types.
 
 | Phase | Block | What | Why | Role in destination |
 |---|---|---|---|---|
-| 0 | A | Foundation setup (Rust scaffold, gates green) | Clean starting point | Enables everything downstream |
-| 1 | B | Crawl & classify content tree | Know every file and its kind | Input to all learn-ai checks |
-| 1 | C | Frontmatter & JSON struct validation | Catch missing/malformed fields | Superset of TS validator |
-| 1 | D | Cross-file integrity (anchor-slice, pairs, ids) | Catch silent runtime failures | learn-ai differentiator *(deprioritized)* |
-| 1 | E | pt-BR parity & ANSI reporter polish | Locale parity + human output | Phase 1 shippable |
-| 2 | F | `ContentValidator` trait + shared core | One core, many schemas | Makes `mev` general |
-| 2 | G | Brain crawl (all `.md`, skip nested git) | Enumerate the brain corpus | Input to OKF checks |
-| 2 | H | Brain OKF frontmatter validator | Gate docs before RAG index | The brain use case |
-| 2 | I | `validate-brain` subcommand + `--json` | Runnable pre-`--rebuild` gate | Brain shippable |
-| 3 | J | Graph integrity (`related:` edges resolve) | Catch dangling/duplicate doc_ids | Brain correctness (D29) |
-| 3 | K | Link integrity (markdown/`file://`/`[[wiki]]`) | Catch dead links + moved files | Brain correctness (D29) |
-| 3 | L | Structural coverage (`index.md` ↔ dir, D17) | Catch orphan files + dangling rows | Brain correctness (D29) |
-| 3 | M | Sync integrity (`synced_from` watermark) | Catch brain↔sub-repo status drift | Brain correctness (D29) |
-| 3B | Q | Manifest emit (file-list + metadata JSON) | Embedder consumes it; kill double crawl | Corpus engine output (D4) |
-| 3B | R | Graph emit + structural query surface | Free/exact "where/what's connected" answers | Knowledge graph as product (D4) |
-| 3B | S | Graph-aware RAG *(orchestrator)* | Fuse semantic + structural retrieval | The two-mode endgame (D4) |
+| 0 | MV.0.A | Foundation setup (Rust scaffold, gates green) | Clean starting point | Enables everything downstream |
+| 1 | MV.1.B | Crawl & classify content tree | Know every file and its kind | Input to all learn-ai checks |
+| 1 | MV.1.C | Frontmatter & JSON struct validation | Catch missing/malformed fields | Superset of TS validator |
+| 1 | MV.1.D | Cross-file integrity (anchor-slice, pairs, ids) | Catch silent runtime failures | learn-ai differentiator *(deprioritized)* |
+| 1 | MV.1.E | pt-BR parity & ANSI reporter polish | Locale parity + human output | Phase 1 shippable |
+| 2 | MV.2.F | `ContentValidator` trait + shared core | One core, many schemas | Makes `mev` general |
+| 2 | MV.2.G | Brain crawl (all `.md`, skip nested git) | Enumerate the brain corpus | Input to OKF checks |
+| 2 | MV.2.H | Brain OKF frontmatter validator | Gate docs before RAG index | The brain use case |
+| 2 | MV.2.I | `validate-brain` subcommand + `--json` | Runnable pre-`--rebuild` gate | Brain shippable |
+| 3 | MV.3.J | Graph integrity (`related:` edges resolve) | Catch dangling/duplicate doc_ids | Brain correctness (D29) |
+| 3 | MV.3.K | Link integrity (markdown/`file://`/`[[wiki]]`) | Catch dead links + moved files | Brain correctness (D29) |
+| 3 | MV.3.L | Structural coverage (`index.md` ↔ dir, D17) | Catch orphan files + dangling rows | Brain correctness (D29) |
+| 3 | MV.3.M | Sync integrity (`synced_from` watermark) | Catch brain↔sub-repo status drift | Brain correctness (D29) |
+| 3B | MV.3B.Q | Manifest emit (file-list + metadata JSON) | Embedder consumes it; kill double crawl | Corpus engine output (D4) |
+| 3B | MV.3B.R | Graph emit + structural query surface | Free/exact "where/what's connected" answers | Knowledge graph as product (D4) |
+| 3B | MV.3B.S | Graph-aware RAG *(orchestrator)* | Fuse semantic + structural retrieval | The two-mode endgame (D4) |
 | 4 | — | Blog validation + code-block/link linting | Cover a fourth content type | Whole-tree coverage |
 | 5+ | — | `watch` (hot-reload) + `compile` (manifest.json) | Speed + precompiled index | Differentiating build |
 
 ---
 
 *Sequenced by dependency and competence, not calendar. When life gets in the way, pick up where you left
-off. Phase 2 (Brain OKF gate) is done; Phase 3 (Brain integrity) is the current priority — `2.J-corpus-crawl`
-then `2.J-graph-integrity`, built with the D4 forward-compat constraints; Phase 3B (corpus engine outputs,
-D4) follows; Phase 1 Blocks D–E and Phase 4 resume after.*
+off. Phase 2 (Brain OKF gate) is done; Phase 3 (Brain integrity) is the current priority — `MV.3.J-crawl`
+then `MV.3.J`, built with the D4 forward-compat constraints; Phase 3B (corpus engine outputs,
+D4) follows; `MV.1.D`–`MV.1.E` and Phase 4 resume after.*

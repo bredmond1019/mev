@@ -60,7 +60,7 @@ Corpus baseline at decision time: 384 authored nodes, 119 leaves.
 
 ---
 
-## Block J graph checks
+## MV.3.J graph checks
 
 1. **Uniqueness** — authored `scope:doc_id` is globally unique (baseline: 0 violations).
 2. **Edge integrity** — every `related:` entry resolves to an authored node: bare `doc_id`
@@ -101,10 +101,10 @@ is **optional** on them. A root file without frontmatter is a searchable leaf; o
 ## Delivery: two-block split
 
 Work was delivered as:
-1. **`2.J-corpus-crawl`** — registry + scope resolver + multi-root corpus crawl (shared foundation)
-2. **`2.J-graph-integrity`** — global `scope:doc_id` node index + edge integrity (`--graph` flag)
+1. **`MV.3.J-crawl`** — registry + scope resolver + multi-root corpus crawl (shared foundation)
+2. **`MV.3.J`** — global `scope:doc_id` node index + edge integrity (`--graph` flag)
 
-The split happened because D5 guardrails were added after `2.J-corpus-crawl` had shipped to review.
+The split happened because D5 guardrails were added after `MV.3.J-crawl` had shipped to review.
 
 ---
 
@@ -112,7 +112,7 @@ The split happened because D5 guardrails were added after `2.J-corpus-crawl` had
 
 Edges are represented as `{ from: canonical_id, to_ref: String, kind }` with a `kind` enum
 starting at `Related`. Typed edges (`supersedes`, `depends-on`, `parent`, …) extend this schema
-with no reshape. Block J validates `related:` only; further edge types land as later blocks.
+with no reshape. `MV.3.J` validates `related:` only; further edge types land as later blocks.
 
 ---
 

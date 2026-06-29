@@ -596,7 +596,9 @@ mod tests {
         let diags = check_graph(&artifact);
         let dangling: Vec<_> = diags
             .iter()
-            .filter(|d| d.locator == "E_GRAPH_DANGLING_RELATED" && d.severity == crate::Severity::Error)
+            .filter(|d| {
+                d.locator == "E_GRAPH_DANGLING_RELATED" && d.severity == crate::Severity::Error
+            })
             .collect();
         assert_eq!(dangling.len(), 1, "expected dangling error: {diags:?}");
         assert!(dangling[0].message.contains("typo-nonexistent"));
@@ -651,7 +653,9 @@ mod tests {
         // bare "mev-target" resolves to "brain:mev-target" which does not exist
         let dangling: Vec<_> = diags
             .iter()
-            .filter(|d| d.locator == "E_GRAPH_DANGLING_RELATED" && d.severity == crate::Severity::Error)
+            .filter(|d| {
+                d.locator == "E_GRAPH_DANGLING_RELATED" && d.severity == crate::Severity::Error
+            })
             .collect();
         assert_eq!(
             dangling.len(),

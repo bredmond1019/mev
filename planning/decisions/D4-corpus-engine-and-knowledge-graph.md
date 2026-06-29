@@ -72,13 +72,13 @@ rerank, the AI answer layer). They share `brain.toml` and the `brain_documents` 
 
 ### 3. The knowledge graph is a first-class emitted artifact — not a throwaway
 
-Block J's graph stops being an in-memory structure that is built, checked, and discarded.
+`MV.3.J`'s graph stops being an in-memory structure that is built, checked, and discarded.
 The graph-construction is a **reusable module** and its node/edge structs are
 **`Serialize`-able**, so the same graph mev *validates* is the graph mev *emits*. Cheap to
-honor while building Block J; expensive to retrofit later.
+honor while building `MV.3.J`; expensive to retrofit later.
 
 **Edge model built to grow.** Edges are represented generically as
-`Edge { from, to_ref, kind }`. Block J validates `related:` only (kind `Related`); typed
+`Edge { from, to_ref, kind }`. `MV.3.J` validates `related:` only (kind `Related`); typed
 edges — `supersedes`, `depends-on`, `parent` — drop in as later blocks with **no refactor**
 as authored frontmatter grows. The `kind` discriminant is what keeps the same node/edge
 structs (and the emitted graph schema) stable across that growth. This is already the stance
@@ -116,15 +116,14 @@ answer surface.
 
 ## Consequences for the roadmap
 
-- Phase 3's two queued specs (`2.J-corpus-crawl`, then `2.J-graph-integrity`) are correct as
-  written; they gain two forward-compat constraints: (a) the crawl produces a clean owned
-  data structure (it will feed manifest + embedder), and (b) the graph module is reusable and
-  serializable (it will be emitted).
-- Two **additive** blocks follow: **manifest emit** (`mev` emits the file-list; orchestrator's
-  `index_brain.py` consumes it — kills the duplication) and **graph emit + structural query
-  surface** (orchestrator loads edges into Postgres; a thin surface — `bastion` / MCP —
-  answers structural questions free).
-- A later block delivers **graph-aware RAG** in the orchestrator's retrieval path.
+- `MV.3.J-crawl` and `MV.3.J` are correct as written; they gain two forward-compat constraints:
+  (a) the crawl produces a clean owned data structure (it will feed manifest + embedder), and
+  (b) the graph module is reusable and serializable (it will be emitted).
+- Two **additive** blocks follow: **`MV.3B.Q`** (manifest emit — `mev` emits the file-list;
+  orchestrator's `index_brain.py` consumes it — kills the duplication) and **`MV.3B.R`** (graph
+  emit + structural query surface — orchestrator loads edges into Postgres; a thin surface —
+  `bastion` / MCP — answers structural questions free).
+- **`MV.3B.S`** delivers **graph-aware RAG** in the orchestrator's retrieval path.
 - Companion work outside this repo: register tier sub-brains as scope units in `brain.toml`;
   refactor `index_brain.py` to consume the manifest; add the Postgres edges table.
 

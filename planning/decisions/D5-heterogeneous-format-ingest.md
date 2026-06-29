@@ -59,10 +59,10 @@ That is a different verb. mev today **validates** authored metadata; a client co
 
 ## What we honor NOW (the only binding part of D5)
 
-Two guardrails, both cheap now and expensive to retrofit, applied to **Block J (`2.J-graph-integrity`)**
-since `2.J-corpus-crawl` already shipped to review:
+Two guardrails, both cheap now and expensive to retrofit, applied to **`MV.3.J`**
+since `MV.3.J-crawl` already shipped to review:
 
-1. **Metadata through a single extractor seam.** Block J reads `doc_id`/`related` via one
+1. **Metadata through a single extractor seam.** `MV.3.J` reads `doc_id`/`related` via one
    `read_doc_metadata` helper — the sole site that knows metadata is inline Markdown frontmatter — so a
    future foreign-format/sidecar extractor is a one-function swap, not a scattered refactor.
 2. **The graph is authored-only — never inferred.** Nodes/edges come solely from authored/confirmed
@@ -76,11 +76,11 @@ The normalized `Document` model, the extractor trait + per-format impls, sidecar
 and AI edge-proposal are all **backlog**. Revisit when a real heterogeneous (client) corpus is on the table.
 
 The corpus-model refactor to fully realize the seam (corpus-crawl shipped with
-`CorpusEntry { path, rel, stem, scope }` and no metadata field, so the OKF pass and Block J's graph build
-each re-parse frontmatter) is **folded into Block Q (manifest emit)** — that block needs per-entry metadata
-to emit the file-list + metadata JSON, so it is the point where `CorpusEntry { …, metadata }` becomes
-load-bearing and the extract-once optimization has a real consumer. Do **not** add a speculative
-follow-on block before Block J for this: the `read_doc_metadata` seam (Decision 7 in
+`CorpusEntry { path, rel, stem, scope }` and no metadata field, so the OKF pass and `MV.3.J`'s graph build
+each re-parse frontmatter) is **folded into `MV.3B.Q` (manifest emit)** — that block needs per-entry
+metadata to emit the file-list + metadata JSON, so it is the point where `CorpusEntry { …, metadata }`
+becomes load-bearing and the extract-once optimization has a real consumer. Do **not** add a speculative
+follow-on block before `MV.3.J` for this: the `read_doc_metadata` seam (Decision 7 in
 `2.J-graph-integrity/tasks.md`) is already entry-keyed and I/O-internal, so when the field lands the seam
 body becomes `entry.metadata` with no call-site changes. The double-read until then is negligible at brain
 scale (hundreds of files).
@@ -89,4 +89,4 @@ scale (hundreds of files).
 
 - D4 (corpus engine; pure compiler; graph in Postgres; two retrieval modes) — D5 extends it.
 - The `scope:doc_id` scheme and corpus rules (`block-j-namespacing-decision.md`).
-- Any shipped Phase 2 / `2.J-corpus-crawl` behaviour.
+- Any shipped Phase 2 / `MV.3.J-crawl` behaviour.

@@ -3,7 +3,7 @@ type: Handoff
 created: 2026-06-29
 ---
 
-# Handoff — 2.J-graph-integrity merged; Block K or Q is next
+# Handoff — MV.3.J merged; MV.3.K or MV.3B.Q is next
 
 > **For the next agent:** Read this immediately after `/prime`. Delete this file once consumed.
 
@@ -13,8 +13,8 @@ created: 2026-06-29
 `2.J-corpus-crawl`, and now `2.J-graph-integrity` are all complete and on `main`. The
 architecture settled in **D4**: mev is a pure compiler emitting diagnostics + manifest + graph as
 separate artifacts; the knowledge graph lives in Postgres beside embeddings; two retrieval modes
-(semantic + structural). The next block choices are **Block K** (link integrity —
-markdown/`file://`/`[[wiki]]`) or **Block Q** (manifest emit — Phase 3B, lets `index_brain.py`
+(semantic + structural). The next block choices are **`MV.3.K`** (link integrity —
+markdown/`file://`/`[[wiki]]`) or **`MV.3B.Q`** (manifest emit — Phase 3B, lets `index_brain.py`
 consume mev's output directly). Check `planning/master-plan.md` for ordering — the decision
 hasn't been locked.
 
@@ -47,22 +47,22 @@ In priority order:
 
 1. **`git push`** — push local main to origin before starting any new work.
 2. **Choose and start the next block** — check `planning/master-plan.md` for ordering:
-   - **Block K** — link integrity (`markdown`/`file://`/`[[wiki]]` refs); spec likely needs
+   - **`MV.3.K`** — link integrity (`markdown`/`file://`/`[[wiki]]` refs); spec likely needs
      writing via `/generate-tasks`.
-   - **Block Q** — manifest emit (Phase 3B); mev emits canonical file-list JSON so
+   - **`MV.3B.Q`** — manifest emit (Phase 3B); mev emits canonical file-list JSON so
      `index_brain.py` can consume it; carries D5 extract-once refactor (adds `metadata` to
      `CorpusEntry`, collapses `read_doc_metadata` seam to `entry.metadata`). Depends on
-     2.J-corpus-crawl (done).
-3. **Phase 3B follow-on (after Q):** Block R (graph emit → Postgres edges + bastion/MCP structural
-   queries), Block S (graph-aware RAG, orchestrator-side).
+     `MV.3.J-crawl` (done).
+3. **Phase 3B follow-on (after `MV.3B.Q`):** `MV.3B.R` (graph emit → Postgres edges + bastion/MCP
+   structural queries), `MV.3B.S` (graph-aware RAG, orchestrator-side).
 4. **Companion work (not mev code — flag to Brandon):** register tier sub-brains as scope units in
    `brain.toml`; refactor `index_brain.py` to consume mev manifest; add Postgres edges table.
 
 ## Open questions / choices
 
-- **Block K vs Block Q next?** Both are unblocked. Q is Phase 3B and unlocks the embedder
-  pipeline; K is pure mev integrity work. Check `planning/master-plan.md` ordering for the
-  intended sequence — the block dependency graph may have already settled this.
+- **`MV.3.K` vs `MV.3B.Q` next?** Both are unblocked. `MV.3B.Q` is Phase 3B and unlocks the
+  embedder pipeline; `MV.3.K` is pure mev integrity work. Check `planning/master-plan.md`
+  ordering for the intended sequence — the block dependency graph may have already settled this.
 
 ## Context the next agent needs
 
@@ -81,7 +81,7 @@ In priority order:
 - **Double-crawl note (skipped in review):** `validate_brain_graph` calls `crawl_corpus`
   separately from `BrainValidator::run`, so files are read twice under `--graph`. Not a
   correctness bug, but worth fixing in Block Q when `BrainValidator` exposes its corpus.
-- **D5 seam:** `read_doc_metadata` in `graph.rs` is the single frontmatter-parse site. Block Q's
+- **D5 seam:** `read_doc_metadata` in `graph.rs` is the single frontmatter-parse site. `MV.3B.Q`'s
   D5 refactor collapses this into `CorpusEntry::metadata`, removing the per-graph-build I/O.
 
 ## First command after `/prime`
@@ -90,4 +90,4 @@ In priority order:
 git push
 ```
 
-Then check `planning/master-plan.md` and pick Block K or Q to start.
+Then check `planning/master-plan.md` and pick `MV.3.K` or `MV.3B.Q` to start.
