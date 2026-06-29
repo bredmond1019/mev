@@ -10,7 +10,7 @@
 //!   metadata through the single [`read_doc_metadata`] seam, and returns both the
 //!   `Graph` (D4 serializable, emittable artifact) and the lookup structures required
 //!   by the integrity checks.
-//! - [`check_graph`] (Task 2) will accept the built [`GraphArtifact`] and return
+//! - [`check_graph`] accepts the built [`GraphArtifact`] and returns
 //!   `Vec<Diagnostic>` without re-walking the corpus.
 //!
 //! # Forward-compat
@@ -244,7 +244,7 @@ pub fn build_graph(corpus: &Corpus, _config: &BrainConfig) -> GraphArtifact {
 }
 
 // ---------------------------------------------------------------------------
-// Graph integrity checks (Task 2 — stubs consumed by Task 3+)
+// Graph integrity checks
 // ---------------------------------------------------------------------------
 
 /// Check the built graph for integrity violations: duplicate canonical ids,
@@ -318,7 +318,7 @@ pub fn check_graph(artifact: &GraphArtifact) -> Vec<Diagnostic> {
         if artifact.leaf_keys.contains(&qualified) {
             diags.push(Diagnostic::warning(
                 referrer_rel,
-                "related",
+                "W_GRAPH_LEAF_TARGET",
                 format!(
                     "related target `{}` (resolved: `{qualified}`) is a leaf file (no `doc_id`)",
                     edge.to_ref
@@ -327,7 +327,7 @@ pub fn check_graph(artifact: &GraphArtifact) -> Vec<Diagnostic> {
         } else {
             diags.push(Diagnostic::error(
                 referrer_rel,
-                "related",
+                "E_GRAPH_DANGLING_RELATED",
                 format!(
                     "related target `{}` (resolved: `{qualified}`) does not exist in the corpus",
                     edge.to_ref
@@ -596,7 +596,7 @@ mod tests {
         let diags = check_graph(&artifact);
         let dangling: Vec<_> = diags
             .iter()
-            .filter(|d| d.locator == "related" && d.severity == crate::Severity::Error)
+            .filter(|d| d.locator == "E_GRAPH_DANGLING_RELATED" && d.severity == crate::Severity::Error)
             .collect();
         assert_eq!(dangling.len(), 1, "expected dangling error: {diags:?}");
         assert!(dangling[0].message.contains("typo-nonexistent"));
@@ -651,7 +651,7 @@ mod tests {
         // bare "mev-target" resolves to "brain:mev-target" which does not exist
         let dangling: Vec<_> = diags
             .iter()
-            .filter(|d| d.locator == "related" && d.severity == crate::Severity::Error)
+            .filter(|d| d.locator == "E_GRAPH_DANGLING_RELATED" && d.severity == crate::Severity::Error)
             .collect();
         assert_eq!(
             dangling.len(),
