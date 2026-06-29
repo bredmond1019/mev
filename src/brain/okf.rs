@@ -109,18 +109,32 @@ pub(crate) fn is_valid_doc_id(s: &str) -> bool {
 // Per-file helpers
 // ---------------------------------------------------------------------------
 
-/// Return `true` if `mf` is a root instruction file (`README.md` or `CLAUDE.md`).
+/// Return `true` if `mf` is a unit-root instruction file (`README.md` or `CLAUDE.md`
+/// located exactly at its owning scope unit's root, not deep in `docs/` or `planning/`).
 ///
-/// Root instruction files are valid corpus leaves (corpus membership rule 2 in the
-/// canonical spec decision) but are **not** required to carry OKF frontmatter — they
-/// may be plain Markdown files that serve as entry points for humans and tools.
-/// Detected by leaf file name only; the membership rule in `crawl_corpus` already
-/// ensures only unit-root instances reach here.
-pub(crate) fn is_root_instruction_file(mf: &MdFile) -> bool {
-    matches!(
+/// Root instruction files at the unit root are valid corpus leaves but are **not** required
+/// to carry OKF frontmatter.  A `docs/README.md` or `planning/CLAUDE.md` is a normal corpus
+/// member and must be validated; the name-only check is insufficient.
+pub(crate) fn is_root_instruction_file(mf: &MdFile, config: &BrainConfig) -> bool {
+    // Fast-path: wrong filename.
+    if !matches!(
         mf.path.file_name().and_then(|n| n.to_str()),
         Some("README.md") | Some("CLAUDE.md")
-    )
+    ) {
+        return false;
+    }
+    // Verify the file sits exactly at its owning unit's root (not under docs/ or planning/).
+    let (_, unit_repo_path) = crate::brain::scope::owning_unit(&mf.rel, config);
+    let trimmed = unit_repo_path.trim();
+    let unit_rel: &std::path::Path = if trimmed == "." || trimmed.is_empty() {
+        &mf.rel
+    } else {
+        match mf.rel.strip_prefix(trimmed) {
+            Ok(r) => r,
+            Err(_) => return false,
+        }
+    };
+    unit_rel == std::path::Path::new("README.md") || unit_rel == std::path::Path::new("CLAUDE.md")
 }
 
 /// Build a "missing required field" `error` diagnostic.
@@ -180,7 +194,7 @@ pub fn validate_md_file(mf: &MdFile, config: &BrainConfig) -> Vec<Diagnostic> {
         None => {
             // Root instruction files (README.md / CLAUDE.md) without frontmatter are
             // valid corpus leaves — they must not raise the OKF "missing frontmatter" error.
-            if is_root_instruction_file(mf) {
+            if is_root_instruction_file(mf, config) {
                 return vec![];
             }
             return vec![Diagnostic::error(
@@ -745,32 +759,48 @@ mod tests {
 
     #[test]
     fn is_root_instruction_file_detects_readme() {
+        let cfg = full_test_config();
         let mf = MdFile {
             path: PathBuf::from("/hq/README.md"),
             rel: PathBuf::from("README.md"),
             stem: "README".to_string(),
         };
-        assert!(is_root_instruction_file(&mf));
+        assert!(is_root_instruction_file(&mf, &cfg));
     }
 
     #[test]
     fn is_root_instruction_file_detects_claude_md() {
+        let cfg = full_test_config();
         let mf = MdFile {
             path: PathBuf::from("/hq/CLAUDE.md"),
             rel: PathBuf::from("CLAUDE.md"),
             stem: "CLAUDE".to_string(),
         };
-        assert!(is_root_instruction_file(&mf));
+        assert!(is_root_instruction_file(&mf, &cfg));
     }
 
     #[test]
     fn is_root_instruction_file_false_for_ordinary_files() {
+        let cfg = full_test_config();
         let mf = MdFile {
             path: PathBuf::from("/hq/planning/status.md"),
             rel: PathBuf::from("planning/status.md"),
             stem: "status".to_string(),
         };
-        assert!(!is_root_instruction_file(&mf));
+        assert!(!is_root_instruction_file(&mf, &cfg));
+    }
+
+    #[test]
+    fn is_root_instruction_file_false_for_deep_readme() {
+        // docs/README.md is a corpus member (starts_with docs/) but NOT a root
+        // instruction file — it must be validated for OKF, not exempt.
+        let cfg = full_test_config();
+        let mf = MdFile {
+            path: PathBuf::from("/hq/docs/README.md"),
+            rel: PathBuf::from("docs/README.md"),
+            stem: "README".to_string(),
+        };
+        assert!(!is_root_instruction_file(&mf, &cfg));
     }
 
     #[test]
