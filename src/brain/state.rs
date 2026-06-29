@@ -541,6 +541,324 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
 }
 
 // ---------------------------------------------------------------------------
+// State graph model (D4 serializable, emittable artifact)
+// ---------------------------------------------------------------------------
+
+/// The kind of a directed edge in the state block graph.
+///
+/// `BlockedBy` edges come from `focus.[].blocked_by[]{type:"block"}` entries.
+/// `CrossRepo` edges come from brain-file `cross_repo[]` arrays.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateEdgeKind {
+    /// A `blocked_by` dependency (a block is waiting on another block).
+    BlockedBy,
+    /// An explicit cross-repo dependency declared in a brain file's `cross_repo[]`.
+    CrossRepo,
+}
+
+/// A directed edge in the state block graph.
+///
+/// `from` and `to_ref` are canonical `"repo:id"` keys.  `source_path` is
+/// recorded for diagnostic generation but **skipped** in serialization (it is
+/// an implementation detail, not part of the D4 artifact).
+#[derive(Debug, Clone, Serialize)]
+pub struct StateEdge {
+    /// `"repo:id"` key of the source block (the dependent / blocked block).
+    pub from: String,
+    /// `"repo:id"` key of the target block (the dependency / blocker).
+    pub to_ref: String,
+    /// Edge discriminant.
+    pub kind: StateEdgeKind,
+    /// Absolute path of the file that authored this edge (skipped in JSON).
+    #[serde(skip)]
+    pub source_path: PathBuf,
+}
+
+/// A graph node — a block registered in a repo's `tracks[]`.
+///
+/// `source_path` is skipped in serialization for the same reason as
+/// [`StateEdge::source_path`].
+#[derive(Debug, Clone, Serialize)]
+pub struct StateNode {
+    /// Canonical key: `"repo:id"`.
+    pub key: String,
+    /// Repo slug that owns this block.
+    pub repo: String,
+    /// Canonical block ID (e.g. `"MV.3.P"`).
+    pub id: String,
+    /// Brief human description.
+    pub title: String,
+    /// Absolute path of the file that registered this block (skipped in JSON).
+    #[serde(skip)]
+    pub source_path: PathBuf,
+}
+
+/// The serializable, emittable state block graph — the D4 artifact.
+///
+/// Produced by [`build_state_graph`]; consumed (read-only) by
+/// [`check_state_graph`].  The graph is authored-only — no node or edge is
+/// inferred.
+#[derive(Debug, Default, Serialize)]
+pub struct StateGraph {
+    /// All blocks registered in any repo's `tracks[]`.
+    pub nodes: Vec<StateNode>,
+    /// All `blocked_by` block edges and brain `cross_repo[]` edges.
+    pub edges: Vec<StateEdge>,
+}
+
+// ---------------------------------------------------------------------------
+// Graph builder
+// ---------------------------------------------------------------------------
+
+/// Build a [`StateGraph`] from the loaded state files.
+///
+/// # Nodes
+/// One [`StateNode`] per `tracks[].blocks[]` entry across all files (keyed
+/// `"repo:id"`).
+///
+/// # Edges
+/// - One [`StateEdge`] with `kind: BlockedBy` per `{type:"block"}` entry
+///   in any file's `focus.*.blocked_by[]`.  The `from` key is the blocked
+///   block's own `"repo:id"` (using the `block.repo` field if present, else
+///   the owning file's slug); `to_ref` is `"{blocked_by.repo}:{blocked_by.id}"`.
+/// - One [`StateEdge`] with `kind: CrossRepo` per brain-file `cross_repo[]`
+///   entry.
+///
+/// Nodes and edges are emitted even when they are later found to be dangling
+/// — the separation of build and check is intentional (see `MV.3.J` pattern).
+pub fn build_state_graph(files: &[(StateSource, StateFile)]) -> StateGraph {
+    let mut nodes: Vec<StateNode> = Vec::new();
+    let mut edges: Vec<StateEdge> = Vec::new();
+
+    for (src, file) in files {
+        let path = &src.abs_path;
+
+        // --- Nodes: one per tracks[].blocks[] entry ---
+        for track in &file.tracks {
+            for block in &track.blocks {
+                nodes.push(StateNode {
+                    key: format!("{}:{}", src.repo_slug, block.id),
+                    repo: src.repo_slug.clone(),
+                    id: block.id.clone(),
+                    title: block.title.clone(),
+                    source_path: path.clone(),
+                });
+            }
+        }
+
+        // --- BlockedBy edges: from focus.*.blocked_by[]{type:block} ---
+        let all_focus = file
+            .focus
+            .now
+            .iter()
+            .chain(file.focus.next.iter())
+            .chain(file.focus.blocked.iter());
+
+        for block in all_focus {
+            // The `from` block may live in a child repo (brain focus carries `repo`).
+            let from_repo = block.repo.as_deref().unwrap_or(src.repo_slug.as_str());
+            let from_key = format!("{}:{}", from_repo, block.block);
+
+            for bb in &block.blocked_by {
+                if let BlockedBy::Block { repo, id, .. } = bb {
+                    edges.push(StateEdge {
+                        from: from_key.clone(),
+                        to_ref: format!("{repo}:{id}"),
+                        kind: StateEdgeKind::BlockedBy,
+                        source_path: path.clone(),
+                    });
+                }
+            }
+        }
+
+        // --- CrossRepo edges: from brain cross_repo[] ---
+        for edge in &file.cross_repo {
+            edges.push(StateEdge {
+                from: format!("{}:{}", edge.from.repo, edge.from.block),
+                to_ref: format!("{}:{}", edge.to.repo, edge.to.block),
+                kind: StateEdgeKind::CrossRepo,
+                source_path: path.clone(),
+            });
+        }
+    }
+
+    StateGraph { nodes, edges }
+}
+
+// ---------------------------------------------------------------------------
+// Graph integrity checks
+// ---------------------------------------------------------------------------
+
+/// Run integrity checks over a built [`StateGraph`].
+///
+/// Checks performed:
+///
+/// 1. **`E_STATE_DUPLICATE_BLOCK_ID`** — two `tracks[]` blocks in the same
+///    repo share an `id`.  Emits one diagnostic per duplicate key (not one
+///    per occurrence).
+/// 2. **`E_STATE_DANGLING_FOCUS`** — a leaf (`kind:"project"`) file's
+///    `focus.now/next/blocked` entry's `block` is absent from that repo's
+///    `tracks[]`.  Brain focus entries are cross-repo and intentionally
+///    excluded from this check.
+/// 3. **`E_STATE_UNKNOWN_REPO`** — a `blocked_by` or `cross_repo` edge
+///    references a `repo` that has no discoverable `state.json` (i.e. is not
+///    in `files`).
+/// 4. **`E_STATE_DANGLING_BLOCKED_BY`** — a `{type:"block",repo,id}` edge's
+///    target `id` does not exist in the named repo's `tracks[]` (repo is
+///    known, block is not).
+/// 5. **`E_STATE_DANGLING_CROSS_REPO`** — a brain `cross_repo[]` edge's
+///    `from` or `to` endpoint's block does not exist in the named repo's
+///    `tracks[]` (repo is known, block is not).
+pub fn check_state_graph(
+    graph: &StateGraph,
+    files: &[(StateSource, StateFile)],
+) -> Vec<Diagnostic> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    // --- Build lookup structures ---
+
+    // All repo slugs that have a loaded state.json.
+    let known_repos: HashSet<&str> = files.iter().map(|(s, _)| s.repo_slug.as_str()).collect();
+
+    // Count occurrences of each "repo:id" key so we can detect duplicates.
+    // Also store the path of the *last* occurrence for the diagnostic.
+    let mut node_counts: HashMap<&str, (usize, &PathBuf)> = HashMap::new();
+    for node in &graph.nodes {
+        let entry = node_counts
+            .entry(node.key.as_str())
+            .or_insert((0, &node.source_path));
+        entry.0 += 1;
+        entry.1 = &node.source_path;
+    }
+
+    // Set of all registered "repo:id" keys (for dangling checks).
+    let node_set: HashSet<&str> = node_counts.keys().copied().collect();
+
+    // --- 1. Duplicate block IDs ---
+    let mut duplicate_reported: HashSet<&str> = HashSet::new();
+    for node in &graph.nodes {
+        let key = node.key.as_str();
+        if node_counts[key].0 > 1 && !duplicate_reported.contains(key) {
+            duplicate_reported.insert(key);
+            diags.push(Diagnostic::error(
+                &node.source_path,
+                "E_STATE_DUPLICATE_BLOCK_ID",
+                format!(
+                    "duplicate block id '{}' in repo '{}' tracks[]",
+                    node.id, node.repo
+                ),
+            ));
+        }
+    }
+
+    // --- 2. Dangling focus (leaf files only) ---
+    for (src, file) in files {
+        if file.kind != "project" {
+            continue;
+        }
+        let path = &src.abs_path;
+        let all_focus = file
+            .focus
+            .now
+            .iter()
+            .chain(file.focus.next.iter())
+            .chain(file.focus.blocked.iter());
+
+        for block in all_focus {
+            let key = format!("{}:{}", src.repo_slug, block.block);
+            if !node_set.contains(key.as_str()) {
+                diags.push(Diagnostic::error(
+                    path,
+                    "E_STATE_DANGLING_FOCUS",
+                    format!(
+                        "focus block '{}' is not registered in this repo's tracks[]",
+                        block.block
+                    ),
+                ));
+            }
+        }
+    }
+
+    // --- 3–5. Edge integrity checks ---
+    for edge in &graph.edges {
+        let path = &edge.source_path;
+
+        match edge.kind {
+            StateEdgeKind::BlockedBy => {
+                // Parse to_ref as "repo:id".
+                let Some((to_repo, to_id)) = edge.to_ref.split_once(':') else {
+                    continue;
+                };
+                if !known_repos.contains(to_repo) {
+                    diags.push(Diagnostic::error(
+                        path,
+                        "E_STATE_UNKNOWN_REPO",
+                        format!("blocked_by references unknown repo '{to_repo}'"),
+                    ));
+                } else if !node_set.contains(edge.to_ref.as_str()) {
+                    diags.push(Diagnostic::error(
+                        path,
+                        "E_STATE_DANGLING_BLOCKED_BY",
+                        format!(
+                            "blocked_by block '{to_id}' does not exist in repo '{to_repo}' tracks[]"
+                        ),
+                    ));
+                }
+            }
+
+            StateEdgeKind::CrossRepo => {
+                // Check from endpoint.
+                let Some((from_repo, from_id)) = edge.from.split_once(':') else {
+                    continue;
+                };
+                if !known_repos.contains(from_repo) {
+                    diags.push(Diagnostic::error(
+                        path,
+                        "E_STATE_UNKNOWN_REPO",
+                        format!("cross_repo 'from' references unknown repo '{from_repo}'"),
+                    ));
+                } else if !node_set.contains(edge.from.as_str()) {
+                    diags.push(Diagnostic::error(
+                        path,
+                        "E_STATE_DANGLING_CROSS_REPO",
+                        format!(
+                            "cross_repo 'from' block '{from_id}' does not exist in repo \
+                             '{from_repo}' tracks[]"
+                        ),
+                    ));
+                }
+
+                // Check to endpoint.
+                let Some((to_repo, to_id)) = edge.to_ref.split_once(':') else {
+                    continue;
+                };
+                if !known_repos.contains(to_repo) {
+                    diags.push(Diagnostic::error(
+                        path,
+                        "E_STATE_UNKNOWN_REPO",
+                        format!("cross_repo 'to' references unknown repo '{to_repo}'"),
+                    ));
+                } else if !node_set.contains(edge.to_ref.as_str()) {
+                    diags.push(Diagnostic::error(
+                        path,
+                        "E_STATE_DANGLING_CROSS_REPO",
+                        format!(
+                            "cross_repo 'to' block '{to_id}' does not exist in repo \
+                             '{to_repo}' tracks[]"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    diags
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -1265,6 +1583,302 @@ mod tests {
         assert!(
             !track_warnings.is_empty(),
             "should warn about missing tracks[], got: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 3 — build_state_graph / check_state_graph tests
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal (source, file) pair for use in graph tests.
+    fn make_pair(
+        dir: &std::path::Path,
+        filename: &str,
+        kind: &'static str,
+        json: &str,
+    ) -> (StateSource, StateFile) {
+        let path = dir.join(filename);
+        std::fs::write(&path, json).unwrap();
+        let src = StateSource {
+            repo_slug: serde_json::from_str::<serde_json::Value>(json).unwrap()["repo"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+            abs_path: path,
+            expected_kind: kind,
+        };
+        let file: StateFile = serde_json::from_str(json).expect("fixture must parse");
+        (src, file)
+    }
+
+    /// Minimal leaf state.json with one tracks block and a clean focus.
+    fn leaf_pair(dir: &std::path::Path, repo: &str, block_id: &str) -> (StateSource, StateFile) {
+        let json = format!(
+            r#"{{
+  "repo": "{repo}",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": {{
+    "now": [{{ "block": "{block_id}", "title": "Work", "status": "in_progress" }}],
+    "next": [],
+    "blocked": []
+  }},
+  "tracks": [{{
+    "title": "Phase 1",
+    "blocks": [{{ "id": "{block_id}", "title": "Work", "status": "in_progress" }}]
+  }}]
+}}"#
+        );
+        make_pair(dir, &format!("{repo}-state.json"), "project", &json)
+    }
+
+    #[test]
+    fn build_and_check_clean_two_repo_fixture_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair_a = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let pair_b = leaf_pair(dir.path(), "beta", "BE.1.A");
+        let files = vec![pair_a, pair_b];
+
+        let graph = build_state_graph(&files);
+
+        // Two nodes, one per repo.
+        assert_eq!(
+            graph.nodes.len(),
+            2,
+            "expected 2 nodes, got: {:?}",
+            graph.nodes
+        );
+        assert_eq!(graph.edges.len(), 0, "expected 0 edges for clean fixture");
+
+        let diags = check_state_graph(&graph, &files);
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == crate::Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "clean two-repo fixture should produce no errors, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_detects_dangling_blocked_by_to_nonexistent_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // alpha has block AL.1.A in tracks
+        let pair_a = leaf_pair(dir.path(), "alpha", "AL.1.A");
+
+        // beta's focus.blocked references alpha's block "AL.1.GHOST" which does NOT exist
+        let beta_json = r#"{
+  "repo": "beta",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": {
+    "now": [],
+    "next": [],
+    "blocked": [
+      {
+        "block": "BE.1.A",
+        "title": "Blocked work",
+        "blocked_by": [
+          { "type": "block", "repo": "alpha", "id": "AL.1.GHOST" }
+        ]
+      }
+    ]
+  },
+  "tracks": [{ "title": "Phase 1", "blocks": [{ "id": "BE.1.A", "title": "Blocked work" }] }]
+}"#;
+        let pair_b = make_pair(dir.path(), "beta-state.json", "project", beta_json);
+
+        let files = vec![pair_a, pair_b];
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files);
+
+        let dangling: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+            .collect();
+        assert_eq!(
+            dangling.len(),
+            1,
+            "expected exactly one E_STATE_DANGLING_BLOCKED_BY, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_detects_unknown_repo_in_blocked_by() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Only one repo in the corpus
+        let alpha_json = r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": {
+    "now": [],
+    "next": [],
+    "blocked": [
+      {
+        "block": "AL.1.A",
+        "title": "Blocked",
+        "blocked_by": [
+          { "type": "block", "repo": "ghost-repo", "id": "GH.1.X" }
+        ]
+      }
+    ]
+  },
+  "tracks": [{ "title": "P1", "blocks": [{ "id": "AL.1.A", "title": "Blocked" }] }]
+}"#;
+        let pair = make_pair(dir.path(), "alpha-state.json", "project", alpha_json);
+        let files = vec![pair];
+
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files);
+
+        let unknown: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_UNKNOWN_REPO")
+            .collect();
+        assert_eq!(
+            unknown.len(),
+            1,
+            "expected exactly one E_STATE_UNKNOWN_REPO, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_detects_duplicate_block_id_in_tracks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // alpha has block AL.1.A registered TWICE in tracks (two entries with same id)
+        let alpha_json = r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [
+    {
+      "title": "Phase 1",
+      "blocks": [
+        { "id": "AL.1.A", "title": "First" },
+        { "id": "AL.1.A", "title": "Duplicate!" }
+      ]
+    }
+  ]
+}"#;
+        let pair = make_pair(dir.path(), "alpha-state.json", "project", alpha_json);
+        let files = vec![pair];
+
+        let graph = build_state_graph(&files);
+        // Two nodes with the same key
+        assert_eq!(graph.nodes.len(), 2, "builder emits both duplicate nodes");
+
+        let diags = check_state_graph(&graph, &files);
+
+        let dup: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DUPLICATE_BLOCK_ID")
+            .collect();
+        assert_eq!(
+            dup.len(),
+            1,
+            "expected exactly one E_STATE_DUPLICATE_BLOCK_ID, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_detects_dangling_focus_in_leaf_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // alpha's focus.now references "AL.1.GHOST" which is not in tracks
+        let alpha_json = r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": {
+    "now": [{ "block": "AL.1.GHOST", "title": "Missing", "status": "in_progress" }],
+    "next": [],
+    "blocked": []
+  },
+  "tracks": [{ "title": "P1", "blocks": [{ "id": "AL.1.A", "title": "Real block" }] }]
+}"#;
+        let pair = make_pair(dir.path(), "alpha-state.json", "project", alpha_json);
+        let files = vec![pair];
+
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files);
+
+        let dangling_focus: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_FOCUS")
+            .collect();
+        assert_eq!(
+            dangling_focus.len(),
+            1,
+            "expected exactly one E_STATE_DANGLING_FOCUS, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_cross_repo_edge_dangling_target_emits_dangling_cross_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // alpha has block AL.1.A
+        let pair_a = leaf_pair(dir.path(), "alpha", "AL.1.A");
+
+        // brain file with cross_repo edge pointing at "alpha:AL.1.GHOST" (nonexistent)
+        let brain_json = r#"{
+  "repo": "core",
+  "kind": "brain",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "repos": [{ "repo": "alpha", "now": [], "next": [], "blocked": [] }],
+  "cross_repo": [
+    {
+      "from": { "repo": "alpha", "block": "AL.1.A" },
+      "to": { "repo": "alpha", "block": "AL.1.GHOST" }
+    }
+  ]
+}"#;
+        let pair_brain = make_pair(dir.path(), "brain-state.json", "brain", brain_json);
+        let files = vec![pair_a, pair_brain];
+
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files);
+
+        let dangling_cross: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_CROSS_REPO")
+            .collect();
+        assert_eq!(
+            dangling_cross.len(),
+            1,
+            "expected exactly one E_STATE_DANGLING_CROSS_REPO for ghost 'to' endpoint, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn state_graph_is_serializable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair_a = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let files = vec![pair_a];
+
+        let graph = build_state_graph(&files);
+        let json = serde_json::to_string(&graph).expect("StateGraph must serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        // Must have "nodes" and "edges" arrays
+        assert!(parsed["nodes"].is_array());
+        assert!(parsed["edges"].is_array());
+
+        // The node must carry key, repo, id, title but NOT source_path (skipped)
+        let node = &parsed["nodes"][0];
+        assert_eq!(node["key"], "alpha:AL.1.A");
+        assert_eq!(node["repo"], "alpha");
+        assert_eq!(node["id"], "AL.1.A");
+        assert!(
+            node["source_path"].is_null(),
+            "source_path should be skipped in JSON"
         );
     }
 }
