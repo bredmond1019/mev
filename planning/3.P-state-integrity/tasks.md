@@ -209,7 +209,7 @@ Rollup ring (brain files):
   - a `--json` round-trip asserting a `State` diagnostic appears in the serialized envelope.
 - Files: `tests/brain_state.rs`. (Depends on Task 5.)
 
-### 7. Validate
+### 7. [x] Validate
 - Run the Validation Commands below and confirm all pass. Then run the real thing:
   `cargo run -- validate-brain --state ~/Dev/agentic-portfolio` and confirm it parses all five live
   state.json files and reports clean (or surfaces only intended findings).
