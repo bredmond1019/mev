@@ -55,18 +55,19 @@ mev --json validate
 
 ---
 
-### `validate-brain [--sync] [path]`
+### `validate-brain [--sync] [--graph] [path]`
 
-Validate the Bastion Brain repo for OKF frontmatter compliance, and optionally check cross-repo sync watermark integrity.
+Validate the Bastion Brain repo for OKF frontmatter compliance, and optionally check cross-repo sync watermark integrity or global knowledge-graph integrity.
 
 ```bash
-mev validate-brain [--sync] [path]
+mev validate-brain [--sync] [--graph] [path]
 ```
 
 | Argument / Flag | Default | Description |
 |---|---|---|
 | `path` | `..` | Path to the company-brain repo root |
 | `--sync` | off | Also run the cross-repo sync watermark check (see below) |
+| `--graph` | off | Also run the global `scope:doc_id` knowledge-graph integrity check (see below). Takes precedence over `--sync` when both flags are present — `--graph` is a superset. |
 
 Resolves `brain.toml` by walking up from `path`. If no `brain.toml` is found, a fatal `Error`-severity diagnostic with locator `E_CONFIG_NOT_FOUND` is emitted and the process exits 1.
 
@@ -89,6 +90,26 @@ A mismatch or missing watermark emits an `Error`-severity diagnostic and causes 
 | `E_SYNC_WATERMARK_MALFORMED` | A watermark is present but is not a valid RFC3339 datetime |
 | `E_SYNC_DRIFT` | Both watermarks parse successfully but their values differ |
 
+#### `--graph` — knowledge-graph integrity check
+
+When `--graph` is passed, `mev` runs the full OKF schema pass first, then appends a graph integrity pass:
+
+1. Crawls the corpus (same registry-driven walk as the OKF pass).
+2. Builds the global `scope:doc_id` knowledge graph from frontmatter (`doc_id` + `related` fields).
+3. Runs integrity checks over the built graph.
+
+Files with a `doc_id` become graph nodes; files without one are leaves. All `related:` entries are resolved as either bare `doc_id` refs (resolved within the from-node's scope first) or qualified `scope:doc_id` refs.
+
+| Locator | Severity | Condition |
+|---|---|---|
+| `E_GRAPH_DUPLICATE_DOC_ID` | Error | Two corpus files in the same scope share a `doc_id`. |
+| `related` | Error | A `related:` entry resolves to no node and no leaf (dangling). |
+| `related` | Warning | A `related:` entry resolves to a corpus file that has no `doc_id` (leaf target). |
+
+Graph errors (`E_GRAPH_DUPLICATE_DOC_ID`, dangling `related:`) cause exit 1. The leaf-target warning alone does not change the exit code.
+
+`--graph` takes precedence over `--sync` when both flags are given — it is a superset (runs the OKF schema pass that `--sync` also runs, plus the graph pass).
+
 **Examples:**
 
 ```bash
@@ -101,11 +122,20 @@ mev validate-brain --sync
 # Explicit path with sync check
 mev validate-brain --sync ~/Dev/agentic-portfolio
 
+# OKF pass + knowledge-graph integrity check
+mev validate-brain --graph
+
+# Explicit path with graph check
+mev validate-brain --graph ~/Dev/agentic-portfolio
+
 # Machine-readable output (consumed by the Brain RAG indexer)
 mev --json validate-brain ~/Dev/agentic-portfolio
 
 # Machine-readable output including sync diagnostics
 mev --json validate-brain --sync ~/Dev/agentic-portfolio
+
+# Machine-readable output including graph diagnostics
+mev --json validate-brain --graph ~/Dev/agentic-portfolio
 ```
 
 ---

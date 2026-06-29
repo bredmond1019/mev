@@ -30,12 +30,14 @@ src/
     ├── crawl.rs    ← crawl_corpus() → (Corpus, Vec<Diagnostic>); Corpus, CorpusEntry, MdFile; crawl_brain() (legacy)
     ├── okf.rs      ← OkfFrontmatter, validate_md_file() — OKF field checks; root-instruction-file exemption
     ├── scope.rs    ← scope_units(), scope_for(), owning_unit() — registry-driven scope resolver
-    └── sync.rs     ← (internal) sync helpers
+    ├── sync.rs     ← (internal) sync helpers
+    └── graph.rs    ← EdgeKind, Edge, Node, Graph, GraphArtifact, DocMeta; build_graph(), check_graph(), read_doc_metadata() — Phase 3 Block J
 
 tests/
 ├── brain_config.rs   ← integration tests for brain.toml loading + BrainConfig
 ├── brain_corpus.rs   ← integration tests for crawl_corpus() multi-root walk + scope resolution
 ├── brain_crawl.rs    ← integration tests for crawl_brain()
+├── brain_graph.rs    ← integration tests for validate_brain_graph() end-to-end — Phase 3 Block J
 ├── brain_okf.rs      ← integration tests for validate_md_file()
 ├── brain_validate.rs ← integration tests for BrainValidator end-to-end
 ├── smoke.rs          ← integration tests for the learn-ai validate() public API
@@ -181,3 +183,38 @@ exit 0 (clean) | exit 1 (any Error)
 | `owning_unit` | `(&Path, &BrainConfig) -> (String, String)` | Resolve a HQ-relative path to its `(slug, repo_path)` pair |
 
 Resolution algorithm: longest-prefix match using `Path::strip_prefix` (prevents `core/mev-extra` from matching `core/mev`). Root unit (`repo_path = "."`) is the fallback when no prefix matches.
+
+### Knowledge graph (`src/brain/graph.rs`) — Phase 3 Block J
+
+The graph module builds and validates the serializable `scope:doc_id` knowledge graph over the Brain corpus.
+
+#### Public functions
+
+| Function | Signature | Description |
+|---|---|---|
+| `read_doc_metadata` | `(&CorpusEntry) -> DocMeta` | D5 seam — reads `doc_id` and `related` from a corpus entry's inline frontmatter. Degrades gracefully on I/O or parse error (returns empty `DocMeta`). |
+| `build_graph` | `(&Corpus, &BrainConfig) -> GraphArtifact` | Walks the corpus once; files with a `doc_id` become nodes, others become leaves. Returns the serializable graph plus lookup structures. |
+| `check_graph` | `(&GraphArtifact) -> Vec<Diagnostic>` | Checks the built graph for integrity violations without re-walking the corpus. |
+
+#### Graph types
+
+| Type | Description |
+|---|---|
+| `EdgeKind` | Discriminant enum — `Related` is the only variant today (from `related:` frontmatter). |
+| `Edge` | Directed edge: `from` (canonical `scope:doc_id`), `to_ref` (as-authored), `kind`. |
+| `Node` | Graph node: `id` (canonical `scope:doc_id`), `scope`, `doc_id`, `rel` path. |
+| `Graph` | Serializable D4 artifact: `nodes: Vec<Node>`, `edges: Vec<Edge>`. |
+| `GraphArtifact` | Build output: `graph`, `node_map` (canonical id → node index), `leaf_keys` (files with no `doc_id`). |
+| `DocMeta` | Metadata extracted by `read_doc_metadata`: `doc_id: Option<String>`, `related: Vec<String>`. |
+
+#### Diagnostic locators emitted by `check_graph`
+
+| Locator | Severity | Condition |
+|---|---|---|
+| `E_GRAPH_DUPLICATE_DOC_ID` | Error | Two or more corpus files share the same `scope:doc_id`. |
+| `related` | Error | A `related:` entry resolves to no node and no leaf (`E_GRAPH_DANGLING_RELATED`). |
+| `related` | Warning | A `related:` entry resolves to a real corpus file that has no `doc_id` (`W_GRAPH_LEAF_TARGET`). |
+
+#### Public library entry point
+
+`validate_brain_graph(root: &Path) -> anyhow::Result<Report>` (in `src/lib.rs`) runs the full OKF schema pass followed by the graph pass — crawls the corpus once, builds the graph, and appends graph diagnostics to the same `Report`. Invoked by `mev validate-brain --graph`.
