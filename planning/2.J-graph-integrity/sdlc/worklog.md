@@ -23,3 +23,6 @@ Validated: gating checks (fast tripwire)
 ## Task 5 — PASSED (1 attempt)
 What: All four harness gates pass: fmt, clippy, 175 unit + 57 integration tests green, release build clean; Task 5 marked complete.
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: /Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/docs/architecture.md, /Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/docs/cli.md
