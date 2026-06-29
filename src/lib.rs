@@ -231,6 +231,102 @@ pub fn validate_brain_graph(root: &std::path::Path) -> anyhow::Result<Report> {
     Ok(report)
 }
 
+/// Validate the company-brain repo for OKF frontmatter compliance **plus** the
+/// `state.json` schema and cross-repo block-dependency graph integrity checks.
+///
+/// Phase 3, Block P: runs the full schema pass (identical to [`validate_brain`]) and
+/// then appends the state-validation pipeline diagnostics — discovery, schema-ring
+/// checks, graph build + integrity checks, and rollup-drift checks — into the same
+/// [`Report`].
+///
+/// Error-severity diagnostics (`E_STATE_*`) cause `report.is_failure()` → `true`
+/// (exit 1).  Drift and missing-file warnings (`W_STATE_*`) are reported but do not
+/// fail the run on their own (exit 0).
+///
+/// Resolves `brain.toml` the same way as [`validate_brain`] — see that function's
+/// doc for the `E_CONFIG_NOT_FOUND` fallback behaviour.
+pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
+    use brain::config::find_brain_config;
+    use brain::state::{
+        StateLoadError, build_state_graph, check_rollup, check_schema, check_state_graph,
+        discover_state_files, load_state,
+    };
+    use std::collections::HashMap;
+
+    let config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            let mut report = Report::default();
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    // Schema pass (OKF frontmatter) — reuse BrainValidator.
+    let mut report = BrainValidator::new(config.clone()).run(root);
+
+    // --- State pipeline ---
+
+    // 1. Discovery: find all planning/state.json files.
+    let (sources, discovery_diags) = discover_state_files(root, &config);
+    report.diagnostics.extend(discovery_diags);
+
+    // 2. Load each discovered file; emit E_STATE_MALFORMED_JSON for parse failures.
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    for src in &sources {
+        match load_state(&src.abs_path) {
+            Ok(file) => {
+                // 3. Schema-ring checks on successfully-loaded files.
+                let schema_diags = check_schema(src, &file);
+                report.diagnostics.extend(schema_diags);
+                loaded.push((src.clone(), file));
+            }
+            Err(StateLoadError::Parse { .. }) => {
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    "state.json is not valid JSON or does not match the expected schema"
+                        .to_string(),
+                ));
+            }
+            Err(StateLoadError::Io { source, .. }) => {
+                // IO errors after discovery are unexpected (file existed during discovery).
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("could not read state.json: {source}"),
+                ));
+            }
+        }
+    }
+
+    // 4. Graph build + integrity checks.
+    let graph = build_state_graph(&loaded);
+    let graph_diags = check_state_graph(&graph, &loaded);
+    report.diagnostics.extend(graph_diags);
+
+    // 5. Rollup-drift checks (brain files only).
+    // Build a slug → StateFile map of all loaded children (project kind).
+    let children: HashMap<String, brain::state::StateFile> = loaded
+        .iter()
+        .filter(|(_, f)| f.kind == "project")
+        .map(|(s, f)| (s.repo_slug.clone(), f.clone()))
+        .collect();
+
+    for (src, file) in &loaded {
+        if file.kind == "brain" {
+            let rollup_diags = check_rollup(&src.abs_path, file, &children);
+            report.diagnostics.extend(rollup_diags);
+        }
+    }
+
+    Ok(report)
+}
+
 /// Machine-readable envelope emitted by the `--json` flag for any `mev` subcommand.
 ///
 /// Consumed by the Brain RAG indexer as a pre-`--rebuild` gate.
