@@ -25,13 +25,16 @@ src/
 │   ├── crawl.rs    ← crawl() → (Vec<ContentFile>, Vec<Diagnostic>); ContentFile, Corpus, FileKind, Locale
 │   └── meta.rs     ← validate_file() — per-file frontmatter + JSON struct checks
 └── brain/
-    ├── mod.rs      ← BrainValidator (implements ContentValidator)
+    ├── mod.rs      ← BrainValidator (implements ContentValidator); wires crawl_corpus
     ├── config.rs   ← BrainConfig, CrawlConfig, VocabConfig, RepoEntry; find_brain_config(), load_brain_config()
-    ├── crawl.rs    ← crawl_brain() → (Vec<MdFile>, Vec<Diagnostic>); MdFile
-    └── okf.rs      ← OkfFrontmatter, validate_md_file() — OKF field checks
+    ├── crawl.rs    ← crawl_corpus() → (Corpus, Vec<Diagnostic>); Corpus, CorpusEntry, MdFile; crawl_brain() (legacy)
+    ├── okf.rs      ← OkfFrontmatter, validate_md_file() — OKF field checks; root-instruction-file exemption
+    ├── scope.rs    ← scope_units(), scope_for(), owning_unit() — registry-driven scope resolver
+    └── sync.rs     ← (internal) sync helpers
 
 tests/
 ├── brain_config.rs   ← integration tests for brain.toml loading + BrainConfig
+├── brain_corpus.rs   ← integration tests for crawl_corpus() multi-root walk + scope resolution
 ├── brain_crawl.rs    ← integration tests for crawl_brain()
 ├── brain_okf.rs      ← integration tests for validate_md_file()
 ├── brain_validate.rs ← integration tests for BrainValidator end-to-end
@@ -138,11 +141,17 @@ BrainValidator::new(config)
         │
         ▼
 .run(root)
-  ├── crawl_brain(root, skip_dirs)   ← walks FS, returns Vec<MdFile>
-  │        prune: skip_dirs names, nested git repos, file blocklist
+  ├── crawl_corpus(root, config)      ← registry-driven multi-root walk → (Corpus, Vec<Diagnostic>)
+  │        per file:
+  │          scope: owning_unit(rel, config) → (slug, repo_path)  [scope.rs]
+  │          membership: is_corpus_member(rel_to_unit) — planning/, docs/, README.md, CLAUDE.md
+  │          ephemeral: is_ephemeral(name) — drops handoff.md, _-prefixed files
+  │          CorpusEntry { path, rel, stem, scope } mapped → MdFile
   │
   └── for each MdFile:
         validate_md_file(item, config)
+            ├── root instruction file? (README.md / CLAUDE.md at unit root)
+            │       └── no-frontmatter exempt → skip OKF checks
             ├── read file
             ├── extract YAML frontmatter
             ├── deserialize OkfFrontmatter
@@ -154,3 +163,21 @@ Report { diagnostics }
         ▼
 exit 0 (clean) | exit 1 (any Error)
 ```
+
+### Key types in `src/brain/crawl.rs`
+
+| Type | Description |
+|---|---|
+| `MdFile` | Single validated file: `path`, `rel`, `stem` |
+| `CorpusEntry` | Multi-root corpus entry: `path`, `rel`, `stem`, `scope` (owning-unit slug) |
+| `Corpus` | Complete Brain corpus: `entries: Vec<CorpusEntry>`; serde-serializable for manifest emission |
+
+### Scope resolution (`src/brain/scope.rs`)
+
+| Function | Signature | Description |
+|---|---|---|
+| `scope_units` | `(&BrainConfig) -> Vec<(String, String)>` | All `(slug, repo_path)` pairs from the registry |
+| `scope_for` | `(&Path, &BrainConfig) -> String` | Resolve a HQ-relative path to its owning unit's slug |
+| `owning_unit` | `(&Path, &BrainConfig) -> (String, String)` | Resolve a HQ-relative path to its `(slug, repo_path)` pair |
+
+Resolution algorithm: longest-prefix match using `Path::strip_prefix` (prevents `core/mev-extra` from matching `core/mev`). Root unit (`repo_path = "."`) is the fallback when no prefix matches.

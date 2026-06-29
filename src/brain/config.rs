@@ -136,9 +136,7 @@ pub fn load_brain_config(path: &Path) -> Result<BrainConfig, ConfigError> {
 /// is found or the filesystem root is reached (in which case [`ConfigError::NotFound`]
 /// is returned).
 pub fn find_brain_root(start: &Path) -> Result<PathBuf, ConfigError> {
-    let mut current = start
-        .canonicalize()
-        .unwrap_or_else(|_| start.to_path_buf());
+    let mut current = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
     loop {
         if current.join("brain.toml").exists() {
             return Ok(current);

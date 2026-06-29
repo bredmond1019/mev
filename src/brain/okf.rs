@@ -109,6 +109,34 @@ pub(crate) fn is_valid_doc_id(s: &str) -> bool {
 // Per-file helpers
 // ---------------------------------------------------------------------------
 
+/// Return `true` if `mf` is a unit-root instruction file (`README.md` or `CLAUDE.md`
+/// located exactly at its owning scope unit's root, not deep in `docs/` or `planning/`).
+///
+/// Root instruction files at the unit root are valid corpus leaves but are **not** required
+/// to carry OKF frontmatter.  A `docs/README.md` or `planning/CLAUDE.md` is a normal corpus
+/// member and must be validated; the name-only check is insufficient.
+pub(crate) fn is_root_instruction_file(mf: &MdFile, config: &BrainConfig) -> bool {
+    // Fast-path: wrong filename.
+    if !matches!(
+        mf.path.file_name().and_then(|n| n.to_str()),
+        Some("README.md") | Some("CLAUDE.md")
+    ) {
+        return false;
+    }
+    // Verify the file sits exactly at its owning unit's root (not under docs/ or planning/).
+    let (_, unit_repo_path) = crate::brain::scope::owning_unit(&mf.rel, config);
+    let trimmed = unit_repo_path.trim();
+    let unit_rel: &std::path::Path = if trimmed == "." || trimmed.is_empty() {
+        &mf.rel
+    } else {
+        match mf.rel.strip_prefix(trimmed) {
+            Ok(r) => r,
+            Err(_) => return false,
+        }
+    };
+    unit_rel == std::path::Path::new("README.md") || unit_rel == std::path::Path::new("CLAUDE.md")
+}
+
 /// Build a "missing required field" `error` diagnostic.
 fn missing(mf: &MdFile, locator: &str) -> Diagnostic {
     Diagnostic::error(mf.rel.clone(), locator, "missing required field")
@@ -129,9 +157,14 @@ fn require_str(mf: &MdFile, locator: &str, value: &Option<String>, diags: &mut V
 ///
 /// Returns every diagnostic the file produces; an empty vector means the file is clean.
 ///
+/// **OKF exemption for root instruction files:** `README.md` and `CLAUDE.md` are valid
+/// corpus leaves but are **not** required to carry OKF frontmatter.  When such a file has
+/// no frontmatter, this function returns an empty diagnostic list (no error).  If the file
+/// *does* carry frontmatter, it is validated normally like any other corpus file.
+///
 /// Error short-circuits:
 /// - File read failure → one `error` diagnostic.
-/// - No frontmatter block → one `error` diagnostic at locator `"frontmatter"`.
+/// - No frontmatter block (non-exempt file) → one `error` diagnostic at locator `"frontmatter"`.
 /// - Malformed YAML → one `error` diagnostic at locator `"frontmatter"`.
 ///
 /// Field checks (after successful parse):
@@ -159,6 +192,11 @@ pub fn validate_md_file(mf: &MdFile, config: &BrainConfig) -> Vec<Diagnostic> {
     let yaml = match extract_frontmatter(&contents) {
         Some(y) => y,
         None => {
+            // Root instruction files (README.md / CLAUDE.md) without frontmatter are
+            // valid corpus leaves — they must not raise the OKF "missing frontmatter" error.
+            if is_root_instruction_file(mf, config) {
+                return vec![];
+            }
             return vec![Diagnostic::error(
                 mf.rel.clone(),
                 "frontmatter",
@@ -715,5 +753,144 @@ mod tests {
         assert_eq!(diags[0].severity, Severity::Error);
         assert_eq!(diags[0].locator, "");
         assert!(diags[0].message.starts_with("could not read file:"));
+    }
+
+    // --- OKF exemption for root instruction files ---
+
+    #[test]
+    fn is_root_instruction_file_detects_readme() {
+        let cfg = full_test_config();
+        let mf = MdFile {
+            path: PathBuf::from("/hq/README.md"),
+            rel: PathBuf::from("README.md"),
+            stem: "README".to_string(),
+        };
+        assert!(is_root_instruction_file(&mf, &cfg));
+    }
+
+    #[test]
+    fn is_root_instruction_file_detects_claude_md() {
+        let cfg = full_test_config();
+        let mf = MdFile {
+            path: PathBuf::from("/hq/CLAUDE.md"),
+            rel: PathBuf::from("CLAUDE.md"),
+            stem: "CLAUDE".to_string(),
+        };
+        assert!(is_root_instruction_file(&mf, &cfg));
+    }
+
+    #[test]
+    fn is_root_instruction_file_false_for_ordinary_files() {
+        let cfg = full_test_config();
+        let mf = MdFile {
+            path: PathBuf::from("/hq/planning/status.md"),
+            rel: PathBuf::from("planning/status.md"),
+            stem: "status".to_string(),
+        };
+        assert!(!is_root_instruction_file(&mf, &cfg));
+    }
+
+    #[test]
+    fn is_root_instruction_file_false_for_deep_readme() {
+        // docs/README.md is a corpus member (starts_with docs/) but NOT a root
+        // instruction file — it must be validated for OKF, not exempt.
+        let cfg = full_test_config();
+        let mf = MdFile {
+            path: PathBuf::from("/hq/docs/README.md"),
+            rel: PathBuf::from("docs/README.md"),
+            stem: "README".to_string(),
+        };
+        assert!(!is_root_instruction_file(&mf, &cfg));
+    }
+
+    #[test]
+    fn root_readme_without_frontmatter_produces_no_diagnostic() {
+        let dir = temp_dir("root-readme-exempt");
+        // Write a README.md with no frontmatter.
+        let path = dir.join("README.md");
+        std::fs::write(&path, b"# Brain\nWelcome to the company brain.\n").unwrap();
+        let mf = MdFile {
+            path: path.clone(),
+            rel: PathBuf::from("README.md"),
+            stem: "README".to_string(),
+        };
+        let cfg = full_test_config();
+        let diags = validate_md_file(&mf, &cfg);
+        assert!(
+            diags.is_empty(),
+            "README.md without frontmatter should produce no diagnostic, got: {diags:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn root_claude_md_without_frontmatter_produces_no_diagnostic() {
+        let dir = temp_dir("root-claude-exempt");
+        let path = dir.join("CLAUDE.md");
+        std::fs::write(&path, b"# CLAUDE\nProject instructions.\n").unwrap();
+        let mf = MdFile {
+            path: path.clone(),
+            rel: PathBuf::from("CLAUDE.md"),
+            stem: "CLAUDE".to_string(),
+        };
+        let cfg = full_test_config();
+        let diags = validate_md_file(&mf, &cfg);
+        assert!(
+            diags.is_empty(),
+            "CLAUDE.md without frontmatter should produce no diagnostic, got: {diags:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn root_readme_with_valid_frontmatter_is_validated_normally() {
+        let dir = temp_dir("root-readme-with-fm");
+        let content =
+            "---\ntype: Index\ntitle: Brain README\ndescription: HQ entry point.\n---\n# Brain\n";
+        let path = dir.join("README.md");
+        std::fs::write(&path, content).unwrap();
+        let mf = MdFile {
+            path: path.clone(),
+            rel: PathBuf::from("README.md"),
+            stem: "README".to_string(),
+        };
+        let cfg = full_test_config();
+        let diags = validate_md_file(&mf, &cfg);
+        assert!(
+            diags.is_empty(),
+            "README.md with valid frontmatter should be clean, got: {diags:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn root_readme_with_invalid_frontmatter_is_flagged() {
+        // A README.md that *does* carry frontmatter but is missing required fields
+        // must still be validated — the exemption only applies to *absent* frontmatter.
+        let dir = temp_dir("root-readme-bad-fm");
+        let content = "---\ntitle: Brain README\n---\n# Brain\n";
+        let path = dir.join("README.md");
+        std::fs::write(&path, content).unwrap();
+        let mf = MdFile {
+            path: path.clone(),
+            rel: PathBuf::from("README.md"),
+            stem: "README".to_string(),
+        };
+        let cfg = full_test_config();
+        let diags = validate_md_file(&mf, &cfg);
+        // Missing `type` and `description` → at least 2 errors.
+        assert!(
+            !diags.is_empty(),
+            "README.md with missing required fields must be flagged"
+        );
+        assert!(
+            diags.iter().any(|d| d.locator == "type"),
+            "expected 'type' error, got: {diags:?}"
+        );
+        assert!(
+            diags.iter().any(|d| d.locator == "description"),
+            "expected 'description' error, got: {diags:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -263,7 +263,8 @@ fn find_brain_root_returns_err_when_no_brain_toml() {
 fn find_brain_config_delegates_to_find_brain_root_correctly() {
     // Confirm that find_brain_config (which now delegates to find_brain_root) still
     // returns a correctly parsed config when called from the fixture dir.
-    let cfg = find_brain_config(&fixture_dir()).expect("should resolve and parse via find_brain_root");
+    let cfg =
+        find_brain_config(&fixture_dir()).expect("should resolve and parse via find_brain_root");
     assert!(
         cfg.vocab.layer.contains(&"brain".to_string()),
         "config via find_brain_root should have 'brain' layer"
