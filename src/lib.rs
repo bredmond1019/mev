@@ -12,6 +12,7 @@ pub mod theme;
 mod validator;
 pub use brain::BrainValidator;
 pub use brain::crawl::{MdFile, crawl_brain};
+pub use brain::graph::{Graph, build_graph, check_graph};
 pub use brain::okf::{OkfFrontmatter, validate_md_file};
 pub use learn_ai::LearnAiValidator;
 pub use learn_ai::crawl::{ContentFile, Corpus, FileKind, Locale, crawl};
@@ -181,6 +182,51 @@ pub fn validate_brain_sync(root: &std::path::Path) -> anyhow::Result<Report> {
     // Sync watermark pass
     let sync_diags = check_sync(root, &config);
     report.diagnostics.extend(sync_diags);
+
+    Ok(report)
+}
+
+/// Validate the company-brain repo for OKF frontmatter compliance **plus** the global
+/// `scope:doc_id` knowledge-graph integrity check.
+///
+/// Phase 3, Block J: runs the full schema pass (identical to [`validate_brain`]) and then
+/// builds the global graph via [`brain::graph::build_graph`] and appends
+/// [`brain::graph::check_graph`] diagnostics into the same [`Report`].
+///
+/// Graph errors (`E_GRAPH_DUPLICATE_DOC_ID`, `E_GRAPH_DANGLING_RELATED`) cause
+/// `report.is_failure()` → `true` (exit 1).  The leaf warning (`W_GRAPH_LEAF_TARGET`)
+/// is reported but does not fail the run on its own.
+///
+/// Resolves `brain.toml` the same way as [`validate_brain`] — see that function's
+/// doc for the `E_CONFIG_NOT_FOUND` fallback behaviour.
+pub fn validate_brain_graph(root: &std::path::Path) -> anyhow::Result<Report> {
+    use brain::config::find_brain_config;
+    use brain::crawl::crawl_corpus;
+    use brain::graph::{build_graph, check_graph};
+
+    let config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            let mut report = Report::default();
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    // Schema pass (OKF frontmatter) — reuse BrainValidator.
+    let mut report = BrainValidator::new(config.clone()).run(root);
+
+    // Graph pass — crawl corpus once, build the graph, then check it.
+    let (corpus, crawl_diags) = crawl_corpus(root, &config);
+    report.diagnostics.extend(crawl_diags);
+
+    let artifact = build_graph(&corpus, &config);
+    let graph_diags = check_graph(&artifact);
+    report.diagnostics.extend(graph_diags);
 
     Ok(report)
 }
