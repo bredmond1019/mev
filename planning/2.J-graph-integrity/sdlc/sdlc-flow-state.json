@@ -2,9 +2,9 @@
   "spec_slug": "2.J-graph-integrity",
   "branch": "2.J-graph-integrity-flow",
   "started_at": "2026-06-29T13:34:36Z",
-  "updated_at": "2026-06-29T13:55:37Z",
+  "updated_at": "2026-06-29T13:58:50Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow",
-  "status": "docs",
+  "status": "done",
   "current_task": 5,
   "tasks": {
     "1": {
@@ -262,13 +262,21 @@
         "filesReadKb": null,
         "inTokEst": 794,
         "outTok": 5741
+      },
+      {
+        "label": "wrap-up",
+        "model": "sonnet",
+        "promptTokEst": 810,
+        "filesReadKb": null,
+        "inTokEst": 810,
+        "outTok": 5171
       }
     ],
     "total": {
-      "promptTokEst": 11303,
+      "promptTokEst": 12113,
       "filesReadKb": 0,
-      "inTokEst": 11303,
-      "outTok": 76290
+      "inTokEst": 12113,
+      "outTok": 81461
     }
   }
 }

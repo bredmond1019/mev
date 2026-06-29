@@ -26,3 +26,6 @@ Validated: gating checks (fast tripwire)
 
 ## Docs
 Patched: /Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/docs/architecture.md, /Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/docs/cli.md
+
+## Wrap-up — PASS
+Next: Block K (link integrity: markdown/file:///[[wiki]]) or Block Q (manifest emit / Phase 3B) — check master-plan.md for ordering
