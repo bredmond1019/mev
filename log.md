@@ -8,12 +8,29 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-06-29T15:59:51-0300"
+timestamp: "2026-06-29T20:30:00-0300"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## 2026-06-29 — MV.3.P Done: state.json integrity validator (`validate-brain --state`)
+
+Implemented the full Block P state integrity layer (all 7 tasks, PASS verdict, 209 tests). Task 1 added `src/brain/state.rs` with the complete serde model for `state.json` (`StateFile`, `Focus`, `Block`, `BlockedBy` internally-tagged enum, `Track`, `RepoRollup`, `CrossRepoEdge`, `TierEntry`) plus `load_state()`, registered in `mod.rs`. Task 2 added `StateSource`, `discover_state_files`, and `check_schema` — registry discovery from HQ brain + tier sub-brains (via `tiers[].rollup`) + leaf repos (via `brain.toml [[repos]]`), plus four validation rings (JSON+schema, blocked_by well-formedness, kind-appropriate section checks). Task 3 built the state graph: `StateGraph`/`StateNode`/`StateEdge` (all `Serialize`), `build_state_graph` (nodes from tracks[], edges from `blocked_by` + `cross_repo[]`), and `check_state_graph` emitting five diagnostic codes including the marquee `E_STATE_DANGLING_BLOCKED_BY`. Task 4 added `check_rollup` — brain `repos[]` headline drift detection emitting `W_STATE_ROLLUP_DRIFT`. Task 5 wired everything into `validate_brain_state` public API and the `--state` CLI flag on `mev validate-brain`. Task 6 delivered `tests/brain_state.rs` with four end-to-end integration tests (clean, dangling blocked_by, rollup drift, JSON round-trip). Task 7 confirmed all four harness gates green and the live run clean: 0 `E_STATE_*`/`W_STATE_*` diagnostics across all five live `planning/state.json` files. Next: `MV.3.K` (link integrity) or `MV.3B.Q` (manifest emit / Phase 3B).
+
+```
+32b9300 chore: flow state — docs
+464046c docs: update docs for 3.P-state-integrity
+129ecee chore: flow state — task 7 passed
+b1e2e2c chore(3.P): task 7 validate — all harness gates pass, live state check clean
+d0d540c chore: flow state — task 6 passed
+a8ab973 feat(3.P): add integration tests for validate_brain_state (Task 6)
+095352b chore: flow state — task 5 passed
+511ab64 feat(state): add validate_brain_state public API + --state CLI flag
+```
 
 ---
 
