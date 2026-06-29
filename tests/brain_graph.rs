@@ -227,7 +227,6 @@ fn cross_scope_related_that_resolves_is_ok() {
         .filter(|d| {
             d.severity == mev::Severity::Error
                 && (d.locator == "E_GRAPH_DANGLING_RELATED"
-                    || d.locator == "related"
                     || d.locator == "E_GRAPH_DUPLICATE_DOC_ID")
         })
         .collect();
@@ -257,13 +256,12 @@ fn cross_scope_related_after_target_removed_is_dangling() {
 
     let report = mev::validate_brain_graph(&dir).expect("validate_brain_graph must not error");
 
-    // The dangling diagnostic uses locator "related" with Error severity.
     let dangling: Vec<_> = report
         .diagnostics
         .iter()
         .filter(|d| {
             d.severity == mev::Severity::Error
-                && (d.locator == "related" || d.locator == "E_GRAPH_DANGLING_RELATED")
+                && d.locator == "E_GRAPH_DANGLING_RELATED"
         })
         .collect();
     assert_eq!(
@@ -304,7 +302,7 @@ fn related_to_leaf_produces_warning_and_no_error() {
     let warnings: Vec<_> = report
         .diagnostics
         .iter()
-        .filter(|d| d.severity == mev::Severity::Warning && d.locator == "related")
+        .filter(|d| d.severity == mev::Severity::Warning && d.locator == "W_GRAPH_LEAF_TARGET")
         .collect();
     // Errors that are NOT OKF schema violations (which we don't care about here)
     let graph_errors: Vec<_> = report
@@ -312,8 +310,7 @@ fn related_to_leaf_produces_warning_and_no_error() {
         .iter()
         .filter(|d| {
             d.severity == mev::Severity::Error
-                && (d.locator == "related"
-                    || d.locator == "E_GRAPH_DANGLING_RELATED"
+                && (d.locator == "E_GRAPH_DANGLING_RELATED"
                     || d.locator == "E_GRAPH_DUPLICATE_DOC_ID")
         })
         .collect();
