@@ -259,10 +259,7 @@ fn cross_scope_related_after_target_removed_is_dangling() {
     let dangling: Vec<_> = report
         .diagnostics
         .iter()
-        .filter(|d| {
-            d.severity == mev::Severity::Error
-                && d.locator == "E_GRAPH_DANGLING_RELATED"
-        })
+        .filter(|d| d.severity == mev::Severity::Error && d.locator == "E_GRAPH_DANGLING_RELATED")
         .collect();
     assert_eq!(
         dangling.len(),
