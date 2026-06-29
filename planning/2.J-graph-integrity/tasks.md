@@ -12,7 +12,7 @@ related: [master-plan, status, block-j-namespacing-decision, 2j-corpus-crawl-tas
 
 # Task Spec — Phase 3, Block J — Graph integrity (global `scope:doc_id` graph)
 
-**Status:** Not started · **Last run:** never
+**Status:** Task 1 in progress · **Last run:** now
 
 ## Goal
 Over the multi-root corpus, build a global **`scope:doc_id`** knowledge-graph node index and flag every
