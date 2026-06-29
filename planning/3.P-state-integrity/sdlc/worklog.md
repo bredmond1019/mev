@@ -24,3 +24,8 @@ Validated: gating checks (fast tripwire)
 What: Added `validate_brain_state` public API function and `--state` CLI flag to wire the state pipeline (Tasks 1–4) into the `mev validate-brain` subcommand
 Decisions: --state takes precedence over --graph and --sync in the dispatch chain (most-specific check first); StateLoadError::Io after discovery emits E_STATE_MALFORMED_JSON rather than a separate IO code — keeps the locator vocabulary minimal per the spec; Brain files in the rollup check only pass project-kind children as the children map — brain-to-brain rollup is not yet in scope
 Validated: gating checks (fast tripwire)
+
+## Task 6 — PASSED (1 attempt)
+What: Add tests/brain_state.rs: four end-to-end integration tests for validate_brain_state covering clean fixture, dangling blocked_by, rollup drift (warning-not-error), and JSON round-trip with State diagnostic
+Decisions: Fixture uses no .md files so the OKF pass in validate_brain_state is silent, allowing assertion of zero total errors in the clean test without needing to write valid OKF docs; Tests filter by E_STATE_* locator prefix to isolate State diagnostics from any OKF noise, consistent with the brain_sync.rs precedent of filtering by E_SYNC_*; Test 3 (drift) updates the brain cross_repo edge to use AL.1.A→BE.1.A (both still valid) so only W_STATE_ROLLUP_DRIFT fires without E_STATE_DANGLING_CROSS_REPO interference
+Validated: gating checks (fast tripwire)

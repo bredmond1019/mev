@@ -2,10 +2,10 @@
   "spec_slug": "3.P-state-integrity",
   "branch": "3.P-state-integrity-flow",
   "started_at": "2026-06-29T19:49:30Z",
-  "updated_at": "2026-06-29T20:14:48Z",
+  "updated_at": "2026-06-29T20:21:15Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.P-state-integrity-flow",
   "status": "running",
-  "current_task": 5,
+  "current_task": 6,
   "tasks": {
     "1": {
       "status": "passed",
@@ -96,6 +96,24 @@
       "files_changed": [
         "src/lib.rs",
         "src/main.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "6": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Add tests/brain_state.rs: four end-to-end integration tests for validate_brain_state covering clean fixture, dangling blocked_by, rollup drift (warning-not-error), and JSON round-trip with State diagnostic",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Fixture uses no .md files so the OKF pass in validate_brain_state is silent, allowing assertion of zero total errors in the clean test without needing to write valid OKF docs",
+        "Tests filter by E_STATE_* locator prefix to isolate State diagnostics from any OKF noise, consistent with the brain_sync.rs precedent of filtering by E_SYNC_*",
+        "Test 3 (drift) updates the brain cross_repo edge to use AL.1.A→BE.1.A (both still valid) so only W_STATE_ROLLUP_DRIFT fires without E_STATE_DANGLING_CROSS_REPO interference"
+      ],
+      "files_changed": [
+        "tests/brain_state.rs",
+        "planning/3.P-state-integrity/tasks.md"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -252,13 +270,37 @@
         "filesReadKb": null,
         "inTokEst": 570,
         "outTok": 1880
+      },
+      {
+        "label": "update-task-6",
+        "model": "haiku",
+        "promptTokEst": 254,
+        "filesReadKb": null,
+        "inTokEst": 254,
+        "outTok": 1185
+      },
+      {
+        "label": "implement-6-1",
+        "model": "sonnet",
+        "promptTokEst": 883,
+        "filesReadKb": null,
+        "inTokEst": 883,
+        "outTok": 14420
+      },
+      {
+        "label": "test-6-1",
+        "model": "haiku",
+        "promptTokEst": 570,
+        "filesReadKb": null,
+        "inTokEst": 570,
+        "outTok": 1798
       }
     ],
     "total": {
-      "promptTokEst": 9531,
+      "promptTokEst": 11238,
       "filesReadKb": 0,
-      "inTokEst": 9531,
-      "outTok": 92628
+      "inTokEst": 11238,
+      "outTok": 110031
     }
   }
 }
