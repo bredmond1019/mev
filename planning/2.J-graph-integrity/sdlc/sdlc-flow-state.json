@@ -2,10 +2,10 @@
   "spec_slug": "2.J-graph-integrity",
   "branch": "2.J-graph-integrity-flow",
   "started_at": "2026-06-29T13:34:36Z",
-  "updated_at": "2026-06-29T13:42:11Z",
+  "updated_at": "2026-06-29T13:47:14Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow",
   "status": "running",
-  "current_task": 3,
+  "current_task": 4,
   "tasks": {
     "1": {
       "status": "passed",
@@ -57,6 +57,23 @@
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/src/lib.rs",
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/src/main.rs",
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/planning/2.J-graph-integrity/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added tests/brain_graph.rs with 7 end-to-end integration tests for validate_brain_graph over a multi-unit (brain/core/mev) fixture, covering all acceptance criteria: clean corpus, same doc_id across scopes, duplicate detection, cross-scope resolution, dangling edges, leaf-target warnings, and JSON envelope round-trip.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Used validate_brain_graph public API (not the graph module directly) for true end-to-end integration coverage matching task intent",
+        "Filtered graph-specific errors (locator == 'related' or 'E_GRAPH_DUPLICATE_DOC_ID') rather than all errors in some tests to avoid OKF schema violations from test fixtures interfering with graph assertions"
+      ],
+      "files_changed": [
+        "tests/brain_graph.rs",
+        "planning/2.J-graph-integrity/tasks.md"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -165,13 +182,37 @@
         "filesReadKb": null,
         "inTokEst": 570,
         "outTok": 1813
+      },
+      {
+        "label": "update-task-4",
+        "model": "haiku",
+        "promptTokEst": 254,
+        "filesReadKb": null,
+        "inTokEst": 254,
+        "outTok": 1927
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 883,
+        "filesReadKb": null,
+        "inTokEst": 883,
+        "outTok": 8600
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 570,
+        "filesReadKb": null,
+        "inTokEst": 570,
+        "outTok": 1999
       }
     ],
     "total": {
-      "promptTokEst": 6117,
+      "promptTokEst": 7824,
       "filesReadKb": 0,
-      "inTokEst": 6117,
-      "outTok": 47099
+      "inTokEst": 7824,
+      "outTok": 59625
     }
   }
 }
