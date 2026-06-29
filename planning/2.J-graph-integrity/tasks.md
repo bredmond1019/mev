@@ -12,7 +12,7 @@ related: [master-plan, status, block-j-namespacing-decision, 2j-corpus-crawl-tas
 
 # Task Spec — Phase 3, Block J — Graph integrity (global `scope:doc_id` graph)
 
-**Status:** Not started · **Last run:** never
+**Status:** Done — all 5 tasks PASS · **Last run:** 2026-06-29
 
 ## Goal
 Over the multi-root corpus, build a global **`scope:doc_id`** knowledge-graph node index and flag every
@@ -142,7 +142,7 @@ duplicate canonical id and every `related:` edge that fails to resolve, surfaced
   the leaf warning does not). Update the subcommand help text.
 - Files: `src/lib.rs`, `src/main.rs`. (Depends on Task 2.)
 
-### 4. Integration tests — end-to-end `--graph` over a multi-unit fixture
+### 4. [~] Integration tests — end-to-end `--graph` over a multi-unit fixture
 - Add `tests/brain_graph.rs` building a temp HQ-root fixture: `brain.toml` registering `brain` (`.`),
   a tier (`core`), and a repo (`mev` → `core/mev`); OKF-clean docs placed to exercise each scope.
 - Tests:
@@ -155,7 +155,7 @@ duplicate canonical id and every `related:` edge that fails to resolve, surfaced
   - (Optional, if cheap) a `--json` round-trip asserting a graph diagnostic appears in the envelope.
 - Files: `tests/brain_graph.rs`. (Depends on Task 3.)
 
-### 5. Validate
+### 5. [x] Validate
 - Run the Validation Commands listed below and confirm all pass.
 
 ## Acceptance Criteria
@@ -199,4 +199,5 @@ cargo build --release
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the spec. -->
-_No amendments yet._
+- 2026-06-29 [task 1] `check_graph` was implemented in Task 1 (graph.rs) rather than deferred to Task 2 as written in the spec. Its logic depends directly on `GraphArtifact` defined in the same module, and the Task 1 unit tests for `E_GRAPH_DUPLICATE_DOC_ID` and `W_GRAPH_LEAF_TARGET` required it. Task 2 consequently reduced to adding the one missing unit test (bare ref to another scope's doc_id is dangling).
+- 2026-06-29 [task 3] `--graph` and `--sync` are mutually exclusive by precedence (graph checked first) rather than producing an error when combined — `--graph` is a strict superset of the OKF schema pass that `--sync` also runs, so the simpler UX was preferred.

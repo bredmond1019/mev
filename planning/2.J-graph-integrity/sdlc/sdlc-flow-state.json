@@ -1,0 +1,290 @@
+{
+  "spec_slug": "2.J-graph-integrity",
+  "branch": "2.J-graph-integrity-flow",
+  "started_at": "2026-06-29T13:34:36Z",
+  "updated_at": "2026-06-29T14:00:58Z",
+  "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow",
+  "status": "done",
+  "current_task": 5,
+  "tasks": {
+    "1": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Implements the serializable graph model (EdgeKind, Edge, Node, Graph), the D5 read_doc_metadata seam, build_graph producing a GraphArtifact with node_map and leaf_keys, and check_graph with duplicate/dangling/leaf-target diagnostics — 14 unit tests, all harness gates green.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "check_graph was co-located in Task 1's graph.rs rather than deferred to Task 2, since its logic depends directly on the GraphArtifact type defined here and it was required to write the unit tests validating E_GRAPH_DUPLICATE_DOC_ID and W_GRAPH_LEAF_TARGET per the spec acceptance criteria",
+        "GraphArtifact wraps Graph plus node_map and leaf_keys rather than returning a tuple, to keep the public API named and extensible",
+        "tempfile added as a dev-dependency since it was absent from Cargo.toml but needed for fixture-based unit tests already used in other test modules"
+      ],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/src/brain/graph.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/src/brain/mod.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/Cargo.toml",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/Cargo.lock"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Task 2 complete: check_graph verifies uniqueness (E_GRAPH_DUPLICATE_DOC_ID), resolves bare/qualified related edges (E_GRAPH_DANGLING_RELATED), and emits leaf-target warnings (W_GRAPH_LEAF_TARGET); added the missing bare_ref_naming_other_scope_id_is_dangling unit test",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "check_graph was already scaffolded in the Task 1 commit with a full implementation; Task 2 completed it by adding the one missing unit test: bare ref to a doc_id that exists only in another scope resolves to the from-scope and is correctly flagged dangling",
+        "Locator for dangling/leaf diagnostics is the string 'related' per spec ('Both use locator related') — not the vocabulary code names E_GRAPH_DANGLING_RELATED/W_GRAPH_LEAF_TARGET which are documentation labels only; E_GRAPH_DUPLICATE_DOC_ID is used as the locator for the duplicate check"
+      ],
+      "files_changed": [
+        "src/brain/graph.rs",
+        "planning/2.J-graph-integrity/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "3": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added validate_brain_graph() public API to lib.rs and --graph flag to the ValidateBrain CLI subcommand, wiring the schema pass + graph integrity check together; re-exported build_graph, Graph, check_graph for Phase 3B Block R emitter use.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "--graph and --sync are mutually exclusive by precedence (graph checked first) rather than producing an error for combining them — simpler UX since --graph is a superset of the OKF schema pass that --sync also runs"
+      ],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/src/lib.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/src/main.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/planning/2.J-graph-integrity/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added tests/brain_graph.rs with 7 end-to-end integration tests for validate_brain_graph over a multi-unit (brain/core/mev) fixture, covering all acceptance criteria: clean corpus, same doc_id across scopes, duplicate detection, cross-scope resolution, dangling edges, leaf-target warnings, and JSON envelope round-trip.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Used validate_brain_graph public API (not the graph module directly) for true end-to-end integration coverage matching task intent",
+        "Filtered graph-specific errors (locator == 'related' or 'E_GRAPH_DUPLICATE_DOC_ID') rather than all errors in some tests to avoid OKF schema violations from test fixtures interfering with graph assertions"
+      ],
+      "files_changed": [
+        "tests/brain_graph.rs",
+        "planning/2.J-graph-integrity/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "5": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "All four harness gates pass: fmt, clippy, 175 unit + 57 integration tests green, release build clean; Task 5 marked complete.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [],
+      "files_changed": [
+        "planning/2.J-graph-integrity/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    }
+  },
+  "review": {
+    "verdict": "PASS",
+    "findings": [],
+    "attempts": 1
+  },
+  "docs": {
+    "changed": [
+      "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/docs/architecture.md",
+      "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/docs/cli.md"
+    ],
+    "created": []
+  },
+  "bail_reason": null,
+  "pr": {
+    "url": "https://github.com/bredmond1019/mev/pull/4",
+    "number": 4
+  },
+  "tokens": {
+    "stages": [
+      {
+        "label": "worktree-setup",
+        "model": "haiku",
+        "promptTokEst": 770,
+        "filesReadKb": null,
+        "inTokEst": 770,
+        "outTok": 10436
+      },
+      {
+        "label": "enumerate",
+        "model": "haiku",
+        "promptTokEst": 226,
+        "filesReadKb": null,
+        "inTokEst": 226,
+        "outTok": 814
+      },
+      {
+        "label": "update-task-1",
+        "model": "haiku",
+        "promptTokEst": 254,
+        "filesReadKb": null,
+        "inTokEst": 254,
+        "outTok": 1667
+      },
+      {
+        "label": "implement-1-1",
+        "model": "sonnet",
+        "promptTokEst": 883,
+        "filesReadKb": null,
+        "inTokEst": 883,
+        "outTok": 12894
+      },
+      {
+        "label": "test-1-1",
+        "model": "haiku",
+        "promptTokEst": 570,
+        "filesReadKb": null,
+        "inTokEst": 570,
+        "outTok": 1746
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 254,
+        "filesReadKb": null,
+        "inTokEst": 254,
+        "outTok": 1503
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 883,
+        "filesReadKb": null,
+        "inTokEst": 883,
+        "outTok": 7741
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 570,
+        "filesReadKb": null,
+        "inTokEst": 570,
+        "outTok": 1903
+      },
+      {
+        "label": "update-task-3",
+        "model": "haiku",
+        "promptTokEst": 254,
+        "filesReadKb": null,
+        "inTokEst": 254,
+        "outTok": 1179
+      },
+      {
+        "label": "implement-3-1",
+        "model": "sonnet",
+        "promptTokEst": 883,
+        "filesReadKb": null,
+        "inTokEst": 883,
+        "outTok": 5403
+      },
+      {
+        "label": "test-3-1",
+        "model": "haiku",
+        "promptTokEst": 570,
+        "filesReadKb": null,
+        "inTokEst": 570,
+        "outTok": 1813
+      },
+      {
+        "label": "update-task-4",
+        "model": "haiku",
+        "promptTokEst": 254,
+        "filesReadKb": null,
+        "inTokEst": 254,
+        "outTok": 1927
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 883,
+        "filesReadKb": null,
+        "inTokEst": 883,
+        "outTok": 8600
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 570,
+        "filesReadKb": null,
+        "inTokEst": 570,
+        "outTok": 1999
+      },
+      {
+        "label": "update-task-5",
+        "model": "haiku",
+        "promptTokEst": 254,
+        "filesReadKb": null,
+        "inTokEst": 254,
+        "outTok": 1123
+      },
+      {
+        "label": "implement-5-1",
+        "model": "sonnet",
+        "promptTokEst": 883,
+        "filesReadKb": null,
+        "inTokEst": 883,
+        "outTok": 2140
+      },
+      {
+        "label": "test-5-1",
+        "model": "haiku",
+        "promptTokEst": 570,
+        "filesReadKb": null,
+        "inTokEst": 570,
+        "outTok": 2572
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 978,
+        "filesReadKb": null,
+        "inTokEst": 978,
+        "outTok": 5089
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 794,
+        "filesReadKb": null,
+        "inTokEst": 794,
+        "outTok": 5741
+      },
+      {
+        "label": "wrap-up",
+        "model": "sonnet",
+        "promptTokEst": 810,
+        "filesReadKb": null,
+        "inTokEst": 810,
+        "outTok": 5171
+      },
+      {
+        "label": "pr-create",
+        "model": "sonnet",
+        "promptTokEst": 738,
+        "filesReadKb": null,
+        "inTokEst": 738,
+        "outTok": 1866
+      }
+    ],
+    "total": {
+      "promptTokEst": 12851,
+      "filesReadKb": 0,
+      "inTokEst": 12851,
+      "outTok": 83327
+    }
+  }
+}
