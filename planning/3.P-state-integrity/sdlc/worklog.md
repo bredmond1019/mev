@@ -34,3 +34,6 @@ Validated: gating checks (fast tripwire)
 What: Task 7 validate: all four harness gates pass (fmt, clippy, 209 tests, release build); mev validate-brain --state ~/Dev/agentic-portfolio parses all five live state.json files with 0 state-specific diagnostics
 Decisions: The exit-1 from the live run is from pre-existing OKF errors on archive files (the normal validate-brain OKF pass), not from any state check failure — confirmed by filtering JSON output for E_STATE_*/W_STATE_* codes which returned 0 results
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: /Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.P-state-integrity-flow/docs/cli.md, /Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.P-state-integrity-flow/docs/architecture.md
