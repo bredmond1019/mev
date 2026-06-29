@@ -2,10 +2,10 @@
   "spec_slug": "3.P-state-integrity",
   "branch": "3.P-state-integrity-flow",
   "started_at": "2026-06-29T19:49:30Z",
-  "updated_at": "2026-06-29T20:05:50Z",
+  "updated_at": "2026-06-29T20:10:19Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.P-state-integrity-flow",
   "status": "running",
-  "current_task": 3,
+  "current_task": 4,
   "tasks": {
     "1": {
       "status": "passed",
@@ -60,6 +60,24 @@
       ],
       "files_changed": [
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.P-state-integrity-flow/src/brain/state.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Add check_rollup to detect brain repos[] headline drift from children's actual focus, emitting W_STATE_ROLLUP_DRIFT warnings",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Used brain_path: &Path as an explicit parameter since the task spec's function signature omits it but Diagnostic::warning requires a path — minimal addition consistent with existing helpers",
+        "Added sorted_set helper to produce deterministic warning messages from HashSet comparisons",
+        "Added four tests: in-sync (0 diags), drifted now+next (1 warning at Warning severity), missing child (silent skip), blocked-only drift (1 warning)"
+      ],
+      "files_changed": [
+        "src/brain/state.rs",
+        "planning/3.P-state-integrity/tasks.md"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -168,13 +186,37 @@
         "filesReadKb": null,
         "inTokEst": 570,
         "outTok": 2183
+      },
+      {
+        "label": "update-task-4",
+        "model": "haiku",
+        "promptTokEst": 254,
+        "filesReadKb": null,
+        "inTokEst": 254,
+        "outTok": 1081
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 883,
+        "filesReadKb": null,
+        "inTokEst": 883,
+        "outTok": 8613
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 570,
+        "filesReadKb": null,
+        "inTokEst": 570,
+        "outTok": 2052
       }
     ],
     "total": {
-      "promptTokEst": 6117,
+      "promptTokEst": 7824,
       "filesReadKb": 0,
-      "inTokEst": 6117,
-      "outTok": 70936
+      "inTokEst": 7824,
+      "outTok": 82682
     }
   }
 }
