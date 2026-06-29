@@ -9,15 +9,15 @@ status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
 timestamp: "2026-06-29"
-now: "2.J-corpus-crawl complete + merged (PR #3, 160 tests); is_root_instruction_file correctness fix applied. Ready to build 2.J-graph-integrity"
-next: "/sdlc-flow 2.J-graph-integrity (global scope:doc_id node index + edge integrity + leaf lint via --graph)"
+now: "2.J-graph-integrity complete (PASS, 5 tasks); global scope:doc_id graph, extensible edge model, check_graph diagnostics, --graph CLI flag, 175 unit + 57 integration tests"
+next: "Block K (link integrity) or Block Q (manifest emit / Phase 3B) — see master-plan.md for ordering"
 blocked: []
 ---
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-29 — 2.J-corpus-crawl merged (PR #3). Post-flow code review fix: is_root_instruction_file now verifies unit-root position (not just filename) — prevents docs/README.md from being silently OKF-exempt. 160 tests pass.
-**Current focus:** 2.J-graph-integrity — global `scope:doc_id` node index + edge integrity + leaf lint (`--graph`)
+**Last updated:** 2026-06-29 — 2.J-graph-integrity PASS. Serializable graph model (EdgeKind/Edge/Node/Graph), build_graph, check_graph (E_GRAPH_DUPLICATE_DOC_ID, E_GRAPH_DANGLING_RELATED, W_GRAPH_LEAF_TARGET), validate_brain_graph public API, --graph CLI flag, 7-test integration suite. 175 unit + 57 integration = 232 total tests pass.
+**Current focus:** Block J done — next is Block K (link integrity) or Block Q (manifest emit)
 
 ---
 
@@ -26,8 +26,8 @@ blocked: []
 > Working board — keep all five queues live. **Never end a meaningful session with every queue
 > empty.** The headlines of **now / next / blocked** mirror the frontmatter scalars above.
 
-- **now** — **2.J-corpus-crawl MERGED** (PR #3, all 5 tasks PASS). Registry-driven `scope_for`/`scope_units`, `crawl_corpus` (owned serializable `Corpus`), `BrainValidator` rewired to corpus crawl, OKF root-file exemption, 13-test integration suite over 3-unit fixture tree. Post-flow fix: `is_root_instruction_file` now verifies unit-root position (not just filename). 160 tests pass.
-- **next** — `/sdlc-flow 2.J-graph-integrity` (global `scope:doc_id` node index + extensible edge model + `related:` resolution + leaf lint via `--graph`)
+- **now** — **2.J-graph-integrity DONE** (all 5 tasks PASS). Serializable `Graph`/`Node`/`Edge`/`EdgeKind` model; `build_graph` + `read_doc_metadata` seam (D5 forward-compat); `check_graph` (E_GRAPH_DUPLICATE_DOC_ID, E_GRAPH_DANGLING_RELATED, W_GRAPH_LEAF_TARGET); `validate_brain_graph` public API; `--graph` CLI flag; 7-test end-to-end integration suite. 175 unit + 57 integration = 232 tests pass.
+- **next** — Block K (link integrity: markdown/`file://`/`[[wiki]]`) or Block Q (manifest emit / Phase 3B) — check master-plan.md for ordering
 - **blocked** — nothing blocked
 - **improve** — Phase 3B (D4): **Block Q** manifest emit → `index_brain.py` consumes it (kill double crawl); **Block R** graph emit → Postgres edges table + structural query surface (bastion/MCP); **Block S** graph-aware RAG (orchestrator). Companion: register tier units + bare-bloat `skip_dirs` in `brain.toml`.
 - **recurring** — none yet
@@ -81,7 +81,7 @@ blocked: []
 | Block | What | Status | Notes |
 |---|---|---|---|
 | Block J-crawl | Multi-root corpus crawl + scope registry | Done | `scope_units`/`scope_for`/`owning_unit` in `src/brain/scope.rs`; `crawl_corpus` → owned serializable `Corpus`; `BrainValidator` rewired; OKF root-file exemption; 13-test integration suite; all 160 tests pass. Post-flow fix: `is_root_instruction_file` now verifies unit-root position (commit `753be87`). PR #3 merged. |
-| Block J | Graph integrity (global `scope:doc_id`) | Not started | Spec ready (`planning/2.J-graph-integrity/`). Global node index + extensible edge model + uniqueness + `related:` resolution (bare=same scope, qualified=cross) + leaf lint; `--graph`. Depends on J-crawl. See `namespacing-and-corpus-decision.md`. |
+| Block J | Graph integrity (global `scope:doc_id`) | Done | Serializable Graph model, build_graph + read_doc_metadata seam, check_graph (3 diagnostic codes), validate_brain_graph API, --graph CLI flag, 7 integration tests. 232 total tests pass. |
 | Block K | Link integrity (markdown/`file://`/`[[wiki]]`) | Not started | Per master-plan |
 | Block L | Structural coverage (`index.md` ↔ dir, D17) | Not started | Per master-plan |
 
