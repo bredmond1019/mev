@@ -33,6 +33,7 @@ enum Command {
     /// Validate the Bastion Brain repo for OKF frontmatter compliance (Phase 2).
     /// With --sync, also checks cross-repo synced_from watermark integrity (Phase 3, Block M).
     /// With --graph, also checks the global scope:doc_id knowledge-graph integrity (Phase 3, Block J).
+    /// With --state, also checks each repo's planning/state.json schema and cross-repo block graph (Phase 3, Block P).
     ValidateBrain {
         /// Path to search from when locating brain.toml (walks up to find it).
         /// Defaults to the current directory.
@@ -49,6 +50,13 @@ enum Command {
         /// (W_GRAPH_LEAF_TARGET). Graph errors cause exit 1; the leaf warning alone does not.
         #[arg(long)]
         graph: bool,
+        /// Also run the state.json schema and block-dependency graph integrity check: validates
+        /// each repo's planning/state.json against the canonical schema, checks for dangling
+        /// blocked_by references (E_STATE_DANGLING_BLOCKED_BY), unknown repos
+        /// (E_STATE_UNKNOWN_REPO), and flags rollup drift (W_STATE_ROLLUP_DRIFT).
+        /// State errors cause exit 1; drift-only warnings exit 0.
+        #[arg(long)]
+        state: bool,
     },
 }
 
@@ -102,7 +110,12 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Command::ValidateBrain { path, sync, graph } => {
+        Command::ValidateBrain {
+            path,
+            sync,
+            graph,
+            state,
+        } => {
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,
                 Err(e) => {
@@ -110,7 +123,9 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let result = if graph {
+            let result = if state {
+                mev::validate_brain_state(&root)
+            } else if graph {
                 mev::validate_brain_graph(&root)
             } else if sync {
                 mev::validate_brain_sync(&root)
