@@ -2,10 +2,10 @@
   "spec_slug": "2.J-graph-integrity",
   "branch": "2.J-graph-integrity-flow",
   "started_at": "2026-06-29T13:34:36Z",
-  "updated_at": "2026-06-29T13:38:15Z",
+  "updated_at": "2026-06-29T13:42:11Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow",
   "status": "running",
-  "current_task": 2,
+  "current_task": 3,
   "tasks": {
     "1": {
       "status": "passed",
@@ -40,6 +40,23 @@
       "files_changed": [
         "src/brain/graph.rs",
         "planning/2.J-graph-integrity/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "3": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added validate_brain_graph() public API to lib.rs and --graph flag to the ValidateBrain CLI subcommand, wiring the schema pass + graph integrity check together; re-exported build_graph, Graph, check_graph for Phase 3B Block R emitter use.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "--graph and --sync are mutually exclusive by precedence (graph checked first) rather than producing an error for combining them — simpler UX since --graph is a superset of the OKF schema pass that --sync also runs"
+      ],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/src/lib.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/src/main.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/2.J-graph-integrity-flow/planning/2.J-graph-integrity/tasks.md"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -124,13 +141,37 @@
         "filesReadKb": null,
         "inTokEst": 570,
         "outTok": 1903
+      },
+      {
+        "label": "update-task-3",
+        "model": "haiku",
+        "promptTokEst": 254,
+        "filesReadKb": null,
+        "inTokEst": 254,
+        "outTok": 1179
+      },
+      {
+        "label": "implement-3-1",
+        "model": "sonnet",
+        "promptTokEst": 883,
+        "filesReadKb": null,
+        "inTokEst": 883,
+        "outTok": 5403
+      },
+      {
+        "label": "test-3-1",
+        "model": "haiku",
+        "promptTokEst": 570,
+        "filesReadKb": null,
+        "inTokEst": 570,
+        "outTok": 1813
       }
     ],
     "total": {
-      "promptTokEst": 4410,
+      "promptTokEst": 6117,
       "filesReadKb": 0,
-      "inTokEst": 4410,
-      "outTok": 38704
+      "inTokEst": 6117,
+      "outTok": 47099
     }
   }
 }

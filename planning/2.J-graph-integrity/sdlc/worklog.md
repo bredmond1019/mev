@@ -9,3 +9,8 @@ Validated: gating checks (fast tripwire)
 What: Task 2 complete: check_graph verifies uniqueness (E_GRAPH_DUPLICATE_DOC_ID), resolves bare/qualified related edges (E_GRAPH_DANGLING_RELATED), and emits leaf-target warnings (W_GRAPH_LEAF_TARGET); added the missing bare_ref_naming_other_scope_id_is_dangling unit test
 Decisions: check_graph was already scaffolded in the Task 1 commit with a full implementation; Task 2 completed it by adding the one missing unit test: bare ref to a doc_id that exists only in another scope resolves to the from-scope and is correctly flagged dangling; Locator for dangling/leaf diagnostics is the string 'related' per spec ('Both use locator related') — not the vocabulary code names E_GRAPH_DANGLING_RELATED/W_GRAPH_LEAF_TARGET which are documentation labels only; E_GRAPH_DUPLICATE_DOC_ID is used as the locator for the duplicate check
 Validated: gating checks (fast tripwire)
+
+## Task 3 — PASSED (1 attempt)
+What: Added validate_brain_graph() public API to lib.rs and --graph flag to the ValidateBrain CLI subcommand, wiring the schema pass + graph integrity check together; re-exported build_graph, Graph, check_graph for Phase 3B Block R emitter use.
+Decisions: --graph and --sync are mutually exclusive by precedence (graph checked first) rather than producing an error for combining them — simpler UX since --graph is a superset of the OKF schema pass that --sync also runs
+Validated: gating checks (fast tripwire)
