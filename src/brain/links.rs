@@ -16,7 +16,7 @@
 //! - [`check_links`] — resolves each extracted link against the filesystem or the
 //!   `doc_ids` set, emitting `E_LINK_*` diagnostics for broken references.
 //! - [`collect_doc_ids`] — collects the set of all authored bare `doc_id`s from a
-//!   corpus, reusing the D5 `read_doc_metadata` seam.
+//!   corpus, reading from `entry.metadata` (D5 extract-once — no re-parse).
 //!
 //! Tasks 2–3 (`check_links`, `check_moved_references`) extend this module.
 
@@ -27,7 +27,6 @@ use serde::Serialize;
 
 use crate::Diagnostic;
 use crate::brain::crawl::Corpus;
-use crate::brain::graph::read_doc_metadata;
 
 // ---------------------------------------------------------------------------
 // Link model (D4 serializable)
@@ -234,15 +233,20 @@ fn find_close(s: &str, start: usize, needle: &str) -> Option<usize> {
 
 /// Collect the set of all authored bare `doc_id`s from the corpus.
 ///
-/// Reuses [`read_doc_metadata`] (the D5 single frontmatter-parsing seam) rather
-/// than re-parsing frontmatter independently.  Returns bare `doc_id` strings (no
-/// `scope:` prefix) so wikilink targets (which are scope-agnostic slugs) can be
-/// looked up directly.
+/// Reads from `entry.metadata` (D5 extract-once — populated by `crawl_corpus`;
+/// no file I/O here).  Returns bare `doc_id` strings (no `scope:` prefix) so
+/// wikilink targets (which are scope-agnostic slugs) can be looked up directly.
 pub fn collect_doc_ids(corpus: &Corpus) -> HashSet<String> {
     corpus
         .entries
         .iter()
-        .filter_map(|entry| read_doc_metadata(entry).doc_id)
+        .filter_map(|entry| {
+            entry
+                .metadata
+                .as_ref()
+                .and_then(|m| m.doc_id.clone())
+                .filter(|s| !s.trim().is_empty())
+        })
         .collect()
 }
 
@@ -260,8 +264,8 @@ fn file_uri_to_path(uri: &str) -> &str {
 
 /// Resolve and check all local link references in every [`CorpusEntry`].
 ///
-/// For each entry the function reads its contents (graceful degrade on I/O error —
-/// mirrors [`read_doc_metadata`]), extracts links via [`extract_links`], and
+/// For each entry the function reads its contents (graceful degrade on I/O error),
+/// extracts links via [`extract_links`], and
 /// resolves each [`LinkRef`]:
 ///
 /// - **[`LinkKind::Markdown`]** — resolves the target relative to the referring
@@ -280,7 +284,7 @@ pub fn check_links(corpus: &Corpus, _root: &Path, doc_ids: &HashSet<String>) -> 
     for entry in &corpus.entries {
         let contents = match std::fs::read_to_string(&entry.path) {
             Ok(c) => c,
-            // Graceful degrade — skip unreadable files (mirrors read_doc_metadata).
+            // Graceful degrade — skip unreadable files.
             Err(_) => continue,
         };
 
@@ -605,14 +609,22 @@ mod tests {
     use std::path::Path;
 
     use crate::brain::crawl::{Corpus, CorpusEntry};
+    use crate::brain::okf::OkfFrontmatter;
+    use crate::shared::extract_frontmatter;
 
-    /// Write `content` to a temp file and return a minimal [`CorpusEntry`] for it.
+    /// Write `content` to a temp file and return a [`CorpusEntry`] for it.
+    ///
+    /// `metadata` is pre-parsed from `content` just as `crawl_corpus` does (D5
+    /// extract-once): entries with valid OKF frontmatter carry `Some(metadata)`;
+    /// those without carry `None`.
     fn write_corpus_entry(dir: &std::path::Path, rel_str: &str, content: &str) -> CorpusEntry {
         let full = dir.join(rel_str);
         if let Some(parent) = full.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(&full, content.as_bytes()).unwrap();
+        let metadata = extract_frontmatter(content)
+            .and_then(|yaml| serde_yaml::from_str::<OkfFrontmatter>(yaml).ok());
         CorpusEntry {
             path: full,
             rel: std::path::PathBuf::from(rel_str),
@@ -623,7 +635,7 @@ mod tests {
                 .unwrap()
                 .to_string(),
             scope: "brain".to_string(),
-            metadata: None,
+            metadata,
         }
     }
 
