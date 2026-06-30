@@ -2,10 +2,10 @@
   "spec_slug": "3B.T-state-table-rollup-emit",
   "branch": "3B.T-state-table-rollup-emit-flow",
   "started_at": "2026-06-30T14:17:03Z",
-  "updated_at": "2026-06-30T14:28:57Z",
+  "updated_at": "2026-06-30T14:36:19Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.T-state-table-rollup-emit-flow",
   "status": "running",
-  "current_task": 3,
+  "current_task": 4,
   "tasks": {
     "1": {
       "status": "passed",
@@ -59,6 +59,25 @@
       ],
       "files_changed": [
         "src/brain/emit.rs",
+        "tests/brain_emit.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Add `emit_state` library driver and `emit-state` CLI subcommand: dry-run/write dispatch over plan_state_json + plan_master_plan_tables, with pub-use re-exports and 4 integration tests",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Used plan_state_json (the Task 3 implementation) where the spec named plan_brain_rollup — the two names refer to the same function; plan_state_json handles both leaf focus and brain rollup in one pass",
+        "Re-exported emit entry points at crate root via pub use brain::emit::{...} to satisfy the Task 4 re-export requirement and enable direct use in tests",
+        "Printed emit-state summary line as 'emit-state <mode> <root>: N error(s), N warning(s)' to mirror the ValidateBrain pattern while surfacing the dry-run/write mode"
+      ],
+      "files_changed": [
+        "src/lib.rs",
+        "src/main.rs",
         "tests/brain_emit.rs"
       ],
       "commit": "",
@@ -168,13 +187,37 @@
         "filesReadKb": null,
         "inTokEst": 588,
         "outTok": 2014
+      },
+      {
+        "label": "update-task-4",
+        "model": "haiku",
+        "promptTokEst": 263,
+        "filesReadKb": null,
+        "inTokEst": 263,
+        "outTok": 1088
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 915,
+        "filesReadKb": null,
+        "inTokEst": 915,
+        "outTok": 15878
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 588,
+        "filesReadKb": null,
+        "inTokEst": 588,
+        "outTok": 2200
       }
     ],
     "total": {
-      "promptTokEst": 6321,
+      "promptTokEst": 8087,
       "filesReadKb": 0,
-      "inTokEst": 6321,
-      "outTok": 65964
+      "inTokEst": 8087,
+      "outTok": 85130
     }
   }
 }
