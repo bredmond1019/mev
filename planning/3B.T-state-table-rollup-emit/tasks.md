@@ -1,6 +1,6 @@
 # Task Spec — Phase 3B, Block MV.3B.T — State-graph table + rollup emit
 
-**Status:** In progress (tasks 1-5 passed) · **Last run:** 2026-06-30T14:42:35Z
+**Status:** Done (all 6 tasks passed, PASS) · **Last run:** 2026-06-30T15:00:00Z
 
 ## Goal
 Add `mev emit-state`: make mev the **single derivation engine** for every *generated* view the v2
@@ -188,4 +188,4 @@ cargo build --release
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the spec. -->
-_No amendments yet._
+- 2026-06-30 [task 4] `emit_state` calls `plan_state_json` (the Task 3 planner) where the spec's Task 4 description referred to the same function as `plan_brain_rollup`; consolidated into the single `plan_state_json` call that already handles both leaf focus and brain rollup in one pass.
