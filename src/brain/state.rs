@@ -96,8 +96,10 @@ pub enum BlockedBy {
 /// - `blocked` items: `block`, `title`, `blocked_by[]`, `repo?`
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Block {
-    /// Canonical block ID.
-    pub block: String,
+    /// Canonical block ID. (`#[serde(alias)]` keeps v1 `"block"`-keyed files readable
+    /// through the v2 transition; the canonical authored key is `id`.)
+    #[serde(alias = "block")]
+    pub id: String,
     /// Brief human description.
     pub title: String,
     /// Lifecycle status (present on `now` and `blocked` entries).
@@ -143,9 +145,19 @@ pub struct TrackBlock {
     pub id: String,
     /// Brief human description.
     pub title: String,
-    /// Lifecycle status.
+    /// Lifecycle status (authored: `open`/`in_progress`/`closed` — `blocked` is derived,
+    /// enforced in task 2).
     #[serde(default)]
     pub status: Option<String>,
+    /// The block's full dependency edges (the authoritative DAG). Same forms as [`BlockedBy`].
+    #[serde(default)]
+    pub depends_on: Vec<BlockedBy>,
+    /// Execution-order rank for "what's next" (orthogonal to track grouping).
+    #[serde(default)]
+    pub wave: Option<i64>,
+    /// Backlog-promotion provenance, when this block came from a backlog item.
+    #[serde(default)]
+    pub origin: Option<Origin>,
 }
 
 /// One phase/wave entry in a leaf repo's `tracks[]`.
@@ -191,7 +203,8 @@ pub struct Endpoint {
     /// Repo slug.
     pub repo: String,
     /// Canonical block ID.
-    pub block: String,
+    #[serde(alias = "block")]
+    pub id: String,
 }
 
 /// A directed cross-repo dependency edge in a brain `cross_repo[]`.
@@ -221,6 +234,54 @@ pub struct TierEntry {
     /// One-line summary of the tier's current state.
     #[serde(default)]
     pub summary: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Origin — backlog→block promotion provenance (v2)
+// ---------------------------------------------------------------------------
+
+/// Provenance pointer on a block that was promoted from a backlog item.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct Origin {
+    /// Origin kind — `"backlog"` today.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The originating backlog node's stable `slug` key.
+    pub slug: String,
+}
+
+// ---------------------------------------------------------------------------
+// Backlog — HQ queued-ideas graph node (v2)
+// ---------------------------------------------------------------------------
+
+/// One entry in the HQ brain `backlog[]` — a queued idea as a graph node.
+///
+/// `slug` is the stable node key. `depends_on` reuses [`BlockedBy`] (the same
+/// edge form as blocks). On promotion the node persists with
+/// `status:"promoted"` + a `block` pointer; the resulting block carries an
+/// [`Origin`] back-pointer.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Backlog {
+    /// Stable node key (the notes-dir slug).
+    pub slug: String,
+    /// Human description.
+    pub title: String,
+    /// Repo the item will land in when promoted (or `"cross-repo"`).
+    pub repo: String,
+    /// Item kind (`improvement` / `feature` / `chore` / `decision` / …).
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Lifecycle status: `idea` / `ready` / `promoted` (validated in task 2).
+    pub status: String,
+    /// What the idea is gated on — same edge forms as a block's `depends_on`.
+    #[serde(default)]
+    pub depends_on: Vec<BlockedBy>,
+    /// Set only when `status == "promoted"`: the ID of the block it became.
+    #[serde(default)]
+    pub block: Option<String>,
+    /// Path to the pre-plan notes doc.
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +322,9 @@ pub struct StateFile {
     /// Optional top-level annotation note (seen in HQ state.json).
     #[serde(default)]
     pub note: Option<String>,
+    /// HQ queued-ideas graph (brain HQ only; empty elsewhere).
+    #[serde(default)]
+    pub backlog: Vec<Backlog>,
 }
 
 // ---------------------------------------------------------------------------
@@ -489,7 +553,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                 "E_STATE_SCHEMA_BAD_STATUS",
                 format!(
                     "block '{}' has invalid status '{}'; expected one of: {}",
-                    block.block,
+                    block.id,
                     status,
                     VALID_STATUSES.join(", ")
                 ),
@@ -508,7 +572,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                         format!(
                             "blocked_by entry in block '{}' is missing required \
                              field(s): {}",
-                            block.block,
+                            block.id,
                             [repo_empty.then_some("'repo'"), id_empty.then_some("'id'")]
                                 .into_iter()
                                 .flatten()
@@ -658,7 +722,7 @@ pub fn build_state_graph(files: &[(StateSource, StateFile)]) -> StateGraph {
         for block in all_focus {
             // The `from` block may live in a child repo (brain focus carries `repo`).
             let from_repo = block.repo.as_deref().unwrap_or(src.repo_slug.as_str());
-            let from_key = format!("{}:{}", from_repo, block.block);
+            let from_key = format!("{}:{}", from_repo, block.id);
 
             for bb in &block.blocked_by {
                 if let BlockedBy::Block { repo, id, .. } = bb {
@@ -675,8 +739,8 @@ pub fn build_state_graph(files: &[(StateSource, StateFile)]) -> StateGraph {
         // --- CrossRepo edges: from brain cross_repo[] ---
         for edge in &file.cross_repo {
             edges.push(StateEdge {
-                from: format!("{}:{}", edge.from.repo, edge.from.block),
-                to_ref: format!("{}:{}", edge.to.repo, edge.to.block),
+                from: format!("{}:{}", edge.from.repo, edge.from.id),
+                to_ref: format!("{}:{}", edge.to.repo, edge.to.id),
                 kind: StateEdgeKind::CrossRepo,
                 source_path: path.clone(),
             });
@@ -763,14 +827,14 @@ pub fn check_state_graph(
             .chain(file.focus.blocked.iter());
 
         for block in all_focus {
-            let key = format!("{}:{}", src.repo_slug, block.block);
+            let key = format!("{}:{}", src.repo_slug, block.id);
             if !node_set.contains(key.as_str()) {
                 diags.push(Diagnostic::error(
                     path,
                     "E_STATE_DANGLING_FOCUS",
                     format!(
                         "focus block '{}' is not registered in this repo's tracks[]",
-                        block.block
+                        block.id
                     ),
                 ));
             }
@@ -890,21 +954,15 @@ pub fn check_rollup(
         };
 
         // Compare block-id sets; ignore title/note cosmetic differences.
-        let cached_now: HashSet<&str> = rollup.now.iter().map(|b| b.block.as_str()).collect();
-        let actual_now: HashSet<&str> = child.focus.now.iter().map(|b| b.block.as_str()).collect();
+        let cached_now: HashSet<&str> = rollup.now.iter().map(|b| b.id.as_str()).collect();
+        let actual_now: HashSet<&str> = child.focus.now.iter().map(|b| b.id.as_str()).collect();
 
-        let cached_next: HashSet<&str> = rollup.next.iter().map(|b| b.block.as_str()).collect();
-        let actual_next: HashSet<&str> =
-            child.focus.next.iter().map(|b| b.block.as_str()).collect();
+        let cached_next: HashSet<&str> = rollup.next.iter().map(|b| b.id.as_str()).collect();
+        let actual_next: HashSet<&str> = child.focus.next.iter().map(|b| b.id.as_str()).collect();
 
-        let cached_blocked: HashSet<&str> =
-            rollup.blocked.iter().map(|b| b.block.as_str()).collect();
-        let actual_blocked: HashSet<&str> = child
-            .focus
-            .blocked
-            .iter()
-            .map(|b| b.block.as_str())
-            .collect();
+        let cached_blocked: HashSet<&str> = rollup.blocked.iter().map(|b| b.id.as_str()).collect();
+        let actual_blocked: HashSet<&str> =
+            child.focus.blocked.iter().map(|b| b.id.as_str()).collect();
 
         if cached_now != actual_now
             || cached_next != actual_next
@@ -978,10 +1036,10 @@ mod tests {
   "updated": "2026-06-29",
   "focus": {{
     "now": [
-      {{ "block": "MV.3.J", "title": "Graph integrity", "status": "closed" }}
+      {{ "id": "MV.3.J", "title": "Graph integrity", "status": "closed" }}
     ],
     "next": [
-      {{ "block": "MV.3.K", "title": "Link integrity" }}
+      {{ "id": "MV.3.K", "title": "Link integrity" }}
     ],
     "blocked": []
   }},
@@ -1006,25 +1064,25 @@ mod tests {
   "updated": "2026-06-29",
   "focus": {
     "now": [
-      { "block": "BA.11.C0", "repo": "bastion", "title": "Manifest engine", "status": "in_progress" }
+      { "id": "BA.11.C0", "repo": "bastion", "title": "Manifest engine", "status": "in_progress" }
     ],
     "next": [
-      { "block": "BA.11.C", "repo": "bastion", "title": "WebSocket hub" }
+      { "id": "BA.11.C", "repo": "bastion", "title": "WebSocket hub" }
     ],
     "blocked": []
   },
   "repos": [
     {
       "repo": "bastion",
-      "now": [{ "block": "BA.11.C0", "title": "Manifest engine", "status": "in_progress" }],
-      "next": [{ "block": "BA.11.C", "title": "WebSocket hub" }],
+      "now": [{ "id": "BA.11.C0", "title": "Manifest engine", "status": "in_progress" }],
+      "next": [{ "id": "BA.11.C", "title": "WebSocket hub" }],
       "blocked": []
     }
   ],
   "cross_repo": [
     {
-      "from": { "repo": "bastion-ui", "block": "BU.1.A" },
-      "to": { "repo": "bastion", "block": "BA.11.C" },
+      "from": { "repo": "bastion-ui", "id": "BU.1.A" },
+      "to": { "repo": "bastion", "id": "BA.11.C" },
       "note": "Session-control screens need the WS hub."
     }
   ]
@@ -1040,12 +1098,12 @@ mod tests {
   "note": "Top company brain.",
   "focus": {
     "now": [
-      { "block": "BA.11.C0", "repo": "bastion", "title": "Manifest engine", "status": "in_progress" }
+      { "id": "BA.11.C0", "repo": "bastion", "title": "Manifest engine", "status": "in_progress" }
     ],
     "next": [],
     "blocked": [
       {
-        "block": "OR.B",
+        "id": "OR.B",
         "repo": "orchestrator",
         "title": "Semantic Brain Q&A",
         "blocked_by": [
@@ -1058,7 +1116,7 @@ mod tests {
     {
       "repo": "bastion",
       "tier": "core",
-      "now": [{ "block": "BA.11.C0", "title": "Manifest engine", "status": "in_progress" }],
+      "now": [{ "id": "BA.11.C0", "title": "Manifest engine", "status": "in_progress" }],
       "next": [],
       "blocked": []
     }
@@ -1577,7 +1635,7 @@ mod tests {
   "updated": "2026-06-29",
   "focus": {
     "now": [
-      { "block": "T.1", "title": "Work", "status": "flying" }
+      { "id": "T.1", "title": "Work", "status": "flying" }
     ],
     "next": [],
     "blocked": []
@@ -1614,7 +1672,7 @@ mod tests {
     "next": [],
     "blocked": [
       {
-        "block": "T.1",
+        "id": "T.1",
         "title": "Blocked block",
         "blocked_by": [
           { "type": "block", "repo": "other", "id": "" }
@@ -1718,7 +1776,7 @@ mod tests {
   "kind": "project",
   "updated": "2026-06-29",
   "focus": {{
-    "now": [{{ "block": "{block_id}", "title": "Work", "status": "in_progress" }}],
+    "now": [{{ "id": "{block_id}", "title": "Work", "status": "in_progress" }}],
     "next": [],
     "blocked": []
   }},
@@ -1777,7 +1835,7 @@ mod tests {
     "next": [],
     "blocked": [
       {
-        "block": "BE.1.A",
+        "id": "BE.1.A",
         "title": "Blocked work",
         "blocked_by": [
           { "type": "block", "repo": "alpha", "id": "AL.1.GHOST" }
@@ -1818,7 +1876,7 @@ mod tests {
     "next": [],
     "blocked": [
       {
-        "block": "AL.1.A",
+        "id": "AL.1.A",
         "title": "Blocked",
         "blocked_by": [
           { "type": "block", "repo": "ghost-repo", "id": "GH.1.X" }
@@ -1895,7 +1953,7 @@ mod tests {
   "kind": "project",
   "updated": "2026-06-29",
   "focus": {
-    "now": [{ "block": "AL.1.GHOST", "title": "Missing", "status": "in_progress" }],
+    "now": [{ "id": "AL.1.GHOST", "title": "Missing", "status": "in_progress" }],
     "next": [],
     "blocked": []
   },
@@ -1934,8 +1992,8 @@ mod tests {
   "repos": [{ "repo": "alpha", "now": [], "next": [], "blocked": [] }],
   "cross_repo": [
     {
-      "from": { "repo": "alpha", "block": "AL.1.A" },
-      "to": { "repo": "alpha", "block": "AL.1.GHOST" }
+      "from": { "repo": "alpha", "id": "AL.1.A" },
+      "to": { "repo": "alpha", "id": "AL.1.GHOST" }
     }
   ]
 }"#;
@@ -1970,7 +2028,7 @@ mod tests {
         let make_blocks = |ids: &[&str]| -> Vec<Block> {
             ids.iter()
                 .map(|id| Block {
-                    block: id.to_string(),
+                    id: id.to_string(),
                     title: "placeholder".to_string(),
                     status: None,
                     note: None,
@@ -1996,6 +2054,7 @@ mod tests {
             cross_repo: vec![],
             tiers: vec![],
             note: None,
+            backlog: vec![],
         }
     }
 
@@ -2009,7 +2068,7 @@ mod tests {
         let make_blocks = |ids: &[&str], with_status: bool| -> Vec<Block> {
             ids.iter()
                 .map(|id| Block {
-                    block: id.to_string(),
+                    id: id.to_string(),
                     title: "placeholder".to_string(),
                     status: if with_status {
                         Some("in_progress".to_string())
@@ -2037,6 +2096,7 @@ mod tests {
             cross_repo: vec![],
             tiers: vec![],
             note: None,
+            backlog: vec![],
         }
     }
 
