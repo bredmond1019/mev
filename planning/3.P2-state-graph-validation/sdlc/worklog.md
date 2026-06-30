@@ -29,3 +29,7 @@ Validated: gating checks (fast tripwire)
 What: Wired detect_cycles, check_status_consistency, check_backlog_integrity, and check_focus_drift into validate_brain_state pipeline; migrated integration fixtures to v2 and added 6 new end-to-end tests (10 total).
 Decisions: Focus drift check runs on all loaded files (not just project kind), matching the spec intent that each file with tracks[] gets checked; Existing fixtures migrated to v2 by replacing 'block' JSON key with 'id' in focus entries and cross_repo endpoints (alias in serde model keeps v1 still deserializable but v2 is canonical); New pipeline steps appended in spec order: cycle detection (5), status consistency (6), backlog integrity (7), rollup drift (8), focus drift (9)
 Validated: gating checks (fast tripwire)
+
+## Task 7 — PASSED (1 attempt)
+What: Updated docs/cli.md and docs/architecture.md to document the v2 state-graph validation additions: new diagnostic codes (E_STATE_CYCLE, E_STATE_AUTHORED_BLOCKED, E_STATE_STATUS_INCONSISTENT, E_STATE_DANGLING_PROMOTION, W_STATE_FOCUS_DRIFT), expanded --state pipeline steps, and updated architecture module map and state-integrity section with v2 types and functions.
+Validated: gating checks (fast tripwire)

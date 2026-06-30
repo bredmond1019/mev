@@ -2,10 +2,10 @@
   "spec_slug": "3.P2-state-graph-validation",
   "branch": "3.P2-state-graph-validation-flow",
   "started_at": "2026-06-30T10:03:46Z",
-  "updated_at": "2026-06-30T10:40:12Z",
+  "updated_at": "2026-06-30T10:45:33Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.P2-state-graph-validation-flow",
   "status": "running",
-  "current_task": 6,
+  "current_task": 7,
   "tasks": {
     "1": {
       "status": "passed",
@@ -108,6 +108,20 @@
       "files_changed": [
         "src/lib.rs",
         "tests/brain_state.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "7": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Updated docs/cli.md and docs/architecture.md to document the v2 state-graph validation additions: new diagnostic codes (E_STATE_CYCLE, E_STATE_AUTHORED_BLOCKED, E_STATE_STATUS_INCONSISTENT, E_STATE_DANGLING_PROMOTION, W_STATE_FOCUS_DRIFT), expanded --state pipeline steps, and updated architecture module map and state-integrity section with v2 types and functions.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [],
+      "files_changed": [
+        "docs/cli.md",
+        "docs/architecture.md"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -288,13 +302,37 @@
         "filesReadKb": null,
         "inTokEst": 586,
         "outTok": 1745
+      },
+      {
+        "label": "update-task-7",
+        "model": "haiku",
+        "promptTokEst": 262,
+        "filesReadKb": null,
+        "inTokEst": 262,
+        "outTok": 1175
+      },
+      {
+        "label": "implement-7-1",
+        "model": "sonnet",
+        "promptTokEst": 911,
+        "filesReadKb": null,
+        "inTokEst": 911,
+        "outTok": 8385
+      },
+      {
+        "label": "test-7-1",
+        "model": "haiku",
+        "promptTokEst": 586,
+        "filesReadKb": null,
+        "inTokEst": 586,
+        "outTok": 2842
       }
     ],
     "total": {
-      "promptTokEst": 11574,
+      "promptTokEst": 13333,
       "filesReadKb": 0,
-      "inTokEst": 11574,
-      "outTok": 136053
+      "inTokEst": 13333,
+      "outTok": 148455
     }
   }
 }

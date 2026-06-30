@@ -73,7 +73,7 @@ Extend `mev validate-brain --state` to guard the **v2 state schema** — the ful
 - `tests/brain_state.rs`: migrate existing integration fixtures to v2 and add end-to-end cases — a cyclic `depends_on` → exit 1 with `E_STATE_CYCLE`; authored `status:"blocked"` → `E_STATE_AUTHORED_BLOCKED`; closed-depends-on-non-closed → `E_STATE_STATUS_INCONSISTENT`; dangling backlog dep + orphan promotion flagged; `focus` drift → warning (exit 0); a clean v2 corpus passes; `--json` envelope well-formed.
 - **Owns:** `src/lib.rs`, `tests/brain_state.rs`.
 
-### 7. Documentation
+### 7. Documentation (in progress)
 - `docs/cli.md`: add the new diagnostic codes (`E_STATE_CYCLE`, `E_STATE_AUTHORED_BLOCKED`, `E_STATE_STATUS_INCONSISTENT`, `E_STATE_DANGLING_PROMOTION`, `W_STATE_FOCUS_DRIFT`) to the diagnostics reference; note that `--state` now validates the v2 `depends_on` DAG (acyclicity + derived-blocked) and warns on focus drift.
 - `docs/architecture.md`: update the `src/brain/state.rs` one-liner to mention DAG/cycle/backlog if it enumerates the module's checks.
 - **Owns:** `docs/cli.md`, `docs/architecture.md`.
