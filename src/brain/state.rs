@@ -1234,16 +1234,16 @@ pub fn check_backlog_integrity(
                         ));
                     }
                     Some(block_id) => {
-                        // Promoted and pointing at a block — verify the block exists.
-                        let block_key = format!("{}:{block_id}", backlog_node.repo);
-                        if !node_set.contains(block_key.as_str()) {
+                        // Promoted and pointing at a block — verify the block exists anywhere in the graph.
+                        let block_exists = graph.nodes.iter().any(|n| n.id == *block_id);
+                        if !block_exists {
                             diags.push(Diagnostic::error(
                                 path,
                                 "E_STATE_DANGLING_PROMOTION",
                                 format!(
                                     "backlog node '{}' promoted to block '{block_id}' which does \
-                                     not exist in '{}' tracks[]",
-                                    backlog_node.slug, backlog_node.repo
+                                     not exist in any repo's tracks[]",
+                                    backlog_node.slug
                                 ),
                             ));
                         }
