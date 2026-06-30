@@ -8,16 +8,16 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-06-29T17:50:21-0300"
-now: "MV.3.P Done — state.json integrity validator fully implemented (209 tests pass, PASS verdict). Next: MV.3.K (link integrity) or MV.3B.Q (manifest emit / Phase 3B)"
-next: "MV.3.K (link integrity: markdown/file:///[[wiki]]), MV.3B.Q (manifest emit / Phase 3B) — see master-plan.md for ordering"
+timestamp: "2026-06-30T09:15:00-0300"
+now: "MV.3.K Done — link integrity validator fully implemented (236 tests pass, PASS verdict). Next: MV.3.L (structural coverage) or MV.3B.Q (manifest emit / Phase 3B)"
+next: "MV.3.L (structural coverage: index.md ↔ dir, D17) or MV.3B.Q (manifest emit / Phase 3B) — see master-plan.md for ordering"
 blocked: []
 ---
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-29 — `MV.3.P` (state.json integrity) fully implemented and verified. All 7 tasks passed (PASS verdict); 209 tests total. `mev validate-brain --state` is live; 0 state-specific diagnostics on the live brain.
-**Current focus:** `MV.3.P` Done — next block: `MV.3.K` (link integrity) or `MV.3B.Q` (manifest emit / Phase 3B); see master-plan.md for ordering
+**Last updated:** 2026-06-30 — `MV.3.K` (link integrity) fully implemented and verified. All 6 tasks passed (PASS verdict); 236 tests total. `mev validate-brain --links` is live; live brain run confirmed real findings (dangling wikilinks, dead file:// URIs, dead markdown links).
+**Current focus:** `MV.3.K` Done — next block: `MV.3.L` (structural coverage) or `MV.3B.Q` (manifest emit / Phase 3B); see master-plan.md for ordering
 
 ---
 
@@ -26,8 +26,8 @@ blocked: []
 > Working board — keep all five queues live. **Never end a meaningful session with every queue
 > empty.** The headlines of **now / next / blocked** mirror the frontmatter scalars above.
 
-- **now** — **`MV.3.P` Done** (state.json integrity; 7 tasks, PASS, 209 tests). Work-block-graph analogue of MV.3.J: `StateFile` serde model + `load_state`; `discover_state_files` + `check_schema` (four rings); `StateGraph`/`build_state_graph`/`check_state_graph` (5 diagnostic codes including marquee `E_STATE_DANGLING_BLOCKED_BY`); `check_rollup` (brain repos[] drift → `W_STATE_ROLLUP_DRIFT`); `validate_brain_state` public API + `--state` CLI flag; 4 integration tests. Live run: 0 state-specific diagnostics on all five live state.json files. **Prior:** `MV.3.J` graph integrity DONE (232 tests, PR #4).
-- **next** — `MV.3.K` (link integrity: markdown/`file://`/`[[wiki]]`) or `MV.3B.Q` (manifest emit / Phase 3B) — check master-plan.md for ordering
+- **now** — **`MV.3.K` Done** (link integrity; 6 tasks, PASS, 236 tests). `LinkKind`/`LinkRef` model + `extract_links()` single-pass byte-scan; `check_links()` resolving Markdown/`FileUri`/`WikiLink` refs with four `E_LINK_*` diagnostic codes; `check_moved_references()` consuming `.brain-moves-pending`; `validate_brain_links()` public API + `--links` CLI flag; 9 integration tests. Live brain run confirmed real findings (dangling `[[bin]]`/`[[test]]` wikilinks, dead `file://` URIs with placeholder paths, dead markdown links in SECURITY.md). **Prior:** `MV.3.P` state integrity DONE (209 tests).
+- **next** — `MV.3.L` (structural coverage: `index.md` ↔ dir, D17) or `MV.3B.Q` (manifest emit / Phase 3B) — check master-plan.md for ordering
 - **blocked** — nothing blocked
 - **improve** — Phase 3B (D4): **`MV.3B.Q`** manifest emit → `index_brain.py` consumes it (kill double crawl); **`MV.3B.R`** graph emit → Postgres edges table + structural query surface (bastion/MCP); **`MV.3B.S`** graph-aware RAG (orchestrator). Companion: register tier units + bare-bloat `skip_dirs` in `brain.toml`.
 - **recurring** — none yet
@@ -82,7 +82,7 @@ blocked: []
 |---|---|---|---|
 | MV.3.J-crawl | Multi-root corpus crawl + scope registry | Done | `scope_units`/`scope_for`/`owning_unit` in `src/brain/scope.rs`; `crawl_corpus` → owned serializable `Corpus`; `BrainValidator` rewired; OKF root-file exemption; 13-test integration suite; all 160 tests pass. Post-flow fix: `is_root_instruction_file` now verifies unit-root position (commit `753be87`). PR #3 merged. |
 | MV.3.J | Graph integrity (global `scope:doc_id`) | Done | Serializable Graph model, build_graph + read_doc_metadata seam, check_graph (3 diagnostic codes), validate_brain_graph API, --graph CLI flag, 7 integration tests. 232 total tests pass. Post-flow fix: diagnostic locators corrected (`W_GRAPH_LEAF_TARGET`, `E_GRAPH_DANGLING_RELATED`); PR #4 merged. |
-| MV.3.K | Link integrity (markdown/`file://`/`[[wiki]]`) | Not started | Per master-plan |
+| MV.3.K | Link integrity (markdown/`file://`/`[[wiki]]`) | Done | `LinkRef` model + `extract_links()`; `check_links()` (4 `E_LINK_*` codes); `check_moved_references()` (.brain-moves-pending); `validate_brain_links()` + `--links` flag; 9 integration tests; 236 total tests pass. |
 | MV.3.L | Structural coverage (`index.md` ↔ dir, D17) | Not started | Per master-plan |
 | MV.3.P | State integrity (`state.json` schema + block graph) | Done | `StateFile` serde model + loader; `discover_state_files` + `check_schema` (4 rings); `StateGraph`/`build_state_graph`/`check_state_graph` (5 codes); `check_rollup` (`W_STATE_ROLLUP_DRIFT`); `validate_brain_state` + `--state` flag; 4 integration tests; 209 total tests pass. |
 

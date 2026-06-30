@@ -12,7 +12,7 @@ related: [master-plan, status, 3-P-state-integrity-tasks]
 
 # Task Spec — Phase 3, Block K (Link integrity)
 
-**Status:** Passed (4/4 tasks) · **Last run:** 2026-06-30 08:56 UTC
+**Status:** Passed (6/6 tasks) · **Last run:** 2026-06-30 09:15 UTC
 
 ## Goal
 Add `mev validate-brain --links`: flag markdown `[text](path)`, `file://`, and `[[wikilink]]` references that do not resolve to an existing file / known `doc_id`, and consume `.brain-moves-pending` to surface references still pointing at moved/deleted paths.
@@ -99,4 +99,4 @@ cargo build --release
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the spec. -->
-_No amendments yet._
+- 2026-06-30 [task 4] UTF-8 boundary panic fix: `extract_links()` advanced `i += 1` byte-by-byte, which can step into the middle of a multi-byte UTF-8 sequence and cause `starts_with()` to panic on real brain content. Fix gates the `file://` check on `bytes[i] == b'f'` and advances `i` by the char width derived from the leading byte. Not in the original spec — discovered during the live brain run.
