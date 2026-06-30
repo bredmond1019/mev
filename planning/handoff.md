@@ -1,84 +1,73 @@
 ---
 type: Handoff
-title: "Handoff — MV.3B.T done; next is MV.3.L or MV.3B.Q"
-description: MV.3B.T (emit-state subcommand, single-derivation engine) is merged (PR #8); next is MV.3.L (structural coverage) or MV.3B.Q (manifest emit).
 created: 2026-06-30
 ---
 
-# Handoff — MV.3B.T done; next is MV.3.L or MV.3B.Q
+# Handoff — MV.3B.Q shipped; next is MV.3.L or MV.3B.R
 
 > **For the next agent:** Read this immediately after `/prime`. Delete this file once consumed.
 
 ## What we're doing and why
 
-`mev` is a Rust CLI tool that validates Markdown/MDX for two consumers: the learn-ai site and
-the Bastion Brain OKF corpus. Phase 3 / 3B is the Brain integrity layer. This session completed
-**MV.3B.T** — the single-derivation emit engine for all generated views declared by the v2
-state schema (`emit-state` subcommand, `src/brain/emit.rs`). The emit is designed to be the
-fixed point of the validator drift checks: running `mev emit-state --write` then
-`mev validate-brain --state` on the same corpus reports zero `W_STATE_FOCUS_DRIFT` /
-`W_STATE_ROLLUP_DRIFT`. The project is clean on `main` with 275 passing tests.
+Phase 3B of the mev roadmap is turning the Brain corpus into a queryable product (D4 decisions).
+`MV.3B.Q` (manifest emit) just landed: `mev manifest <root>` emits a canonical JSON file-list
+with per-file OKF metadata, making `index_brain.py` able to consume a single validated source
+(`"what's validated == what's embedded"`). As part of this block, the D5 extract-once refactor
+also landed: `OkfFrontmatter` now derives `Serialize`, `CorpusEntry` carries
+`Option<OkfFrontmatter>` parsed once in `crawl_corpus()`, and the old `read_doc_metadata` seam
+was removed from `graph.rs`. PR #9 is merged to main. Two blocks now compete for next: `MV.3.L`
+(structural coverage — `index.md` ↔ dir, D17, Phase 3 graph track) and `MV.3B.R` (graph emit to
+Postgres edges, Phase 3B, depends on MV.3B.Q which just closed). Check `master-plan.md` for the
+authoritative ordering decision.
 
 ## Completed this session
 
-- Ran `/sdlc-flow 3B.T-state-table-rollup-emit` — **6 tasks, all PASS**, 275 tests green.
-- **Task 1:** Extracted `derive_focus`, `derive_rollup`, `derive_cross_repo` from
-  `check_focus_drift` into standalone public functions in `src/brain/state.rs`; added
-  `DerivedFocus { now, next, blocked }` struct; 8 new integration tests in `tests/brain_state.rs`.
-- **Task 2:** Created `src/brain/emit.rs` with `EmitError`, `wave_order`, `render_wave_table`,
-  `splice_generated`; 18 integration tests in `tests/brain_emit.rs`.
-- **Task 3:** Added `EmitAction`/`EmitPlan` types and planners `plan_state_json`,
-  `plan_master_plan_tables`, `apply_plan`; 14 more tests (fixed-point, idempotency, dry-run/write).
-- **Task 4:** Added `emit_state` library driver in `src/lib.rs` + `emit-state` CLI subcommand
-  in `src/main.rs` with `--write` flag (default dry-run); 4 integration tests.
-- **Task 5:** Updated `docs/cli.md` (full subcommand reference, sentinel contract, diagnostic
-  codes) and `docs/architecture.md` (emit module map, `derive_*` function table, `DerivedFocus`
-  type).
-- **Task 6:** Confirmed all four harness gates green: `cargo fmt --check`, `cargo clippy -D
-  warnings`, `cargo test` (275 tests, 0 failures), `cargo build --release`.
-- `/code-review low` — no findings.
-- PR #8 opened and merged (merge commit `75abaae`); worktree `trees/3B.T-state-table-rollup-emit-flow`
-  removed; branch deleted; `main == origin/main`.
+- **MV.3B.Q** implemented via `/sdlc-flow 3B.Q-manifest-emit` (6 tasks, all PASS):
+  - Task 1: D5 extract-once — `OkfFrontmatter` gains `Clone + Serialize`; `CorpusEntry` gains
+    `metadata: Option<OkfFrontmatter>`; `crawl_corpus()` parses frontmatter once; 2 new tests.
+  - Task 2: Collapsed `read_doc_metadata` seam — `build_graph()` reads from `entry.metadata`;
+    `RawFrontmatter`, `DocMeta`, `read_doc_metadata` removed from `graph.rs`; `collect_doc_ids()`
+    in `links.rs` updated; test helpers patched.
+  - Task 3: New `src/brain/manifest.rs` — `ManifestEntry`, `Manifest`, `build_manifest()`;
+    forward-slash path normalization for cross-platform JSON; 3 unit tests.
+  - Task 4: `manifest_brain()` library driver in `src/lib.rs`; `mev manifest <root>` CLI
+    subcommand with `--pretty` flag; 5 integration tests in `tests/brain_manifest.rs`.
+  - Task 5: `docs/cli.md` manifest subcommand reference; `docs/architecture.md` updated with
+    manifest module, D5 refactor note, `read_doc_metadata` removal.
+  - Task 6: All four harness gates green (`fmt`, `clippy`, `test`, `build`). Review: PASS.
+- Code review (low effort): no findings.
+- Worktree `3B.Q-manifest-emit-flow` merged into main (fast-forward) and removed; branch deleted.
+- PR #9 opened (flow creates it automatically, already merged).
+- `state.json` updated: MV.3B.Q and MV.3B.T marked `closed`; `focus.next` updated to
+  `[MV.3.L, MV.3B.R]`.
 
 ## Remaining work
 
-In priority order:
-
-1. **Brain-side v2 `state.json` re-seed** (5 files in the company-brain repo) — a brain-side
-   coordination step, not a mev blocker. Live `mev validate-brain --state` on the real brain
-   will fail until those files are re-seeded from v1 → v2 schema. Not blocking next mev blocks.
-2. **`MV.3.L`** — structural coverage (`index.md` ↔ directory, governed by D17). Not started.
-   Check `planning/master-plan.md` for the spec and wave ordering.
-3. **`MV.3B.Q`** — manifest emit: mev emits a canonical file-list + metadata JSON that
-   `index_brain.py` consumes (kills the double crawl, D5 extract-once refactor). Not started.
-   Depends on `MV.3.J-crawl` (done). Check ordering vs `MV.3.L` in master-plan.
-4. Phase 3B blocks `MV.3B.R` (graph emit → Postgres edges) and `MV.3B.S` (graph-aware RAG)
-   are further out and depend on `MV.3B.Q`.
+- **`MV.3.L`** — structural coverage (`index.md` ↔ dir, D17): verify every directory has an
+  `index.md` and every `index.md` entry points to a real file. No hard dependency.
+- **`MV.3B.R`** — graph emit: mev emits the `scope:doc_id` graph as JSON for orchestrator to
+  load into Postgres edges table alongside `brain_documents`; bastion/MCP structural queries.
+  Depends on MV.3B.Q (now closed). See `planning/master-plan.md` for block spec.
+- **`MV.3B.S`** — graph-aware RAG (orchestrator-side): retrieval traverses edges to expand/rerank
+  semantic hits. Depends on MV.3B.R.
+- **Brain-side coordination** (not a mev blocker): live `mev validate-brain --state` on the
+  brain repo will flag drift until the brain-side v2 `state.json` re-seed (5 files) lands.
+  That's a brain HQ session, not a mev session.
+- **`index_brain.py` double-crawl elimination**: now that `mev manifest` exists, the Python
+  indexer can consume the manifest instead of crawling independently. This is an orchestrator-side
+  change; mev's side is done.
 
 ## Open questions / choices
 
-- **3.L vs 3B.Q ordering:** `planning/master-plan.md` is the authority. Check the wave/ordering
-  table there before picking the next block. Both are unblocked.
-- **Sentinel contract for `emit-state`:** `plan_master_plan_tables` only splices if the
-  `<!-- BEGIN generated:wave-table -->` sentinels are already present — never invents them. The
-  brain-side master-plan files need to be seeded with the sentinel pair before live emit touches
-  them.
+- **Which block next — `MV.3.L` or `MV.3B.R`?** Check `planning/master-plan.md` for the
+  settled ordering. MV.3B.R has a now-closed dependency (MV.3B.Q) so it is unblocked. MV.3.L
+  is also unblocked. The choice is priority/value, not dependency.
 
 ## Context the next agent needs
 
-- Test count is **275** at session end (`cargo test` from the project root).
-- `render_wave_table` (`src/brain/emit.rs:91`) accepts `graph` for API symmetry but uses a
-  conservative "treat cross-repo deps as unmet" rule since it only receives one repo's `StateFile`.
-  This is by design (recorded in Task 2 decision log).
-- `I_EMIT_WROTE` uses `Warning` severity (no `Info` level in `Diagnostic`) — intentional; docs
-  already reflect this accurately.
-- `AGENT.md` and `GEMINI.md` are untracked files in the repo root — do not commit them unless
-  the user asks. They appeared during this session and are not part of mev source.
-- The sdlc-flow state for this block lives at `planning/3B.T-state-table-rollup-emit/sdlc/` —
-  the spec is fully closed; no residual state to clean up.
-- Dispatch precedence in `src/main.rs`: `links → state → graph → sync`.
+No durable caveats or env issues to carry forward. The working tree is clean, all harness gates
+are green, and the worktree was removed cleanly. The next session starts from a clean `main`.
 
 ## First command after `/prime`
 
-`cat planning/master-plan.md` — check the wave/ordering table to confirm whether `MV.3.L` or
-`MV.3B.Q` is next, then run `/plan <chosen-block>`.
+`/sdlc-flow 3B.R-graph-emit`

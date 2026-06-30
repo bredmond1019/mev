@@ -6,7 +6,7 @@
     "now": [],
     "next": [
       { "id": "MV.3.L", "title": "Structural coverage (index.md ↔ dir)" },
-      { "id": "MV.3B.Q", "title": "Manifest emit — validated corpus list for index_brain.py" }
+      { "id": "MV.3B.R", "title": "Graph emit → Postgres edges table + structural query surface" }
     ],
     "blocked": []
   },
@@ -32,7 +32,7 @@
     {
       "title": "Phase 3B — Manifest + graph emit",
       "blocks": [
-        { "id": "MV.3B.Q", "title": "Manifest emit — validated corpus list for index_brain.py", "status": "open", "wave": 4, "depends_on": [] },
+        { "id": "MV.3B.Q", "title": "Manifest emit — validated corpus list for index_brain.py", "status": "closed", "wave": 4, "depends_on": [] },
         {
           "id": "MV.3B.R",
           "title": "Graph emit → Postgres edges table + structural query surface",
@@ -45,7 +45,7 @@
         {
           "id": "MV.3B.T",
           "title": "Table/rollup emit from v2 state graph",
-          "status": "open",
+          "status": "closed",
           "wave": 5,
           "depends_on": [
             { "type": "block", "repo": "mev", "id": "MV.3.P2", "what": "emits derived focus/rollup tables from the v2 state graph" }
