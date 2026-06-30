@@ -21,6 +21,7 @@
 //! - `E_STATE_UNKNOWN_REPO` — a `blocked_by` / `cross_repo` entry names unknown repo.
 //! - `E_STATE_DANGLING_CROSS_REPO` — a brain `cross_repo[]` endpoint doesn't resolve.
 //! - `W_STATE_ROLLUP_DRIFT` — brain `repos[]` headline drifted from child `focus`.
+//! - `W_STATE_FOCUS_DRIFT` — a leaf file's `focus` snapshot has drifted from the tracks[] derivation.
 //! - `W_STATE_FILE_MISSING` — a registered repo has no `planning/state.json`.
 
 use std::path::{Path, PathBuf};
@@ -1426,6 +1427,145 @@ pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> V
     // Primary sort: wave asc. Tiebreak: iteration order (stable).
     ready.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     ready.into_iter().map(|(_, _, key)| key).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Focus-drift check (task 5)
+// ---------------------------------------------------------------------------
+
+/// Recompute the expected `focus` from `tracks[]` and warn when it disagrees
+/// with the stored `focus` snapshot.
+///
+/// **Derivation rules (from the v2 schema design decisions):**
+/// - `now` — every `tracks[]` block with authored `status == "in_progress"`.
+/// - `blocked` — every `tracks[]` block that is `open` and has at least one
+///   unmet dependency: any `External` dep, or any `Block` dep whose target is not `closed`.
+/// - `next` — every `tracks[]` block returned by [`ready_order`] for this
+///   file (open blocks with no external deps and all block deps `closed`).
+///
+/// Comparison is **block-id sets only** (mirrors [`check_rollup`]'s strategy —
+/// cosmetic title/note differences are ignored).
+///
+/// **Severity:** warning only — focus is a derived view maintained by hand
+/// (the warn→error flip is deferred until the `/log-work` writer exists).
+/// Drift never causes exit 1.
+///
+/// Skips files with an empty `tracks[]` (the derivation is undefined when there
+/// is no roadmap catalog — typically brain files whose focus comes from
+/// aggregated child repos).
+pub fn check_focus_drift(
+    src: &StateSource,
+    file: &StateFile,
+    graph: &StateGraph,
+    files: &[(StateSource, StateFile)],
+) -> Vec<Diagnostic> {
+    use std::collections::{HashMap, HashSet};
+
+    // Undefined for files without a roadmap catalog.
+    if file.tracks.is_empty() {
+        return vec![];
+    }
+
+    // Build a status map: "repo:id" → authored status (None = absent = open).
+    let mut status_map: HashMap<String, Option<String>> = HashMap::new();
+    for (s, f) in files {
+        for track in &f.tracks {
+            for block in &track.blocks {
+                let key = format!("{}:{}", s.repo_slug, block.id);
+                status_map.insert(key, block.status.clone());
+            }
+        }
+    }
+
+    // Derive the three focus sets from tracks[].
+    let mut derived_now: HashSet<String> = HashSet::new();
+    let mut derived_blocked: HashSet<String> = HashSet::new();
+
+    for track in &file.tracks {
+        for block in &track.blocks {
+            let authored_status = block.status.as_deref().unwrap_or("open");
+
+            match authored_status {
+                "in_progress" => {
+                    derived_now.insert(block.id.clone());
+                }
+                "open" => {
+                    // Is this block gated on something unmet?
+                    let has_unmet = block.depends_on.iter().any(|d| match d {
+                        BlockedBy::External { .. } => true,
+                        BlockedBy::Block { repo, id, .. } => {
+                            let dep_key = format!("{repo}:{id}");
+                            status_map.get(&dep_key).and_then(|s| s.as_deref()) != Some("closed")
+                        }
+                    });
+                    if has_unmet {
+                        derived_blocked.insert(block.id.clone());
+                    }
+                    // `closed` and `blocked` (invalid authored) are skipped; they
+                    // don't appear in the derived focus.
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // next = ready_order filtered to this file's blocks.
+    let ready = ready_order(graph, files);
+    let this_prefix = format!("{}:", src.repo_slug);
+    let derived_next: HashSet<String> = ready
+        .into_iter()
+        .filter(|key| key.starts_with(&this_prefix))
+        .map(|key| key[this_prefix.len()..].to_string())
+        .collect();
+
+    // Compare stored focus to derived (block-id sets only).
+    let stored_now: HashSet<&str> = file.focus.now.iter().map(|b| b.id.as_str()).collect();
+    let stored_next: HashSet<&str> = file.focus.next.iter().map(|b| b.id.as_str()).collect();
+    let stored_blocked: HashSet<&str> = file.focus.blocked.iter().map(|b| b.id.as_str()).collect();
+
+    let derived_now_str: HashSet<&str> = derived_now.iter().map(|s| s.as_str()).collect();
+    let derived_next_str: HashSet<&str> = derived_next.iter().map(|s| s.as_str()).collect();
+    let derived_blocked_str: HashSet<&str> = derived_blocked.iter().map(|s| s.as_str()).collect();
+
+    if stored_now == derived_now_str
+        && stored_next == derived_next_str
+        && stored_blocked == derived_blocked_str
+    {
+        return vec![];
+    }
+
+    // Build a compact diff for the warning message.
+    let mut diffs: Vec<String> = Vec::new();
+    if stored_now != derived_now_str {
+        diffs.push(format!(
+            "now: stored={:?} derived={:?}",
+            sorted_set(&stored_now),
+            sorted_set(&derived_now_str),
+        ));
+    }
+    if stored_next != derived_next_str {
+        diffs.push(format!(
+            "next: stored={:?} derived={:?}",
+            sorted_set(&stored_next),
+            sorted_set(&derived_next_str),
+        ));
+    }
+    if stored_blocked != derived_blocked_str {
+        diffs.push(format!(
+            "blocked: stored={:?} derived={:?}",
+            sorted_set(&stored_blocked),
+            sorted_set(&derived_blocked_str),
+        ));
+    }
+
+    vec![Diagnostic::warning(
+        &src.abs_path,
+        "W_STATE_FOCUS_DRIFT",
+        format!(
+            "focus snapshot has drifted from tracks[] derivation — {}",
+            diffs.join("; ")
+        ),
+    )]
 }
 
 /// Return a deterministically sorted `Vec<&str>` from a `HashSet<&str>` for
@@ -3795,6 +3935,339 @@ mod tests {
             drift.len(),
             1,
             "blocked-only drift should also emit W_STATE_ROLLUP_DRIFT, got: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 5 — check_focus_drift tests
+    // -----------------------------------------------------------------------
+
+    /// Build a (StateSource, StateFile) pair for focus-drift testing.
+    ///
+    /// `blocks` = `(id, authored_status, depends_on)`.
+    /// `stored_now/next/blocked` are the block IDs stored in the `focus` object.
+    fn make_drift_pair(
+        dir: &std::path::Path,
+        repo: &str,
+        blocks: &[(&str, Option<&str>, Vec<BlockedBy>)],
+        stored_now: &[&str],
+        stored_next: &[&str],
+        stored_blocked: &[&str],
+    ) -> (StateSource, StateFile) {
+        let track_blocks: Vec<TrackBlock> = blocks
+            .iter()
+            .map(|(id, status, deps)| TrackBlock {
+                id: id.to_string(),
+                title: id.to_string(),
+                status: status.map(|s| s.to_string()),
+                depends_on: deps.clone(),
+                wave: None,
+                origin: None,
+            })
+            .collect();
+
+        let make_focus_blocks = |ids: &[&str]| -> Vec<Block> {
+            ids.iter()
+                .map(|id| Block {
+                    id: id.to_string(),
+                    title: "placeholder".to_string(),
+                    status: None,
+                    note: None,
+                    repo: None,
+                    blocked_by: vec![],
+                })
+                .collect()
+        };
+
+        let path = dir.join(format!("{repo}-drift-state.json"));
+        let file = StateFile {
+            repo: repo.to_string(),
+            kind: "project".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus: Focus {
+                now: make_focus_blocks(stored_now),
+                next: make_focus_blocks(stored_next),
+                blocked: make_focus_blocks(stored_blocked),
+            },
+            tracks: vec![Track {
+                title: "Phase 1".to_string(),
+                blocks: track_blocks,
+            }],
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+        };
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: path,
+            expected_kind: "project",
+        };
+        (src, file)
+    }
+
+    #[test]
+    fn check_focus_drift_in_sync_produces_no_diagnostics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // One in_progress block, one open block (no deps) → it's in next.
+        // Stored focus matches exactly.
+        let pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("in_progress"), vec![]),
+                ("AL.1.B", Some("open"), vec![]),
+            ],
+            &["AL.1.A"], // stored now
+            &["AL.1.B"], // stored next
+            &[],         // stored blocked
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &graph, &files);
+
+        assert!(
+            diags.is_empty(),
+            "in-sync focus should produce no diagnostics, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_now_mismatch_emits_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Block is in_progress in tracks[] but stored focus.now is empty.
+        let pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("in_progress"), vec![])],
+            &[], // stored now — stale (should be ["AL.1.A"])
+            &[], // stored next
+            &[], // stored blocked
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &graph, &files);
+
+        let drifts: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_FOCUS_DRIFT")
+            .collect();
+        assert_eq!(
+            drifts.len(),
+            1,
+            "stale now should emit exactly one W_STATE_FOCUS_DRIFT, got: {diags:?}"
+        );
+        assert_eq!(
+            drifts[0].severity,
+            crate::Severity::Warning,
+            "W_STATE_FOCUS_DRIFT must be Warning severity"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_next_mismatch_emits_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // One open block with no deps → should be in next.
+        // Stored focus.next is empty → drift.
+        let pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("open"), vec![])],
+            &[], // stored now
+            &[], // stored next — stale (should be ["AL.1.A"])
+            &[], // stored blocked
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &graph, &files);
+
+        let drifts: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_FOCUS_DRIFT")
+            .collect();
+        assert_eq!(
+            drifts.len(),
+            1,
+            "stale next should emit exactly one W_STATE_FOCUS_DRIFT, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_blocked_mismatch_emits_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Open block with external dep → should be in blocked.
+        // Stored focus.blocked is empty → drift.
+        let pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[(
+                "AL.1.A",
+                Some("open"),
+                vec![BlockedBy::External {
+                    what: "upstream dep".to_string(),
+                }],
+            )],
+            &[], // stored now
+            &[], // stored next
+            &[], // stored blocked — stale (should be ["AL.1.A"])
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &graph, &files);
+
+        let drifts: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_FOCUS_DRIFT")
+            .collect();
+        assert_eq!(
+            drifts.len(),
+            1,
+            "stale blocked should emit exactly one W_STATE_FOCUS_DRIFT, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_drift_is_warning_not_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("in_progress"), vec![])],
+            &[], // stored now — deliberately wrong
+            &[],
+            &[],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &graph, &files);
+
+        // No errors should be emitted.
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == crate::Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "drift must never produce errors (exit-0 behaviour), got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_empty_tracks_produces_no_diagnostics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("brain-state.json");
+        // Brain file: non-empty focus but no tracks[] — skip.
+        let file = StateFile {
+            repo: "hq".to_string(),
+            kind: "brain".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus: Focus {
+                now: vec![Block {
+                    id: "BA.1.A".to_string(),
+                    title: "something".to_string(),
+                    status: Some("in_progress".to_string()),
+                    note: None,
+                    repo: Some("bastion".to_string()),
+                    blocked_by: vec![],
+                }],
+                next: vec![],
+                blocked: vec![],
+            },
+            tracks: vec![],
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+        };
+        let src = StateSource {
+            repo_slug: "hq".to_string(),
+            abs_path: path,
+            expected_kind: "brain",
+        };
+        let files = vec![(src.clone(), file.clone())];
+        let graph = build_state_graph(&files);
+        let diags = check_focus_drift(&src, &file, &graph, &files);
+
+        assert!(
+            diags.is_empty(),
+            "empty tracks[] should skip focus drift check, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_open_with_unclosed_block_dep_goes_to_blocked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Block B is open but dep A is in_progress (not closed) → B goes in blocked.
+        // Stored focus.blocked is empty → drift.
+        let dep_a = BlockedBy::Block {
+            repo: "alpha".to_string(),
+            id: "AL.1.A".to_string(),
+            what: None,
+        };
+        let pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("in_progress"), vec![]),
+                ("AL.1.B", Some("open"), vec![dep_a]),
+            ],
+            &["AL.1.A"], // stored now (correct)
+            &[],         // stored next (correct — B has unmet dep)
+            &[],         // stored blocked — stale (should be ["AL.1.B"])
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &graph, &files);
+
+        let drifts: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_FOCUS_DRIFT")
+            .collect();
+        assert_eq!(
+            drifts.len(),
+            1,
+            "B blocked by in_progress A should trigger drift, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_open_with_closed_dep_goes_to_next() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Block B is open; dep A is closed → B is ready (goes in next).
+        // Stored focus matches exactly → no drift.
+        let dep_a = BlockedBy::Block {
+            repo: "alpha".to_string(),
+            id: "AL.1.A".to_string(),
+            what: None,
+        };
+        let pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("closed"), vec![]),
+                ("AL.1.B", Some("open"), vec![dep_a]),
+            ],
+            &[],         // stored now (A is closed, not in_progress)
+            &["AL.1.B"], // stored next (B is ready)
+            &[],         // stored blocked
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &graph, &files);
+
+        assert!(
+            diags.is_empty(),
+            "in-sync focus (B ready after A closed) should produce no diagnostics, \
+             got: {diags:?}"
         );
     }
 
