@@ -32,13 +32,15 @@ src/
     ├── scope.rs    ← scope_units(), scope_for(), owning_unit() — registry-driven scope resolver
     ├── sync.rs     ← (internal) sync helpers
     ├── graph.rs    ← EdgeKind, Edge, Node, Graph, GraphArtifact, DocMeta; build_graph(), check_graph(), read_doc_metadata() — Phase 3 Block J
-    └── state.rs    ← StateFile, StateGraph, StateNode, StateEdge, StateSource; discover_state_files(), load_state(), check_schema(), build_state_graph(), check_state_graph(), check_rollup() — Phase 3 Block P
+    ├── state.rs    ← StateFile, StateGraph, StateNode, StateEdge, StateSource; discover_state_files(), load_state(), check_schema(), build_state_graph(), check_state_graph(), check_rollup() — Phase 3 Block P
+    └── links.rs    ← LinkKind, LinkRef; extract_links(), check_links(), collect_doc_ids(), read_moves_pending(), check_moved_references() — Phase 3 Block K
 
 tests/
 ├── brain_config.rs   ← integration tests for brain.toml loading + BrainConfig
 ├── brain_corpus.rs   ← integration tests for crawl_corpus() multi-root walk + scope resolution
 ├── brain_crawl.rs    ← integration tests for crawl_brain()
 ├── brain_graph.rs    ← integration tests for validate_brain_graph() end-to-end — Phase 3 Block J
+├── brain_links.rs    ← integration tests for validate_brain_links() end-to-end — Phase 3 Block K
 ├── brain_okf.rs      ← integration tests for validate_md_file()
 ├── brain_state.rs    ← integration tests for validate_brain_state() end-to-end — Phase 3 Block P
 ├── brain_validate.rs ← integration tests for BrainValidator end-to-end
@@ -254,3 +256,39 @@ The state module discovers, loads, and validates all `planning/state.json` files
 #### Public library entry point
 
 `validate_brain_state(root: &Path) -> anyhow::Result<Report>` (in `src/lib.rs`) runs the full OKF schema pass followed by the five-step state pipeline (discovery → load → schema → graph → rollup) and appends all state diagnostics to the same `Report`. Invoked by `mev validate-brain --state`.
+
+---
+
+### Link integrity (`src/brain/links.rs`) — Phase 3 Block K
+
+The links module extracts and validates all local references (markdown links, `file://` URIs, and `[[wikilinks]]`) across the Brain corpus, and re-checks references against `.brain-moves-pending` to surface stale targets after moves or deletions.
+
+#### Public functions
+
+| Function | Signature | Description |
+|---|---|---|
+| `extract_links` | `(&str) -> Vec<LinkRef>` | Parses a file's body and returns all local link references. External links and pure anchors are skipped. |
+| `collect_doc_ids` | `(&Corpus) -> HashSet<String>` | Builds the set of authored bare `doc_id`s from corpus frontmatter — reuses `read_doc_metadata` (D5 seam). |
+| `check_links` | `(&Corpus, &Path, &HashSet<String>) -> Vec<Diagnostic>` | For each corpus entry, extracts links and resolves each against the filesystem or the `doc_id` set. Emits `E_LINK_*` diagnostics on resolution failures. |
+| `read_moves_pending` | `(&Path) -> Vec<String>` | Reads `<root>/.brain-moves-pending`; returns the set of moved/deleted repo-relative paths. Missing file returns empty set. |
+| `check_moved_references` | `(&Corpus, &Path, &[String]) -> Vec<Diagnostic>` | Scans the corpus for references that still resolve to a path listed in the moved set. Emits `E_LINK_MOVED_REFERENCE` for each hit. |
+
+#### Link types
+
+| Type | Description |
+|---|---|
+| `LinkKind` | Discriminant enum: `Markdown`, `FileUri`, `WikiLink`. |
+| `LinkRef` | A single extracted reference: `kind`, `raw` (as-authored), `target` (path/slug with any `#anchor` suffix stripped). |
+
+#### Diagnostic locators emitted by `check_links` and `check_moved_references`
+
+| Locator | Severity | Condition |
+|---|---|---|
+| `E_LINK_DEAD_MARKDOWN` | Error | A relative markdown link's resolved path does not exist on disk. |
+| `E_LINK_DEAD_FILE_URI` | Error | A `file://` URI's resolved path does not exist on disk. |
+| `E_LINK_DANGLING_WIKILINK` | Error | A `[[wikilink]]` target slug is absent from the corpus `doc_id` set. |
+| `E_LINK_MOVED_REFERENCE` | Error | A markdown or `file://` reference still points at a path listed in `.brain-moves-pending`. |
+
+#### Public library entry point
+
+`validate_brain_links(root: &Path) -> anyhow::Result<Report>` (in `src/lib.rs`) runs the full OKF schema pass, then crawls the corpus once, collects `doc_id`s, runs `check_links`, reads `.brain-moves-pending`, runs `check_moved_references`, and appends all link diagnostics to the same `Report`. Invoked by `mev validate-brain --links`.
