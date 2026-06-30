@@ -322,6 +322,139 @@ pub fn check_links(corpus: &Corpus, _root: &Path, doc_ids: &HashSet<String>) -> 
 }
 
 // ---------------------------------------------------------------------------
+// read_moves_pending + check_moved_references (Task 3)
+// ---------------------------------------------------------------------------
+
+/// Parse `<root>/.brain-moves-pending` and return all repo-relative moved/deleted
+/// paths.
+///
+/// Each non-empty, non-comment line has the format:
+/// `<ISO-date> <rel-path1> [rel-path2 ...]`
+///
+/// The leading date token is discarded; every subsequent whitespace-separated
+/// token is collected as a moved path.
+///
+/// If the file does not exist (the hook is optional/ephemeral), returns an empty
+/// `Vec` — no diagnostics result.
+pub fn read_moves_pending(root: &Path) -> Vec<String> {
+    let pending_path = root.join(".brain-moves-pending");
+    let contents = match std::fs::read_to_string(&pending_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut paths = Vec::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Each line: `<ISO-date> <path1> [path2 ...]`
+        // Skip the first token (the date) and collect the rest.
+        let mut tokens = line.split_whitespace();
+        tokens.next(); // discard date
+        for token in tokens {
+            paths.push(token.to_string());
+        }
+    }
+    paths
+}
+
+/// Scan the corpus for markdown and `file://` references that still point at a
+/// path listed in `moved_paths` (repo-relative paths from `root`), emitting
+/// `E_LINK_MOVED_REFERENCE` for each stale reference found.
+///
+/// WikiLinks are scope-agnostic slug references and are not path-resolved here;
+/// they are out of scope for the moved-reference re-check.
+///
+/// A missing `.brain-moves-pending` file (empty `moved_paths`) produces no
+/// diagnostics.
+pub fn check_moved_references(
+    corpus: &Corpus,
+    root: &Path,
+    moved_paths: &[String],
+) -> Vec<Diagnostic> {
+    if moved_paths.is_empty() {
+        return Vec::new();
+    }
+
+    // Canonicalise every moved path to an absolute path for comparison.
+    // Use `root.join(rel)` — if already absolute (unusual), `join` returns it
+    // unchanged.
+    let moved_absolute: Vec<std::path::PathBuf> =
+        moved_paths.iter().map(|rel| root.join(rel)).collect();
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    for entry in &corpus.entries {
+        let contents = match std::fs::read_to_string(&entry.path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let links = extract_links(&contents);
+
+        for link in &links {
+            let resolved = match link.kind {
+                LinkKind::Markdown => {
+                    let base = entry.path.parent().unwrap_or_else(|| Path::new("."));
+                    Some(base.join(&link.target))
+                }
+                LinkKind::FileUri => {
+                    let path_str = file_uri_to_path(&link.target);
+                    Some(std::path::PathBuf::from(path_str))
+                }
+                LinkKind::WikiLink => None, // slug-based, not path-based
+            };
+
+            if let Some(ref resolved_path) = resolved {
+                for moved in &moved_absolute {
+                    // Normalise with `components()` to handle `..` segments.
+                    // Simple string comparison after normalisation is sufficient
+                    // here since we control both paths (no symlinks in corpus).
+                    let resolved_norm = normalize_path(resolved_path);
+                    let moved_norm = normalize_path(moved);
+                    if resolved_norm == moved_norm {
+                        diags.push(Diagnostic::error(
+                            &entry.rel,
+                            "E_LINK_MOVED_REFERENCE",
+                            format!(
+                                "stale reference to moved/deleted path: '{}' (target: '{}')",
+                                link.raw,
+                                moved.display()
+                            ),
+                        ));
+                        break; // one diagnostic per link per moved path is enough
+                    }
+                }
+            }
+        }
+    }
+
+    diags
+}
+
+/// Lexically normalise a path by resolving `.` and `..` components without
+/// touching the filesystem (no `canonicalize` — the target may not exist).
+fn normalize_path(path: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {} // skip `.`
+            Component::ParentDir => {
+                // pop last component if possible
+                if !out.pop() {
+                    out.push(Component::ParentDir);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -710,5 +843,164 @@ mod tests {
             diags.is_empty(),
             "expected no diagnostics for unreadable entry, got: {diags:?}"
         );
+    }
+
+    // =========================================================================
+    // Task 3 tests: read_moves_pending + check_moved_references
+    // =========================================================================
+
+    // --- .brain-moves-pending entry + a doc linking the moved path → flagged ---
+
+    #[test]
+    fn moved_reference_is_flagged() {
+        let dir = std::env::temp_dir().join("mev-links-moved-ref");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+
+        // Create a moved/deleted file reference in a doc (the target does NOT need to
+        // exist on disk — it was moved/deleted).
+        let entry = write_corpus_entry(
+            &dir,
+            "docs/page.md",
+            "See [old doc](../planning/old-doc.md) here.",
+        );
+
+        // Write .brain-moves-pending referencing the same repo-relative path.
+        std::fs::write(
+            dir.join(".brain-moves-pending"),
+            b"2026-06-30 planning/old-doc.md\n",
+        )
+        .unwrap();
+
+        let corpus = Corpus {
+            entries: vec![entry],
+        };
+
+        let moved = read_moves_pending(&dir);
+        assert_eq!(moved, vec!["planning/old-doc.md"]);
+
+        let diags = check_moved_references(&corpus, &dir, &moved);
+        assert_eq!(diags.len(), 1, "expected 1 diagnostic, got: {diags:?}");
+        assert_eq!(diags[0].locator, "E_LINK_MOVED_REFERENCE");
+        assert!(diags[0].message.contains("old-doc.md"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- no .brain-moves-pending file → no diagnostics ---
+
+    #[test]
+    fn no_moves_pending_file_produces_no_diagnostics() {
+        let dir = std::env::temp_dir().join("mev-links-no-pending");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+
+        let entry = write_corpus_entry(
+            &dir,
+            "docs/page.md",
+            "See [some doc](../planning/doc.md) here.",
+        );
+        let corpus = Corpus {
+            entries: vec![entry],
+        };
+
+        // File does not exist — read_moves_pending should return empty.
+        let moved = read_moves_pending(&dir);
+        assert!(
+            moved.is_empty(),
+            "expected empty moved list, got: {moved:?}"
+        );
+
+        let diags = check_moved_references(&corpus, &dir, &moved);
+        assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- moved path with no remaining references → no diagnostics ---
+
+    #[test]
+    fn moved_path_with_no_references_produces_no_diagnostics() {
+        let dir = std::env::temp_dir().join("mev-links-no-refs");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+
+        // Doc links to a DIFFERENT path, not the moved one.
+        let entry = write_corpus_entry(
+            &dir,
+            "docs/page.md",
+            "See [other doc](../planning/other-doc.md) here.",
+        );
+
+        std::fs::write(
+            dir.join(".brain-moves-pending"),
+            b"2026-06-30 planning/old-doc.md\n",
+        )
+        .unwrap();
+
+        let corpus = Corpus {
+            entries: vec![entry],
+        };
+
+        let moved = read_moves_pending(&dir);
+        let diags = check_moved_references(&corpus, &dir, &moved);
+        assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- multiple paths on one line are all collected ---
+
+    #[test]
+    fn multiple_paths_on_one_line_are_collected() {
+        let dir = std::env::temp_dir().join("mev-links-multi-path");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(
+            dir.join(".brain-moves-pending"),
+            b"2026-06-30 planning/a.md docs/b.md\n2026-06-29 planning/c.md\n",
+        )
+        .unwrap();
+
+        let moved = read_moves_pending(&dir);
+        assert_eq!(moved.len(), 3, "expected 3 paths, got: {moved:?}");
+        assert!(moved.contains(&"planning/a.md".to_string()));
+        assert!(moved.contains(&"docs/b.md".to_string()));
+        assert!(moved.contains(&"planning/c.md".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- file:// reference to a moved path is also flagged ---
+
+    #[test]
+    fn moved_file_uri_reference_is_flagged() {
+        let dir = std::env::temp_dir().join("mev-links-moved-file-uri");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+
+        // Construct an absolute file URI pointing at the moved path.
+        let moved_abs = dir.join("planning/old-doc.md");
+        let uri = format!("file://{}", moved_abs.display());
+        let content = format!("Open [{uri}]({uri}) now.");
+        let entry = write_corpus_entry(&dir, "docs/page.md", &content);
+
+        std::fs::write(
+            dir.join(".brain-moves-pending"),
+            b"2026-06-30 planning/old-doc.md\n",
+        )
+        .unwrap();
+
+        let corpus = Corpus {
+            entries: vec![entry],
+        };
+
+        let moved = read_moves_pending(&dir);
+        let diags = check_moved_references(&corpus, &dir, &moved);
+        assert_eq!(diags.len(), 1, "expected 1 diagnostic, got: {diags:?}");
+        assert_eq!(diags[0].locator, "E_LINK_MOVED_REFERENCE");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
