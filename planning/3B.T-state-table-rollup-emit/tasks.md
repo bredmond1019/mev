@@ -1,6 +1,6 @@
 # Task Spec — Phase 3B, Block MV.3B.T — State-graph table + rollup emit
 
-**Status:** In progress (tasks 1-4 passed) · **Last run:** 2026-06-30T14:36:19Z
+**Status:** In progress (tasks 1-5 passed) · **Last run:** 2026-06-30T14:42:35Z
 
 ## Goal
 Add `mev emit-state`: make mev the **single derivation engine** for every *generated* view the v2

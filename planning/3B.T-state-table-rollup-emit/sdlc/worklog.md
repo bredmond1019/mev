@@ -19,3 +19,8 @@ Validated: gating checks (fast tripwire)
 What: Add `emit_state` library driver and `emit-state` CLI subcommand: dry-run/write dispatch over plan_state_json + plan_master_plan_tables, with pub-use re-exports and 4 integration tests
 Decisions: Used plan_state_json (the Task 3 implementation) where the spec named plan_brain_rollup — the two names refer to the same function; plan_state_json handles both leaf focus and brain rollup in one pass; Re-exported emit entry points at crate root via pub use brain::emit::{...} to satisfy the Task 4 re-export requirement and enable direct use in tests; Printed emit-state summary line as 'emit-state <mode> <root>: N error(s), N warning(s)' to mirror the ValidateBrain pattern while surfacing the dry-run/write mode
 Validated: gating checks (fast tripwire)
+
+## Task 5 — PASSED (1 attempt)
+What: Added `emit-state` subcommand documentation to docs/cli.md and extended docs/architecture.md with the emit module map entry, function table (wave_order, render_wave_table, splice_generated, plan_state_json, plan_master_plan_tables, apply_plan, emit_state), derive_* helpers (derive_focus, derive_rollup, derive_cross_repo) and DerivedFocus type added to state.rs, plus sentinel contract and diagnostic code reference.
+Decisions: No new doc file was added (task spec noted this was not expected), so docs/index.md was not modified — only the two existing docs were updated.; I_EMIT_WROTE uses Warning severity in the implementation (no Info level exists in the Diagnostic type); the doc reflects this accurately by listing it as Warning.
+Validated: gating checks (fast tripwire)
