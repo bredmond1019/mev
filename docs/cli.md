@@ -216,6 +216,38 @@ mev --json validate-brain --links ~/Dev/agentic-portfolio
 
 ---
 
+### `generate-graph [--out] [path]`
+
+Generate an interactive HTML visualization of the Bastion Brain knowledge graph.
+
+```bash
+mev generate-graph [--out <dir>] [path]
+```
+
+| Argument / Flag | Default | Description |
+|---|---|---|
+| `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
+| `--out` | `<brain_root>/planning/doc-graph` | The output directory to write the graph files (`graph.md` and `graph.html`) to |
+
+Resolves `brain.toml` by walking up from `path`. If no `brain.toml` is found, the process exits 1.
+
+The output is an interactive `vis.js` physics simulation that visualizes all `scope:doc_id` nodes and their `related:` edges across the entire portfolio. It includes color coding by repository scope, node sizing based on connectivity (hub nodes), hover tooltips, and a dynamic search and filtering UI.
+
+**Examples:**
+
+```bash
+# Generate the graph in the default location (planning/doc-graph)
+mev generate-graph
+
+# Generate the graph from an explicit brain root
+mev generate-graph ~/Dev/agentic-portfolio
+
+# Generate the graph to a custom output directory
+mev generate-graph --out /tmp/my-graph
+```
+
+---
+
 ### `manifest [--pretty] [path]`
 
 Emit a JSON manifest of every file in the Brain corpus.
