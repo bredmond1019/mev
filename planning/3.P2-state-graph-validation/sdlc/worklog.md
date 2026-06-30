@@ -37,3 +37,6 @@ Validated: gating checks (fast tripwire)
 ## Task 8 — PASSED (1 attempt)
 What: Task 8 validate: all four harness gates pass — cargo fmt --check, clippy -D warnings, cargo test (275 tests, 0 failures), cargo build --release.
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: docs/cli.md, docs/architecture.md

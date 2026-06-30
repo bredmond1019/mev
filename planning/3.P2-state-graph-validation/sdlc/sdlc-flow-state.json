@@ -2,9 +2,9 @@
   "spec_slug": "3.P2-state-graph-validation",
   "branch": "3.P2-state-graph-validation-flow",
   "started_at": "2026-06-30T10:03:46Z",
-  "updated_at": "2026-06-30T10:49:18Z",
+  "updated_at": "2026-06-30T10:53:34Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.P2-state-graph-validation-flow",
-  "status": "running",
+  "status": "docs",
   "current_task": 8,
   "tasks": {
     "1": {
@@ -141,12 +141,15 @@
     }
   },
   "review": {
-    "verdict": null,
+    "verdict": "PASS",
     "findings": [],
-    "attempts": 0
+    "attempts": 1
   },
   "docs": {
-    "changed": [],
+    "changed": [
+      "docs/cli.md",
+      "docs/architecture.md"
+    ],
     "created": []
   },
   "bail_reason": null,
@@ -363,13 +366,29 @@
         "filesReadKb": null,
         "inTokEst": 586,
         "outTok": 2058
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 1008,
+        "filesReadKb": null,
+        "inTokEst": 1008,
+        "outTok": 4031
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 816,
+        "filesReadKb": null,
+        "inTokEst": 816,
+        "outTok": 2415
       }
     ],
     "total": {
-      "promptTokEst": 15092,
+      "promptTokEst": 16916,
       "filesReadKb": 0,
-      "inTokEst": 15092,
-      "outTok": 154234
+      "inTokEst": 16916,
+      "outTok": 160680
     }
   }
 }
