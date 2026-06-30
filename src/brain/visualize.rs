@@ -48,10 +48,11 @@ pub fn generate_graph_visual(manifest: &Manifest, out_dir: &Path) -> anyhow::Res
             if let Some(&degree) = node_degrees.get(&node_id) {
                 if degree > 0 {
                     let raw_title = entry.title.clone().unwrap_or_else(|| doc_id.clone());
-                    let short_label = if raw_title.len() <= 30 {
+                    let short_label = if raw_title.chars().count() <= 30 {
                         raw_title.clone()
                     } else {
-                        format!("{}...", &raw_title[..27])
+                        let truncated: String = raw_title.chars().take(27).collect();
+                        format!("{}...", truncated)
                     };
                     let doc_type = entry.doc_type.clone().unwrap_or_else(|| "Document".to_string());
                     

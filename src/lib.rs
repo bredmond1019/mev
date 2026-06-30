@@ -525,14 +525,7 @@ pub fn manifest_brain(root: &std::path::Path) -> anyhow::Result<Manifest> {
 /// `generate_graph_visual` to write `graph.md` and `graph.html` to `out_dir`.
 /// If `out_dir` is `None`, defaults to `planning/doc-graph` under the brain root.
 pub fn visualize_brain(root: &std::path::Path, out_dir: Option<PathBuf>) -> anyhow::Result<()> {
-    use brain::config::find_brain_config;
-    
-    let config = find_brain_config(root)
-        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
-    
-    // Use the actual found root for default output dir, not the search path
-    let actual_root = config.path.parent().unwrap();
-    let out = out_dir.unwrap_or_else(|| actual_root.join("planning").join("doc-graph"));
+    let out = out_dir.unwrap_or_else(|| root.join("planning").join("doc-graph"));
     
     let manifest = manifest_brain(root)?;
     brain::visualize::generate_graph_visual(&manifest, &out)

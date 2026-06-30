@@ -312,7 +312,14 @@ fn main() -> ExitCode {
             }
         }
         Command::VisualizeGraph { path, out } => {
-            match mev::visualize_brain(&path, out) {
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match mev::visualize_brain(&root, out) {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(err) => {
                     eprintln!("error: {err:#}");
