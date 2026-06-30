@@ -4,3 +4,8 @@
 What: CorpusEntry now carries parsed OkfFrontmatter metadata extracted once during crawl_corpus() (D5 extract-once refactor); OkfFrontmatter derives Clone + Serialize; all existing tests updated; two new tests verify metadata round-trip.
 Decisions: Added Clone to OkfFrontmatter (required by CorpusEntry which derives Clone); Stored metadata as Option<OkfFrontmatter> directly rather than introducing an EntryMetadata wrapper — spec permitted either and direct storage is simpler; In crawl_corpus(), frontmatter is parsed via a single read_to_string().ok().and_then() chain — I/O or YAML errors produce None (graceful degradation per spec)
 Validated: gating checks (fast tripwire)
+
+## Task 2 — PASSED (1 attempt)
+What: Collapsed read_doc_metadata seam: build_graph and collect_doc_ids now read doc_id/related from entry.metadata (D5 extract-once); removed read_doc_metadata, RawFrontmatter, DocMeta from graph.rs; updated test helpers to pre-parse frontmatter into CorpusEntry.metadata
+Decisions: Removed the 3 read_doc_metadata unit tests from graph.rs along with the function — they tested the removed seam directly; the behavior-level tests for build_graph/check_graph all pass unchanged; Updated write_corpus_entry in links.rs tests (and make_entry in graph.rs tests) to parse frontmatter from content and set entry.metadata, mirroring what crawl_corpus does, so collect_doc_ids and build_graph work correctly in tests
+Validated: gating checks (fast tripwire)

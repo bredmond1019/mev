@@ -2,10 +2,10 @@
   "spec_slug": "3B.Q-manifest-emit",
   "branch": "3B.Q-manifest-emit-flow",
   "started_at": "2026-06-30T20:35:15Z",
-  "updated_at": "2026-06-30T20:35:15Z",
+  "updated_at": "2026-06-30T20:41:33Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.Q-manifest-emit-flow",
   "status": "running",
-  "current_task": 1,
+  "current_task": 2,
   "tasks": {
     "1": {
       "status": "passed",
@@ -21,6 +21,23 @@
       "files_changed": [
         "src/brain/okf.rs",
         "src/brain/crawl.rs",
+        "src/brain/graph.rs",
+        "src/brain/links.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Collapsed read_doc_metadata seam: build_graph and collect_doc_ids now read doc_id/related from entry.metadata (D5 extract-once); removed read_doc_metadata, RawFrontmatter, DocMeta from graph.rs; updated test helpers to pre-parse frontmatter into CorpusEntry.metadata",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Removed the 3 read_doc_metadata unit tests from graph.rs along with the function — they tested the removed seam directly; the behavior-level tests for build_graph/check_graph all pass unchanged",
+        "Updated write_corpus_entry in links.rs tests (and make_entry in graph.rs tests) to parse frontmatter from content and set entry.metadata, mirroring what crawl_corpus does, so collect_doc_ids and build_graph work correctly in tests"
+      ],
+      "files_changed": [
         "src/brain/graph.rs",
         "src/brain/links.rs"
       ],
@@ -83,13 +100,37 @@
         "filesReadKb": null,
         "inTokEst": 568,
         "outTok": 1477
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 253,
+        "filesReadKb": null,
+        "inTokEst": 253,
+        "outTok": 1467
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 880,
+        "filesReadKb": null,
+        "inTokEst": 880,
+        "outTok": 16641
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 568,
+        "filesReadKb": null,
+        "inTokEst": 568,
+        "outTok": 1993
       }
     ],
     "total": {
-      "promptTokEst": 2694,
+      "promptTokEst": 4395,
       "filesReadKb": 0,
-      "inTokEst": 2694,
-      "outTok": 18161
+      "inTokEst": 4395,
+      "outTok": 38262
     }
   }
 }
