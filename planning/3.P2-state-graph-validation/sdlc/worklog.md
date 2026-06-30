@@ -33,3 +33,7 @@ Validated: gating checks (fast tripwire)
 ## Task 7 — PASSED (1 attempt)
 What: Updated docs/cli.md and docs/architecture.md to document the v2 state-graph validation additions: new diagnostic codes (E_STATE_CYCLE, E_STATE_AUTHORED_BLOCKED, E_STATE_STATUS_INCONSISTENT, E_STATE_DANGLING_PROMOTION, W_STATE_FOCUS_DRIFT), expanded --state pipeline steps, and updated architecture module map and state-integrity section with v2 types and functions.
 Validated: gating checks (fast tripwire)
+
+## Task 8 — PASSED (1 attempt)
+What: Task 8 validate: all four harness gates pass — cargo fmt --check, clippy -D warnings, cargo test (275 tests, 0 failures), cargo build --release.
+Validated: gating checks (fast tripwire)
