@@ -286,6 +286,42 @@ pub struct Backlog {
 }
 
 // ---------------------------------------------------------------------------
+// Carryover — durable caveats / follow-ons (v3)
+// ---------------------------------------------------------------------------
+
+/// The scope of a `carryover[]` entry.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct CarryoverScope {
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
+    pub cross_repo: Option<bool>,
+}
+
+/// A durable caveat, known issue, environmental note, or deferred follow-on.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Carryover {
+    /// Stable node key.
+    pub slug: String,
+    /// Where it applies.
+    pub scope: CarryoverScope,
+    /// Item kind (`constraint`, `known_issue`, `env`, `deferred`).
+    pub kind: String,
+    /// The caveat / follow-on text.
+    pub text: String,
+    /// Optional related edges (same forms as blocked_by).
+    #[serde(default)]
+    pub related: Vec<BlockedBy>,
+    /// Human-readable condition under which this entry should be deleted.
+    #[serde(default)]
+    pub clears_when: Option<String>,
+    /// Date recorded (YYYY-MM-DD).
+    pub created: String,
+}
+
+// ---------------------------------------------------------------------------
 // StateFile — top-level structure
 // ---------------------------------------------------------------------------
 
@@ -326,6 +362,9 @@ pub struct StateFile {
     /// HQ queued-ideas graph (brain HQ only; empty elsewhere).
     #[serde(default)]
     pub backlog: Vec<Backlog>,
+    /// Durable caveats and follow-ons.
+    #[serde(default)]
+    pub carryover: Vec<Carryover>,
 }
 
 // ---------------------------------------------------------------------------
@@ -493,6 +532,9 @@ const VALID_TRACK_BLOCK_STATUSES: &[&str] = &["open", "in_progress", "closed"];
 
 /// Valid `status` values for `backlog[]` entries (HQ brain only).
 const VALID_BACKLOG_STATUSES: &[&str] = &["idea", "ready", "promoted"];
+
+/// Valid `kind` values for `carryover[]` entries.
+const VALID_CARRYOVER_KINDS: &[&str] = &["constraint", "known_issue", "env", "deferred"];
 
 /// Validate the schema-ring constraints for a successfully-deserialized
 /// [`StateFile`].
@@ -689,6 +731,60 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                     VALID_BACKLOG_STATUSES.join(", ")
                 ),
             ));
+        }
+    }
+
+    // --- 9. carryover[] validation ---
+    for item in &file.carryover {
+        if !VALID_CARRYOVER_KINDS.contains(&item.kind.as_str()) {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_SCHEMA_BAD_KIND",
+                format!(
+                    "carryover item '{}' has invalid kind '{}'; expected one of: {}",
+                    item.slug,
+                    item.kind,
+                    VALID_CARRYOVER_KINDS.join(", ")
+                ),
+            ));
+        }
+        
+        let scope_fields_set = item.scope.repo.is_some() as u8
+            + item.scope.tier.is_some() as u8
+            + item.scope.cross_repo.is_some() as u8;
+            
+        if scope_fields_set != 1 {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_SCHEMA_MALFORMED_SCOPE",
+                format!(
+                    "carryover item '{}' has malformed scope; exactly one of 'repo', 'tier', or 'cross_repo' must be set",
+                    item.slug
+                ),
+            ));
+        }
+
+        for dep in &item.related {
+            if let BlockedBy::Block { repo, id, .. } = dep {
+                let repo_empty = repo.trim().is_empty();
+                let id_empty = id.trim().is_empty();
+                if repo_empty || id_empty {
+                    diags.push(Diagnostic::error(
+                        path,
+                        "E_STATE_SCHEMA_BAD_BLOCKED_BY",
+                        format!(
+                            "related entry in carryover item '{}' is missing required \
+                             field(s): {}",
+                            item.slug,
+                            [repo_empty.then_some("'repo'"), id_empty.then_some("'id'")]
+                                .into_iter()
+                                .flatten()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ));
+                }
+            }
         }
     }
 
