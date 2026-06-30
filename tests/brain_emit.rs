@@ -483,3 +483,555 @@ fn splice_generated_empty_generated_clears_between_sentinels() {
         "END sentinel missing"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 3: plan_state_json, plan_master_plan_tables, apply_plan
+// ---------------------------------------------------------------------------
+
+mod task3_planners {
+    use mev::brain::emit::{apply_plan, plan_master_plan_tables, plan_state_json};
+    use mev::brain::state::{
+        Block, BlockedBy, Focus, RepoRollup, StateFile, StateSource, Track, TrackBlock,
+        build_state_graph,
+    };
+    use std::path::PathBuf;
+
+    // -----------------------------------------------------------------------
+    // Fixture helpers
+    // -----------------------------------------------------------------------
+
+    fn track_block(
+        id: &str,
+        title: &str,
+        status: Option<&str>,
+        wave: Option<i64>,
+        deps: Vec<BlockedBy>,
+    ) -> TrackBlock {
+        TrackBlock {
+            id: id.to_string(),
+            title: title.to_string(),
+            status: status.map(|s| s.to_string()),
+            depends_on: deps,
+            wave,
+            origin: None,
+        }
+    }
+
+    fn make_leaf_file(repo: &str, tracks: Vec<Track>, focus: Focus) -> StateFile {
+        StateFile {
+            repo: repo.to_string(),
+            kind: "project".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus,
+            tracks,
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+        }
+    }
+
+    fn make_brain_file(
+        repos: Vec<RepoRollup>,
+        cross_repo: Vec<mev::brain::state::CrossRepoEdge>,
+        focus: Focus,
+    ) -> StateFile {
+        StateFile {
+            repo: "brain".to_string(),
+            kind: "brain".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus,
+            tracks: vec![],
+            repos,
+            cross_repo,
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+        }
+    }
+
+    fn focus_with_now(block_id: &str, title: &str) -> Focus {
+        Focus {
+            now: vec![Block {
+                id: block_id.to_string(),
+                title: title.to_string(),
+                status: Some("in_progress".to_string()),
+                note: None,
+                repo: None,
+                blocked_by: vec![],
+            }],
+            next: vec![],
+            blocked: vec![],
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // plan_state_json — leaf focus regeneration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn leaf_focus_regenerated_from_tracks() {
+        // Leaf has a stale focus.now (a closed block) while "B" is in_progress.
+        let stale_focus = focus_with_now("A", "Block A"); // stale: A is now closed
+        let tracks = vec![Track {
+            title: "Phase 1".to_string(),
+            blocks: vec![
+                track_block("A", "Block A", Some("closed"), Some(1), vec![]),
+                track_block("B", "Block B", Some("in_progress"), Some(2), vec![]),
+            ],
+        }];
+        let file = make_leaf_file("myrepo", tracks, stale_focus);
+        let src = StateSource {
+            repo_slug: "myrepo".to_string(),
+            abs_path: PathBuf::from("/fake/myrepo/planning/state.json"),
+            expected_kind: "project",
+        };
+        let files = vec![(src.clone(), file)];
+        let graph = build_state_graph(&files);
+
+        let plan = plan_state_json(&files, &graph);
+
+        // Exactly one action for this file.
+        assert_eq!(
+            plan.actions.len(),
+            1,
+            "expected one action; got {}",
+            plan.actions.len()
+        );
+        let action = &plan.actions[0];
+        assert_eq!(action.path, src.abs_path);
+
+        // Parse the new content and verify focus.now = ["B"], not ["A"].
+        let derived: StateFile =
+            serde_json::from_str(&action.new_content).expect("new_content must be valid JSON");
+        let now_ids: Vec<&str> = derived.focus.now.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(
+            now_ids,
+            vec!["B"],
+            "focus.now should be [B]; got {now_ids:?}"
+        );
+        assert!(
+            derived.focus.now.iter().all(|b| b.id != "A"),
+            "stale block A should not appear in focus.now"
+        );
+
+        // tracks[] must survive unchanged.
+        assert_eq!(derived.tracks.len(), 1);
+        assert_eq!(derived.tracks[0].blocks.len(), 2);
+    }
+
+    #[test]
+    fn fixed_point_no_action() {
+        // A leaf whose stored focus already matches the derivation → no action.
+        let tracks = vec![Track {
+            title: "P".to_string(),
+            blocks: vec![
+                track_block("A", "Block A", Some("closed"), Some(1), vec![]),
+                track_block("B", "Block B", Some("in_progress"), Some(2), vec![]),
+            ],
+        }];
+        // Pre-derive the correct focus.
+        let correct_focus = Focus {
+            now: vec![Block {
+                id: "B".to_string(),
+                title: "Block B".to_string(),
+                status: Some("in_progress".to_string()),
+                note: None,
+                repo: None,
+                blocked_by: vec![],
+            }],
+            next: vec![],
+            blocked: vec![],
+        };
+        let file = make_leaf_file("myrepo", tracks, correct_focus);
+        let src = StateSource {
+            repo_slug: "myrepo".to_string(),
+            abs_path: PathBuf::from("/fake/myrepo/planning/state.json"),
+            expected_kind: "project",
+        };
+        let files = vec![(src, file)];
+        let graph = build_state_graph(&files);
+
+        let plan = plan_state_json(&files, &graph);
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "no action expected when focus is already at fixed point; got {} actions",
+            plan.actions.len()
+        );
+    }
+
+    #[test]
+    fn brain_rollup_regenerated_preserves_authored() {
+        use mev::brain::state::{Backlog, TierEntry};
+
+        // Leaf repo with one in_progress block.
+        let leaf_tracks = vec![Track {
+            title: "P".to_string(),
+            blocks: vec![track_block(
+                "BA.1",
+                "My block",
+                Some("in_progress"),
+                Some(1),
+                vec![],
+            )],
+        }];
+        let leaf_file = make_leaf_file("myrepo", leaf_tracks, Focus::default());
+        let leaf_src = StateSource {
+            repo_slug: "myrepo".to_string(),
+            abs_path: PathBuf::from("/fake/myrepo/planning/state.json"),
+            expected_kind: "project",
+        };
+
+        // Brain with stale repos[] (no children listed) and authored backlog/tiers.
+        let brain_focus = focus_with_now("brain-block", "Brain Block");
+        let mut brain_file = make_brain_file(vec![], vec![], brain_focus.clone());
+        brain_file.backlog = vec![Backlog {
+            slug: "bl-1".to_string(),
+            title: "Backlog item".to_string(),
+            repo: "myrepo".to_string(),
+            kind: "feature".to_string(),
+            status: "idea".to_string(),
+            depends_on: vec![],
+            block: None,
+            notes: None,
+        }];
+        brain_file.tiers = vec![TierEntry {
+            tier: "core".to_string(),
+            rollup: None,
+            summary: None,
+        }];
+
+        let brain_src = StateSource {
+            repo_slug: "brain".to_string(),
+            abs_path: PathBuf::from("/fake/brain/planning/state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![
+            (leaf_src.clone(), leaf_file.clone()),
+            (brain_src.clone(), brain_file),
+        ];
+        let graph = build_state_graph(&files);
+
+        let plan = plan_state_json(&files, &graph);
+
+        // Brain file should have an action (its repos[] was stale).
+        let brain_action = plan
+            .actions
+            .iter()
+            .find(|a| a.path == brain_src.abs_path)
+            .expect("expected an action for the brain state.json");
+
+        let derived: StateFile = serde_json::from_str(&brain_action.new_content)
+            .expect("new_content must be valid JSON");
+
+        // repos[] should now contain myrepo with the in_progress block.
+        assert_eq!(derived.repos.len(), 1, "expected one repo rollup");
+        let rollup = &derived.repos[0];
+        assert_eq!(rollup.repo, "myrepo");
+        let now_ids: Vec<&str> = rollup.now.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(now_ids, vec!["BA.1"]);
+
+        // Authored backlog must survive.
+        assert_eq!(derived.backlog.len(), 1);
+        assert_eq!(derived.backlog[0].slug, "bl-1");
+
+        // Authored tiers must survive.
+        assert_eq!(derived.tiers.len(), 1);
+        assert_eq!(derived.tiers[0].tier, "core");
+    }
+
+    #[test]
+    fn brain_focus_untouched() {
+        // Brain file has a non-empty authored focus — it must not be touched.
+        let authored_focus = focus_with_now("special-block", "Special");
+        let brain_file = make_brain_file(vec![], vec![], authored_focus);
+        let brain_src = StateSource {
+            repo_slug: "brain".to_string(),
+            abs_path: PathBuf::from("/fake/brain/planning/state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![(brain_src.clone(), brain_file.clone())];
+        let graph = build_state_graph(&files);
+
+        let plan = plan_state_json(&files, &graph);
+
+        // If there's an action, parse it and check the brain focus is identical.
+        if let Some(action) = plan.actions.iter().find(|a| a.path == brain_src.abs_path) {
+            let derived: StateFile = serde_json::from_str(&action.new_content).expect("valid JSON");
+            assert_eq!(
+                derived.focus.now.len(),
+                brain_file.focus.now.len(),
+                "brain focus.now length changed"
+            );
+            if !derived.focus.now.is_empty() {
+                assert_eq!(
+                    derived.focus.now[0].id, "special-block",
+                    "brain focus.now id changed"
+                );
+            }
+        }
+        // (No action is also acceptable if repos[]/cross_repo[] are already empty/correct.)
+    }
+
+    // -----------------------------------------------------------------------
+    // plan_master_plan_tables
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn splices_table_inside_sentinels() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mp_path = tmp.path().join("master-plan.md");
+        let state_path = tmp.path().join("state.json");
+
+        let original_mp = "# Plan\n\nNarrative before.\n\
+            <!-- BEGIN generated:wave-table -->\n\
+            <!-- END generated:wave-table -->\n\
+            \nNarrative after.\n";
+        std::fs::write(&mp_path, original_mp).unwrap();
+
+        let tracks = vec![Track {
+            title: "P".to_string(),
+            blocks: vec![track_block(
+                "B1",
+                "Block One",
+                Some("open"),
+                Some(1),
+                vec![],
+            )],
+        }];
+        let file = make_leaf_file("myrepo", tracks, Focus::default());
+        let src = StateSource {
+            repo_slug: "myrepo".to_string(),
+            abs_path: state_path,
+            expected_kind: "project",
+        };
+
+        let files = vec![(src, file)];
+        let graph = build_state_graph(&files);
+        let plan = plan_master_plan_tables(&files, &graph);
+
+        assert_eq!(
+            plan.actions.len(),
+            1,
+            "expected one action; got {}",
+            plan.actions.len()
+        );
+        let action = &plan.actions[0];
+        assert_eq!(action.path, mp_path);
+
+        // Narrative lines outside sentinels preserved.
+        assert!(
+            action.new_content.contains("Narrative before."),
+            "narrative before sentinel was lost"
+        );
+        assert!(
+            action.new_content.contains("Narrative after."),
+            "narrative after sentinel was lost"
+        );
+
+        // Table rendered inside sentinels.
+        assert!(
+            action.new_content.contains("| Wave |"),
+            "table header missing from new content"
+        );
+        assert!(
+            action.new_content.contains("B1"),
+            "block id B1 missing from rendered table"
+        );
+        assert!(
+            action
+                .new_content
+                .contains("<!-- BEGIN generated:wave-table -->"),
+            "BEGIN sentinel missing"
+        );
+        assert!(
+            action
+                .new_content
+                .contains("<!-- END generated:wave-table -->"),
+            "END sentinel missing"
+        );
+    }
+
+    #[test]
+    fn no_sentinels_warns_no_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mp_path = tmp.path().join("master-plan.md");
+        let state_path = tmp.path().join("state.json");
+
+        // master-plan.md has no sentinels.
+        std::fs::write(&mp_path, "# Plan\n\nNo sentinels here.\n").unwrap();
+
+        let file = make_leaf_file("myrepo", vec![], Focus::default());
+        let src = StateSource {
+            repo_slug: "myrepo".to_string(),
+            abs_path: state_path,
+            expected_kind: "project",
+        };
+
+        let files = vec![(src, file)];
+        let graph = build_state_graph(&files);
+        let plan = plan_master_plan_tables(&files, &graph);
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "no action expected when sentinels are absent; got {}",
+            plan.actions.len()
+        );
+        let warn = plan
+            .diagnostics
+            .iter()
+            .find(|d| d.locator == "W_EMIT_NO_SENTINEL");
+        assert!(
+            warn.is_some(),
+            "expected W_EMIT_NO_SENTINEL diagnostic; got none"
+        );
+    }
+
+    #[test]
+    fn missing_master_plan_warns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("state.json");
+        // No master-plan.md created.
+
+        let file = make_leaf_file("myrepo", vec![], Focus::default());
+        let src = StateSource {
+            repo_slug: "myrepo".to_string(),
+            abs_path: state_path,
+            expected_kind: "project",
+        };
+
+        let files = vec![(src, file)];
+        let graph = build_state_graph(&files);
+        let plan = plan_master_plan_tables(&files, &graph);
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "no action expected; got {}",
+            plan.actions.len()
+        );
+        let warn = plan
+            .diagnostics
+            .iter()
+            .find(|d| d.locator == "W_EMIT_NO_SENTINEL");
+        assert!(
+            warn.is_some(),
+            "expected W_EMIT_NO_SENTINEL for missing file; got none"
+        );
+    }
+
+    #[test]
+    fn master_plan_splice_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mp_path = tmp.path().join("master-plan.md");
+        let state_path = tmp.path().join("state.json");
+
+        let original_mp = "# Plan\n\
+            <!-- BEGIN generated:wave-table -->\n\
+            <!-- END generated:wave-table -->\n";
+        std::fs::write(&mp_path, original_mp).unwrap();
+
+        let tracks = vec![Track {
+            title: "P".to_string(),
+            blocks: vec![track_block("X", "X block", Some("open"), Some(1), vec![])],
+        }];
+        let file = make_leaf_file("repo", tracks, Focus::default());
+        let src = StateSource {
+            repo_slug: "repo".to_string(),
+            abs_path: state_path,
+            expected_kind: "project",
+        };
+
+        let files = vec![(src.clone(), file.clone())];
+        let graph = build_state_graph(&files);
+
+        // First pass: get the action's new_content.
+        let plan1 = plan_master_plan_tables(&files, &graph);
+        assert!(
+            !plan1.actions.is_empty(),
+            "first pass should produce an action"
+        );
+        let first_content = plan1.actions[0].new_content.clone();
+
+        // Write it to disk.
+        std::fs::write(&mp_path, &first_content).unwrap();
+
+        // Second pass: re-run the planner.
+        let plan2 = plan_master_plan_tables(&files, &graph);
+        // The content is now at fixed point, so no action should be generated.
+        assert_eq!(
+            plan2.actions.len(),
+            0,
+            "second pass (idempotent) should produce no action; got {}",
+            plan2.actions.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_plan
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dry_run_writes_nothing() {
+        use mev::brain::emit::EmitAction;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("output.json");
+        let original_bytes = b"original content";
+        std::fs::write(&target, original_bytes).unwrap();
+
+        let plan = mev::brain::emit::EmitPlan {
+            actions: vec![EmitAction {
+                path: target.clone(),
+                new_content: "new content".to_string(),
+                note: "test".to_string(),
+            }],
+            diagnostics: vec![],
+        };
+
+        let diags = apply_plan(&plan, false);
+
+        // File must be unchanged.
+        let after = std::fs::read(&target).unwrap();
+        assert_eq!(after, original_bytes, "dry-run must not write to the file");
+
+        // Should have a W_EMIT_DRY_RUN diagnostic.
+        let dry_diag = diags.iter().find(|d| d.locator == "W_EMIT_DRY_RUN");
+        assert!(dry_diag.is_some(), "expected W_EMIT_DRY_RUN diagnostic");
+    }
+
+    #[test]
+    fn write_true_persists() {
+        use mev::brain::emit::EmitAction;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("output.json");
+        std::fs::write(&target, b"original content").unwrap();
+
+        let new_content = "new content after write".to_string();
+        let plan = mev::brain::emit::EmitPlan {
+            actions: vec![EmitAction {
+                path: target.clone(),
+                new_content: new_content.clone(),
+                note: "test write".to_string(),
+            }],
+            diagnostics: vec![],
+        };
+
+        let diags = apply_plan(&plan, true);
+
+        // File must now contain the new content.
+        let after = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(after, new_content, "write=true must update the file");
+
+        // Should have an I_EMIT_WROTE diagnostic.
+        let wrote_diag = diags.iter().find(|d| d.locator == "I_EMIT_WROTE");
+        assert!(wrote_diag.is_some(), "expected I_EMIT_WROTE diagnostic");
+    }
+}
