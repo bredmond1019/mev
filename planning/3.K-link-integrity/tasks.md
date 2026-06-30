@@ -12,7 +12,7 @@ related: [master-plan, status, 3-P-state-integrity-tasks]
 
 # Task Spec — Phase 3, Block K (Link integrity)
 
-**Status:** Not started · **Last run:** never
+**Status:** Passed (4/4 tasks) · **Last run:** 2026-06-30 08:56 UTC
 
 ## Goal
 Add `mev validate-brain --links`: flag markdown `[text](path)`, `file://`, and `[[wikilink]]` references that do not resolve to an existing file / known `doc_id`, and consume `.brain-moves-pending` to surface references still pointing at moved/deleted paths.

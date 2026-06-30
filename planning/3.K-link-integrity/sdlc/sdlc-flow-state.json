@@ -2,10 +2,10 @@
   "spec_slug": "3.K-link-integrity",
   "branch": "3.K-link-integrity-flow",
   "started_at": "2026-06-30T08:40:01Z",
-  "updated_at": "2026-06-30T08:49:57Z",
+  "updated_at": "2026-06-30T08:56:36Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.K-link-integrity-flow",
   "status": "running",
-  "current_task": 3,
+  "current_task": 4,
   "tasks": {
     "1": {
       "status": "passed",
@@ -54,6 +54,25 @@
       ],
       "files_changed": [
         "src/brain/links.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Add validate_brain_links() public API + --links CLI flag + 9 integration tests; fix UTF-8 panic in extract_links() byte scanner",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Fixed a UTF-8 boundary panic discovered during the live brain run: extract_links() used i += 1 which can advance into the middle of a multi-byte sequence, causing contents[i..].starts_with() to panic. Fix: guard the file:// check with bytes[i] == b'f' first, and replace i += 1 with a char-width advance derived from the leading byte.",
+        "The live brain run produces 2085 errors (real findings: dangling [[bin]]/[[test]] wikilinks in claude-sdk-rs status docs, dead file:// URIs with placeholder paths, dead markdown links in SECURITY.md). These are genuine corpus findings, not false positives."
+      ],
+      "files_changed": [
+        "src/brain/links.rs",
+        "src/lib.rs",
+        "src/main.rs",
+        "tests/brain_links.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -162,13 +181,37 @@
         "filesReadKb": null,
         "inTokEst": 568,
         "outTok": 1796
+      },
+      {
+        "label": "update-task-4",
+        "model": "haiku",
+        "promptTokEst": 253,
+        "filesReadKb": null,
+        "inTokEst": 253,
+        "outTok": 1425
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 880,
+        "filesReadKb": null,
+        "inTokEst": 880,
+        "outTok": 14991
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 568,
+        "filesReadKb": null,
+        "inTokEst": 568,
+        "outTok": 1905
       }
     ],
     "total": {
-      "promptTokEst": 6096,
+      "promptTokEst": 7797,
       "filesReadKb": 0,
-      "inTokEst": 6096,
-      "outTok": 43936
+      "inTokEst": 7797,
+      "outTok": 62257
     }
   }
 }
