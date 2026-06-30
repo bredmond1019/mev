@@ -1,0 +1,95 @@
+{
+  "spec_slug": "3B.T-state-table-rollup-emit",
+  "branch": "3B.T-state-table-rollup-emit-flow",
+  "started_at": "2026-06-30T14:17:03Z",
+  "updated_at": "2026-06-30T14:17:03Z",
+  "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.T-state-table-rollup-emit-flow",
+  "status": "running",
+  "current_task": 1,
+  "tasks": {
+    "1": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Extracted derive_focus from check_focus_drift as single-source derivation; added DerivedFocus struct, derive_cross_repo, derive_rollup, and 8 integration tests covering all acceptance criteria for Task 1.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "DerivedFocus.blocked is Vec<(String, Vec<BlockedBy>)> returning only the unmet subset of depends_on (not the full list), matching the spec's requirement for emitter population of blocked_by[].",
+        "check_focus_drift now delegates entirely to derive_focus for the three-set derivation, then does set-comparison in place — no logic duplication.",
+        "derive_cross_repo skips same-repo and external deps; only cross-repo Block deps produce CrossRepoEdge.",
+        "derive_rollup filters children to kind==project before calling derive_focus, leaves tier as None per spec.",
+        "Used let-chain (if let ... && ...) to satisfy clippy::collapsible_if in derive_cross_repo."
+      ],
+      "files_changed": [
+        "src/brain/state.rs",
+        "tests/brain_state.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    }
+  },
+  "review": {
+    "verdict": null,
+    "findings": [],
+    "attempts": 0
+  },
+  "docs": {
+    "changed": [],
+    "created": []
+  },
+  "bail_reason": null,
+  "pr": {
+    "url": null,
+    "number": null
+  },
+  "tokens": {
+    "stages": [
+      {
+        "label": "worktree-setup",
+        "model": "haiku",
+        "promptTokEst": 788,
+        "filesReadKb": null,
+        "inTokEst": 788,
+        "outTok": 3330
+      },
+      {
+        "label": "enumerate",
+        "model": "haiku",
+        "promptTokEst": 235,
+        "filesReadKb": null,
+        "inTokEst": 235,
+        "outTok": 1051
+      },
+      {
+        "label": "update-task-1",
+        "model": "haiku",
+        "promptTokEst": 263,
+        "filesReadKb": null,
+        "inTokEst": 263,
+        "outTok": 1056
+      },
+      {
+        "label": "implement-1-1",
+        "model": "sonnet",
+        "promptTokEst": 915,
+        "filesReadKb": null,
+        "inTokEst": 915,
+        "outTok": 23951
+      },
+      {
+        "label": "test-1-1",
+        "model": "haiku",
+        "promptTokEst": 588,
+        "filesReadKb": null,
+        "inTokEst": 588,
+        "outTok": 1289
+      }
+    ],
+    "total": {
+      "promptTokEst": 2789,
+      "filesReadKb": 0,
+      "inTokEst": 2789,
+      "outTok": 30677
+    }
+  }
+}
