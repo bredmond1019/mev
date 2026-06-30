@@ -4,14 +4,12 @@ import os
 import subprocess
 
 def generate_graph():
-    # Resolve the absolute path to the portfolio root based on the script location
     script_dir = os.path.dirname(os.path.abspath(__file__))
     portfolio_root = os.path.abspath(os.path.join(script_dir, "../../../../"))
     mev_path = os.path.abspath(os.path.join(script_dir, "../../target/release/mev"))
     
     print(f"Running mev manifest from {mev_path}...")
     
-    # Run the manifest command
     result = subprocess.run([mev_path, "manifest", portfolio_root], capture_output=True, text=True)
     if result.returncode != 0:
         print(f"Failed to run mev manifest. Ensure it is built. Error: {result.stderr}")
@@ -22,23 +20,21 @@ def generate_graph():
     nodes = set()
 
     for entry in data.get("entries", []):
-        meta = entry.get("metadata")
-        if meta:
-            doc_id = meta.get("doc_id")
-            scope = entry.get("scope", "unknown")
-            if doc_id:
-                node_id = f"{scope}:{doc_id}"
-                related = meta.get("related", [])
-                for r in related:
-                    target = r if ":" in r else f"{scope}:{r}"
-                    edges.append((node_id, target))
-                    nodes.add(node_id)
-                    nodes.add(target)
+        doc_id = entry.get("doc_id")
+        scope = entry.get("scope", "unknown")
+        if doc_id:
+            node_id = f"{scope}:{doc_id}"
+            # The related field is flattened
+            related = entry.get("related", [])
+            for r in related:
+                target = r if ":" in r else f"{scope}:{r}"
+                edges.append((node_id, target))
+                nodes.add(node_id)
+                nodes.add(target)
 
     out_path = os.path.join(script_dir, "graph.md")
     
     with open(out_path, "w") as f:
-        # Include OKF frontmatter so it passes mev validation!
         f.write("---\n")
         f.write("type: Reference\n")
         f.write("title: Brain Knowledge Graph Visual\n")
@@ -62,7 +58,7 @@ def generate_graph():
             f.write(f"    {s_safe} --> {d_safe}\n")
         f.write("```\n")
 
-    print(f"Graph successfully generated at {out_path}")
+    print(f"Graph successfully generated at {out_path} with {len(nodes)} connected nodes and {len(edges)} edges.")
 
 if __name__ == "__main__":
     generate_graph()
