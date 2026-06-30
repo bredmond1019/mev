@@ -2,10 +2,10 @@
   "spec_slug": "3.P2-state-graph-validation",
   "branch": "3.P2-state-graph-validation-flow",
   "started_at": "2026-06-30T10:03:46Z",
-  "updated_at": "2026-06-30T10:03:46Z",
+  "updated_at": "2026-06-30T10:10:45Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.P2-state-graph-validation-flow",
   "status": "running",
-  "current_task": 1,
+  "current_task": 2,
   "tasks": {
     "1": {
       "status": "passed",
@@ -20,6 +20,24 @@
       ],
       "files_changed": [
         "src/brain/state.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Re-source graph DAG edges from tracks[].blocks[].depends_on[] (v2), add E_STATE_AUTHORED_BLOCKED and backlog status checks to check_schema, with 8 new unit tests",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "focus.blocked_by[] is completely removed as an edge source — existing tests that used it for edge detection were updated to use tracks[].blocks[].depends_on[] instead",
+        "Integration tests in tests/brain_state.rs were also updated (task 6 owns them long-term but they needed immediate update to keep the suite green)",
+        "Track blocks with invalid non-blocked status values are caught under E_STATE_SCHEMA_BAD_STATUS rather than a new code (consistent with existing focus status check)"
+      ],
+      "files_changed": [
+        "src/brain/state.rs",
+        "tests/brain_state.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -80,13 +98,37 @@
         "filesReadKb": null,
         "inTokEst": 586,
         "outTok": 1553
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 262,
+        "filesReadKb": null,
+        "inTokEst": 262,
+        "outTok": 789
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 911,
+        "filesReadKb": null,
+        "inTokEst": 911,
+        "outTok": 20074
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 586,
+        "filesReadKb": null,
+        "inTokEst": 586,
+        "outTok": 1686
       }
     ],
     "total": {
-      "promptTokEst": 2779,
+      "promptTokEst": 4538,
       "filesReadKb": 0,
-      "inTokEst": 2779,
-      "outTok": 30426
+      "inTokEst": 4538,
+      "outTok": 52975
     }
   }
 }
