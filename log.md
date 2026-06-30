@@ -8,12 +8,29 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-06-30T06:29:46-0300"
+timestamp: "2026-06-30T06:33:51-0300"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## 2026-06-30 — MV.3.P2 complete: v2 state-graph expansion validator (8 tasks, PASS, 275 tests)
+
+Implemented the full Block P2 v2 state-graph expansion validator across 8 tasks (all PASS, single attempt each). Task 1 migrated `src/brain/state.rs` to the v2 serde model: `Origin`/`Backlog` structs, `depends_on`/`wave`/`origin` added to `TrackBlock`, `Block.block`/`Endpoint.block` renamed to `id` with serde aliases for v1 backward compat, `backlog[]` added to `StateFile`, and all in-file fixture JSON migrated to canonical v2 form. Task 2 re-sourced DAG edges from `tracks[].blocks[].depends_on[]` (replacing the v1 `focus.blocked_by[]` edge source), added `E_STATE_AUTHORED_BLOCKED` for track blocks with a hand-authored `"blocked"` status, and extended `check_schema` to validate `backlog[].status` ∈ `{idea, ready, promoted}`. Task 3 added `detect_cycles` (DFS-based, emits `E_STATE_CYCLE` with cycle path) and a standalone `ready_order` (wave-ordered ready+open blocks, built as a reusable function for the future `MV.3B.T` emit step). Task 4 added `check_status_consistency` (`E_STATE_STATUS_INCONSISTENT` when a closed block depends on a non-closed block) and `check_backlog_integrity` (`E_STATE_DANGLING_BLOCKED_BY` for unresolvable backlog deps, `E_STATE_DANGLING_PROMOTION` for promoted backlog nodes whose `block` pointer resolves to nothing). Task 5 added `check_focus_drift` which recomputes `focus.now/next/blocked` from `tracks[]` and emits `W_STATE_FOCUS_DRIFT` (warning, exit 0) on mismatch, reusing `ready_order`. Task 6 wired all four new checks into the `validate_brain_state` pipeline in `src/lib.rs`, migrated the integration fixtures in `tests/brain_state.rs` to v2, and added 6 new end-to-end tests (10 total). Task 7 updated `docs/cli.md` (new diagnostic codes, expanded `--state` pipeline description) and `docs/architecture.md` (v2 types, function map). Task 8 confirmed all four harness gates green: `cargo fmt --check`, `clippy -D warnings`, `cargo test` (275 tests, 0 failures), `cargo build --release`. Final review verdict: PASS (no findings). Next: coordinate the brain-side re-seed of the 5 live `state.json` files to v2 to enable live `--state` validation, then `MV.3.L` (structural coverage) or `MV.3B.Q` (manifest emit).
+
+```
+ce336e4 chore: flow state — task 8 passed
+2032d44 chore: mark Task 8 validate passed — all harness gates green (275 tests)
+25c3626 chore: flow state — task 7 passed
+78a606b docs: update cli.md and architecture.md for 3.P2 state-graph v2 (Task 7)
+0f47c99 chore: flow state — task 6 passed
+cbd16f2 feat: implement 3.P2-state-graph-validation-task6
+e495bb9 chore: flow state — task 5 passed
+833f404 feat: implement 3.P2-state-graph-validation-task5
+```
 
 ---
 
@@ -36,6 +53,11 @@ b1c3989 chore: flow state — task 3 passed
 - **What:** `3.K-link-integrity` merged via PR #6 (merge commit `334ae4a`). Ran `/sdlc-flow 3.K-link-integrity` to completion (6 tasks, PASS), then a post-merge `/code-review low`. The review caught a real docs/code mismatch: the `validate-brain` dispatch ladder in `src/main.rs` placed the `--links` branch **last** (lowest precedence), contradicting `docs/cli.md`, `docs/architecture.md`, and the recorded task decision that `--links` outranks `--state`. Fix: moved `links` to the **top** of the ladder; added binary-spawning integration test `links_flag_outranks_state_in_dispatch` in `tests/brain_links.rs` (commit `973b3df`). Test count now **237** (was 236). Local `main` rebased to preserve an unpushed planning-doc commit → `main` at `b1fb953`, in sync with `origin/main`. Worktree `trees/3.K-link-integrity-flow` removed, branch deleted. `mev validate-brain --links` is live.
 - **Why:** Block K is the link-integrity sibling of the doc-graph corpus engine; the precedence bug would have let `--links` silently lose to `--state` at the CLI, contradicting documented behavior — fixing it keeps the dispatch contract consistent with docs/spec.
 - **Refs:** PR #6; commit `973b3df`; merge `334ae4a`; `main` `b1fb953`; `planning/3.K-link-integrity/`; `master-plan.md`.
+
+### State-graph expansion design + MV.3.P2 / MV.3B.T planning
+- **What:** Settled 4 design decisions + 7 refinements for the state-graph expansion (recorded in the Resolutions section of `core/planning/state-graph-design-decisions/notes.md`), then rewrote `core/planning/state-schema.md` to **v2**: `depends_on` DAG (replacing the ad-hoc `blocked_by`), derived focus/rollup, `backlog[]`, `id` standardization, and **blocked-is-derived** (a block's blocked status is computed from its `depends_on` edges, not hand-set). Added two blocks to the mev master-plan — **MV.3.P2** (state-graph expansion validation) and **MV.3B.T** (table/rollup emit) — and specced **MV.3.P2** at `planning/3.P2-state-graph-validation/tasks.md` (8 tasks). Concurrent in a separate worktree: **MV.3.K** link integrity was implemented, reviewed, and merged (PR #6, 237 tests). Key commits: mev `b1fb953` (master-plan MV.3.P2+MV.3B.T), `7f20ca8` (MV.3.P2 spec); core repo `4693dce` (schema v2 + settled decisions). Note: two separate git repos — mev at `core/mev`, brain/core at `core/`. Next: re-seed the 5 live `state.json` files to v2, then run `/sdlc-flow 3.P2-state-graph-validation`.
+- **Why:** The state-graph (work-block graph) is the twin of the doc-graph corpus engine; before re-seeding the live `state.json` files we needed to settle the v2 schema shape and plan the mev validator that will guard it — design and validator spec first, schema migration second.
+- **Refs:** D36; `core/planning/state-schema.md` (v2); `core/planning/state-graph-design-decisions/notes.md`; `planning/3.P2-state-graph-validation/tasks.md`; mev `b1fb953`, `7f20ca8`; core `4693dce`.
 
 ---
 

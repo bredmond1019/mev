@@ -1,0 +1,48 @@
+# Worklog — 3.P2-state-graph-validation
+
+## Task 1 — PASSED (1 attempt)
+What: Migrate src/brain/state.rs to the v2 state schema: add Origin/Backlog structs, extend TrackBlock with depends_on/wave/origin, rename Block.block and Endpoint.block to id with serde aliases for v1 compat, add backlog[] to StateFile, cascade all internal .block references to .id, and migrate fixture JSON keys to canonical v2 form.
+Decisions: Used #[serde(alias = "block")] on Block.id and Endpoint.id rather than renaming the JSON key alone — this preserves backward compatibility with any v1 fixtures that still use the "block" key while making canonical v2 fixtures use "id".; Added backlog: vec![] to the two Rust StateFile struct constructors in test helpers so they compile against the new required field; all other StateFile instances are deserialized from JSON (which defaults via #[serde(default)]).; Migrated all fixture JSON strings to use "id" key (step 1.8) even though the serde alias makes this belt-and-suspenders — the spec explicitly requires canonical v2 form in the in-file fixtures.
+Validated: gating checks (fast tripwire)
+
+## Task 2 — PASSED (1 attempt)
+What: Re-source graph DAG edges from tracks[].blocks[].depends_on[] (v2), add E_STATE_AUTHORED_BLOCKED and backlog status checks to check_schema, with 8 new unit tests
+Decisions: focus.blocked_by[] is completely removed as an edge source — existing tests that used it for edge detection were updated to use tracks[].blocks[].depends_on[] instead; Integration tests in tests/brain_state.rs were also updated (task 6 owns them long-term but they needed immediate update to keep the suite green); Track blocks with invalid non-blocked status values are caught under E_STATE_SCHEMA_BAD_STATUS rather than a new code (consistent with existing focus status check)
+Validated: gating checks (fast tripwire)
+
+## Task 3 — PASSED (1 attempt)
+What: Add detect_cycles (DFS, E_STATE_CYCLE with path) and ready_order (wave-ordered ready-open blocks, standalone for MV.3B.T) to src/brain/state.rs, with 13 unit tests covering all spec cases.
+Decisions: detect_cycles_dfs is a private module-level function (not nested in detect_cycles) using fully-qualified HashMap/HashSet types to avoid import scope issues; ready_order accepts _graph parameter (unused, prefixed with underscore) for MV.3B.T forward-compat without triggering clippy unused-variable warning; wave=None treated as i64::MAX (lowest priority, goes last) for stable ordering; CrossRepo edges are excluded from cycle detection — only BlockedBy edges form the authoritative DAG
+Validated: gating checks (fast tripwire)
+
+## Task 4 — PASSED (1 attempt)
+What: Added check_status_consistency (E_STATE_STATUS_INCONSISTENT) and check_backlog_integrity (E_STATE_DANGLING_BLOCKED_BY + E_STATE_DANGLING_PROMOTION) functions with 8 unit tests; all 267 state module tests pass and all harness gates green.
+Decisions: check_status_consistency silently skips dangling deps (dep key not in status_map) to avoid double-reporting with check_state_graph's E_STATE_DANGLING_BLOCKED_BY; check_backlog_integrity emits E_STATE_DANGLING_PROMOTION for both cases: promoted node with no block pointer AND promoted node with a block pointer that resolves to nothing; Both functions are standalone public functions rather than extensions of check_state_graph, matching the spec's 'new check fns' language and keeping separation clean for task 6 wiring
+Validated: gating checks (fast tripwire)
+
+## Task 5 — PASSED (1 attempt)
+What: Add check_focus_drift to src/brain/state.rs — recomputes focus.now/next/blocked from tracks[] and emits W_STATE_FOCUS_DRIFT (warning, exit 0) on mismatch; 8 unit tests covering all cases.
+Decisions: Skips files with empty tracks[] (brain files whose focus comes from aggregated child repos would produce false positives); Signature takes (src, file, graph, files) so ready_order can be called cross-file for accurate next derivation; open blocks with any External dep or any unclosed Block dep go into derived blocked; ready_order output filtered by repo prefix gives derived next
+Validated: gating checks (fast tripwire)
+
+## Task 6 — PASSED (1 attempt)
+What: Wired detect_cycles, check_status_consistency, check_backlog_integrity, and check_focus_drift into validate_brain_state pipeline; migrated integration fixtures to v2 and added 6 new end-to-end tests (10 total).
+Decisions: Focus drift check runs on all loaded files (not just project kind), matching the spec intent that each file with tracks[] gets checked; Existing fixtures migrated to v2 by replacing 'block' JSON key with 'id' in focus entries and cross_repo endpoints (alias in serde model keeps v1 still deserializable but v2 is canonical); New pipeline steps appended in spec order: cycle detection (5), status consistency (6), backlog integrity (7), rollup drift (8), focus drift (9)
+Validated: gating checks (fast tripwire)
+
+## Task 7 — PASSED (1 attempt)
+What: Updated docs/cli.md and docs/architecture.md to document the v2 state-graph validation additions: new diagnostic codes (E_STATE_CYCLE, E_STATE_AUTHORED_BLOCKED, E_STATE_STATUS_INCONSISTENT, E_STATE_DANGLING_PROMOTION, W_STATE_FOCUS_DRIFT), expanded --state pipeline steps, and updated architecture module map and state-integrity section with v2 types and functions.
+Validated: gating checks (fast tripwire)
+
+## Task 8 — PASSED (1 attempt)
+What: Task 8 validate: all four harness gates pass — cargo fmt --check, clippy -D warnings, cargo test (275 tests, 0 failures), cargo build --release.
+Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: docs/cli.md, docs/architecture.md
+
+## Wrap-up — PASS
+Next: Coordinate brain-side re-seed of the 5 live state.json files to v2 schema to enable live `mev validate-brain --state` validation, then pick up MV.3.L (structural coverage: index.md ↔ dir, D17) or MV.3B.Q (manifest emit / Phase 3B) per master-plan.md ordering.
+
+## PR
+https://github.com/bredmond1019/mev/pull/7

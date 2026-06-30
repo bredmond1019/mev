@@ -1,0 +1,410 @@
+{
+  "spec_slug": "3.P2-state-graph-validation",
+  "branch": "3.P2-state-graph-validation-flow",
+  "started_at": "2026-06-30T10:03:46Z",
+  "updated_at": "2026-06-30T11:00:30Z",
+  "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.P2-state-graph-validation-flow",
+  "status": "done",
+  "current_task": 8,
+  "tasks": {
+    "1": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Migrate src/brain/state.rs to the v2 state schema: add Origin/Backlog structs, extend TrackBlock with depends_on/wave/origin, rename Block.block and Endpoint.block to id with serde aliases for v1 compat, add backlog[] to StateFile, cascade all internal .block references to .id, and migrate fixture JSON keys to canonical v2 form.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Used #[serde(alias = \"block\")] on Block.id and Endpoint.id rather than renaming the JSON key alone — this preserves backward compatibility with any v1 fixtures that still use the \"block\" key while making canonical v2 fixtures use \"id\".",
+        "Added backlog: vec![] to the two Rust StateFile struct constructors in test helpers so they compile against the new required field; all other StateFile instances are deserialized from JSON (which defaults via #[serde(default)]).",
+        "Migrated all fixture JSON strings to use \"id\" key (step 1.8) even though the serde alias makes this belt-and-suspenders — the spec explicitly requires canonical v2 form in the in-file fixtures."
+      ],
+      "files_changed": [
+        "src/brain/state.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Re-source graph DAG edges from tracks[].blocks[].depends_on[] (v2), add E_STATE_AUTHORED_BLOCKED and backlog status checks to check_schema, with 8 new unit tests",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "focus.blocked_by[] is completely removed as an edge source — existing tests that used it for edge detection were updated to use tracks[].blocks[].depends_on[] instead",
+        "Integration tests in tests/brain_state.rs were also updated (task 6 owns them long-term but they needed immediate update to keep the suite green)",
+        "Track blocks with invalid non-blocked status values are caught under E_STATE_SCHEMA_BAD_STATUS rather than a new code (consistent with existing focus status check)"
+      ],
+      "files_changed": [
+        "src/brain/state.rs",
+        "tests/brain_state.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "3": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Add detect_cycles (DFS, E_STATE_CYCLE with path) and ready_order (wave-ordered ready-open blocks, standalone for MV.3B.T) to src/brain/state.rs, with 13 unit tests covering all spec cases.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "detect_cycles_dfs is a private module-level function (not nested in detect_cycles) using fully-qualified HashMap/HashSet types to avoid import scope issues",
+        "ready_order accepts _graph parameter (unused, prefixed with underscore) for MV.3B.T forward-compat without triggering clippy unused-variable warning",
+        "wave=None treated as i64::MAX (lowest priority, goes last) for stable ordering",
+        "CrossRepo edges are excluded from cycle detection — only BlockedBy edges form the authoritative DAG"
+      ],
+      "files_changed": [
+        "src/brain/state.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added check_status_consistency (E_STATE_STATUS_INCONSISTENT) and check_backlog_integrity (E_STATE_DANGLING_BLOCKED_BY + E_STATE_DANGLING_PROMOTION) functions with 8 unit tests; all 267 state module tests pass and all harness gates green.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "check_status_consistency silently skips dangling deps (dep key not in status_map) to avoid double-reporting with check_state_graph's E_STATE_DANGLING_BLOCKED_BY",
+        "check_backlog_integrity emits E_STATE_DANGLING_PROMOTION for both cases: promoted node with no block pointer AND promoted node with a block pointer that resolves to nothing",
+        "Both functions are standalone public functions rather than extensions of check_state_graph, matching the spec's 'new check fns' language and keeping separation clean for task 6 wiring"
+      ],
+      "files_changed": [
+        "src/brain/state.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "5": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Add check_focus_drift to src/brain/state.rs — recomputes focus.now/next/blocked from tracks[] and emits W_STATE_FOCUS_DRIFT (warning, exit 0) on mismatch; 8 unit tests covering all cases.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Skips files with empty tracks[] (brain files whose focus comes from aggregated child repos would produce false positives)",
+        "Signature takes (src, file, graph, files) so ready_order can be called cross-file for accurate next derivation",
+        "open blocks with any External dep or any unclosed Block dep go into derived blocked; ready_order output filtered by repo prefix gives derived next"
+      ],
+      "files_changed": [
+        "src/brain/state.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "6": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Wired detect_cycles, check_status_consistency, check_backlog_integrity, and check_focus_drift into validate_brain_state pipeline; migrated integration fixtures to v2 and added 6 new end-to-end tests (10 total).",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Focus drift check runs on all loaded files (not just project kind), matching the spec intent that each file with tracks[] gets checked",
+        "Existing fixtures migrated to v2 by replacing 'block' JSON key with 'id' in focus entries and cross_repo endpoints (alias in serde model keeps v1 still deserializable but v2 is canonical)",
+        "New pipeline steps appended in spec order: cycle detection (5), status consistency (6), backlog integrity (7), rollup drift (8), focus drift (9)"
+      ],
+      "files_changed": [
+        "src/lib.rs",
+        "tests/brain_state.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "7": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Updated docs/cli.md and docs/architecture.md to document the v2 state-graph validation additions: new diagnostic codes (E_STATE_CYCLE, E_STATE_AUTHORED_BLOCKED, E_STATE_STATUS_INCONSISTENT, E_STATE_DANGLING_PROMOTION, W_STATE_FOCUS_DRIFT), expanded --state pipeline steps, and updated architecture module map and state-integrity section with v2 types and functions.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [],
+      "files_changed": [
+        "docs/cli.md",
+        "docs/architecture.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "8": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Task 8 validate: all four harness gates pass — cargo fmt --check, clippy -D warnings, cargo test (275 tests, 0 failures), cargo build --release.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [],
+      "files_changed": [
+        "planning/3.P2-state-graph-validation/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    }
+  },
+  "review": {
+    "verdict": "PASS",
+    "findings": [],
+    "attempts": 1
+  },
+  "docs": {
+    "changed": [
+      "docs/cli.md",
+      "docs/architecture.md"
+    ],
+    "created": []
+  },
+  "bail_reason": null,
+  "pr": {
+    "url": "https://github.com/bredmond1019/mev/pull/7",
+    "number": 7
+  },
+  "tokens": {
+    "stages": [
+      {
+        "label": "worktree-setup",
+        "model": "haiku",
+        "promptTokEst": 786,
+        "filesReadKb": null,
+        "inTokEst": 786,
+        "outTok": 8683
+      },
+      {
+        "label": "enumerate",
+        "model": "haiku",
+        "promptTokEst": 234,
+        "filesReadKb": null,
+        "inTokEst": 234,
+        "outTok": 772
+      },
+      {
+        "label": "update-task-1",
+        "model": "haiku",
+        "promptTokEst": 262,
+        "filesReadKb": null,
+        "inTokEst": 262,
+        "outTok": 849
+      },
+      {
+        "label": "implement-1-1",
+        "model": "sonnet",
+        "promptTokEst": 911,
+        "filesReadKb": null,
+        "inTokEst": 911,
+        "outTok": 18569
+      },
+      {
+        "label": "test-1-1",
+        "model": "haiku",
+        "promptTokEst": 586,
+        "filesReadKb": null,
+        "inTokEst": 586,
+        "outTok": 1553
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 262,
+        "filesReadKb": null,
+        "inTokEst": 262,
+        "outTok": 789
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 911,
+        "filesReadKb": null,
+        "inTokEst": 911,
+        "outTok": 20074
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 586,
+        "filesReadKb": null,
+        "inTokEst": 586,
+        "outTok": 1686
+      },
+      {
+        "label": "update-task-3",
+        "model": "haiku",
+        "promptTokEst": 262,
+        "filesReadKb": null,
+        "inTokEst": 262,
+        "outTok": 913
+      },
+      {
+        "label": "implement-3-1",
+        "model": "sonnet",
+        "promptTokEst": 911,
+        "filesReadKb": null,
+        "inTokEst": 911,
+        "outTok": 21013
+      },
+      {
+        "label": "test-3-1",
+        "model": "haiku",
+        "promptTokEst": 586,
+        "filesReadKb": null,
+        "inTokEst": 586,
+        "outTok": 1807
+      },
+      {
+        "label": "update-task-4",
+        "model": "haiku",
+        "promptTokEst": 262,
+        "filesReadKb": null,
+        "inTokEst": 262,
+        "outTok": 1174
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 911,
+        "filesReadKb": null,
+        "inTokEst": 911,
+        "outTok": 16218
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 586,
+        "filesReadKb": null,
+        "inTokEst": 586,
+        "outTok": 1394
+      },
+      {
+        "label": "update-task-5",
+        "model": "haiku",
+        "promptTokEst": 262,
+        "filesReadKb": null,
+        "inTokEst": 262,
+        "outTok": 1205
+      },
+      {
+        "label": "implement-5-1",
+        "model": "sonnet",
+        "promptTokEst": 911,
+        "filesReadKb": null,
+        "inTokEst": 911,
+        "outTok": 16110
+      },
+      {
+        "label": "test-5-1",
+        "model": "haiku",
+        "promptTokEst": 586,
+        "filesReadKb": null,
+        "inTokEst": 586,
+        "outTok": 2592
+      },
+      {
+        "label": "update-task-6",
+        "model": "haiku",
+        "promptTokEst": 262,
+        "filesReadKb": null,
+        "inTokEst": 262,
+        "outTok": 1502
+      },
+      {
+        "label": "implement-6-1",
+        "model": "sonnet",
+        "promptTokEst": 911,
+        "filesReadKb": null,
+        "inTokEst": 911,
+        "outTok": 17405
+      },
+      {
+        "label": "test-6-1",
+        "model": "haiku",
+        "promptTokEst": 586,
+        "filesReadKb": null,
+        "inTokEst": 586,
+        "outTok": 1745
+      },
+      {
+        "label": "update-task-7",
+        "model": "haiku",
+        "promptTokEst": 262,
+        "filesReadKb": null,
+        "inTokEst": 262,
+        "outTok": 1175
+      },
+      {
+        "label": "implement-7-1",
+        "model": "sonnet",
+        "promptTokEst": 911,
+        "filesReadKb": null,
+        "inTokEst": 911,
+        "outTok": 8385
+      },
+      {
+        "label": "test-7-1",
+        "model": "haiku",
+        "promptTokEst": 586,
+        "filesReadKb": null,
+        "inTokEst": 586,
+        "outTok": 2842
+      },
+      {
+        "label": "update-task-8",
+        "model": "haiku",
+        "promptTokEst": 262,
+        "filesReadKb": null,
+        "inTokEst": 262,
+        "outTok": 1113
+      },
+      {
+        "label": "implement-8-1",
+        "model": "sonnet",
+        "promptTokEst": 911,
+        "filesReadKb": null,
+        "inTokEst": 911,
+        "outTok": 2608
+      },
+      {
+        "label": "test-8-1",
+        "model": "haiku",
+        "promptTokEst": 586,
+        "filesReadKb": null,
+        "inTokEst": 586,
+        "outTok": 2058
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 1008,
+        "filesReadKb": null,
+        "inTokEst": 1008,
+        "outTok": 4031
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 816,
+        "filesReadKb": null,
+        "inTokEst": 816,
+        "outTok": 2415
+      },
+      {
+        "label": "wrap-up",
+        "model": "sonnet",
+        "promptTokEst": 853,
+        "filesReadKb": null,
+        "inTokEst": 853,
+        "outTok": 8253
+      },
+      {
+        "label": "pr-create",
+        "model": "sonnet",
+        "promptTokEst": 772,
+        "filesReadKb": null,
+        "inTokEst": 772,
+        "outTok": 1934
+      }
+    ],
+    "total": {
+      "promptTokEst": 18541,
+      "filesReadKb": 0,
+      "inTokEst": 18541,
+      "outTok": 170867
+    }
+  }
+}

@@ -12,7 +12,7 @@ related: [master-plan, status, 3-P-state-integrity-tasks, state-json-schema]
 
 # Task Spec — Phase 3, Block P2 (State-graph expansion validation)
 
-**Status:** Not started · **Last run:** never
+**Status:** All 8 tasks passed — PASS · **Last run:** 2026-06-30T10:53:34Z
 
 ## Goal
 Extend `mev validate-brain --state` to guard the **v2 state schema** — the full work-block DAG: validate `depends_on` resolution + acyclicity, reject the now-derived `blocked` status, check status consistency and backlog nodes, and warn on `focus`/rollup derivation drift.
@@ -62,23 +62,23 @@ Extend `mev validate-brain --state` to guard the **v2 state schema** — the ful
 - Unit tests: closed-depends-on-open flagged; dangling backlog dep flagged; orphan promoted-node flagged; a clean promote (node `block` matches a real block carrying `origin`) passes.
 - **Owns:** `src/brain/state.rs` (new check fns; may extend `check_state_graph` to fold in backlog edge sources).
 
-### 5. Derivation-drift warnings (focus recompute)
+### 5. Derivation-drift warnings (focus recompute) (PASSED)
 - Add `check_focus_drift(file, graph) -> Vec<Diagnostic>`: recompute the expected `focus` from authored `tracks[]` (`now` = `in_progress` blocks; `blocked` = blocks with an unmet `depends_on`; `next` = `ready_order` ∩ `open`) and compare to the stored `focus` (block-id sets only, mirroring `check_rollup`'s set comparison). On mismatch emit **`W_STATE_FOCUS_DRIFT`** (warning — exit 0). Reuse `ready_order` from task 3.
 - Leave `check_rollup` (`W_STATE_ROLLUP_DRIFT`) as-is for now; note in code that v2 will eventually derive `repos[]` from child `tracks[]` (deferred to `MV.3B.T`).
 - Unit tests: a stored `focus` that disagrees with the derived view → one `W_STATE_FOCUS_DRIFT`; an in-sync `focus` → none; drift never raises exit code.
 - **Owns:** `src/brain/state.rs` (new `check_focus_drift`).
 
-### 6. Wire into the pipeline + integration tests
+### 6. Wire into the pipeline + integration tests (in progress)
 - `src/lib.rs` → `validate_brain_state`: after the existing schema/graph/rollup passes, append `detect_cycles`, the status-consistency check, the backlog-node checks, and `check_focus_drift` into the same `Report`. (No `--state` flag change; `src/main.rs` untouched.)
 - `tests/brain_state.rs`: migrate existing integration fixtures to v2 and add end-to-end cases — a cyclic `depends_on` → exit 1 with `E_STATE_CYCLE`; authored `status:"blocked"` → `E_STATE_AUTHORED_BLOCKED`; closed-depends-on-non-closed → `E_STATE_STATUS_INCONSISTENT`; dangling backlog dep + orphan promotion flagged; `focus` drift → warning (exit 0); a clean v2 corpus passes; `--json` envelope well-formed.
 - **Owns:** `src/lib.rs`, `tests/brain_state.rs`.
 
-### 7. Documentation
+### 7. Documentation (in progress)
 - `docs/cli.md`: add the new diagnostic codes (`E_STATE_CYCLE`, `E_STATE_AUTHORED_BLOCKED`, `E_STATE_STATUS_INCONSISTENT`, `E_STATE_DANGLING_PROMOTION`, `W_STATE_FOCUS_DRIFT`) to the diagnostics reference; note that `--state` now validates the v2 `depends_on` DAG (acyclicity + derived-blocked) and warns on focus drift.
 - `docs/architecture.md`: update the `src/brain/state.rs` one-liner to mention DAG/cycle/backlog if it enumerates the module's checks.
 - **Owns:** `docs/cli.md`, `docs/architecture.md`.
 
-### 8. Validate
+### 8. Validate (PASSED)
 - Run the Validation Commands listed below and confirm all pass.
 
 ## Acceptance Criteria
@@ -105,4 +105,8 @@ cargo build --release
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the spec. -->
-_No amendments yet._
+- 2026-06-30 [task 1] Used `#[serde(alias = "block")]` on `Block.id` and `Endpoint.id` rather than a pure rename — preserves v1 fixture backward compat; spec said "rename/cascade" without specifying alias approach.
+- 2026-06-30 [task 2] `tests/brain_state.rs` (task 6's owned file) was also updated in task 2 to keep the full test suite green after the `focus.blocked_by[]` edge source was removed; spec assigned that file exclusively to task 6.
+- 2026-06-30 [task 3] `ready_order` accepts an unused `_graph` parameter (prefixed to suppress clippy) for forward-compat with `MV.3B.T`; `wave=None` treated as `i64::MAX` (lowest priority) — neither detail was specified in the spec.
+- 2026-06-30 [task 5] `check_focus_drift` silently skips files with empty `tracks[]` to avoid false positives on aggregated brain files — the spec did not specify this guard.
+- 2026-06-30 [task 6] `check_focus_drift` is wired to run on all loaded files (not filtered to project-kind only) — spec implied per-file scope without specifying file-kind filtering.
