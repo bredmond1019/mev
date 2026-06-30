@@ -32,7 +32,7 @@ src/
     ├── scope.rs    ← scope_units(), scope_for(), owning_unit() — registry-driven scope resolver
     ├── sync.rs     ← (internal) sync helpers
     ├── graph.rs    ← EdgeKind, Edge, Node, Graph, GraphArtifact, DocMeta; build_graph(), check_graph(), read_doc_metadata() — Phase 3 Block J
-    ├── state.rs    ← StateFile, StateGraph, StateNode, StateEdge, StateSource; discover_state_files(), load_state(), check_schema(), build_state_graph(), check_state_graph(), check_rollup() — Phase 3 Block P
+    ├── state.rs    ← StateFile, TrackBlock, Backlog, Origin, StateGraph, StateNode, StateEdge, StateSource; discover_state_files(), load_state(), check_schema(), build_state_graph(), check_state_graph(), check_rollup(), detect_cycles(), ready_order(), check_focus_drift() — Phase 3 Block P / P2 (v2: depends_on DAG, cycle detection, derived-blocked enforcement, backlog nodes, focus-drift warnings)
     └── links.rs    ← LinkKind, LinkRef; extract_links(), check_links(), collect_doc_ids(), read_moves_pending(), check_moved_references() — Phase 3 Block K
 
 tests/
@@ -225,9 +225,9 @@ The graph module builds and validates the serializable `scope:doc_id` knowledge 
 
 ---
 
-### State integrity (`src/brain/state.rs`) — Phase 3 Block P
+### State integrity (`src/brain/state.rs`) — Phase 3 Block P / P2
 
-The state module discovers, loads, and validates all `planning/state.json` files across the registered repos, then builds and checks the cross-repo block-dependency graph.
+The state module discovers, loads, and validates all `planning/state.json` files across the registered repos, then builds and checks the cross-repo block-dependency graph. Block P2 extends the v1 model to the v2 schema: `depends_on[]` DAG edges on track blocks, cycle detection, derived-blocked enforcement, backlog-node integrity, and focus-drift warnings.
 
 #### Public functions
 
@@ -235,19 +235,26 @@ The state module discovers, loads, and validates all `planning/state.json` files
 |---|---|---|
 | `discover_state_files` | `(&Path, &BrainConfig) -> (Vec<StateSource>, Vec<Diagnostic>)` | Discovers state.json paths for the HQ brain, tier sub-brains (via `tiers[].rollup`), and leaf repos (via `[[repos]]` in `brain.toml`). Missing files emit `W_STATE_FILE_MISSING`. |
 | `load_state` | `(&Path) -> Result<StateFile, StateLoadError>` | Deserializes a `planning/state.json` file into a `StateFile`. Returns `StateLoadError::Malformed` on schema mismatch or `StateLoadError::Io` on I/O failure. |
-| `check_schema` | `(&StateSource, &StateFile) -> Vec<Diagnostic>` | Schema-ring validation: kind membership, `updated` non-empty, status enum values, `blocked_by` well-formedness, kind-appropriate section presence. |
-| `build_state_graph` | `(&[(StateSource, StateFile)]) -> StateGraph` | Builds the cross-repo block-dependency graph: nodes from `tracks[]` blocks, edges from `blocked_by` and `cross_repo[]` entries. |
+| `check_schema` | `(&StateSource, &StateFile) -> Vec<Diagnostic>` | Schema-ring validation: kind membership, `updated` non-empty, status enum values, `blocked_by` well-formedness, kind-appropriate section presence. In v2 files: validates `tracks[].blocks[].depends_on[]` entry well-formedness, rejects authored `status:"blocked"` (`E_STATE_AUTHORED_BLOCKED`), and validates `backlog[].status` membership. |
+| `build_state_graph` | `(&[(StateSource, StateFile)]) -> StateGraph` | Builds the cross-repo block-dependency graph: nodes from `tracks[]` blocks, edges from `depends_on[]` (v2) and `cross_repo[]`. `External`-type `depends_on` entries are leaves, not graph edges. |
 | `check_state_graph` | `(&StateGraph, &[(StateSource, StateFile)]) -> Vec<Diagnostic>` | Graph integrity checks: duplicate block IDs, dangling focus references, unknown repos, dangling blocked_by, dangling cross_repo edges. |
+| `detect_cycles` | `(&StateGraph) -> Vec<Diagnostic>` | DFS cycle detection over `depends_on` edges; emits `E_STATE_CYCLE` naming the cycle path (e.g. `A → B → A`). |
+| `check_status_consistency` | `(&[(StateSource, StateFile)]) -> Vec<Diagnostic>` | Emits `E_STATE_STATUS_INCONSISTENT` when a `closed` block has a `type:block` `depends_on` target that is not `closed`. Dangling targets are skipped (reported by `check_state_graph`). |
+| `check_backlog_integrity` | `(&[(StateSource, StateFile)], &StateGraph) -> Vec<Diagnostic>` | Backlog-node integrity: dangling `depends_on` targets (`E_STATE_DANGLING_BLOCKED_BY`) and orphan/unresolved promoted nodes (`E_STATE_DANGLING_PROMOTION`). |
+| `ready_order` | `(&StateGraph, &[(StateSource, StateFile)]) -> Vec<String>` | Reusable standalone function: returns open blocks ordered by `wave` (tiebreak: track order, array order) whose every `type:block` dep is `closed` and which have no `type:external` deps. Forward-compat input for `MV.3B.T` topo-emit. |
+| `check_focus_drift` | `(&StateSource, &StateFile, &StateGraph, &[(StateSource, StateFile)]) -> Vec<Diagnostic>` | Recomputes the expected `focus` from authored `tracks[]` (`now` = `in_progress`, `blocked` = unmet `depends_on`, `next` = `ready_order` ∩ `open`) and emits `W_STATE_FOCUS_DRIFT` (warning, exit 0) on block-id set mismatch. |
 | `check_rollup` | `(&Path, &StateFile, &HashMap<String, StateFile>) -> Vec<Diagnostic>` | Rollup drift check: compares brain `repos[]` now/next headline entries against each child's actual `focus` values. Emits `W_STATE_ROLLUP_DRIFT` on mismatch. |
 
 #### State types
 
 | Type | Description |
 |---|---|
-| `StateFile` | Top-level deserialized `state.json`: `kind`, `updated`, `focus`, `tracks`, `repos`, `tiers`, `cross_repo`, `note`. |
+| `StateFile` | Top-level deserialized `state.json`: `kind`, `updated`, `focus`, `tracks`, `repos`, `tiers`, `cross_repo`, `backlog`, `note`. |
 | `Focus` | Current focus entry: `now`, `next`, `blocked_by`. |
-| `Block` | A single `tracks[]` block: `id`, `title`, `status`, `blocked_by`. |
-| `BlockedBy` | Internally-tagged enum for block dependencies: `BlockRef { repo, id }` or `External { description }`. |
+| `TrackBlock` | A single `tracks[].blocks[]` entry: `id`, `title`, `status`, `blocked_by` (v1), `depends_on` (v2, `#[serde(default)]`), `wave`, `origin`. |
+| `BlockedBy` | Internally-tagged enum for block dependencies (shared by both `blocked_by` and `depends_on`): `Block { repo, id, what }` or `External { what }`. |
+| `Origin` | Block provenance for promoted backlog nodes: `kind` (serde: `"type"`), `slug`. |
+| `Backlog` | HQ-only backlog node: `slug`, `title`, `repo`, `kind` (serde: `"type"`), `status` (`idea`/`ready`/`promoted`), `depends_on`, `block` (pointer on promote), `notes`. |
 | `StateSource` | Discovery result: `abs_path`, `repo_slug`, `kind` (`hq`, `tier`, `leaf`). |
 | `StateGraph` | Cross-repo block-dependency graph: `nodes: Vec<StateNode>`, `edges: Vec<StateEdge>`. Serde-serializable. |
 | `StateNode` | Graph node: `repo`, `id`, `title`, `status`, `source_path` (skipped in serialization). |
@@ -255,7 +262,7 @@ The state module discovers, loads, and validates all `planning/state.json` files
 
 #### Public library entry point
 
-`validate_brain_state(root: &Path) -> anyhow::Result<Report>` (in `src/lib.rs`) runs the full OKF schema pass followed by the five-step state pipeline (discovery → load → schema → graph → rollup) and appends all state diagnostics to the same `Report`. Invoked by `mev validate-brain --state`.
+`validate_brain_state(root: &Path) -> anyhow::Result<Report>` (in `src/lib.rs`) runs the full OKF schema pass followed by the multi-step state pipeline (discovery → load → schema → graph build + check → cycle detection → status consistency → backlog integrity → rollup → focus drift) and appends all state diagnostics to the same `Report`. Invoked by `mev validate-brain --state`.
 
 ---
 

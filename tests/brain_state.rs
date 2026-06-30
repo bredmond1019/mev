@@ -1,18 +1,24 @@
 //! Integration tests for `validate_brain_state` — end-to-end `--state` over a fixture tree.
 //!
-//! Phase 3, Block P — Task 6.
+//! Phase 3, Block P2 — Task 6.
 //!
 //! Builds a temp HQ-root fixture with two `[[repos]]` entries (alpha, beta), each with a
 //! leaf `planning/state.json`, plus a brain `planning/state.json` that rolls them up via
 //! `repos[]` and connects them with a `cross_repo` edge.
 //!
-//! Tests:
-//!   1. Clean fixture → `validate_brain_state` returns 0 errors.
-//!   2. One repo's `blocked_by` points at a nonexistent target id → exactly one
+//! Tests (v2 fixtures: `id` in focus + cross_repo endpoints, `depends_on` on track blocks):
+//!   1. Clean v2 fixture → `validate_brain_state` returns 0 errors.
+//!   2. One repo's `depends_on` points at a nonexistent target id → exactly one
 //!      `E_STATE_DANGLING_BLOCKED_BY`.
 //!   3. A child advances past its brain `repos[]` headline → exactly one
 //!      `W_STATE_ROLLUP_DRIFT`, and the report has 0 *errors* (exits 0).
 //!   4. `--json` round-trip: a `State` diagnostic appears in the serialized envelope.
+//!   5. Cyclic `depends_on` → `E_STATE_CYCLE` (exit 1).
+//!   6. Authored `status: "blocked"` → `E_STATE_AUTHORED_BLOCKED` (exit 1).
+//!   7. Closed block depends on non-closed block → `E_STATE_STATUS_INCONSISTENT` (exit 1).
+//!   8. Backlog `depends_on` dangling → `E_STATE_DANGLING_BLOCKED_BY` (exit 1).
+//!   9. Promoted backlog node with missing block pointer → `E_STATE_DANGLING_PROMOTION` (exit 1).
+//!  10. Focus that disagrees with derivation → `W_STATE_FOCUS_DRIFT` (warning, exit 0).
 
 use std::fs;
 use std::path::Path;
@@ -71,7 +77,7 @@ fn write_json(root: &Path, rel: &str, value: &serde_json::Value) {
     write_file(root, rel, &serde_json::to_string_pretty(value).unwrap());
 }
 
-/// Write the clean HQ brain `planning/state.json`.
+/// Write the clean HQ brain `planning/state.json` (v2: `id` in focus + cross_repo endpoints).
 ///
 /// - `repos[]` caches alpha and beta with their canonical focus.
 /// - `cross_repo[]` has one edge: alpha:AL.1.A → beta:BE.1.A.
@@ -84,21 +90,21 @@ fn write_hq_brain_state(root: &Path) {
         "repos": [
             {
                 "repo": "alpha",
-                "now": [{ "block": "AL.1.A", "title": "Alpha block A", "status": "in_progress" }],
+                "now": [{ "id": "AL.1.A", "title": "Alpha block A", "status": "in_progress" }],
                 "next": [],
                 "blocked": []
             },
             {
                 "repo": "beta",
-                "now": [{ "block": "BE.1.A", "title": "Beta block A", "status": "in_progress" }],
+                "now": [{ "id": "BE.1.A", "title": "Beta block A", "status": "in_progress" }],
                 "next": [],
                 "blocked": []
             }
         ],
         "cross_repo": [
             {
-                "from": { "repo": "alpha", "block": "AL.1.A" },
-                "to":   { "repo": "beta",  "block": "BE.1.A" },
+                "from": { "repo": "alpha", "id": "AL.1.A" },
+                "to":   { "repo": "beta",  "id": "BE.1.A" },
                 "note": "Alpha depends on beta integration."
             }
         ]
@@ -106,14 +112,14 @@ fn write_hq_brain_state(root: &Path) {
     write_json(root, "planning/state.json", &state);
 }
 
-/// Write a clean alpha leaf `repos/alpha/planning/state.json`.
+/// Write a clean alpha leaf `repos/alpha/planning/state.json` (v2: `id` in focus).
 fn write_alpha_state(root: &Path) {
     let state = serde_json::json!({
         "repo": "alpha",
         "kind": "project",
         "updated": "2026-06-29",
         "focus": {
-            "now": [{ "block": "AL.1.A", "title": "Alpha block A", "status": "in_progress" }],
+            "now": [{ "id": "AL.1.A", "title": "Alpha block A", "status": "in_progress" }],
             "next": [],
             "blocked": []
         },
@@ -130,14 +136,14 @@ fn write_alpha_state(root: &Path) {
     write_json(root, "repos/alpha/planning/state.json", &state);
 }
 
-/// Write a clean beta leaf `repos/beta/planning/state.json`.
+/// Write a clean beta leaf `repos/beta/planning/state.json` (v2: `id` in focus).
 fn write_beta_state(root: &Path) {
     let state = serde_json::json!({
         "repo": "beta",
         "kind": "project",
         "updated": "2026-06-29",
         "focus": {
-            "now": [{ "block": "BE.1.A", "title": "Beta block A", "status": "in_progress" }],
+            "now": [{ "id": "BE.1.A", "title": "Beta block A", "status": "in_progress" }],
             "next": [],
             "blocked": []
         },
@@ -162,7 +168,7 @@ fn write_clean_fixture(root: &Path) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 1 — clean fixture produces zero errors
+// Test 1 — clean v2 fixture produces zero errors
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -204,8 +210,8 @@ fn dangling_blocked_by_produces_exactly_one_error() {
     let dir = temp_dir("dangling-bb");
     write_clean_fixture(&dir);
 
-    // Overwrite beta's state.json so its focus.blocked references a block that
-    // does not exist in alpha's tracks[].
+    // Overwrite beta's state.json so its tracks[].blocks[].depends_on references a block
+    // that does not exist in alpha's tracks[] (v2: edges come from depends_on, not focus).
     let beta_state = serde_json::json!({
         "repo": "beta",
         "kind": "project",
@@ -213,21 +219,20 @@ fn dangling_blocked_by_produces_exactly_one_error() {
         "focus": {
             "now": [],
             "next": [],
-            "blocked": [
-                {
-                    "block": "BE.1.A",
-                    "title": "Beta waiting on alpha ghost",
-                    "blocked_by": [
-                        { "type": "block", "repo": "alpha", "id": "AL.1.GHOST" }
-                    ]
-                }
-            ]
+            "blocked": [{ "id": "BE.1.A", "title": "Beta waiting on alpha ghost" }]
         },
         "tracks": [
             {
                 "title": "Phase 1",
                 "blocks": [
-                    { "id": "BE.1.A", "title": "Beta block A", "status": "open" }
+                    {
+                        "id": "BE.1.A",
+                        "title": "Beta block A",
+                        "status": "open",
+                        "depends_on": [
+                            { "type": "block", "repo": "alpha", "id": "AL.1.GHOST" }
+                        ]
+                    }
                 ]
             }
         ]
@@ -274,7 +279,7 @@ fn rollup_drift_produces_warning_not_error() {
         "kind": "project",
         "updated": "2026-06-29",
         "focus": {
-            "now": [{ "block": "AL.1.B", "title": "Alpha block B", "status": "in_progress" }],
+            "now": [{ "id": "AL.1.B", "title": "Alpha block B", "status": "in_progress" }],
             "next": [],
             "blocked": []
         },
@@ -301,21 +306,21 @@ fn rollup_drift_produces_warning_not_error() {
             {
                 "repo": "alpha",
                 // Still caches the OLD block id AL.1.A — this is intentional drift.
-                "now": [{ "block": "AL.1.A", "title": "Alpha block A", "status": "in_progress" }],
+                "now": [{ "id": "AL.1.A", "title": "Alpha block A", "status": "in_progress" }],
                 "next": [],
                 "blocked": []
             },
             {
                 "repo": "beta",
-                "now": [{ "block": "BE.1.A", "title": "Beta block A", "status": "in_progress" }],
+                "now": [{ "id": "BE.1.A", "title": "Beta block A", "status": "in_progress" }],
                 "next": [],
                 "blocked": []
             }
         ],
         "cross_repo": [
             {
-                "from": { "repo": "alpha", "block": "AL.1.A" },
-                "to":   { "repo": "beta",  "block": "BE.1.A" },
+                "from": { "repo": "alpha", "id": "AL.1.A" },
+                "to":   { "repo": "beta",  "id": "BE.1.A" },
                 "note": "Alpha depends on beta integration."
             }
         ]
@@ -369,7 +374,8 @@ fn json_round_trip_includes_state_diagnostic() {
     let dir = temp_dir("json-roundtrip");
     write_clean_fixture(&dir);
 
-    // Introduce a dangling blocked_by on beta so there is a State error to serialize.
+    // Introduce a dangling depends_on on beta so there is a State error to serialize.
+    // v2: edges come from tracks[].blocks[].depends_on[], not focus.blocked.blocked_by[].
     let beta_state = serde_json::json!({
         "repo": "beta",
         "kind": "project",
@@ -377,21 +383,20 @@ fn json_round_trip_includes_state_diagnostic() {
         "focus": {
             "now": [],
             "next": [],
-            "blocked": [
-                {
-                    "block": "BE.1.A",
-                    "title": "Beta blocked",
-                    "blocked_by": [
-                        { "type": "block", "repo": "alpha", "id": "AL.1.GHOST" }
-                    ]
-                }
-            ]
+            "blocked": [{ "id": "BE.1.A", "title": "Beta blocked" }]
         },
         "tracks": [
             {
                 "title": "Phase 1",
                 "blocks": [
-                    { "id": "BE.1.A", "title": "Beta block A", "status": "open" }
+                    {
+                        "id": "BE.1.A",
+                        "title": "Beta block A",
+                        "status": "open",
+                        "depends_on": [
+                            { "type": "block", "repo": "alpha", "id": "AL.1.GHOST" }
+                        ]
+                    }
                 ]
             }
         ]
@@ -451,6 +456,441 @@ fn json_round_trip_includes_state_diagnostic() {
             "severity must be 'error' or 'warning', got: {sev:?} in {diag}"
         );
     }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Test 5 — cyclic depends_on → E_STATE_CYCLE (exit 1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cyclic_depends_on_produces_e_state_cycle() {
+    let dir = temp_dir("cycle");
+    write_clean_fixture(&dir);
+
+    // Create a cycle: alpha:AL.1.A depends_on beta:BE.1.A, which depends_on alpha:AL.1.A.
+    let alpha_cyclic = serde_json::json!({
+        "repo": "alpha",
+        "kind": "project",
+        "updated": "2026-06-29",
+        "focus": {
+            "now": [],
+            "next": [],
+            "blocked": [{ "id": "AL.1.A", "title": "Alpha blocked on beta" }]
+        },
+        "tracks": [
+            {
+                "title": "Phase 1",
+                "blocks": [
+                    {
+                        "id": "AL.1.A",
+                        "title": "Alpha block A",
+                        "status": "open",
+                        "depends_on": [
+                            { "type": "block", "repo": "beta", "id": "BE.1.A" }
+                        ]
+                    }
+                ]
+            }
+        ]
+    });
+    let beta_cyclic = serde_json::json!({
+        "repo": "beta",
+        "kind": "project",
+        "updated": "2026-06-29",
+        "focus": {
+            "now": [],
+            "next": [],
+            "blocked": [{ "id": "BE.1.A", "title": "Beta blocked on alpha" }]
+        },
+        "tracks": [
+            {
+                "title": "Phase 1",
+                "blocks": [
+                    {
+                        "id": "BE.1.A",
+                        "title": "Beta block A",
+                        "status": "open",
+                        "depends_on": [
+                            { "type": "block", "repo": "alpha", "id": "AL.1.A" }
+                        ]
+                    }
+                ]
+            }
+        ]
+    });
+    write_json(&dir, "repos/alpha/planning/state.json", &alpha_cyclic);
+    write_json(&dir, "repos/beta/planning/state.json", &beta_cyclic);
+
+    let report = mev::validate_brain_state(&dir).expect("validate_brain_state should not error");
+
+    let cycle_diags: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator == "E_STATE_CYCLE")
+        .collect();
+
+    assert!(
+        !cycle_diags.is_empty(),
+        "cyclic depends_on must produce at least one E_STATE_CYCLE, got: {:#?}",
+        report.diagnostics
+    );
+
+    // The cycle diagnostic must be Error severity (exit 1).
+    assert_eq!(
+        cycle_diags[0].severity,
+        mev::Severity::Error,
+        "E_STATE_CYCLE must be Error severity"
+    );
+
+    // The message must name the cycle path.
+    let msg = &cycle_diags[0].message;
+    assert!(
+        msg.contains("AL.1.A") || msg.contains("BE.1.A"),
+        "E_STATE_CYCLE message should identify cycle participants, got: {msg:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Test 6 — authored status:"blocked" → E_STATE_AUTHORED_BLOCKED (exit 1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn authored_blocked_status_produces_e_state_authored_blocked() {
+    let dir = temp_dir("authored-blocked");
+    write_clean_fixture(&dir);
+
+    // Alpha has a track block with status:"blocked" — which is derived, not authored.
+    let alpha_bad = serde_json::json!({
+        "repo": "alpha",
+        "kind": "project",
+        "updated": "2026-06-29",
+        "focus": {
+            "now": [],
+            "next": [],
+            "blocked": [{ "id": "AL.1.A", "title": "Alpha A blocked" }]
+        },
+        "tracks": [
+            {
+                "title": "Phase 1",
+                "blocks": [
+                    {
+                        "id": "AL.1.A",
+                        "title": "Alpha block A",
+                        "status": "blocked"
+                    }
+                ]
+            }
+        ]
+    });
+    write_json(&dir, "repos/alpha/planning/state.json", &alpha_bad);
+
+    let report = mev::validate_brain_state(&dir).expect("validate_brain_state should not error");
+
+    let authored_blocked: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator == "E_STATE_AUTHORED_BLOCKED")
+        .collect();
+
+    assert!(
+        !authored_blocked.is_empty(),
+        "authored status:'blocked' must produce E_STATE_AUTHORED_BLOCKED, got: {:#?}",
+        report.diagnostics
+    );
+
+    assert_eq!(
+        authored_blocked[0].severity,
+        mev::Severity::Error,
+        "E_STATE_AUTHORED_BLOCKED must be Error severity"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Test 7 — closed block depends on non-closed block → E_STATE_STATUS_INCONSISTENT
+// ---------------------------------------------------------------------------
+
+#[test]
+fn closed_depends_on_non_closed_produces_e_state_status_inconsistent() {
+    let dir = temp_dir("status-inconsistent");
+    write_clean_fixture(&dir);
+
+    // Alpha: AL.1.B is closed but depends on AL.1.A which is still open.
+    let alpha_inconsistent = serde_json::json!({
+        "repo": "alpha",
+        "kind": "project",
+        "updated": "2026-06-29",
+        "focus": {
+            "now": [{ "id": "AL.1.A", "title": "Alpha block A", "status": "in_progress" }],
+            "next": [],
+            "blocked": []
+        },
+        "tracks": [
+            {
+                "title": "Phase 1",
+                "blocks": [
+                    {
+                        "id": "AL.1.A",
+                        "title": "Alpha block A",
+                        "status": "in_progress"
+                    },
+                    {
+                        "id": "AL.1.B",
+                        "title": "Alpha block B",
+                        "status": "closed",
+                        "depends_on": [
+                            { "type": "block", "repo": "alpha", "id": "AL.1.A" }
+                        ]
+                    }
+                ]
+            }
+        ]
+    });
+    write_json(&dir, "repos/alpha/planning/state.json", &alpha_inconsistent);
+
+    let report = mev::validate_brain_state(&dir).expect("validate_brain_state should not error");
+
+    let inconsistent: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator == "E_STATE_STATUS_INCONSISTENT")
+        .collect();
+
+    assert_eq!(
+        inconsistent.len(),
+        1,
+        "expected exactly one E_STATE_STATUS_INCONSISTENT, got: {:#?}",
+        report.diagnostics
+    );
+
+    assert_eq!(
+        inconsistent[0].severity,
+        mev::Severity::Error,
+        "E_STATE_STATUS_INCONSISTENT must be Error severity"
+    );
+
+    // The message must identify both blocks.
+    let msg = &inconsistent[0].message;
+    assert!(
+        msg.contains("AL.1.B") && msg.contains("AL.1.A"),
+        "E_STATE_STATUS_INCONSISTENT message should name both blocks, got: {msg:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Test 8 — dangling backlog depends_on → E_STATE_DANGLING_BLOCKED_BY
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dangling_backlog_dep_produces_error() {
+    let dir = temp_dir("backlog-dangling");
+    write_clean_fixture(&dir);
+
+    // HQ brain has a backlog node whose depends_on references a non-existent block.
+    let hq_with_backlog = serde_json::json!({
+        "repo": "hq",
+        "kind": "brain",
+        "updated": "2026-06-29",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "repos": [
+            {
+                "repo": "alpha",
+                "now": [{ "id": "AL.1.A", "title": "Alpha block A", "status": "in_progress" }],
+                "next": [],
+                "blocked": []
+            },
+            {
+                "repo": "beta",
+                "now": [{ "id": "BE.1.A", "title": "Beta block A", "status": "in_progress" }],
+                "next": [],
+                "blocked": []
+            }
+        ],
+        "cross_repo": [],
+        "backlog": [
+            {
+                "slug": "future-feature",
+                "title": "Future Feature",
+                "repo": "alpha",
+                "type": "feature",
+                "status": "idea",
+                "depends_on": [
+                    { "type": "block", "repo": "alpha", "id": "AL.99.GHOST" }
+                ]
+            }
+        ]
+    });
+    write_json(&dir, "planning/state.json", &hq_with_backlog);
+
+    let report = mev::validate_brain_state(&dir).expect("validate_brain_state should not error");
+
+    let dangling: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+        .collect();
+
+    assert!(
+        !dangling.is_empty(),
+        "dangling backlog depends_on must produce E_STATE_DANGLING_BLOCKED_BY, got: {:#?}",
+        report.diagnostics
+    );
+
+    assert!(
+        dangling[0].message.contains("AL.99.GHOST"),
+        "E_STATE_DANGLING_BLOCKED_BY message should name the missing id, got: {:?}",
+        dangling[0].message
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Test 9 — promoted backlog node with missing block pointer → E_STATE_DANGLING_PROMOTION
+// ---------------------------------------------------------------------------
+
+#[test]
+fn orphan_promoted_backlog_produces_e_state_dangling_promotion() {
+    let dir = temp_dir("backlog-orphan-promo");
+    write_clean_fixture(&dir);
+
+    // HQ brain has a promoted backlog node pointing at a block that doesn't exist.
+    let hq_orphan = serde_json::json!({
+        "repo": "hq",
+        "kind": "brain",
+        "updated": "2026-06-29",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "repos": [
+            {
+                "repo": "alpha",
+                "now": [{ "id": "AL.1.A", "title": "Alpha block A", "status": "in_progress" }],
+                "next": [],
+                "blocked": []
+            },
+            {
+                "repo": "beta",
+                "now": [{ "id": "BE.1.A", "title": "Beta block A", "status": "in_progress" }],
+                "next": [],
+                "blocked": []
+            }
+        ],
+        "cross_repo": [],
+        "backlog": [
+            {
+                "slug": "promoted-ghost",
+                "title": "Promoted Ghost Feature",
+                "repo": "alpha",
+                "type": "feature",
+                "status": "promoted",
+                "block": "AL.99.NONEXISTENT"
+            }
+        ]
+    });
+    write_json(&dir, "planning/state.json", &hq_orphan);
+
+    let report = mev::validate_brain_state(&dir).expect("validate_brain_state should not error");
+
+    let promotion_diags: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator == "E_STATE_DANGLING_PROMOTION")
+        .collect();
+
+    assert!(
+        !promotion_diags.is_empty(),
+        "promoted backlog node with missing block must produce E_STATE_DANGLING_PROMOTION, got: {:#?}",
+        report.diagnostics
+    );
+
+    assert_eq!(
+        promotion_diags[0].severity,
+        mev::Severity::Error,
+        "E_STATE_DANGLING_PROMOTION must be Error severity"
+    );
+
+    assert!(
+        promotion_diags[0].message.contains("AL.99.NONEXISTENT")
+            || promotion_diags[0].message.contains("promoted-ghost"),
+        "E_STATE_DANGLING_PROMOTION message should identify the node or missing block, got: {:?}",
+        promotion_diags[0].message
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Test 10 — focus drift → W_STATE_FOCUS_DRIFT (warning, exit 0)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn focus_drift_produces_warning_not_error() {
+    let dir = temp_dir("focus-drift");
+    write_clean_fixture(&dir);
+
+    // Alpha's stored focus says AL.1.A is in_progress (now),
+    // but tracks[] has AL.1.A as closed and AL.1.B as in_progress.
+    // So the stored focus disagrees with what would be derived from tracks[].
+    let alpha_drifted = serde_json::json!({
+        "repo": "alpha",
+        "kind": "project",
+        "updated": "2026-06-29",
+        "focus": {
+            // Stored: AL.1.A in now — but tracks[] says AL.1.A is closed.
+            "now": [{ "id": "AL.1.A", "title": "Alpha block A", "status": "in_progress" }],
+            "next": [],
+            "blocked": []
+        },
+        "tracks": [
+            {
+                "title": "Phase 1",
+                "blocks": [
+                    { "id": "AL.1.A", "title": "Alpha block A", "status": "closed" },
+                    { "id": "AL.1.B", "title": "Alpha block B", "status": "in_progress" }
+                ]
+            }
+        ]
+    });
+    write_json(&dir, "repos/alpha/planning/state.json", &alpha_drifted);
+
+    let report = mev::validate_brain_state(&dir).expect("validate_brain_state should not error");
+
+    let focus_drift: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator == "W_STATE_FOCUS_DRIFT")
+        .collect();
+
+    assert!(
+        !focus_drift.is_empty(),
+        "focus mismatch with tracks[] must produce W_STATE_FOCUS_DRIFT, got: {:#?}",
+        report.diagnostics
+    );
+
+    // Must be Warning severity (exit 0).
+    assert_eq!(
+        focus_drift[0].severity,
+        mev::Severity::Warning,
+        "W_STATE_FOCUS_DRIFT must be Warning severity, not Error"
+    );
+
+    // Zero State *errors* — focus drift alone must not fail the gate.
+    let state_errors: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator.starts_with("E_STATE_"))
+        .collect();
+
+    assert!(
+        state_errors.is_empty(),
+        "focus drift alone must not produce any State errors; got: {state_errors:#?}"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }

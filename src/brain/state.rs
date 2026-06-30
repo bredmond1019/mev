@@ -21,6 +21,7 @@
 //! - `E_STATE_UNKNOWN_REPO` — a `blocked_by` / `cross_repo` entry names unknown repo.
 //! - `E_STATE_DANGLING_CROSS_REPO` — a brain `cross_repo[]` endpoint doesn't resolve.
 //! - `W_STATE_ROLLUP_DRIFT` — brain `repos[]` headline drifted from child `focus`.
+//! - `W_STATE_FOCUS_DRIFT` — a leaf file's `focus` snapshot has drifted from the tracks[] derivation.
 //! - `W_STATE_FILE_MISSING` — a registered repo has no `planning/state.json`.
 
 use std::path::{Path, PathBuf};
@@ -96,8 +97,10 @@ pub enum BlockedBy {
 /// - `blocked` items: `block`, `title`, `blocked_by[]`, `repo?`
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Block {
-    /// Canonical block ID.
-    pub block: String,
+    /// Canonical block ID. (`#[serde(alias)]` keeps v1 `"block"`-keyed files readable
+    /// through the v2 transition; the canonical authored key is `id`.)
+    #[serde(alias = "block")]
+    pub id: String,
     /// Brief human description.
     pub title: String,
     /// Lifecycle status (present on `now` and `blocked` entries).
@@ -143,9 +146,19 @@ pub struct TrackBlock {
     pub id: String,
     /// Brief human description.
     pub title: String,
-    /// Lifecycle status.
+    /// Lifecycle status (authored: `open`/`in_progress`/`closed` — `blocked` is derived,
+    /// enforced in task 2).
     #[serde(default)]
     pub status: Option<String>,
+    /// The block's full dependency edges (the authoritative DAG). Same forms as [`BlockedBy`].
+    #[serde(default)]
+    pub depends_on: Vec<BlockedBy>,
+    /// Execution-order rank for "what's next" (orthogonal to track grouping).
+    #[serde(default)]
+    pub wave: Option<i64>,
+    /// Backlog-promotion provenance, when this block came from a backlog item.
+    #[serde(default)]
+    pub origin: Option<Origin>,
 }
 
 /// One phase/wave entry in a leaf repo's `tracks[]`.
@@ -191,7 +204,8 @@ pub struct Endpoint {
     /// Repo slug.
     pub repo: String,
     /// Canonical block ID.
-    pub block: String,
+    #[serde(alias = "block")]
+    pub id: String,
 }
 
 /// A directed cross-repo dependency edge in a brain `cross_repo[]`.
@@ -221,6 +235,54 @@ pub struct TierEntry {
     /// One-line summary of the tier's current state.
     #[serde(default)]
     pub summary: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Origin — backlog→block promotion provenance (v2)
+// ---------------------------------------------------------------------------
+
+/// Provenance pointer on a block that was promoted from a backlog item.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct Origin {
+    /// Origin kind — `"backlog"` today.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The originating backlog node's stable `slug` key.
+    pub slug: String,
+}
+
+// ---------------------------------------------------------------------------
+// Backlog — HQ queued-ideas graph node (v2)
+// ---------------------------------------------------------------------------
+
+/// One entry in the HQ brain `backlog[]` — a queued idea as a graph node.
+///
+/// `slug` is the stable node key. `depends_on` reuses [`BlockedBy`] (the same
+/// edge form as blocks). On promotion the node persists with
+/// `status:"promoted"` + a `block` pointer; the resulting block carries an
+/// [`Origin`] back-pointer.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Backlog {
+    /// Stable node key (the notes-dir slug).
+    pub slug: String,
+    /// Human description.
+    pub title: String,
+    /// Repo the item will land in when promoted (or `"cross-repo"`).
+    pub repo: String,
+    /// Item kind (`improvement` / `feature` / `chore` / `decision` / …).
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Lifecycle status: `idea` / `ready` / `promoted` (validated in task 2).
+    pub status: String,
+    /// What the idea is gated on — same edge forms as a block's `depends_on`.
+    #[serde(default)]
+    pub depends_on: Vec<BlockedBy>,
+    /// Set only when `status == "promoted"`: the ID of the block it became.
+    #[serde(default)]
+    pub block: Option<String>,
+    /// Path to the pre-plan notes doc.
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +323,9 @@ pub struct StateFile {
     /// Optional top-level annotation note (seen in HQ state.json).
     #[serde(default)]
     pub note: Option<String>,
+    /// HQ queued-ideas graph (brain HQ only; empty elsewhere).
+    #[serde(default)]
+    pub backlog: Vec<Backlog>,
 }
 
 // ---------------------------------------------------------------------------
@@ -417,8 +482,17 @@ pub fn discover_state_files(
 // Schema-ring checks
 // ---------------------------------------------------------------------------
 
-/// Valid `status` values for `focus.now` and `focus.blocked` block entries.
+/// Valid `status` values for `focus.now` and `focus.blocked` block entries (derived view).
 const VALID_STATUSES: &[&str] = &["open", "in_progress", "blocked", "closed"];
+
+/// Valid *authored* `status` values for `tracks[].blocks[]` entries.
+///
+/// `"blocked"` is intentionally excluded — it is a derived property, never an authored one.
+/// Any block authored with `"blocked"` triggers `E_STATE_AUTHORED_BLOCKED`.
+const VALID_TRACK_BLOCK_STATUSES: &[&str] = &["open", "in_progress", "closed"];
+
+/// Valid `status` values for `backlog[]` entries (HQ brain only).
+const VALID_BACKLOG_STATUSES: &[&str] = &["idea", "ready", "promoted"];
 
 /// Validate the schema-ring constraints for a successfully-deserialized
 /// [`StateFile`].
@@ -440,6 +514,14 @@ const VALID_STATUSES: &[&str] = &["open", "in_progress", "blocked", "closed"];
 /// 5. **Kind-appropriate sections** (`E_STATE_SCHEMA_MISSING_FIELD`, warning)
 ///    — a `project` file is expected to carry `tracks[]`; a `brain` file is
 ///    expected to carry `repos[]`.
+/// 6. **Authored `tracks[].blocks[].status` not `"blocked"`**
+///    (`E_STATE_AUTHORED_BLOCKED`) — `"blocked"` is a derived property; an
+///    authored track-block must use `{open, in_progress, closed}` only.
+/// 7. **`tracks[].blocks[].depends_on` well-formedness**
+///    (`E_STATE_SCHEMA_BAD_BLOCKED_BY`) — a `{type:"block"}` `depends_on`
+///    entry must have non-empty `repo` and `id`.
+/// 8. **`backlog[].status` enum** (`E_STATE_SCHEMA_BAD_STATUS`) — every
+///    backlog node's `status` must be one of `{idea, ready, promoted}`.
 pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
     let mut diags: Vec<Diagnostic> = Vec::new();
     let path = &src.abs_path;
@@ -489,7 +571,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                 "E_STATE_SCHEMA_BAD_STATUS",
                 format!(
                     "block '{}' has invalid status '{}'; expected one of: {}",
-                    block.block,
+                    block.id,
                     status,
                     VALID_STATUSES.join(", ")
                 ),
@@ -508,7 +590,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                         format!(
                             "blocked_by entry in block '{}' is missing required \
                              field(s): {}",
-                            block.block,
+                            block.id,
                             [repo_empty.then_some("'repo'"), id_empty.then_some("'id'")]
                                 .into_iter()
                                 .flatten()
@@ -535,6 +617,79 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
             "E_STATE_SCHEMA_MISSING_FIELD",
             "brain state.json is missing 'repos[]'; expected a child-repo rollup".to_string(),
         ));
+    }
+
+    // --- 6. Authored track-block status must not be "blocked" (v2: blocked is derived) ---
+    // --- 7. depends_on entry well-formedness ---
+    for track in &file.tracks {
+        for block in &track.blocks {
+            // check 6: authored status must not be "blocked"
+            if let Some(status) = &block.status {
+                if status == "blocked" {
+                    diags.push(Diagnostic::error(
+                        path,
+                        "E_STATE_AUTHORED_BLOCKED",
+                        format!(
+                            "track block '{}' has authored status 'blocked'; \
+                             'blocked' is a derived property — use open/in_progress/closed",
+                            block.id
+                        ),
+                    ));
+                } else if !VALID_TRACK_BLOCK_STATUSES.contains(&status.as_str()) {
+                    // Also catch other invalid statuses on track blocks.
+                    diags.push(Diagnostic::error(
+                        path,
+                        "E_STATE_SCHEMA_BAD_STATUS",
+                        format!(
+                            "track block '{}' has invalid status '{}'; expected one of: {}",
+                            block.id,
+                            status,
+                            VALID_TRACK_BLOCK_STATUSES.join(", ")
+                        ),
+                    ));
+                }
+            }
+
+            // check 7: depends_on {type:block} entries must have non-empty repo and id
+            for dep in &block.depends_on {
+                if let BlockedBy::Block { repo, id, .. } = dep {
+                    let repo_empty = repo.trim().is_empty();
+                    let id_empty = id.trim().is_empty();
+                    if repo_empty || id_empty {
+                        diags.push(Diagnostic::error(
+                            path,
+                            "E_STATE_SCHEMA_BAD_BLOCKED_BY",
+                            format!(
+                                "depends_on entry in track block '{}' is missing required \
+                                 field(s): {}",
+                                block.id,
+                                [repo_empty.then_some("'repo'"), id_empty.then_some("'id'")]
+                                    .into_iter()
+                                    .flatten()
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // --- 8. backlog[].status enum (HQ brain only) ---
+    for item in &file.backlog {
+        if !VALID_BACKLOG_STATUSES.contains(&item.status.as_str()) {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_SCHEMA_BAD_STATUS",
+                format!(
+                    "backlog item '{}' has invalid status '{}'; expected one of: {}",
+                    item.slug,
+                    item.status,
+                    VALID_BACKLOG_STATUSES.join(", ")
+                ),
+            ));
+        }
     }
 
     diags
@@ -618,12 +773,16 @@ pub struct StateGraph {
 /// `"repo:id"`).
 ///
 /// # Edges
-/// - One [`StateEdge`] with `kind: BlockedBy` per `{type:"block"}` entry
-///   in any file's `focus.*.blocked_by[]`.  The `from` key is the blocked
-///   block's own `"repo:id"` (using the `block.repo` field if present, else
-///   the owning file's slug); `to_ref` is `"{blocked_by.repo}:{blocked_by.id}"`.
+/// - One [`StateEdge`] with `kind: BlockedBy` per `{type:"block"}` entry in
+///   any file's `tracks[].blocks[].depends_on[]`.  The `from` key is the
+///   owning block's `"repo:id"` (the block that declares the dependency);
+///   `to_ref` is `"{dep.repo}:{dep.id}"`.  External entries are skipped —
+///   they are leaf constraints, not graph edges.
 /// - One [`StateEdge`] with `kind: CrossRepo` per brain-file `cross_repo[]`
 ///   entry.
+///
+/// `focus.*.blocked_by[]` is intentionally **not** an edge source in v2 —
+/// `focus` is a derived view, not the authoritative DAG.
 ///
 /// Nodes and edges are emitted even when they are later found to be dangling
 /// — the separation of build and check is intentional (see `MV.3.J` pattern).
@@ -634,40 +793,30 @@ pub fn build_state_graph(files: &[(StateSource, StateFile)]) -> StateGraph {
     for (src, file) in files {
         let path = &src.abs_path;
 
-        // --- Nodes: one per tracks[].blocks[] entry ---
+        // --- Nodes + BlockedBy edges: from tracks[].blocks[] ---
         for track in &file.tracks {
             for block in &track.blocks {
+                let from_key = format!("{}:{}", src.repo_slug, block.id);
+
                 nodes.push(StateNode {
-                    key: format!("{}:{}", src.repo_slug, block.id),
+                    key: from_key.clone(),
                     repo: src.repo_slug.clone(),
                     id: block.id.clone(),
                     title: block.title.clone(),
                     source_path: path.clone(),
                 });
-            }
-        }
 
-        // --- BlockedBy edges: from focus.*.blocked_by[]{type:block} ---
-        let all_focus = file
-            .focus
-            .now
-            .iter()
-            .chain(file.focus.next.iter())
-            .chain(file.focus.blocked.iter());
-
-        for block in all_focus {
-            // The `from` block may live in a child repo (brain focus carries `repo`).
-            let from_repo = block.repo.as_deref().unwrap_or(src.repo_slug.as_str());
-            let from_key = format!("{}:{}", from_repo, block.block);
-
-            for bb in &block.blocked_by {
-                if let BlockedBy::Block { repo, id, .. } = bb {
-                    edges.push(StateEdge {
-                        from: from_key.clone(),
-                        to_ref: format!("{repo}:{id}"),
-                        kind: StateEdgeKind::BlockedBy,
-                        source_path: path.clone(),
-                    });
+                // BlockedBy edges: one per {type:block} depends_on entry.
+                // External entries are leaf constraints, not graph edges — skip.
+                for dep in &block.depends_on {
+                    if let BlockedBy::Block { repo, id, .. } = dep {
+                        edges.push(StateEdge {
+                            from: from_key.clone(),
+                            to_ref: format!("{repo}:{id}"),
+                            kind: StateEdgeKind::BlockedBy,
+                            source_path: path.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -675,8 +824,8 @@ pub fn build_state_graph(files: &[(StateSource, StateFile)]) -> StateGraph {
         // --- CrossRepo edges: from brain cross_repo[] ---
         for edge in &file.cross_repo {
             edges.push(StateEdge {
-                from: format!("{}:{}", edge.from.repo, edge.from.block),
-                to_ref: format!("{}:{}", edge.to.repo, edge.to.block),
+                from: format!("{}:{}", edge.from.repo, edge.from.id),
+                to_ref: format!("{}:{}", edge.to.repo, edge.to.id),
                 kind: StateEdgeKind::CrossRepo,
                 source_path: path.clone(),
             });
@@ -763,14 +912,14 @@ pub fn check_state_graph(
             .chain(file.focus.blocked.iter());
 
         for block in all_focus {
-            let key = format!("{}:{}", src.repo_slug, block.block);
+            let key = format!("{}:{}", src.repo_slug, block.id);
             if !node_set.contains(key.as_str()) {
                 diags.push(Diagnostic::error(
                     path,
                     "E_STATE_DANGLING_FOCUS",
                     format!(
                         "focus block '{}' is not registered in this repo's tracks[]",
-                        block.block
+                        block.id
                     ),
                 ));
             }
@@ -854,6 +1003,164 @@ pub fn check_state_graph(
 }
 
 // ---------------------------------------------------------------------------
+// Status-consistency check (Task 4)
+// ---------------------------------------------------------------------------
+
+/// Check that no `closed` block depends on a non-`closed` block.
+///
+/// A block that declares `status: "closed"` with a `{type:"block"}` entry in its
+/// `depends_on[]` that points to a block whose authored status is **not** `"closed"`
+/// is inconsistent — the dependency was not complete before the dependent was closed.
+///
+/// Emits **`E_STATE_STATUS_INCONSISTENT`** for each such pair.  Dependencies whose
+/// target does not exist in any loaded file are silently skipped here — they are
+/// already reported as `E_STATE_DANGLING_BLOCKED_BY` by [`check_state_graph`].
+pub fn check_status_consistency(files: &[(StateSource, StateFile)]) -> Vec<Diagnostic> {
+    use std::collections::HashMap;
+
+    // Build a status lookup: "repo:id" → authored status (None = absent = treated as open).
+    let mut status_map: HashMap<String, Option<String>> = HashMap::new();
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let key = format!("{}:{}", src.repo_slug, block.id);
+                status_map.insert(key, block.status.clone());
+            }
+        }
+    }
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                // Only closed blocks participate in this check.
+                if block.status.as_deref() != Some("closed") {
+                    continue;
+                }
+
+                let from_key = format!("{}:{}", src.repo_slug, block.id);
+
+                for dep in &block.depends_on {
+                    if let BlockedBy::Block { repo, id, .. } = dep {
+                        let dep_key = format!("{repo}:{id}");
+                        // If the dep target is not in any loaded file, skip — it will
+                        // be reported as E_STATE_DANGLING_BLOCKED_BY by check_state_graph.
+                        if let Some(dep_status) = status_map.get(&dep_key) {
+                            let dep_is_closed = dep_status.as_deref() == Some("closed");
+                            if !dep_is_closed {
+                                diags.push(Diagnostic::error(
+                                    &src.abs_path,
+                                    "E_STATE_STATUS_INCONSISTENT",
+                                    format!(
+                                        "closed block '{from_key}' has a non-closed depends_on \
+                                         target '{dep_key}' (status: {})",
+                                        dep_status.as_deref().unwrap_or("open")
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    diags
+}
+
+// ---------------------------------------------------------------------------
+// Backlog-node integrity check (Task 4)
+// ---------------------------------------------------------------------------
+
+/// Validate referential integrity for `backlog[]` nodes (HQ brain files only).
+///
+/// Two checks are performed:
+///
+/// 1. **`E_STATE_DANGLING_BLOCKED_BY`** — a backlog node's `depends_on[]` entry of
+///    `{type:"block"}` references a block that is not registered in any loaded
+///    repo's `tracks[]`.
+///
+/// 2. **`E_STATE_DANGLING_PROMOTION`** — a backlog node whose `status` is `"promoted"`
+///    carries a `block` pointer (or is missing one) that does not resolve to an
+///    existing node in `{backlog.repo}:tracks[]`.
+///
+/// Backlog nodes with `status` other than `"promoted"` are not checked for
+/// promotion integrity (they have no `block` pointer by contract).
+pub fn check_backlog_integrity(
+    files: &[(StateSource, StateFile)],
+    graph: &StateGraph,
+) -> Vec<Diagnostic> {
+    use std::collections::HashSet;
+
+    // Set of all registered "repo:id" keys.
+    let node_set: HashSet<&str> = graph.nodes.iter().map(|n| n.key.as_str()).collect();
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    for (src, file) in files {
+        if file.backlog.is_empty() {
+            continue;
+        }
+
+        let path = &src.abs_path;
+
+        for backlog_node in &file.backlog {
+            // --- 1. Dangling depends_on ---
+            for dep in &backlog_node.depends_on {
+                if let BlockedBy::Block { repo, id, .. } = dep {
+                    let dep_key = format!("{repo}:{id}");
+                    if !node_set.contains(dep_key.as_str()) {
+                        diags.push(Diagnostic::error(
+                            path,
+                            "E_STATE_DANGLING_BLOCKED_BY",
+                            format!(
+                                "backlog node '{}' depends_on references unknown block '{dep_key}'",
+                                backlog_node.slug
+                            ),
+                        ));
+                    }
+                }
+            }
+
+            // --- 2. Orphan promoted node ---
+            if backlog_node.status == "promoted" {
+                match &backlog_node.block {
+                    None => {
+                        // Promoted with no block pointer — the promotion target is unknown.
+                        diags.push(Diagnostic::error(
+                            path,
+                            "E_STATE_DANGLING_PROMOTION",
+                            format!(
+                                "backlog node '{}' has status 'promoted' but no 'block' pointer",
+                                backlog_node.slug
+                            ),
+                        ));
+                    }
+                    Some(block_id) => {
+                        // Promoted and pointing at a block — verify the block exists.
+                        let block_key = format!("{}:{block_id}", backlog_node.repo);
+                        if !node_set.contains(block_key.as_str()) {
+                            diags.push(Diagnostic::error(
+                                path,
+                                "E_STATE_DANGLING_PROMOTION",
+                                format!(
+                                    "backlog node '{}' promoted to block '{block_id}' which does \
+                                     not exist in '{}' tracks[]",
+                                    backlog_node.slug, backlog_node.repo
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    diags
+}
+
+// ---------------------------------------------------------------------------
 // Rollup-drift check (brain files)
 // ---------------------------------------------------------------------------
 
@@ -890,21 +1197,15 @@ pub fn check_rollup(
         };
 
         // Compare block-id sets; ignore title/note cosmetic differences.
-        let cached_now: HashSet<&str> = rollup.now.iter().map(|b| b.block.as_str()).collect();
-        let actual_now: HashSet<&str> = child.focus.now.iter().map(|b| b.block.as_str()).collect();
+        let cached_now: HashSet<&str> = rollup.now.iter().map(|b| b.id.as_str()).collect();
+        let actual_now: HashSet<&str> = child.focus.now.iter().map(|b| b.id.as_str()).collect();
 
-        let cached_next: HashSet<&str> = rollup.next.iter().map(|b| b.block.as_str()).collect();
-        let actual_next: HashSet<&str> =
-            child.focus.next.iter().map(|b| b.block.as_str()).collect();
+        let cached_next: HashSet<&str> = rollup.next.iter().map(|b| b.id.as_str()).collect();
+        let actual_next: HashSet<&str> = child.focus.next.iter().map(|b| b.id.as_str()).collect();
 
-        let cached_blocked: HashSet<&str> =
-            rollup.blocked.iter().map(|b| b.block.as_str()).collect();
-        let actual_blocked: HashSet<&str> = child
-            .focus
-            .blocked
-            .iter()
-            .map(|b| b.block.as_str())
-            .collect();
+        let cached_blocked: HashSet<&str> = rollup.blocked.iter().map(|b| b.id.as_str()).collect();
+        let actual_blocked: HashSet<&str> =
+            child.focus.blocked.iter().map(|b| b.id.as_str()).collect();
 
         if cached_now != actual_now
             || cached_next != actual_next
@@ -949,6 +1250,324 @@ pub fn check_rollup(
     diags
 }
 
+// ---------------------------------------------------------------------------
+// Cycle detection
+// ---------------------------------------------------------------------------
+
+/// Detect cycles in the `depends_on` edge subgraph of `graph`.
+///
+/// Performs a DFS over [`StateEdgeKind::BlockedBy`] edges only; [`StateEdgeKind::CrossRepo`]
+/// edges are intentionally excluded (they annotate inter-repo intent, not block ordering
+/// and are not part of the authoritative DAG).
+///
+/// On detection of a back-edge, emits **`E_STATE_CYCLE`** naming the cycle path in the
+/// form `A → B → C → A`.  Each distinct cycle path is reported once.
+///
+/// Returns an empty `Vec` when the `depends_on` subgraph is acyclic.
+pub fn detect_cycles(graph: &StateGraph) -> Vec<Diagnostic> {
+    use std::collections::{HashMap, HashSet};
+
+    // Build adjacency: from_key → Vec<(to_ref, source_path)>.
+    // Initialise every node so isolated nodes are visited and early-exited cleanly.
+    let mut adj: HashMap<&str, Vec<(&str, &std::path::Path)>> = HashMap::new();
+    for node in &graph.nodes {
+        adj.entry(node.key.as_str()).or_default();
+    }
+    for edge in &graph.edges {
+        if edge.kind == StateEdgeKind::BlockedBy {
+            adj.entry(edge.from.as_str())
+                .or_default()
+                .push((edge.to_ref.as_str(), edge.source_path.as_path()));
+        }
+    }
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut diags: Vec<Diagnostic> = Vec::new();
+    let mut reported: HashSet<String> = HashSet::new();
+
+    // Iterate in a deterministic order (node-insertion order from the graph).
+    let starts: Vec<String> = graph.nodes.iter().map(|n| n.key.clone()).collect();
+    for start in &starts {
+        if !visited.contains(start.as_str()) {
+            let mut rec_stack: Vec<String> = Vec::new();
+            detect_cycles_dfs(
+                start.as_str(),
+                &adj,
+                &mut visited,
+                &mut rec_stack,
+                &mut diags,
+                &mut reported,
+            );
+        }
+    }
+
+    diags
+}
+
+/// DFS worker for [`detect_cycles`].
+///
+/// `rec_stack` tracks the current DFS path (nodes in the "gray" / visiting state).
+/// `visited` is the union of gray + black nodes (prevents re-visiting fully-explored nodes).
+/// `reported` deduplicates identical cycle-path strings so each cycle is emitted once.
+fn detect_cycles_dfs<'a>(
+    node: &'a str,
+    adj: &std::collections::HashMap<&'a str, Vec<(&'a str, &'a std::path::Path)>>,
+    visited: &mut std::collections::HashSet<String>,
+    rec_stack: &mut Vec<String>,
+    diags: &mut Vec<Diagnostic>,
+    reported: &mut std::collections::HashSet<String>,
+) {
+    visited.insert(node.to_string());
+    rec_stack.push(node.to_string());
+
+    if let Some(neighbors) = adj.get(node) {
+        for (neighbor, source_path) in neighbors {
+            if !visited.contains(*neighbor) {
+                detect_cycles_dfs(neighbor, adj, visited, rec_stack, diags, reported);
+            } else if let Some(pos) = rec_stack.iter().position(|n| n == neighbor) {
+                // Back-edge — `neighbor` is still on the recursion stack.
+                // Build the cycle path: stack[pos..] + closing arrow back to neighbor.
+                let cycle: Vec<&str> = rec_stack[pos..].iter().map(|s| s.as_str()).collect();
+                let path_str = format!("{} \u{2192} {}", cycle.join(" \u{2192} "), neighbor);
+                if !reported.contains(&path_str) {
+                    reported.insert(path_str.clone());
+                    diags.push(Diagnostic::error(
+                        *source_path,
+                        "E_STATE_CYCLE",
+                        format!("cycle detected in depends_on DAG: {path_str}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    rec_stack.pop();
+}
+
+// ---------------------------------------------------------------------------
+// Ready-order (reusable — MV.3B.T topo-emitter input)
+// ---------------------------------------------------------------------------
+
+/// Compute the wave-ordered list of **ready** `open` blocks across all files.
+///
+/// A block is *ready* iff:
+/// - Its authored status is `"open"` (or absent — treated as open).
+/// - It has **zero** `{type:"external"}` `depends_on` entries (external dependencies
+///   mean the block is gated on something outside the graph).
+/// - Every `{type:"block"}` `depends_on` target has authored status `"closed"`.
+///
+/// The returned `Vec<String>` lists canonical `"repo:id"` keys ordered by:
+/// 1. `wave` ascending (`None` treated as `i64::MAX` — lowest priority, goes last).
+/// 2. Track iteration order across `files` (stable tiebreak: position of the containing
+///    track, then block array index within that track).
+///
+/// `graph` is accepted for forward-compatibility — `MV.3B.T` will extend this function
+/// to query graph structure; the current implementation derives all information from `files`.
+/// Callers should always pass the graph built from the same `files` slice.
+///
+/// This function is **standalone and public** — do not inline it into any check function.
+pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> Vec<String> {
+    use std::collections::HashMap;
+
+    // Status lookup: "repo:id" → authored status (None = absent = open).
+    let mut status_map: HashMap<String, Option<String>> = HashMap::new();
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let key = format!("{}:{}", src.repo_slug, block.id);
+                status_map.insert(key, block.status.clone());
+            }
+        }
+    }
+
+    // Collect (wave, iteration_order, "repo:id") for every ready open block.
+    let mut ready: Vec<(i64, usize, String)> = Vec::new();
+    let mut order: usize = 0;
+
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let current_order = order;
+                order += 1;
+
+                // Only open (or status-absent) blocks are candidates.
+                let status = block.status.as_deref().unwrap_or("open");
+                if status != "open" {
+                    continue;
+                }
+
+                // Any external dep disqualifies the block (not yet runnable).
+                let has_external = block
+                    .depends_on
+                    .iter()
+                    .any(|d| matches!(d, BlockedBy::External { .. }));
+                if has_external {
+                    continue;
+                }
+
+                // All block deps must be closed.
+                let all_block_deps_closed = block.depends_on.iter().all(|d| {
+                    if let BlockedBy::Block { repo, id, .. } = d {
+                        let dep_key = format!("{repo}:{id}");
+                        status_map.get(&dep_key).and_then(|s| s.as_deref()) == Some("closed")
+                    } else {
+                        true // External entries handled above; this branch is unreachable here.
+                    }
+                });
+
+                if all_block_deps_closed {
+                    let wave = block.wave.unwrap_or(i64::MAX);
+                    let key = format!("{}:{}", src.repo_slug, block.id);
+                    ready.push((wave, current_order, key));
+                }
+            }
+        }
+    }
+
+    // Primary sort: wave asc. Tiebreak: iteration order (stable).
+    ready.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    ready.into_iter().map(|(_, _, key)| key).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Focus-drift check (task 5)
+// ---------------------------------------------------------------------------
+
+/// Recompute the expected `focus` from `tracks[]` and warn when it disagrees
+/// with the stored `focus` snapshot.
+///
+/// **Derivation rules (from the v2 schema design decisions):**
+/// - `now` — every `tracks[]` block with authored `status == "in_progress"`.
+/// - `blocked` — every `tracks[]` block that is `open` and has at least one
+///   unmet dependency: any `External` dep, or any `Block` dep whose target is not `closed`.
+/// - `next` — every `tracks[]` block returned by [`ready_order`] for this
+///   file (open blocks with no external deps and all block deps `closed`).
+///
+/// Comparison is **block-id sets only** (mirrors [`check_rollup`]'s strategy —
+/// cosmetic title/note differences are ignored).
+///
+/// **Severity:** warning only — focus is a derived view maintained by hand
+/// (the warn→error flip is deferred until the `/log-work` writer exists).
+/// Drift never causes exit 1.
+///
+/// Skips files with an empty `tracks[]` (the derivation is undefined when there
+/// is no roadmap catalog — typically brain files whose focus comes from
+/// aggregated child repos).
+pub fn check_focus_drift(
+    src: &StateSource,
+    file: &StateFile,
+    graph: &StateGraph,
+    files: &[(StateSource, StateFile)],
+) -> Vec<Diagnostic> {
+    use std::collections::{HashMap, HashSet};
+
+    // Undefined for files without a roadmap catalog.
+    if file.tracks.is_empty() {
+        return vec![];
+    }
+
+    // Build a status map: "repo:id" → authored status (None = absent = open).
+    let mut status_map: HashMap<String, Option<String>> = HashMap::new();
+    for (s, f) in files {
+        for track in &f.tracks {
+            for block in &track.blocks {
+                let key = format!("{}:{}", s.repo_slug, block.id);
+                status_map.insert(key, block.status.clone());
+            }
+        }
+    }
+
+    // Derive the three focus sets from tracks[].
+    let mut derived_now: HashSet<String> = HashSet::new();
+    let mut derived_blocked: HashSet<String> = HashSet::new();
+
+    for track in &file.tracks {
+        for block in &track.blocks {
+            let authored_status = block.status.as_deref().unwrap_or("open");
+
+            match authored_status {
+                "in_progress" => {
+                    derived_now.insert(block.id.clone());
+                }
+                "open" => {
+                    // Is this block gated on something unmet?
+                    let has_unmet = block.depends_on.iter().any(|d| match d {
+                        BlockedBy::External { .. } => true,
+                        BlockedBy::Block { repo, id, .. } => {
+                            let dep_key = format!("{repo}:{id}");
+                            status_map.get(&dep_key).and_then(|s| s.as_deref()) != Some("closed")
+                        }
+                    });
+                    if has_unmet {
+                        derived_blocked.insert(block.id.clone());
+                    }
+                    // `closed` and `blocked` (invalid authored) are skipped; they
+                    // don't appear in the derived focus.
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // next = ready_order filtered to this file's blocks.
+    let ready = ready_order(graph, files);
+    let this_prefix = format!("{}:", src.repo_slug);
+    let derived_next: HashSet<String> = ready
+        .into_iter()
+        .filter(|key| key.starts_with(&this_prefix))
+        .map(|key| key[this_prefix.len()..].to_string())
+        .collect();
+
+    // Compare stored focus to derived (block-id sets only).
+    let stored_now: HashSet<&str> = file.focus.now.iter().map(|b| b.id.as_str()).collect();
+    let stored_next: HashSet<&str> = file.focus.next.iter().map(|b| b.id.as_str()).collect();
+    let stored_blocked: HashSet<&str> = file.focus.blocked.iter().map(|b| b.id.as_str()).collect();
+
+    let derived_now_str: HashSet<&str> = derived_now.iter().map(|s| s.as_str()).collect();
+    let derived_next_str: HashSet<&str> = derived_next.iter().map(|s| s.as_str()).collect();
+    let derived_blocked_str: HashSet<&str> = derived_blocked.iter().map(|s| s.as_str()).collect();
+
+    if stored_now == derived_now_str
+        && stored_next == derived_next_str
+        && stored_blocked == derived_blocked_str
+    {
+        return vec![];
+    }
+
+    // Build a compact diff for the warning message.
+    let mut diffs: Vec<String> = Vec::new();
+    if stored_now != derived_now_str {
+        diffs.push(format!(
+            "now: stored={:?} derived={:?}",
+            sorted_set(&stored_now),
+            sorted_set(&derived_now_str),
+        ));
+    }
+    if stored_next != derived_next_str {
+        diffs.push(format!(
+            "next: stored={:?} derived={:?}",
+            sorted_set(&stored_next),
+            sorted_set(&derived_next_str),
+        ));
+    }
+    if stored_blocked != derived_blocked_str {
+        diffs.push(format!(
+            "blocked: stored={:?} derived={:?}",
+            sorted_set(&stored_blocked),
+            sorted_set(&derived_blocked_str),
+        ));
+    }
+
+    vec![Diagnostic::warning(
+        &src.abs_path,
+        "W_STATE_FOCUS_DRIFT",
+        format!(
+            "focus snapshot has drifted from tracks[] derivation — {}",
+            diffs.join("; ")
+        ),
+    )]
+}
+
 /// Return a deterministically sorted `Vec<&str>` from a `HashSet<&str>` for
 /// use in diagnostic messages (avoids non-deterministic output from Set debug).
 fn sorted_set<'a>(set: &std::collections::HashSet<&'a str>) -> Vec<&'a str> {
@@ -978,10 +1597,10 @@ mod tests {
   "updated": "2026-06-29",
   "focus": {{
     "now": [
-      {{ "block": "MV.3.J", "title": "Graph integrity", "status": "closed" }}
+      {{ "id": "MV.3.J", "title": "Graph integrity", "status": "closed" }}
     ],
     "next": [
-      {{ "block": "MV.3.K", "title": "Link integrity" }}
+      {{ "id": "MV.3.K", "title": "Link integrity" }}
     ],
     "blocked": []
   }},
@@ -1006,25 +1625,25 @@ mod tests {
   "updated": "2026-06-29",
   "focus": {
     "now": [
-      { "block": "BA.11.C0", "repo": "bastion", "title": "Manifest engine", "status": "in_progress" }
+      { "id": "BA.11.C0", "repo": "bastion", "title": "Manifest engine", "status": "in_progress" }
     ],
     "next": [
-      { "block": "BA.11.C", "repo": "bastion", "title": "WebSocket hub" }
+      { "id": "BA.11.C", "repo": "bastion", "title": "WebSocket hub" }
     ],
     "blocked": []
   },
   "repos": [
     {
       "repo": "bastion",
-      "now": [{ "block": "BA.11.C0", "title": "Manifest engine", "status": "in_progress" }],
-      "next": [{ "block": "BA.11.C", "title": "WebSocket hub" }],
+      "now": [{ "id": "BA.11.C0", "title": "Manifest engine", "status": "in_progress" }],
+      "next": [{ "id": "BA.11.C", "title": "WebSocket hub" }],
       "blocked": []
     }
   ],
   "cross_repo": [
     {
-      "from": { "repo": "bastion-ui", "block": "BU.1.A" },
-      "to": { "repo": "bastion", "block": "BA.11.C" },
+      "from": { "repo": "bastion-ui", "id": "BU.1.A" },
+      "to": { "repo": "bastion", "id": "BA.11.C" },
       "note": "Session-control screens need the WS hub."
     }
   ]
@@ -1040,12 +1659,12 @@ mod tests {
   "note": "Top company brain.",
   "focus": {
     "now": [
-      { "block": "BA.11.C0", "repo": "bastion", "title": "Manifest engine", "status": "in_progress" }
+      { "id": "BA.11.C0", "repo": "bastion", "title": "Manifest engine", "status": "in_progress" }
     ],
     "next": [],
     "blocked": [
       {
-        "block": "OR.B",
+        "id": "OR.B",
         "repo": "orchestrator",
         "title": "Semantic Brain Q&A",
         "blocked_by": [
@@ -1058,7 +1677,7 @@ mod tests {
     {
       "repo": "bastion",
       "tier": "core",
-      "now": [{ "block": "BA.11.C0", "title": "Manifest engine", "status": "in_progress" }],
+      "now": [{ "id": "BA.11.C0", "title": "Manifest engine", "status": "in_progress" }],
       "next": [],
       "blocked": []
     }
@@ -1577,7 +2196,7 @@ mod tests {
   "updated": "2026-06-29",
   "focus": {
     "now": [
-      { "block": "T.1", "title": "Work", "status": "flying" }
+      { "id": "T.1", "title": "Work", "status": "flying" }
     ],
     "next": [],
     "blocked": []
@@ -1614,7 +2233,7 @@ mod tests {
     "next": [],
     "blocked": [
       {
-        "block": "T.1",
+        "id": "T.1",
         "title": "Blocked block",
         "blocked_by": [
           { "type": "block", "repo": "other", "id": "" }
@@ -1718,7 +2337,7 @@ mod tests {
   "kind": "project",
   "updated": "2026-06-29",
   "focus": {{
-    "now": [{{ "block": "{block_id}", "title": "Work", "status": "in_progress" }}],
+    "now": [{{ "id": "{block_id}", "title": "Work", "status": "in_progress" }}],
     "next": [],
     "blocked": []
   }},
@@ -1767,7 +2386,7 @@ mod tests {
         // alpha has block AL.1.A in tracks
         let pair_a = leaf_pair(dir.path(), "alpha", "AL.1.A");
 
-        // beta's focus.blocked references alpha's block "AL.1.GHOST" which does NOT exist
+        // beta's tracks[].blocks[].depends_on references alpha's block "AL.1.GHOST" which does NOT exist
         let beta_json = r#"{
   "repo": "beta",
   "kind": "project",
@@ -1776,16 +2395,19 @@ mod tests {
     "now": [],
     "next": [],
     "blocked": [
-      {
-        "block": "BE.1.A",
-        "title": "Blocked work",
-        "blocked_by": [
-          { "type": "block", "repo": "alpha", "id": "AL.1.GHOST" }
-        ]
-      }
+      { "id": "BE.1.A", "title": "Blocked work" }
     ]
   },
-  "tracks": [{ "title": "Phase 1", "blocks": [{ "id": "BE.1.A", "title": "Blocked work" }] }]
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [{
+      "id": "BE.1.A",
+      "title": "Blocked work",
+      "depends_on": [
+        { "type": "block", "repo": "alpha", "id": "AL.1.GHOST" }
+      ]
+    }]
+  }]
 }"#;
         let pair_b = make_pair(dir.path(), "beta-state.json", "project", beta_json);
 
@@ -1808,7 +2430,7 @@ mod tests {
     fn check_detects_unknown_repo_in_blocked_by() {
         let dir = tempfile::tempdir().expect("tempdir");
 
-        // Only one repo in the corpus
+        // Only one repo in the corpus; the block's depends_on references an unknown repo.
         let alpha_json = r#"{
   "repo": "alpha",
   "kind": "project",
@@ -1816,17 +2438,18 @@ mod tests {
   "focus": {
     "now": [],
     "next": [],
-    "blocked": [
-      {
-        "block": "AL.1.A",
-        "title": "Blocked",
-        "blocked_by": [
-          { "type": "block", "repo": "ghost-repo", "id": "GH.1.X" }
-        ]
-      }
-    ]
+    "blocked": [{ "id": "AL.1.A", "title": "Blocked" }]
   },
-  "tracks": [{ "title": "P1", "blocks": [{ "id": "AL.1.A", "title": "Blocked" }] }]
+  "tracks": [{
+    "title": "P1",
+    "blocks": [{
+      "id": "AL.1.A",
+      "title": "Blocked",
+      "depends_on": [
+        { "type": "block", "repo": "ghost-repo", "id": "GH.1.X" }
+      ]
+    }]
+  }]
 }"#;
         let pair = make_pair(dir.path(), "alpha-state.json", "project", alpha_json);
         let files = vec![pair];
@@ -1895,7 +2518,7 @@ mod tests {
   "kind": "project",
   "updated": "2026-06-29",
   "focus": {
-    "now": [{ "block": "AL.1.GHOST", "title": "Missing", "status": "in_progress" }],
+    "now": [{ "id": "AL.1.GHOST", "title": "Missing", "status": "in_progress" }],
     "next": [],
     "blocked": []
   },
@@ -1934,8 +2557,8 @@ mod tests {
   "repos": [{ "repo": "alpha", "now": [], "next": [], "blocked": [] }],
   "cross_repo": [
     {
-      "from": { "repo": "alpha", "block": "AL.1.A" },
-      "to": { "repo": "alpha", "block": "AL.1.GHOST" }
+      "from": { "repo": "alpha", "id": "AL.1.A" },
+      "to": { "repo": "alpha", "id": "AL.1.GHOST" }
     }
   ]
 }"#;
@@ -1957,6 +2580,1188 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Task 2 — depends_on DAG edges + check_schema v2 checks
+    // -----------------------------------------------------------------------
+
+    /// A v2 leaf fixture with `depends_on` wired through `tracks[].blocks[]`.
+    fn leaf_with_depends_on(
+        dir: &std::path::Path,
+        repo: &str,
+        block_id: &str,
+        dep_repo: &str,
+        dep_id: &str,
+    ) -> (StateSource, StateFile) {
+        let json = format!(
+            r#"{{
+  "repo": "{repo}",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": {{
+    "now": [{{ "id": "{block_id}", "title": "Waiting", "status": "open" }}],
+    "next": [],
+    "blocked": []
+  }},
+  "tracks": [{{
+    "title": "Phase 1",
+    "blocks": [{{
+      "id": "{block_id}",
+      "title": "Waiting",
+      "status": "open",
+      "depends_on": [
+        {{ "type": "block", "repo": "{dep_repo}", "id": "{dep_id}" }}
+      ]
+    }}]
+  }}]
+}}"#
+        );
+        make_pair(dir, &format!("{repo}-state.json"), "project", &json)
+    }
+
+    #[test]
+    fn build_depends_on_edges_from_tracks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // alpha has block AL.1.A that depends_on beta:BE.1.A
+        let pair_alpha = leaf_with_depends_on(dir.path(), "alpha", "AL.1.A", "beta", "BE.1.A");
+        let pair_beta = leaf_pair(dir.path(), "beta", "BE.1.A");
+        let files = vec![pair_alpha, pair_beta];
+
+        let graph = build_state_graph(&files);
+
+        // Two nodes (one per repo)
+        assert_eq!(
+            graph.nodes.len(),
+            2,
+            "expected 2 nodes, got: {:?}",
+            graph.nodes
+        );
+
+        // One BlockedBy edge from depends_on
+        let bb_edges: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == StateEdgeKind::BlockedBy)
+            .collect();
+        assert_eq!(
+            bb_edges.len(),
+            1,
+            "expected exactly one BlockedBy edge from depends_on, got: {:?}",
+            graph.edges
+        );
+        assert_eq!(bb_edges[0].from, "alpha:AL.1.A");
+        assert_eq!(bb_edges[0].to_ref, "beta:BE.1.A");
+    }
+
+    #[test]
+    fn build_external_depends_on_entries_are_excluded_from_edges() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // alpha has a block that depends_on an external constraint only — no graph edges.
+        let alpha_json = r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [{
+      "id": "AL.1.A",
+      "title": "Needs hardware",
+      "status": "open",
+      "depends_on": [
+        { "type": "external", "what": "New Mac Mini delivery" }
+      ]
+    }]
+  }]
+}"#;
+        let pair = make_pair(dir.path(), "alpha-state.json", "project", alpha_json);
+        let files = vec![pair];
+
+        let graph = build_state_graph(&files);
+
+        assert_eq!(graph.nodes.len(), 1, "expected 1 node");
+        assert_eq!(
+            graph.edges.len(),
+            0,
+            "external depends_on must not produce a graph edge, got: {:?}",
+            graph.edges
+        );
+    }
+
+    #[test]
+    fn build_no_edges_from_focus_blocked_by() {
+        // Confirm that focus.blocked_by is NOT an edge source in v2.
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // alpha has a focus.blocked entry with blocked_by — should NOT produce an edge.
+        let alpha_json = r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": {
+    "now": [],
+    "next": [],
+    "blocked": [{
+      "id": "AL.1.A",
+      "title": "Waiting",
+      "blocked_by": [
+        { "type": "block", "repo": "beta", "id": "BE.1.A" }
+      ]
+    }]
+  },
+  "tracks": [{ "title": "P1", "blocks": [{ "id": "AL.1.A", "title": "Waiting" }] }]
+}"#;
+        let pair = make_pair(dir.path(), "alpha-state.json", "project", alpha_json);
+        let files = vec![pair];
+
+        let graph = build_state_graph(&files);
+
+        assert_eq!(
+            graph.edges.len(),
+            0,
+            "focus.blocked_by must not produce edges in v2; got: {:?}",
+            graph.edges
+        );
+    }
+
+    #[test]
+    fn check_schema_authored_blocked_emits_e_state_authored_blocked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        // A track block with authored status "blocked" — this is illegal in v2.
+        let json = r#"{
+  "repo": "test",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [
+      { "id": "T.1", "title": "Should not be authored blocked", "status": "blocked" }
+    ]
+  }]
+}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+
+        let authored_blocked: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_AUTHORED_BLOCKED")
+            .collect();
+        assert_eq!(
+            authored_blocked.len(),
+            1,
+            "expected exactly one E_STATE_AUTHORED_BLOCKED, got: {diags:?}"
+        );
+        assert!(
+            authored_blocked[0].message.contains("T.1"),
+            "E_STATE_AUTHORED_BLOCKED message should name the block id, got: {:?}",
+            authored_blocked[0].message
+        );
+    }
+
+    #[test]
+    fn check_schema_bad_backlog_status_emits_e_state_schema_bad_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "brain");
+
+        // A backlog item with an invalid status value.
+        let json = r#"{
+  "repo": "hq",
+  "kind": "brain",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "repos": [{ "repo": "some-child", "now": [], "next": [], "blocked": [] }],
+  "backlog": [
+    {
+      "slug": "my-idea",
+      "title": "Some idea",
+      "repo": "mev",
+      "type": "feature",
+      "status": "flying"
+    }
+  ]
+}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+
+        let bad_status: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_STATUS")
+            .collect();
+        assert_eq!(
+            bad_status.len(),
+            1,
+            "expected exactly one E_STATE_SCHEMA_BAD_STATUS for bad backlog status, got: {diags:?}"
+        );
+        assert!(
+            bad_status[0].message.contains("my-idea"),
+            "E_STATE_SCHEMA_BAD_STATUS message should name the backlog slug, got: {:?}",
+            bad_status[0].message
+        );
+    }
+
+    #[test]
+    fn check_schema_valid_backlog_statuses_pass() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "brain");
+
+        for status in &["idea", "ready", "promoted"] {
+            let json = format!(
+                r#"{{
+  "repo": "hq",
+  "kind": "brain",
+  "updated": "2026-06-29",
+  "focus": {{ "now": [], "next": [], "blocked": [] }},
+  "repos": [{{ "repo": "c", "now": [], "next": [], "blocked": [] }}],
+  "backlog": [
+    {{
+      "slug": "item-{status}",
+      "title": "Test",
+      "repo": "mev",
+      "type": "feature",
+      "status": "{status}"
+    }}
+  ]
+}}"#
+            );
+            let file = parse_file(&json);
+            let diags = check_schema(&src, &file);
+            let bad: Vec<_> = diags
+                .iter()
+                .filter(|d| {
+                    d.locator == "E_STATE_SCHEMA_BAD_STATUS"
+                        || d.locator == "E_STATE_AUTHORED_BLOCKED"
+                })
+                .collect();
+            assert!(
+                bad.is_empty(),
+                "backlog status '{status}' should be valid, got: {diags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn check_schema_clean_v2_file_with_depends_on_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        // A clean v2 leaf with depends_on in tracks and backlog-free.
+        let json = r#"{
+  "repo": "test",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": {
+    "now": [{ "id": "T.2", "title": "Active", "status": "in_progress" }],
+    "next": [{ "id": "T.1", "title": "Ready" }],
+    "blocked": []
+  },
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [
+      { "id": "T.1", "title": "Ready", "status": "open" },
+      {
+        "id": "T.2",
+        "title": "Active",
+        "status": "in_progress",
+        "depends_on": [
+          { "type": "block", "repo": "other", "id": "OT.1.A" }
+        ],
+        "wave": 1
+      }
+    ]
+  }]
+}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == crate::Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "clean v2 file with depends_on should produce no schema errors, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_schema_depends_on_empty_repo_emits_bad_blocked_by() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        // A track block whose depends_on entry has an empty repo field.
+        let json = r#"{
+  "repo": "test",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [{
+      "id": "T.1",
+      "title": "Work",
+      "depends_on": [
+        { "type": "block", "repo": "", "id": "OT.1.A" }
+      ]
+    }]
+  }]
+}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+        let bad_bb: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_BLOCKED_BY")
+            .collect();
+        assert_eq!(
+            bad_bb.len(),
+            1,
+            "expected one E_STATE_SCHEMA_BAD_BLOCKED_BY for empty depends_on repo, got: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 3 — detect_cycles tests
+    // -----------------------------------------------------------------------
+
+    /// Build a `StateGraph` directly from node keys and BlockedBy edge tuples.
+    /// `nodes`: (repo, id); `edges`: (from_key, to_ref).
+    /// Uses a stable fake path derived from `from_key` for each edge's `source_path`.
+    fn make_cycle_graph(
+        dir: &std::path::Path,
+        nodes: &[(&str, &str)],
+        edges: &[(&str, &str)],
+    ) -> StateGraph {
+        let node_vec: Vec<StateNode> = nodes
+            .iter()
+            .map(|(repo, id)| StateNode {
+                key: format!("{repo}:{id}"),
+                repo: repo.to_string(),
+                id: id.to_string(),
+                title: format!("{repo}:{id}"),
+                source_path: dir.join(format!("{repo}.json")),
+            })
+            .collect();
+        let edge_vec: Vec<StateEdge> = edges
+            .iter()
+            .map(|(from, to_ref)| {
+                let repo = from.split(':').next().unwrap_or("unknown");
+                StateEdge {
+                    from: from.to_string(),
+                    to_ref: to_ref.to_string(),
+                    kind: StateEdgeKind::BlockedBy,
+                    source_path: dir.join(format!("{repo}.json")),
+                }
+            })
+            .collect();
+        StateGraph {
+            nodes: node_vec,
+            edges: edge_vec,
+        }
+    }
+
+    #[test]
+    fn detect_cycles_simple_two_node_cycle_is_flagged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // a:X depends_on b:Y, b:Y depends_on a:X → cycle
+        let graph = make_cycle_graph(
+            dir.path(),
+            &[("a", "X"), ("b", "Y")],
+            &[("a:X", "b:Y"), ("b:Y", "a:X")],
+        );
+
+        let diags = detect_cycles(&graph);
+        let cycles: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_CYCLE")
+            .collect();
+        assert_eq!(
+            cycles.len(),
+            1,
+            "expected exactly one E_STATE_CYCLE for two-node cycle, got: {diags:?}"
+        );
+        // The message should contain both node keys.
+        assert!(
+            cycles[0].message.contains("a:X") && cycles[0].message.contains("b:Y"),
+            "E_STATE_CYCLE message should name the cycle nodes, got: {:?}",
+            cycles[0].message
+        );
+    }
+
+    #[test]
+    fn detect_cycles_three_node_cycle_path_is_flagged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // a:X → b:Y → c:Z → a:X
+        let graph = make_cycle_graph(
+            dir.path(),
+            &[("a", "X"), ("b", "Y"), ("c", "Z")],
+            &[("a:X", "b:Y"), ("b:Y", "c:Z"), ("c:Z", "a:X")],
+        );
+
+        let diags = detect_cycles(&graph);
+        let cycles: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_CYCLE")
+            .collect();
+        assert_eq!(
+            cycles.len(),
+            1,
+            "expected exactly one E_STATE_CYCLE for three-node cycle, got: {diags:?}"
+        );
+        // All three keys must appear in the message.
+        assert!(
+            cycles[0].message.contains("a:X")
+                && cycles[0].message.contains("b:Y")
+                && cycles[0].message.contains("c:Z"),
+            "E_STATE_CYCLE message should name all cycle nodes, got: {:?}",
+            cycles[0].message
+        );
+    }
+
+    #[test]
+    fn detect_cycles_acyclic_dag_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // a:X → b:Y → c:Z (no cycle)
+        let graph = make_cycle_graph(
+            dir.path(),
+            &[("a", "X"), ("b", "Y"), ("c", "Z")],
+            &[("a:X", "b:Y"), ("b:Y", "c:Z")],
+        );
+
+        let diags = detect_cycles(&graph);
+        let cycles: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_CYCLE")
+            .collect();
+        assert!(
+            cycles.is_empty(),
+            "acyclic DAG should produce no E_STATE_CYCLE, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn detect_cycles_self_loop_is_flagged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // a:X depends_on itself
+        let graph = make_cycle_graph(dir.path(), &[("a", "X")], &[("a:X", "a:X")]);
+
+        let diags = detect_cycles(&graph);
+        let cycles: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_CYCLE")
+            .collect();
+        assert_eq!(
+            cycles.len(),
+            1,
+            "self-loop should produce exactly one E_STATE_CYCLE, got: {diags:?}"
+        );
+        assert!(
+            cycles[0].message.contains("a:X"),
+            "E_STATE_CYCLE message should name the self-loop node, got: {:?}",
+            cycles[0].message
+        );
+    }
+
+    #[test]
+    fn detect_cycles_cross_repo_edges_are_excluded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Two nodes with a CrossRepo edge — CrossRepo edges must NOT trigger cycle detection.
+        let node_vec = vec![
+            StateNode {
+                key: "a:X".to_string(),
+                repo: "a".to_string(),
+                id: "X".to_string(),
+                title: "X".to_string(),
+                source_path: dir.path().join("a.json"),
+            },
+            StateNode {
+                key: "b:Y".to_string(),
+                repo: "b".to_string(),
+                id: "Y".to_string(),
+                title: "Y".to_string(),
+                source_path: dir.path().join("b.json"),
+            },
+        ];
+        // CrossRepo edges forming a "cycle" — should be ignored by detect_cycles.
+        let edge_vec = vec![
+            StateEdge {
+                from: "a:X".to_string(),
+                to_ref: "b:Y".to_string(),
+                kind: StateEdgeKind::CrossRepo,
+                source_path: dir.path().join("brain.json"),
+            },
+            StateEdge {
+                from: "b:Y".to_string(),
+                to_ref: "a:X".to_string(),
+                kind: StateEdgeKind::CrossRepo,
+                source_path: dir.path().join("brain.json"),
+            },
+        ];
+        let graph = StateGraph {
+            nodes: node_vec,
+            edges: edge_vec,
+        };
+
+        let diags = detect_cycles(&graph);
+        let cycles: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_CYCLE")
+            .collect();
+        assert!(
+            cycles.is_empty(),
+            "CrossRepo edges must not trigger E_STATE_CYCLE, got: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 3 — ready_order tests
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal (StateSource, StateFile) pair for ready_order testing.
+    fn make_ready_pair(
+        dir: &std::path::Path,
+        repo: &str,
+        blocks: &[(&str, Option<&str>, Option<i64>, Vec<BlockedBy>)],
+    ) -> (StateSource, StateFile) {
+        // blocks: (id, status, wave, depends_on)
+        let track_blocks: Vec<TrackBlock> = blocks
+            .iter()
+            .map(|(id, status, wave, deps)| TrackBlock {
+                id: id.to_string(),
+                title: id.to_string(),
+                status: status.map(|s| s.to_string()),
+                depends_on: deps.clone(),
+                wave: *wave,
+                origin: None,
+            })
+            .collect();
+
+        let path = dir.join(format!("{repo}-state.json"));
+        let file = StateFile {
+            repo: repo.to_string(),
+            kind: "project".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus: Focus::default(),
+            tracks: vec![Track {
+                title: "Phase 1".to_string(),
+                blocks: track_blocks,
+            }],
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+        };
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: path,
+            expected_kind: "project",
+        };
+        (src, file)
+    }
+
+    #[test]
+    fn ready_order_no_deps_open_block_is_ready() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("open"), None, vec![])],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert_eq!(
+            order,
+            vec!["alpha:AL.1.A"],
+            "open block with no deps should appear in ready_order, got: {order:?}"
+        );
+    }
+
+    #[test]
+    fn ready_order_absent_status_treated_as_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No status field — treated as open.
+        let pair = make_ready_pair(dir.path(), "alpha", &[("AL.1.A", None, None, vec![])]);
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert_eq!(
+            order,
+            vec!["alpha:AL.1.A"],
+            "absent-status block should be treated as open and appear in ready_order"
+        );
+    }
+
+    #[test]
+    fn ready_order_closed_block_excluded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("closed"), None, vec![])],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert!(
+            order.is_empty(),
+            "closed block must not appear in ready_order, got: {order:?}"
+        );
+    }
+
+    #[test]
+    fn ready_order_in_progress_block_excluded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("in_progress"), None, vec![])],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert!(
+            order.is_empty(),
+            "in_progress block must not appear in ready_order, got: {order:?}"
+        );
+    }
+
+    #[test]
+    fn ready_order_block_with_external_dep_excluded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ext_dep = BlockedBy::External {
+            what: "Mac Mini delivery".to_string(),
+        };
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("open"), None, vec![ext_dep])],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert!(
+            order.is_empty(),
+            "open block with external dep must not appear in ready_order, got: {order:?}"
+        );
+    }
+
+    #[test]
+    fn ready_order_block_with_unclosed_block_dep_excluded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // alpha:AL.1.A depends_on beta:BE.1.A which is open (not closed).
+        let block_dep = BlockedBy::Block {
+            repo: "beta".to_string(),
+            id: "BE.1.A".to_string(),
+            what: None,
+        };
+        let pair_a = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("open"), None, vec![block_dep])],
+        );
+        // beta:BE.1.A is open (not closed).
+        let pair_b = make_ready_pair(
+            dir.path(),
+            "beta",
+            &[("BE.1.A", Some("open"), None, vec![])],
+        );
+        let files = vec![pair_a, pair_b];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        // beta:BE.1.A is open → alpha:AL.1.A is not ready
+        // beta:BE.1.A has no deps → it IS ready
+        assert!(
+            !order.contains(&"alpha:AL.1.A".to_string()),
+            "alpha:AL.1.A should not be ready when its dep is open; order={order:?}"
+        );
+        assert!(
+            order.contains(&"beta:BE.1.A".to_string()),
+            "beta:BE.1.A (no deps, open) should be ready; order={order:?}"
+        );
+    }
+
+    #[test]
+    fn ready_order_block_with_closed_dep_is_ready() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // alpha:AL.1.A depends_on beta:BE.1.A which is closed → AL.1.A is ready.
+        let block_dep = BlockedBy::Block {
+            repo: "beta".to_string(),
+            id: "BE.1.A".to_string(),
+            what: None,
+        };
+        let pair_a = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("open"), None, vec![block_dep])],
+        );
+        let pair_b = make_ready_pair(
+            dir.path(),
+            "beta",
+            &[("BE.1.A", Some("closed"), None, vec![])],
+        );
+        let files = vec![pair_a, pair_b];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert!(
+            order.contains(&"alpha:AL.1.A".to_string()),
+            "alpha:AL.1.A should be ready when its only dep is closed; order={order:?}"
+        );
+    }
+
+    #[test]
+    fn ready_order_wave_ordering_applied() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Three open blocks: wave 3, wave 1, wave 2 → should come out 1, 2, 3.
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.C", Some("open"), Some(3), vec![]),
+                ("AL.1.A", Some("open"), Some(1), vec![]),
+                ("AL.1.B", Some("open"), Some(2), vec![]),
+            ],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert_eq!(
+            order,
+            vec!["alpha:AL.1.A", "alpha:AL.1.B", "alpha:AL.1.C"],
+            "ready_order should sort by wave ascending, got: {order:?}"
+        );
+    }
+
+    #[test]
+    fn ready_order_none_wave_goes_last() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // One block with wave=1, one with no wave → wave=1 should come first.
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.B", Some("open"), None, vec![]), // no wave → last
+                ("AL.1.A", Some("open"), Some(1), vec![]),
+            ],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert_eq!(
+            order,
+            vec!["alpha:AL.1.A", "alpha:AL.1.B"],
+            "block with wave=None should sort after wave=1, got: {order:?}"
+        );
+    }
+
+    #[test]
+    fn ready_order_equal_wave_preserves_iteration_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Three open blocks all with wave=1 → should preserve array order.
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("open"), Some(1), vec![]),
+                ("AL.1.B", Some("open"), Some(1), vec![]),
+                ("AL.1.C", Some("open"), Some(1), vec![]),
+            ],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert_eq!(
+            order,
+            vec!["alpha:AL.1.A", "alpha:AL.1.B", "alpha:AL.1.C"],
+            "equal-wave blocks should preserve array order, got: {order:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 4 — status consistency + backlog integrity tests
+    // -----------------------------------------------------------------------
+
+    // Helper: build a (StateSource, StateFile) pair with blocks that have known statuses
+    // and depends_on edges. Each block tuple is (id, status, Vec<depends_on>).
+    fn make_consistency_pair(
+        dir: &std::path::Path,
+        repo: &str,
+        blocks: &[(&str, Option<&str>, Vec<BlockedBy>)],
+    ) -> (StateSource, StateFile) {
+        let track_blocks: Vec<TrackBlock> = blocks
+            .iter()
+            .map(|(id, status, deps)| TrackBlock {
+                id: id.to_string(),
+                title: id.to_string(),
+                status: status.map(|s| s.to_string()),
+                depends_on: deps.clone(),
+                wave: None,
+                origin: None,
+            })
+            .collect();
+
+        let path = dir.join(format!("{repo}-state.json"));
+        let file = StateFile {
+            repo: repo.to_string(),
+            kind: "project".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus: Focus::default(),
+            tracks: vec![Track {
+                title: "Phase 1".to_string(),
+                blocks: track_blocks,
+            }],
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+        };
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: path,
+            expected_kind: "project",
+        };
+        (src, file)
+    }
+
+    #[test]
+    fn check_status_consistency_closed_depends_on_open_emits_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // alpha has two blocks: AL.1.A (open) and AL.1.B (closed, depends on AL.1.A).
+        let dep = BlockedBy::Block {
+            repo: "alpha".to_string(),
+            id: "AL.1.A".to_string(),
+            what: None,
+        };
+        let pair = make_consistency_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("open"), vec![]),
+                ("AL.1.B", Some("closed"), vec![dep]),
+            ],
+        );
+        let files = vec![pair];
+        let diags = check_status_consistency(&files);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_STATUS_INCONSISTENT")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "closed block depending on open block should emit exactly one \
+             E_STATE_STATUS_INCONSISTENT, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_status_consistency_closed_depends_on_closed_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Both blocks are closed — no inconsistency.
+        let dep = BlockedBy::Block {
+            repo: "alpha".to_string(),
+            id: "AL.1.A".to_string(),
+            what: None,
+        };
+        let pair = make_consistency_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("closed"), vec![]),
+                ("AL.1.B", Some("closed"), vec![dep]),
+            ],
+        );
+        let files = vec![pair];
+        let diags = check_status_consistency(&files);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_STATUS_INCONSISTENT")
+            .collect();
+        assert!(
+            errs.is_empty(),
+            "closed block depending on closed block should not emit errors, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_status_consistency_closed_depends_on_in_progress_emits_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dep = BlockedBy::Block {
+            repo: "alpha".to_string(),
+            id: "AL.1.A".to_string(),
+            what: None,
+        };
+        let pair = make_consistency_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("in_progress"), vec![]),
+                ("AL.1.B", Some("closed"), vec![dep]),
+            ],
+        );
+        let files = vec![pair];
+        let diags = check_status_consistency(&files);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_STATUS_INCONSISTENT")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "closed block depending on in_progress block should emit E_STATE_STATUS_INCONSISTENT, \
+             got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_status_consistency_dangling_dep_is_skipped_silently() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // AL.1.B is closed but depends on "alpha:AL.1.GHOST" which is not in any file.
+        // Should NOT emit E_STATE_STATUS_INCONSISTENT (that's E_STATE_DANGLING_BLOCKED_BY's job).
+        let dep = BlockedBy::Block {
+            repo: "alpha".to_string(),
+            id: "AL.1.GHOST".to_string(),
+            what: None,
+        };
+        let pair = make_consistency_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.B", Some("closed"), vec![dep])],
+        );
+        let files = vec![pair];
+        let diags = check_status_consistency(&files);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_STATUS_INCONSISTENT")
+            .collect();
+        assert!(
+            errs.is_empty(),
+            "dangling dep (not in any loaded file) should not produce \
+             E_STATE_STATUS_INCONSISTENT (that's check_state_graph's job), got: {diags:?}"
+        );
+    }
+
+    // Helper: build a (StateSource, StateFile) pair that has a backlog[] array.
+    fn make_brain_with_backlog(
+        dir: &std::path::Path,
+        repo: &str,
+        track_blocks: Vec<TrackBlock>,
+        backlog_nodes: Vec<Backlog>,
+    ) -> (StateSource, StateFile) {
+        let path = dir.join(format!("{repo}-state.json"));
+        let file = StateFile {
+            repo: repo.to_string(),
+            kind: "brain".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus: Focus::default(),
+            tracks: if track_blocks.is_empty() {
+                vec![]
+            } else {
+                vec![Track {
+                    title: "Phase 1".to_string(),
+                    blocks: track_blocks,
+                }]
+            },
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: backlog_nodes,
+        };
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: path,
+            expected_kind: "brain",
+        };
+        (src, file)
+    }
+
+    #[test]
+    fn check_backlog_integrity_dangling_depends_on_emits_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Backlog node depends on "mev:MV.3.GHOST" which doesn't exist in any tracks[].
+        let backlog_node = Backlog {
+            slug: "add-foo".to_string(),
+            title: "Add foo".to_string(),
+            repo: "mev".to_string(),
+            kind: "feature".to_string(),
+            status: "idea".to_string(),
+            depends_on: vec![BlockedBy::Block {
+                repo: "mev".to_string(),
+                id: "MV.3.GHOST".to_string(),
+                what: None,
+            }],
+            block: None,
+            notes: None,
+        };
+        let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![backlog_node]);
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_backlog_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "backlog node with dangling depends_on should emit E_STATE_DANGLING_BLOCKED_BY, \
+             got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_backlog_integrity_promoted_no_block_pointer_emits_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Backlog node with status "promoted" but no block pointer.
+        let backlog_node = Backlog {
+            slug: "add-bar".to_string(),
+            title: "Add bar".to_string(),
+            repo: "mev".to_string(),
+            kind: "feature".to_string(),
+            status: "promoted".to_string(),
+            depends_on: vec![],
+            block: None, // missing pointer
+            notes: None,
+        };
+        let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![backlog_node]);
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_backlog_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_PROMOTION")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "promoted backlog node with no block pointer should emit E_STATE_DANGLING_PROMOTION, \
+             got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_backlog_integrity_promoted_block_pointer_resolves_to_nothing_emits_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Backlog node with status "promoted" pointing at a block that doesn't exist.
+        let backlog_node = Backlog {
+            slug: "add-baz".to_string(),
+            title: "Add baz".to_string(),
+            repo: "mev".to_string(),
+            kind: "feature".to_string(),
+            status: "promoted".to_string(),
+            depends_on: vec![],
+            block: Some("MV.3.GHOST".to_string()), // block doesn't exist in mev tracks[]
+            notes: None,
+        };
+        let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![backlog_node]);
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_backlog_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_PROMOTION")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "promoted backlog node with orphan block pointer should emit \
+             E_STATE_DANGLING_PROMOTION, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_backlog_integrity_clean_promotion_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A promoted backlog node pointing at a real block that carries an origin.
+        // The origin back-pointer is structural metadata — the integrity check validates
+        // that the block exists in tracks[], not that it carries an origin field.
+        let real_block = TrackBlock {
+            id: "MV.3.P2".to_string(),
+            title: "P2 block".to_string(),
+            status: Some("in_progress".to_string()),
+            depends_on: vec![],
+            wave: Some(1),
+            origin: Some(Origin {
+                kind: "backlog".to_string(),
+                slug: "add-p2".to_string(),
+            }),
+        };
+        let backlog_node = Backlog {
+            slug: "add-p2".to_string(),
+            title: "Add P2".to_string(),
+            repo: "mev".to_string(),
+            kind: "feature".to_string(),
+            status: "promoted".to_string(),
+            depends_on: vec![],
+            block: Some("MV.3.P2".to_string()), // resolves to the real block
+            notes: None,
+        };
+
+        // Two files: a mev leaf (owns the track block) and hq brain (owns the backlog node).
+        let mev_path = dir.path().join("mev-state.json");
+        let mev_file = StateFile {
+            repo: "mev".to_string(),
+            kind: "project".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus: Focus::default(),
+            tracks: vec![Track {
+                title: "Phase 3".to_string(),
+                blocks: vec![real_block],
+            }],
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+        };
+        let mev_src = StateSource {
+            repo_slug: "mev".to_string(),
+            abs_path: mev_path,
+            expected_kind: "project",
+        };
+
+        let hq_pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![backlog_node]);
+        let files = vec![(mev_src, mev_file), hq_pair];
+        let graph = build_state_graph(&files);
+        let diags = check_backlog_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == crate::Severity::Error)
+            .collect();
+        assert!(
+            errs.is_empty(),
+            "clean promotion (block exists in tracks[]) should produce no errors, \
+             got: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Task 4 — check_rollup tests
     // -----------------------------------------------------------------------
 
@@ -1970,7 +3775,7 @@ mod tests {
         let make_blocks = |ids: &[&str]| -> Vec<Block> {
             ids.iter()
                 .map(|id| Block {
-                    block: id.to_string(),
+                    id: id.to_string(),
                     title: "placeholder".to_string(),
                     status: None,
                     note: None,
@@ -1996,6 +3801,7 @@ mod tests {
             cross_repo: vec![],
             tiers: vec![],
             note: None,
+            backlog: vec![],
         }
     }
 
@@ -2009,7 +3815,7 @@ mod tests {
         let make_blocks = |ids: &[&str], with_status: bool| -> Vec<Block> {
             ids.iter()
                 .map(|id| Block {
-                    block: id.to_string(),
+                    id: id.to_string(),
                     title: "placeholder".to_string(),
                     status: if with_status {
                         Some("in_progress".to_string())
@@ -2037,6 +3843,7 @@ mod tests {
             cross_repo: vec![],
             tiers: vec![],
             note: None,
+            backlog: vec![],
         }
     }
 
@@ -2128,6 +3935,339 @@ mod tests {
             drift.len(),
             1,
             "blocked-only drift should also emit W_STATE_ROLLUP_DRIFT, got: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 5 — check_focus_drift tests
+    // -----------------------------------------------------------------------
+
+    /// Build a (StateSource, StateFile) pair for focus-drift testing.
+    ///
+    /// `blocks` = `(id, authored_status, depends_on)`.
+    /// `stored_now/next/blocked` are the block IDs stored in the `focus` object.
+    fn make_drift_pair(
+        dir: &std::path::Path,
+        repo: &str,
+        blocks: &[(&str, Option<&str>, Vec<BlockedBy>)],
+        stored_now: &[&str],
+        stored_next: &[&str],
+        stored_blocked: &[&str],
+    ) -> (StateSource, StateFile) {
+        let track_blocks: Vec<TrackBlock> = blocks
+            .iter()
+            .map(|(id, status, deps)| TrackBlock {
+                id: id.to_string(),
+                title: id.to_string(),
+                status: status.map(|s| s.to_string()),
+                depends_on: deps.clone(),
+                wave: None,
+                origin: None,
+            })
+            .collect();
+
+        let make_focus_blocks = |ids: &[&str]| -> Vec<Block> {
+            ids.iter()
+                .map(|id| Block {
+                    id: id.to_string(),
+                    title: "placeholder".to_string(),
+                    status: None,
+                    note: None,
+                    repo: None,
+                    blocked_by: vec![],
+                })
+                .collect()
+        };
+
+        let path = dir.join(format!("{repo}-drift-state.json"));
+        let file = StateFile {
+            repo: repo.to_string(),
+            kind: "project".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus: Focus {
+                now: make_focus_blocks(stored_now),
+                next: make_focus_blocks(stored_next),
+                blocked: make_focus_blocks(stored_blocked),
+            },
+            tracks: vec![Track {
+                title: "Phase 1".to_string(),
+                blocks: track_blocks,
+            }],
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+        };
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: path,
+            expected_kind: "project",
+        };
+        (src, file)
+    }
+
+    #[test]
+    fn check_focus_drift_in_sync_produces_no_diagnostics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // One in_progress block, one open block (no deps) → it's in next.
+        // Stored focus matches exactly.
+        let pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("in_progress"), vec![]),
+                ("AL.1.B", Some("open"), vec![]),
+            ],
+            &["AL.1.A"], // stored now
+            &["AL.1.B"], // stored next
+            &[],         // stored blocked
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &graph, &files);
+
+        assert!(
+            diags.is_empty(),
+            "in-sync focus should produce no diagnostics, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_now_mismatch_emits_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Block is in_progress in tracks[] but stored focus.now is empty.
+        let pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("in_progress"), vec![])],
+            &[], // stored now — stale (should be ["AL.1.A"])
+            &[], // stored next
+            &[], // stored blocked
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &graph, &files);
+
+        let drifts: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_FOCUS_DRIFT")
+            .collect();
+        assert_eq!(
+            drifts.len(),
+            1,
+            "stale now should emit exactly one W_STATE_FOCUS_DRIFT, got: {diags:?}"
+        );
+        assert_eq!(
+            drifts[0].severity,
+            crate::Severity::Warning,
+            "W_STATE_FOCUS_DRIFT must be Warning severity"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_next_mismatch_emits_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // One open block with no deps → should be in next.
+        // Stored focus.next is empty → drift.
+        let pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("open"), vec![])],
+            &[], // stored now
+            &[], // stored next — stale (should be ["AL.1.A"])
+            &[], // stored blocked
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &graph, &files);
+
+        let drifts: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_FOCUS_DRIFT")
+            .collect();
+        assert_eq!(
+            drifts.len(),
+            1,
+            "stale next should emit exactly one W_STATE_FOCUS_DRIFT, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_blocked_mismatch_emits_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Open block with external dep → should be in blocked.
+        // Stored focus.blocked is empty → drift.
+        let pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[(
+                "AL.1.A",
+                Some("open"),
+                vec![BlockedBy::External {
+                    what: "upstream dep".to_string(),
+                }],
+            )],
+            &[], // stored now
+            &[], // stored next
+            &[], // stored blocked — stale (should be ["AL.1.A"])
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &graph, &files);
+
+        let drifts: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_FOCUS_DRIFT")
+            .collect();
+        assert_eq!(
+            drifts.len(),
+            1,
+            "stale blocked should emit exactly one W_STATE_FOCUS_DRIFT, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_drift_is_warning_not_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("in_progress"), vec![])],
+            &[], // stored now — deliberately wrong
+            &[],
+            &[],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &graph, &files);
+
+        // No errors should be emitted.
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == crate::Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "drift must never produce errors (exit-0 behaviour), got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_empty_tracks_produces_no_diagnostics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("brain-state.json");
+        // Brain file: non-empty focus but no tracks[] — skip.
+        let file = StateFile {
+            repo: "hq".to_string(),
+            kind: "brain".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus: Focus {
+                now: vec![Block {
+                    id: "BA.1.A".to_string(),
+                    title: "something".to_string(),
+                    status: Some("in_progress".to_string()),
+                    note: None,
+                    repo: Some("bastion".to_string()),
+                    blocked_by: vec![],
+                }],
+                next: vec![],
+                blocked: vec![],
+            },
+            tracks: vec![],
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+        };
+        let src = StateSource {
+            repo_slug: "hq".to_string(),
+            abs_path: path,
+            expected_kind: "brain",
+        };
+        let files = vec![(src.clone(), file.clone())];
+        let graph = build_state_graph(&files);
+        let diags = check_focus_drift(&src, &file, &graph, &files);
+
+        assert!(
+            diags.is_empty(),
+            "empty tracks[] should skip focus drift check, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_open_with_unclosed_block_dep_goes_to_blocked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Block B is open but dep A is in_progress (not closed) → B goes in blocked.
+        // Stored focus.blocked is empty → drift.
+        let dep_a = BlockedBy::Block {
+            repo: "alpha".to_string(),
+            id: "AL.1.A".to_string(),
+            what: None,
+        };
+        let pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("in_progress"), vec![]),
+                ("AL.1.B", Some("open"), vec![dep_a]),
+            ],
+            &["AL.1.A"], // stored now (correct)
+            &[],         // stored next (correct — B has unmet dep)
+            &[],         // stored blocked — stale (should be ["AL.1.B"])
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &graph, &files);
+
+        let drifts: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_FOCUS_DRIFT")
+            .collect();
+        assert_eq!(
+            drifts.len(),
+            1,
+            "B blocked by in_progress A should trigger drift, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_open_with_closed_dep_goes_to_next() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Block B is open; dep A is closed → B is ready (goes in next).
+        // Stored focus matches exactly → no drift.
+        let dep_a = BlockedBy::Block {
+            repo: "alpha".to_string(),
+            id: "AL.1.A".to_string(),
+            what: None,
+        };
+        let pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("closed"), vec![]),
+                ("AL.1.B", Some("open"), vec![dep_a]),
+            ],
+            &[],         // stored now (A is closed, not in_progress)
+            &["AL.1.B"], // stored next (B is ready)
+            &[],         // stored blocked
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &graph, &files);
+
+        assert!(
+            diags.is_empty(),
+            "in-sync focus (B ready after A closed) should produce no diagnostics, \
+             got: {diags:?}"
         );
     }
 
