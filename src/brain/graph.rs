@@ -6,10 +6,10 @@
 //!
 //! # Separation of concerns
 //!
-//! - [`build_graph`] → [`GraphArtifact`]: walks the corpus **once**, extracting
-//!   metadata through the single [`read_doc_metadata`] seam, and returns both the
-//!   `Graph` (D4 serializable, emittable artifact) and the lookup structures required
-//!   by the integrity checks.
+//! - [`build_graph`] → [`GraphArtifact`]: walks the corpus **once**, reading
+//!   metadata from `entry.metadata` (populated once by `crawl_corpus` — D5
+//!   extract-once refactor), and returns both the `Graph` (D4 serializable,
+//!   emittable artifact) and the lookup structures required by the integrity checks.
 //! - [`check_graph`] accepts the built [`GraphArtifact`] and returns
 //!   `Vec<Diagnostic>` without re-walking the corpus.
 //!
@@ -17,8 +17,8 @@
 //!
 //! - **D4** — `Graph`, `Node`, `Edge`, `EdgeKind` all derive `serde::Serialize` so
 //!   the validated graph is byte-for-byte the artifact Phase 3B Block R emits to Postgres.
-//! - **D5** — inline-frontmatter parsing is confined to `read_doc_metadata`.  A future
-//!   foreign-format extractor (`.docx` / sidecars) replaces that one function.
+//! - **D5** — frontmatter is parsed exactly once in `crawl_corpus` and carried on
+//!   `CorpusEntry.metadata`; no module re-reads files for frontmatter independently.
 //!
 //! # Authored-only guarantee (D5)
 //!
@@ -28,12 +28,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use serde::Deserialize;
-
 use crate::Diagnostic;
 use crate::brain::config::BrainConfig;
-use crate::brain::crawl::{Corpus, CorpusEntry};
-use crate::shared::extract_frontmatter;
+use crate::brain::crawl::Corpus;
 
 // ---------------------------------------------------------------------------
 // Graph model (D4 serializable, emittable artifact)
@@ -92,71 +89,6 @@ pub struct Graph {
 }
 
 // ---------------------------------------------------------------------------
-// Metadata seam (D5 forward-compat)
-// ---------------------------------------------------------------------------
-
-/// Per-file metadata extracted from authored frontmatter.
-///
-/// This is the **only** struct that knows metadata comes from inline Markdown
-/// frontmatter.  A future foreign-format extractor (D5) replaces [`read_doc_metadata`]
-/// alone — no other code in this module parses frontmatter.
-#[derive(Debug)]
-pub struct DocMeta {
-    /// Authored `doc_id`, if present and non-empty.
-    pub doc_id: Option<String>,
-    /// Authored `related:` entries (empty if the field is absent).
-    pub related: Vec<String>,
-}
-
-/// Minimal serde target for the fields this block needs.
-#[derive(Debug, Deserialize)]
-struct RawFrontmatter {
-    doc_id: Option<String>,
-    related: Option<Vec<String>>,
-}
-
-/// Read per-file metadata from a corpus entry's inline Markdown frontmatter.
-///
-/// This is the **single site** that calls [`extract_frontmatter`] and parses
-/// `doc_id` / `related` — the D5 seam.  `build_graph` calls this helper; nothing
-/// else in this module (or `check_graph`) should parse frontmatter directly.
-///
-/// Returns `DocMeta { doc_id: None, related: [] }` on any I/O or parse error so the
-/// graph degrades gracefully: the file becomes a leaf rather than blocking the run.
-pub fn read_doc_metadata(entry: &CorpusEntry) -> DocMeta {
-    let contents = match std::fs::read_to_string(&entry.path) {
-        Ok(c) => c,
-        Err(_) => {
-            return DocMeta {
-                doc_id: None,
-                related: vec![],
-            };
-        }
-    };
-
-    let yaml = match extract_frontmatter(&contents) {
-        Some(y) => y,
-        None => {
-            return DocMeta {
-                doc_id: None,
-                related: vec![],
-            };
-        }
-    };
-
-    match serde_yaml::from_str::<RawFrontmatter>(yaml) {
-        Ok(fm) => DocMeta {
-            doc_id: fm.doc_id.filter(|s| !s.trim().is_empty()),
-            related: fm.related.unwrap_or_default(),
-        },
-        Err(_) => DocMeta {
-            doc_id: None,
-            related: vec![],
-        },
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Graph construction
 // ---------------------------------------------------------------------------
 
@@ -175,7 +107,8 @@ pub struct GraphArtifact {
 /// Build the global `scope:doc_id` knowledge graph over the supplied corpus.
 ///
 /// For each [`CorpusEntry`]:
-/// - Calls [`read_doc_metadata`] (the D5 seam) to read `doc_id` and `related`.
+/// - Reads `doc_id` and `related` from `entry.metadata` (D5 extract-once — populated
+///   by `crawl_corpus`; no file I/O here).
 /// - Files **with** a non-empty `doc_id` become [`Node`]s; their `related:` entries
 ///   become [`Edge`]s with `kind = EdgeKind::Related`.
 /// - Files **without** a `doc_id` are leaves — tracked in `leaf_keys` (`scope:stem`)
@@ -200,9 +133,20 @@ pub fn build_graph(corpus: &Corpus, _config: &BrainConfig) -> GraphArtifact {
     let mut pending_edges: Vec<(String, Vec<String>)> = Vec::new();
 
     for entry in &corpus.entries {
-        let meta = read_doc_metadata(entry);
+        // D5 extract-once: read from entry.metadata (populated by crawl_corpus).
+        // Graceful degradation: None metadata → leaf (same behaviour as before).
+        let doc_id = entry
+            .metadata
+            .as_ref()
+            .and_then(|m| m.doc_id.clone())
+            .filter(|s| !s.trim().is_empty());
+        let related = entry
+            .metadata
+            .as_ref()
+            .and_then(|m| m.related.clone())
+            .unwrap_or_default();
 
-        match meta.doc_id {
+        match doc_id {
             Some(doc_id) => {
                 let canonical_id = format!("{}:{}", entry.scope, doc_id);
                 let node_idx = nodes.len();
@@ -213,8 +157,8 @@ pub fn build_graph(corpus: &Corpus, _config: &BrainConfig) -> GraphArtifact {
                     doc_id,
                     rel: entry.rel.clone(),
                 });
-                if !meta.related.is_empty() {
-                    pending_edges.push((canonical_id, meta.related));
+                if !related.is_empty() {
+                    pending_edges.push((canonical_id, related));
                 }
             }
             None => {
@@ -348,10 +292,13 @@ mod tests {
     use super::*;
     use crate::brain::config::BrainConfig;
     use crate::brain::crawl::{Corpus, CorpusEntry};
+    use crate::brain::okf::OkfFrontmatter;
+    use crate::shared::extract_frontmatter;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    // Helper: write a .md file with frontmatter and return a CorpusEntry for it.
+    /// Write a `.md` file and return a `CorpusEntry` with `metadata` pre-parsed from
+    /// the file contents (mirrors what `crawl_corpus` does — D5 extract-once).
     fn make_entry(dir: &TempDir, scope: &str, filename: &str, contents: &str) -> CorpusEntry {
         let path = dir.path().join(filename);
         std::fs::write(&path, contents).unwrap();
@@ -361,58 +308,20 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned();
+        // D5: parse frontmatter once here just as crawl_corpus does.
+        let metadata = extract_frontmatter(contents)
+            .and_then(|yaml| serde_yaml::from_str::<OkfFrontmatter>(yaml).ok());
         CorpusEntry {
             path,
             rel,
             stem,
             scope: scope.to_string(),
-            metadata: None,
+            metadata,
         }
     }
 
     fn corpus_from(entries: Vec<CorpusEntry>) -> Corpus {
         Corpus { entries }
-    }
-
-    // -----------------------------------------------------------------------
-    // read_doc_metadata
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn read_doc_metadata_returns_doc_id_and_related() {
-        let dir = TempDir::new().unwrap();
-        let entry = make_entry(
-            &dir,
-            "brain",
-            "status.md",
-            "---\ndoc_id: brain-status\nrelated:\n  - other-doc\n---\n# body",
-        );
-        let meta = read_doc_metadata(&entry);
-        assert_eq!(meta.doc_id.as_deref(), Some("brain-status"));
-        assert_eq!(meta.related, vec!["other-doc"]);
-    }
-
-    #[test]
-    fn read_doc_metadata_no_frontmatter_returns_empty() {
-        let dir = TempDir::new().unwrap();
-        let entry = make_entry(&dir, "brain", "plain.md", "# No frontmatter here");
-        let meta = read_doc_metadata(&entry);
-        assert!(meta.doc_id.is_none());
-        assert!(meta.related.is_empty());
-    }
-
-    #[test]
-    fn read_doc_metadata_no_doc_id_field_returns_none() {
-        let dir = TempDir::new().unwrap();
-        let entry = make_entry(
-            &dir,
-            "brain",
-            "nodocid.md",
-            "---\ntitle: Something\ntype: Plan\n---\nbody",
-        );
-        let meta = read_doc_metadata(&entry);
-        assert!(meta.doc_id.is_none());
-        assert!(meta.related.is_empty());
     }
 
     // -----------------------------------------------------------------------
