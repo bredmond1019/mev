@@ -116,7 +116,7 @@ enum Command {
         write: bool,
     },
     /// Generate an interactive HTML visualization of the knowledge graph (graph.html)
-    VisualizeGraph {
+    GenerateGraph {
         /// Path to search from when locating brain.toml. Defaults to the current directory.
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -311,7 +311,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::VisualizeGraph { path, out } => {
+        Command::GenerateGraph { path, out } => {
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,
                 Err(e) => {
