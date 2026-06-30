@@ -1091,6 +1091,185 @@ pub fn check_rollup(
     diags
 }
 
+// ---------------------------------------------------------------------------
+// Cycle detection
+// ---------------------------------------------------------------------------
+
+/// Detect cycles in the `depends_on` edge subgraph of `graph`.
+///
+/// Performs a DFS over [`StateEdgeKind::BlockedBy`] edges only; [`StateEdgeKind::CrossRepo`]
+/// edges are intentionally excluded (they annotate inter-repo intent, not block ordering
+/// and are not part of the authoritative DAG).
+///
+/// On detection of a back-edge, emits **`E_STATE_CYCLE`** naming the cycle path in the
+/// form `A → B → C → A`.  Each distinct cycle path is reported once.
+///
+/// Returns an empty `Vec` when the `depends_on` subgraph is acyclic.
+pub fn detect_cycles(graph: &StateGraph) -> Vec<Diagnostic> {
+    use std::collections::{HashMap, HashSet};
+
+    // Build adjacency: from_key → Vec<(to_ref, source_path)>.
+    // Initialise every node so isolated nodes are visited and early-exited cleanly.
+    let mut adj: HashMap<&str, Vec<(&str, &std::path::Path)>> = HashMap::new();
+    for node in &graph.nodes {
+        adj.entry(node.key.as_str()).or_default();
+    }
+    for edge in &graph.edges {
+        if edge.kind == StateEdgeKind::BlockedBy {
+            adj.entry(edge.from.as_str())
+                .or_default()
+                .push((edge.to_ref.as_str(), edge.source_path.as_path()));
+        }
+    }
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut diags: Vec<Diagnostic> = Vec::new();
+    let mut reported: HashSet<String> = HashSet::new();
+
+    // Iterate in a deterministic order (node-insertion order from the graph).
+    let starts: Vec<String> = graph.nodes.iter().map(|n| n.key.clone()).collect();
+    for start in &starts {
+        if !visited.contains(start.as_str()) {
+            let mut rec_stack: Vec<String> = Vec::new();
+            detect_cycles_dfs(
+                start.as_str(),
+                &adj,
+                &mut visited,
+                &mut rec_stack,
+                &mut diags,
+                &mut reported,
+            );
+        }
+    }
+
+    diags
+}
+
+/// DFS worker for [`detect_cycles`].
+///
+/// `rec_stack` tracks the current DFS path (nodes in the "gray" / visiting state).
+/// `visited` is the union of gray + black nodes (prevents re-visiting fully-explored nodes).
+/// `reported` deduplicates identical cycle-path strings so each cycle is emitted once.
+fn detect_cycles_dfs<'a>(
+    node: &'a str,
+    adj: &std::collections::HashMap<&'a str, Vec<(&'a str, &'a std::path::Path)>>,
+    visited: &mut std::collections::HashSet<String>,
+    rec_stack: &mut Vec<String>,
+    diags: &mut Vec<Diagnostic>,
+    reported: &mut std::collections::HashSet<String>,
+) {
+    visited.insert(node.to_string());
+    rec_stack.push(node.to_string());
+
+    if let Some(neighbors) = adj.get(node) {
+        for (neighbor, source_path) in neighbors {
+            if !visited.contains(*neighbor) {
+                detect_cycles_dfs(neighbor, adj, visited, rec_stack, diags, reported);
+            } else if let Some(pos) = rec_stack.iter().position(|n| n == neighbor) {
+                // Back-edge — `neighbor` is still on the recursion stack.
+                // Build the cycle path: stack[pos..] + closing arrow back to neighbor.
+                let cycle: Vec<&str> = rec_stack[pos..].iter().map(|s| s.as_str()).collect();
+                let path_str = format!("{} \u{2192} {}", cycle.join(" \u{2192} "), neighbor);
+                if !reported.contains(&path_str) {
+                    reported.insert(path_str.clone());
+                    diags.push(Diagnostic::error(
+                        *source_path,
+                        "E_STATE_CYCLE",
+                        format!("cycle detected in depends_on DAG: {path_str}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    rec_stack.pop();
+}
+
+// ---------------------------------------------------------------------------
+// Ready-order (reusable — MV.3B.T topo-emitter input)
+// ---------------------------------------------------------------------------
+
+/// Compute the wave-ordered list of **ready** `open` blocks across all files.
+///
+/// A block is *ready* iff:
+/// - Its authored status is `"open"` (or absent — treated as open).
+/// - It has **zero** `{type:"external"}` `depends_on` entries (external dependencies
+///   mean the block is gated on something outside the graph).
+/// - Every `{type:"block"}` `depends_on` target has authored status `"closed"`.
+///
+/// The returned `Vec<String>` lists canonical `"repo:id"` keys ordered by:
+/// 1. `wave` ascending (`None` treated as `i64::MAX` — lowest priority, goes last).
+/// 2. Track iteration order across `files` (stable tiebreak: position of the containing
+///    track, then block array index within that track).
+///
+/// `graph` is accepted for forward-compatibility — `MV.3B.T` will extend this function
+/// to query graph structure; the current implementation derives all information from `files`.
+/// Callers should always pass the graph built from the same `files` slice.
+///
+/// This function is **standalone and public** — do not inline it into any check function.
+pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> Vec<String> {
+    use std::collections::HashMap;
+
+    // Status lookup: "repo:id" → authored status (None = absent = open).
+    let mut status_map: HashMap<String, Option<String>> = HashMap::new();
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let key = format!("{}:{}", src.repo_slug, block.id);
+                status_map.insert(key, block.status.clone());
+            }
+        }
+    }
+
+    // Collect (wave, iteration_order, "repo:id") for every ready open block.
+    let mut ready: Vec<(i64, usize, String)> = Vec::new();
+    let mut order: usize = 0;
+
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let current_order = order;
+                order += 1;
+
+                // Only open (or status-absent) blocks are candidates.
+                let status = block.status.as_deref().unwrap_or("open");
+                if status != "open" {
+                    continue;
+                }
+
+                // Any external dep disqualifies the block (not yet runnable).
+                let has_external = block
+                    .depends_on
+                    .iter()
+                    .any(|d| matches!(d, BlockedBy::External { .. }));
+                if has_external {
+                    continue;
+                }
+
+                // All block deps must be closed.
+                let all_block_deps_closed = block.depends_on.iter().all(|d| {
+                    if let BlockedBy::Block { repo, id, .. } = d {
+                        let dep_key = format!("{repo}:{id}");
+                        status_map.get(&dep_key).and_then(|s| s.as_deref()) == Some("closed")
+                    } else {
+                        true // External entries handled above; this branch is unreachable here.
+                    }
+                });
+
+                if all_block_deps_closed {
+                    let wave = block.wave.unwrap_or(i64::MAX);
+                    let key = format!("{}:{}", src.repo_slug, block.id);
+                    ready.push((wave, current_order, key));
+                }
+            }
+        }
+    }
+
+    // Primary sort: wave asc. Tiebreak: iteration order (stable).
+    ready.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    ready.into_iter().map(|(_, _, key)| key).collect()
+}
+
 /// Return a deterministically sorted `Vec<&str>` from a `HashSet<&str>` for
 /// use in diagnostic messages (avoids non-deterministic output from Set debug).
 fn sorted_set<'a>(set: &std::collections::HashSet<&'a str>) -> Vec<&'a str> {
@@ -2445,6 +2624,474 @@ mod tests {
             bad_bb.len(),
             1,
             "expected one E_STATE_SCHEMA_BAD_BLOCKED_BY for empty depends_on repo, got: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 3 — detect_cycles tests
+    // -----------------------------------------------------------------------
+
+    /// Build a `StateGraph` directly from node keys and BlockedBy edge tuples.
+    /// `nodes`: (repo, id); `edges`: (from_key, to_ref).
+    /// Uses a stable fake path derived from `from_key` for each edge's `source_path`.
+    fn make_cycle_graph(
+        dir: &std::path::Path,
+        nodes: &[(&str, &str)],
+        edges: &[(&str, &str)],
+    ) -> StateGraph {
+        let node_vec: Vec<StateNode> = nodes
+            .iter()
+            .map(|(repo, id)| StateNode {
+                key: format!("{repo}:{id}"),
+                repo: repo.to_string(),
+                id: id.to_string(),
+                title: format!("{repo}:{id}"),
+                source_path: dir.join(format!("{repo}.json")),
+            })
+            .collect();
+        let edge_vec: Vec<StateEdge> = edges
+            .iter()
+            .map(|(from, to_ref)| {
+                let repo = from.split(':').next().unwrap_or("unknown");
+                StateEdge {
+                    from: from.to_string(),
+                    to_ref: to_ref.to_string(),
+                    kind: StateEdgeKind::BlockedBy,
+                    source_path: dir.join(format!("{repo}.json")),
+                }
+            })
+            .collect();
+        StateGraph {
+            nodes: node_vec,
+            edges: edge_vec,
+        }
+    }
+
+    #[test]
+    fn detect_cycles_simple_two_node_cycle_is_flagged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // a:X depends_on b:Y, b:Y depends_on a:X → cycle
+        let graph = make_cycle_graph(
+            dir.path(),
+            &[("a", "X"), ("b", "Y")],
+            &[("a:X", "b:Y"), ("b:Y", "a:X")],
+        );
+
+        let diags = detect_cycles(&graph);
+        let cycles: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_CYCLE")
+            .collect();
+        assert_eq!(
+            cycles.len(),
+            1,
+            "expected exactly one E_STATE_CYCLE for two-node cycle, got: {diags:?}"
+        );
+        // The message should contain both node keys.
+        assert!(
+            cycles[0].message.contains("a:X") && cycles[0].message.contains("b:Y"),
+            "E_STATE_CYCLE message should name the cycle nodes, got: {:?}",
+            cycles[0].message
+        );
+    }
+
+    #[test]
+    fn detect_cycles_three_node_cycle_path_is_flagged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // a:X → b:Y → c:Z → a:X
+        let graph = make_cycle_graph(
+            dir.path(),
+            &[("a", "X"), ("b", "Y"), ("c", "Z")],
+            &[("a:X", "b:Y"), ("b:Y", "c:Z"), ("c:Z", "a:X")],
+        );
+
+        let diags = detect_cycles(&graph);
+        let cycles: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_CYCLE")
+            .collect();
+        assert_eq!(
+            cycles.len(),
+            1,
+            "expected exactly one E_STATE_CYCLE for three-node cycle, got: {diags:?}"
+        );
+        // All three keys must appear in the message.
+        assert!(
+            cycles[0].message.contains("a:X")
+                && cycles[0].message.contains("b:Y")
+                && cycles[0].message.contains("c:Z"),
+            "E_STATE_CYCLE message should name all cycle nodes, got: {:?}",
+            cycles[0].message
+        );
+    }
+
+    #[test]
+    fn detect_cycles_acyclic_dag_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // a:X → b:Y → c:Z (no cycle)
+        let graph = make_cycle_graph(
+            dir.path(),
+            &[("a", "X"), ("b", "Y"), ("c", "Z")],
+            &[("a:X", "b:Y"), ("b:Y", "c:Z")],
+        );
+
+        let diags = detect_cycles(&graph);
+        let cycles: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_CYCLE")
+            .collect();
+        assert!(
+            cycles.is_empty(),
+            "acyclic DAG should produce no E_STATE_CYCLE, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn detect_cycles_self_loop_is_flagged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // a:X depends_on itself
+        let graph = make_cycle_graph(dir.path(), &[("a", "X")], &[("a:X", "a:X")]);
+
+        let diags = detect_cycles(&graph);
+        let cycles: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_CYCLE")
+            .collect();
+        assert_eq!(
+            cycles.len(),
+            1,
+            "self-loop should produce exactly one E_STATE_CYCLE, got: {diags:?}"
+        );
+        assert!(
+            cycles[0].message.contains("a:X"),
+            "E_STATE_CYCLE message should name the self-loop node, got: {:?}",
+            cycles[0].message
+        );
+    }
+
+    #[test]
+    fn detect_cycles_cross_repo_edges_are_excluded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Two nodes with a CrossRepo edge — CrossRepo edges must NOT trigger cycle detection.
+        let node_vec = vec![
+            StateNode {
+                key: "a:X".to_string(),
+                repo: "a".to_string(),
+                id: "X".to_string(),
+                title: "X".to_string(),
+                source_path: dir.path().join("a.json"),
+            },
+            StateNode {
+                key: "b:Y".to_string(),
+                repo: "b".to_string(),
+                id: "Y".to_string(),
+                title: "Y".to_string(),
+                source_path: dir.path().join("b.json"),
+            },
+        ];
+        // CrossRepo edges forming a "cycle" — should be ignored by detect_cycles.
+        let edge_vec = vec![
+            StateEdge {
+                from: "a:X".to_string(),
+                to_ref: "b:Y".to_string(),
+                kind: StateEdgeKind::CrossRepo,
+                source_path: dir.path().join("brain.json"),
+            },
+            StateEdge {
+                from: "b:Y".to_string(),
+                to_ref: "a:X".to_string(),
+                kind: StateEdgeKind::CrossRepo,
+                source_path: dir.path().join("brain.json"),
+            },
+        ];
+        let graph = StateGraph {
+            nodes: node_vec,
+            edges: edge_vec,
+        };
+
+        let diags = detect_cycles(&graph);
+        let cycles: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_CYCLE")
+            .collect();
+        assert!(
+            cycles.is_empty(),
+            "CrossRepo edges must not trigger E_STATE_CYCLE, got: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 3 — ready_order tests
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal (StateSource, StateFile) pair for ready_order testing.
+    fn make_ready_pair(
+        dir: &std::path::Path,
+        repo: &str,
+        blocks: &[(&str, Option<&str>, Option<i64>, Vec<BlockedBy>)],
+    ) -> (StateSource, StateFile) {
+        // blocks: (id, status, wave, depends_on)
+        let track_blocks: Vec<TrackBlock> = blocks
+            .iter()
+            .map(|(id, status, wave, deps)| TrackBlock {
+                id: id.to_string(),
+                title: id.to_string(),
+                status: status.map(|s| s.to_string()),
+                depends_on: deps.clone(),
+                wave: *wave,
+                origin: None,
+            })
+            .collect();
+
+        let path = dir.join(format!("{repo}-state.json"));
+        let file = StateFile {
+            repo: repo.to_string(),
+            kind: "project".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus: Focus::default(),
+            tracks: vec![Track {
+                title: "Phase 1".to_string(),
+                blocks: track_blocks,
+            }],
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+        };
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: path,
+            expected_kind: "project",
+        };
+        (src, file)
+    }
+
+    #[test]
+    fn ready_order_no_deps_open_block_is_ready() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("open"), None, vec![])],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert_eq!(
+            order,
+            vec!["alpha:AL.1.A"],
+            "open block with no deps should appear in ready_order, got: {order:?}"
+        );
+    }
+
+    #[test]
+    fn ready_order_absent_status_treated_as_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No status field — treated as open.
+        let pair = make_ready_pair(dir.path(), "alpha", &[("AL.1.A", None, None, vec![])]);
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert_eq!(
+            order,
+            vec!["alpha:AL.1.A"],
+            "absent-status block should be treated as open and appear in ready_order"
+        );
+    }
+
+    #[test]
+    fn ready_order_closed_block_excluded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("closed"), None, vec![])],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert!(
+            order.is_empty(),
+            "closed block must not appear in ready_order, got: {order:?}"
+        );
+    }
+
+    #[test]
+    fn ready_order_in_progress_block_excluded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("in_progress"), None, vec![])],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert!(
+            order.is_empty(),
+            "in_progress block must not appear in ready_order, got: {order:?}"
+        );
+    }
+
+    #[test]
+    fn ready_order_block_with_external_dep_excluded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ext_dep = BlockedBy::External {
+            what: "Mac Mini delivery".to_string(),
+        };
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("open"), None, vec![ext_dep])],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert!(
+            order.is_empty(),
+            "open block with external dep must not appear in ready_order, got: {order:?}"
+        );
+    }
+
+    #[test]
+    fn ready_order_block_with_unclosed_block_dep_excluded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // alpha:AL.1.A depends_on beta:BE.1.A which is open (not closed).
+        let block_dep = BlockedBy::Block {
+            repo: "beta".to_string(),
+            id: "BE.1.A".to_string(),
+            what: None,
+        };
+        let pair_a = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("open"), None, vec![block_dep])],
+        );
+        // beta:BE.1.A is open (not closed).
+        let pair_b = make_ready_pair(
+            dir.path(),
+            "beta",
+            &[("BE.1.A", Some("open"), None, vec![])],
+        );
+        let files = vec![pair_a, pair_b];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        // beta:BE.1.A is open → alpha:AL.1.A is not ready
+        // beta:BE.1.A has no deps → it IS ready
+        assert!(
+            !order.contains(&"alpha:AL.1.A".to_string()),
+            "alpha:AL.1.A should not be ready when its dep is open; order={order:?}"
+        );
+        assert!(
+            order.contains(&"beta:BE.1.A".to_string()),
+            "beta:BE.1.A (no deps, open) should be ready; order={order:?}"
+        );
+    }
+
+    #[test]
+    fn ready_order_block_with_closed_dep_is_ready() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // alpha:AL.1.A depends_on beta:BE.1.A which is closed → AL.1.A is ready.
+        let block_dep = BlockedBy::Block {
+            repo: "beta".to_string(),
+            id: "BE.1.A".to_string(),
+            what: None,
+        };
+        let pair_a = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("open"), None, vec![block_dep])],
+        );
+        let pair_b = make_ready_pair(
+            dir.path(),
+            "beta",
+            &[("BE.1.A", Some("closed"), None, vec![])],
+        );
+        let files = vec![pair_a, pair_b];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert!(
+            order.contains(&"alpha:AL.1.A".to_string()),
+            "alpha:AL.1.A should be ready when its only dep is closed; order={order:?}"
+        );
+    }
+
+    #[test]
+    fn ready_order_wave_ordering_applied() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Three open blocks: wave 3, wave 1, wave 2 → should come out 1, 2, 3.
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.C", Some("open"), Some(3), vec![]),
+                ("AL.1.A", Some("open"), Some(1), vec![]),
+                ("AL.1.B", Some("open"), Some(2), vec![]),
+            ],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert_eq!(
+            order,
+            vec!["alpha:AL.1.A", "alpha:AL.1.B", "alpha:AL.1.C"],
+            "ready_order should sort by wave ascending, got: {order:?}"
+        );
+    }
+
+    #[test]
+    fn ready_order_none_wave_goes_last() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // One block with wave=1, one with no wave → wave=1 should come first.
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.B", Some("open"), None, vec![]), // no wave → last
+                ("AL.1.A", Some("open"), Some(1), vec![]),
+            ],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert_eq!(
+            order,
+            vec!["alpha:AL.1.A", "alpha:AL.1.B"],
+            "block with wave=None should sort after wave=1, got: {order:?}"
+        );
+    }
+
+    #[test]
+    fn ready_order_equal_wave_preserves_iteration_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Three open blocks all with wave=1 → should preserve array order.
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("open"), Some(1), vec![]),
+                ("AL.1.B", Some("open"), Some(1), vec![]),
+                ("AL.1.C", Some("open"), Some(1), vec![]),
+            ],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert_eq!(
+            order,
+            vec!["alpha:AL.1.A", "alpha:AL.1.B", "alpha:AL.1.C"],
+            "equal-wave blocks should preserve array order, got: {order:?}"
         );
     }
 
