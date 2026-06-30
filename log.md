@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-06-30T06:29:46-0300"
+timestamp: "2026-06-30T06:33:51-0300"
 ---
 
 # Log — mev
@@ -36,6 +36,11 @@ b1c3989 chore: flow state — task 3 passed
 - **What:** `3.K-link-integrity` merged via PR #6 (merge commit `334ae4a`). Ran `/sdlc-flow 3.K-link-integrity` to completion (6 tasks, PASS), then a post-merge `/code-review low`. The review caught a real docs/code mismatch: the `validate-brain` dispatch ladder in `src/main.rs` placed the `--links` branch **last** (lowest precedence), contradicting `docs/cli.md`, `docs/architecture.md`, and the recorded task decision that `--links` outranks `--state`. Fix: moved `links` to the **top** of the ladder; added binary-spawning integration test `links_flag_outranks_state_in_dispatch` in `tests/brain_links.rs` (commit `973b3df`). Test count now **237** (was 236). Local `main` rebased to preserve an unpushed planning-doc commit → `main` at `b1fb953`, in sync with `origin/main`. Worktree `trees/3.K-link-integrity-flow` removed, branch deleted. `mev validate-brain --links` is live.
 - **Why:** Block K is the link-integrity sibling of the doc-graph corpus engine; the precedence bug would have let `--links` silently lose to `--state` at the CLI, contradicting documented behavior — fixing it keeps the dispatch contract consistent with docs/spec.
 - **Refs:** PR #6; commit `973b3df`; merge `334ae4a`; `main` `b1fb953`; `planning/3.K-link-integrity/`; `master-plan.md`.
+
+### State-graph expansion design + MV.3.P2 / MV.3B.T planning
+- **What:** Settled 4 design decisions + 7 refinements for the state-graph expansion (recorded in the Resolutions section of `core/planning/state-graph-design-decisions/notes.md`), then rewrote `core/planning/state-schema.md` to **v2**: `depends_on` DAG (replacing the ad-hoc `blocked_by`), derived focus/rollup, `backlog[]`, `id` standardization, and **blocked-is-derived** (a block's blocked status is computed from its `depends_on` edges, not hand-set). Added two blocks to the mev master-plan — **MV.3.P2** (state-graph expansion validation) and **MV.3B.T** (table/rollup emit) — and specced **MV.3.P2** at `planning/3.P2-state-graph-validation/tasks.md` (8 tasks). Concurrent in a separate worktree: **MV.3.K** link integrity was implemented, reviewed, and merged (PR #6, 237 tests). Key commits: mev `b1fb953` (master-plan MV.3.P2+MV.3B.T), `7f20ca8` (MV.3.P2 spec); core repo `4693dce` (schema v2 + settled decisions). Note: two separate git repos — mev at `core/mev`, brain/core at `core/`. Next: re-seed the 5 live `state.json` files to v2, then run `/sdlc-flow 3.P2-state-graph-validation`.
+- **Why:** The state-graph (work-block graph) is the twin of the doc-graph corpus engine; before re-seeding the live `state.json` files we needed to settle the v2 schema shape and plan the mev validator that will guard it — design and validator spec first, schema migration second.
+- **Refs:** D36; `core/planning/state-schema.md` (v2); `core/planning/state-graph-design-decisions/notes.md`; `planning/3.P2-state-graph-validation/tasks.md`; mev `b1fb953`, `7f20ca8`; core `4693dce`.
 
 ---
 

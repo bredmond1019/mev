@@ -8,16 +8,18 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-06-30T06:29:46-0300"
-now: "MV.3.K Done — link integrity validator implemented + merged (PR #6, 237 tests, PASS verdict). Next: MV.3.L (structural coverage) or MV.3B.Q (manifest emit / Phase 3B)"
-next: "MV.3.L (structural coverage: index.md ↔ dir, D17) or MV.3B.Q (manifest emit / Phase 3B) — see master-plan.md for ordering"
+timestamp: "2026-06-30T06:33:51-0300"
+now: "MV.3.K Done — link integrity validator implemented + merged (PR #6, 237 tests, PASS verdict). Next: MV.3.P2 (state-graph v2 validator — spec drafted, gated on brain re-seed), MV.3.L (structural coverage) or MV.3B.Q (manifest emit / Phase 3B)"
+next: "MV.3.P2 (v2 state-graph validator — spec drafted at planning/3.P2-state-graph-validation/, gated on brain-side v2 state.json re-seed); also MV.3.L (structural coverage, D17), MV.3B.Q (manifest emit / Phase 3B), MV.3B.T (table/rollup emit) — see master-plan.md for ordering"
 blocked: []
 ---
 
 # STATUS — Current State & Progress
 
 **Last updated:** 2026-06-30 — `MV.3.K` (link integrity) fully implemented, reviewed, and merged via PR #6. All 6 tasks passed (PASS verdict); 237 tests total. `mev validate-brain --links` is live; live brain run confirmed real findings (dangling wikilinks, dead file:// URIs, dead markdown links). Post-review fix: `--links` now takes **highest** dispatch precedence (was placed last → lowest, contradicting docs/spec), covered by a new binary-spawning test.
-**Current focus:** `MV.3.K` Done — next block: `MV.3.L` (structural coverage) or `MV.3B.Q` (manifest emit / Phase 3B); see master-plan.md for ordering
+**State-graph expansion planned (2026-06-30):** Settled the state-graph v2 design (schema rewritten to v2 in `core/planning/state-schema.md`: `depends_on` DAG, derived focus/rollup, `backlog[]`, blocked-is-derived); added blocks **MV.3.P2** (state-graph expansion validation) + **MV.3B.T** (table/rollup emit) to the master-plan and **specced MV.3.P2** at `planning/3.P2-state-graph-validation/tasks.md` (8 tasks). MV.3.P2 is gated on the brain-side re-seed of the 5 live `state.json` files to v2.
+
+**Current focus:** `MV.3.K` Done — next block: `MV.3.P2` (v2 state-graph validator — spec drafted, gated on brain re-seed), `MV.3.L` (structural coverage) or `MV.3B.Q` (manifest emit / Phase 3B); see master-plan.md for ordering
 
 ---
 
@@ -27,9 +29,9 @@ blocked: []
 > empty.** The headlines of **now / next / blocked** mirror the frontmatter scalars above.
 
 - **now** — **`MV.3.K` Done & merged (PR #6)** (link integrity; 6 tasks, PASS, 237 tests). `LinkKind`/`LinkRef` model + `extract_links()` single-pass byte-scan; `check_links()` resolving Markdown/`FileUri`/`WikiLink` refs with four `E_LINK_*` diagnostic codes; `check_moved_references()` consuming `.brain-moves-pending`; `validate_brain_links()` public API + `--links` CLI flag (highest dispatch precedence); 10 integration tests. Live brain run confirmed real findings (dangling `[[bin]]`/`[[test]]` wikilinks, dead `file://` URIs with placeholder paths, dead markdown links in SECURITY.md). **Prior:** `MV.3.P` state integrity DONE (209 tests).
-- **next** — `MV.3.L` (structural coverage: `index.md` ↔ dir, D17) or `MV.3B.Q` (manifest emit / Phase 3B) — check master-plan.md for ordering
-- **blocked** — nothing blocked
-- **improve** — Phase 3B (D4): **`MV.3B.Q`** manifest emit → `index_brain.py` consumes it (kill double crawl); **`MV.3B.R`** graph emit → Postgres edges table + structural query surface (bastion/MCP); **`MV.3B.S`** graph-aware RAG (orchestrator). Companion: register tier units + bare-bloat `skip_dirs` in `brain.toml`.
+- **next** — **`MV.3.P2`** (state-graph v2 validator) — spec drafted at `planning/3.P2-state-graph-validation/tasks.md` (8 tasks); **gated on the brain-side re-seed of the 5 live `state.json` files to v2** (`depends_on` DAG, derived focus/rollup, `backlog[]`, blocked-is-derived per `core/planning/state-schema.md` v2). Also queued: `MV.3.L` (structural coverage: `index.md` ↔ dir, D17), `MV.3B.Q` (manifest emit / Phase 3B) — check master-plan.md for ordering.
+- **blocked** — nothing hard-blocked; `MV.3.P2` implementation waits on the brain-side v2 `state.json` re-seed (not a mev-side blocker).
+- **improve** — Phase 3B (D4): **`MV.3B.Q`** manifest emit → `index_brain.py` consumes it (kill double crawl); **`MV.3B.R`** graph emit → Postgres edges table + structural query surface (bastion/MCP); **`MV.3B.S`** graph-aware RAG (orchestrator); **`MV.3B.T`** table/rollup emit (newly planned — derived focus/rollup tables from the v2 state graph). Companion: register tier units + bare-bloat `skip_dirs` in `brain.toml`.
 - **recurring** — none yet
 
 ## Metrics
@@ -85,6 +87,7 @@ blocked: []
 | MV.3.K | Link integrity (markdown/`file://`/`[[wiki]]`) | Done | `LinkRef` model + `extract_links()`; `check_links()` (4 `E_LINK_*` codes); `check_moved_references()` (.brain-moves-pending); `validate_brain_links()` + `--links` flag; 10 integration tests; 237 total tests pass. PR #6 merged. Post-review fix: `--links` moved to highest dispatch precedence (matches docs/spec) + dispatch-precedence test. |
 | MV.3.L | Structural coverage (`index.md` ↔ dir, D17) | Not started | Per master-plan |
 | MV.3.P | State integrity (`state.json` schema + block graph) | Done | `StateFile` serde model + loader; `discover_state_files` + `check_schema` (4 rings); `StateGraph`/`build_state_graph`/`check_state_graph` (5 codes); `check_rollup` (`W_STATE_ROLLUP_DRIFT`); `validate_brain_state` + `--state` flag; 4 integration tests; 209 total tests pass. |
+| MV.3.P2 | State-graph expansion validation (v2 schema) | Not started | v2 state-graph validator — spec drafted at `planning/3.P2-state-graph-validation/tasks.md` (8 tasks); validates `depends_on` DAG, derived focus/rollup, `backlog[]`, blocked-is-derived (`core/planning/state-schema.md` v2). Gated on brain re-seed of 5 live `state.json` files. |
 
 ### Phase 3B — The Brain as a queryable product (corpus engine outputs, D4)
 | Block | What | Status | Notes |
@@ -92,6 +95,7 @@ blocked: []
 | MV.3B.Q | Manifest emit (file-list + metadata JSON) | Not started | mev emits canonical file-list; `index_brain.py` consumes it → "validated == embedded" by construction. Carries the D5 extract-once refactor (adds `metadata` to `CorpusEntry`, parses frontmatter once; `MV.3.J`'s `read_doc_metadata` seam collapses to `entry.metadata`). Depends on `MV.3.J-crawl`. |
 | MV.3B.R | Graph emit + structural query surface | Not started | mev emits graph JSON; orchestrator loads Postgres edges table beside `brain_documents`; bastion/MCP structural queries (free/exact). Depends on `MV.3.J`. |
 | MV.3B.S | Graph-aware RAG (orchestrator) | Not started | Retrieval traverses edges to expand/rerank semantic hits + query router. Orchestrator-side; mev's edge model is the contract. |
+| MV.3B.T | Table/rollup emit (from v2 state graph) | Not started | mev emits derived focus/rollup tables from the v2 state graph (`depends_on` DAG → computed blocked + rollup). Companion to MV.3.P2's validation; planned alongside the state-graph expansion. |
 
 ---
 
