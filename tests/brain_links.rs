@@ -403,3 +403,39 @@ fn json_envelope_is_well_formed() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// 9. CLI dispatch precedence — `--links` outranks `--state`
+// ---------------------------------------------------------------------------
+
+/// `--links` takes the highest precedence in the `validate-brain` dispatch ladder.
+/// When both `--links` and `--state` are passed, the link-integrity pass must run
+/// (and the state pass must not be selected instead). The link pass is the only one
+/// that emits `E_LINK_*` locators, so seeing `E_LINK_DEAD_MARKDOWN` proves `--links`
+/// won the dispatch.
+#[test]
+fn links_flag_outranks_state_in_dispatch() {
+    let dir = temp_dir("dispatch-precedence");
+    write_brain_toml(&dir);
+
+    // A doc with a dead relative markdown link — only the link pass flags this.
+    write_file(
+        &dir,
+        "planning/referrer.md",
+        &doc_linking_to("referrer-doc", "../docs/nonexistent.md"),
+    );
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mev"))
+        .args(["validate-brain", "--links", "--state"])
+        .arg(&dir)
+        .output()
+        .expect("failed to spawn mev binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("E_LINK_DEAD_MARKDOWN"),
+        "`--links --state` must run the link pass (highest precedence); stdout: {stdout}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
