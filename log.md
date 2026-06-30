@@ -19,6 +19,29 @@ timestamp: "2026-06-30T08:09:28-0300"
 
 ## 2026-06-30
 
+### MV.3B.Q complete: manifest emit + D5 extract-once refactor (`manifest` subcommand, 6 tasks, PASS)
+
+Implemented the full Block 3B.Q manifest emit pipeline across 6 tasks (all PASS). Task 1 applied the D5 extract-once refactor: added `Serialize` to `OkfFrontmatter`, added `Option<OkfFrontmatter>` field to `CorpusEntry`, and wired frontmatter parsing into `crawl_corpus()` via a single read + parse chain (I/O or YAML errors produce `None`); two new tests verify metadata round-trip. Task 2 collapsed the `read_doc_metadata` seam: `build_graph()` reads `doc_id`/`related` directly from `entry.metadata`; `RawFrontmatter`, `DocMeta`, and `read_doc_metadata` removed from `graph.rs`; `collect_doc_ids()` in `links.rs` likewise updated; test helpers patched to pre-populate `entry.metadata` as `crawl_corpus` does. Task 3 created `src/brain/manifest.rs` with `ManifestEntry` and `Manifest` structs (all derive `Serialize`) and `build_manifest()` function; `rel` paths normalised to forward slashes via `replace(MAIN_SEPARATOR, '/')` for cross-platform JSON portability; registered as `pub mod manifest` in `brain/mod.rs`; 3 unit tests covering entry mapping, serialization, and empty-corpus handling. Task 4 added `manifest_brain()` library driver in `src/lib.rs` and the `mev manifest <root>` CLI subcommand in `src/main.rs` with `--pretty` flag (compact JSON default); 5 integration tests in `tests/brain_manifest.rs` asserting on compact JSON string patterns. Task 5 updated `docs/cli.md` with the manifest subcommand reference (arguments, `--pretty`, output shape, exit codes, sample JSON) and `docs/architecture.md` with the manifest module map, `ManifestEntry`/`Manifest` types, `build_manifest` function, D5 refactor note, and removal of `read_doc_metadata`. Task 6 confirmed all four harness gates green: `cargo fmt --check`, `clippy -D warnings`, `cargo test` (all tests pass), `cargo build --release`. Final review verdict: PASS (no findings). `mev manifest <root>` now emits a canonical file-list consumable by `index_brain.py` — "validated == embedded" holds by construction. Next: `MV.3.L` (structural coverage) or `MV.3B.R` (graph emit).
+
+```
+a04d830 chore: flow state — docs
+bd1e715 chore: flow state — task 6 passed
+a479818 chore: flow state — task 5 passed
+59dc133 docs: document manifest subcommand and D5 refactor in cli.md and architecture.md
+e4cfd42 chore: flow state — task 4 passed
+71d55c3 feat: implement 3B.Q-manifest-emit-task4
+f185749 chore: flow state — task 3 passed
+ed6bbc0 feat: implement 3B.Q-manifest-emit-task3
+9436033 chore: flow state — task 2 passed
+1e1a8cd feat: implement 3B.Q-manifest-emit-task2
+67694a2 chore: flow state — task 1 passed
+87ce81b feat: implement 3B.Q-manifest-emit task 1 — D5 extract-once refactor
+```
+
+---
+
+## 2026-06-30
+
 ### MV.3B.T complete: state-graph table + rollup emit (`emit-state` subcommand, 6 tasks, PASS, 275 tests)
 
 Implemented the full Block 3B.T single-derivation emit engine across 6 tasks (all PASS). Task 1 extracted `derive_focus`, `derive_rollup`, and `derive_cross_repo` from `check_focus_drift` into reusable public functions in `src/brain/state.rs` — `DerivedFocus { now, next, blocked }` returning derived block ids (with unmet `depends_on` subsets for `blocked`); `check_focus_drift` now delegates to `derive_focus` so the validator and emitter share one derivation; 8 integration tests added. Task 2 created `src/brain/emit.rs` with `EmitError` (thiserror), `wave_order` (all-block wave sort, `None`-last), `render_wave_table` (Markdown table with derived `blocked` status), and `splice_generated` (idempotent sentinel-aware splice of `<!-- BEGIN/END generated:{marker} -->` regions); 18 integration tests in `tests/brain_emit.rs`. Task 3 added `EmitAction`/`EmitPlan` types, `plan_state_json` (leaf focus regen + brain rollup regen with fixed-point check), `plan_master_plan_tables` (sentinel-aware wave-table splice — missing sentinels yield `W_EMIT_NO_SENTINEL`, never forced into prose), and `apply_plan` (dry-run/write split); 14 integration tests covering fixed-point property, idempotency, and dry-run/write behaviour. Task 4 added the `emit_state` library driver (`src/lib.rs`) and the `emit-state` CLI subcommand (`src/main.rs`) with `--write` flag; default is dry-run; exits from `report.is_failure()`; 4 integration tests. Task 5 updated `docs/cli.md` (subcommand reference, sentinel contract, diagnostic codes) and `docs/architecture.md` (emit module map + function table, `derive_*` helpers). Task 6 confirmed all four harness gates green: `cargo fmt --check`, `clippy -D warnings`, `cargo test` (275 tests, 0 failures), `cargo build --release`. Final review verdict: PASS (no findings). `mev emit-state --write` is now the fixed point of `mev validate-brain --state`: running emit then validate reports zero `W_STATE_FOCUS_DRIFT` / `W_STATE_ROLLUP_DRIFT`. Next: `MV.3.L` (structural coverage) or `MV.3B.Q` (manifest emit / Phase 3B).
