@@ -32,3 +32,6 @@ Validated: gating checks (fast tripwire)
 
 ## Docs
 Patched: none
+
+## Wrap-up — PASS
+Next: MV.3.L (structural coverage: index.md vs dir, D17) or MV.3B.Q (manifest emit / Phase 3B) — see master-plan.md for ordering
