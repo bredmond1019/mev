@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-06-30T08:09:28-0300"
+timestamp: "2026-06-30T21:10:46Z"
 ---
 
 # Log — mev
@@ -37,6 +37,11 @@ ed6bbc0 feat: implement 3B.Q-manifest-emit-task3
 67694a2 chore: flow state — task 1 passed
 87ce81b feat: implement 3B.Q-manifest-emit task 1 — D5 extract-once refactor
 ```
+
+### MV.3B.Q shipped: manifest emit + D5 extract-once refactor
+- **What:** `mev manifest <root>` subcommand implemented (6 tasks, PASS). D5 extract-once refactor: `OkfFrontmatter` derives `Serialize`; `CorpusEntry` carries `Option<OkfFrontmatter>` parsed once in `crawl_corpus()`; `read_doc_metadata` seam removed from `graph.rs`. New `src/brain/manifest.rs` with `ManifestEntry`/`Manifest`/`build_manifest()`. `manifest_brain()` lib driver + CLI subcommand with `--pretty`. All harness gates green. Worktree merged + cleaned. PR #9 merged to main.
+- **Why:** Phase 3B: turn the validated Brain corpus into a queryable product. The manifest is the single source for `index_brain.py` — "what's validated == what's embedded" by construction.
+- **Refs:** `planning/3B.Q-manifest-emit/tasks.md`, PR #9
 
 ---
 

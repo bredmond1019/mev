@@ -8,9 +8,9 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-06-30"
-now: "MV.3B.Q Done — manifest emit subcommand + D5 extract-once refactor (6 tasks, PASS). Next: MV.3.L (structural coverage) or MV.3B.R (graph emit / Phase 3B)."
-next: "MV.3.L (structural coverage: index.md ↔ dir, D17); MV.3B.R (graph emit / Phase 3B) — see master-plan.md for ordering"
+timestamp: "2026-06-30T21:10:46Z"
+now: "MV.3B.Q shipped — PR #9 merged, worktree cleaned. Nothing in flight. Next: MV.3.L (structural coverage) or MV.3B.R (graph emit / Phase 3B)."
+next: "MV.3.L (structural coverage: index.md ↔ dir, D17); MV.3B.R (graph emit / Phase 3B)"
 blocked: []
 ---
 
