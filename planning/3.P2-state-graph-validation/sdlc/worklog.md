@@ -43,3 +43,6 @@ Patched: docs/cli.md, docs/architecture.md
 
 ## Wrap-up — PASS
 Next: Coordinate brain-side re-seed of the 5 live state.json files to v2 schema to enable live `mev validate-brain --state` validation, then pick up MV.3.L (structural coverage: index.md ↔ dir, D17) or MV.3B.Q (manifest emit / Phase 3B) per master-plan.md ordering.
+
+## PR
+https://github.com/bredmond1019/mev/pull/7
