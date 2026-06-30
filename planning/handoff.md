@@ -41,6 +41,10 @@ parallel worktree — PR #6 merged, 237 tests — but that is concurrent work, n
   (v2 serde migration → DAG-from-`depends_on` → cycle detection + reusable `ready_order` →
   status-consistency + backlog checks → focus-drift warnings → pipeline wiring + integration tests →
   docs → validate). `planning/index.md` updated.
+- **Broke down task 1** (the flagged candidate) → `planning/3.P2-state-graph-validation/breakdown.md`:
+  9 atomic sub-steps for the v2 serde migration, with the `#[serde(alias = "block")]` transition linchpin
+  and the task-1↔task-6 shared-fixture flag documented. Task 1 is behaviour-neutral by design (edge
+  re-sourcing + enum split are task 2). Tasks 2–8 run straight from `tasks.md`.
 - **(Concurrent)** `MV.3.K` link integrity implemented, reviewed, merged (PR #6); a post-review fix moved
   `--links` to highest dispatch precedence; test count now **237**.
 
@@ -85,4 +89,7 @@ In priority order (per the user's stated intent — state-graph expansion is the
 
 ## First command after `/prime`
 
-`/breakdown planning/3.P2-state-graph-validation/tasks.md` — then `/sdlc-flow 3.P2-state-graph-validation`, **coordinated with** the brain-side v2 re-seed of the 5 `state.json` files (see Remaining work #1).
+`/sdlc-flow 3.P2-state-graph-validation` — task 1 is already broken down (`breakdown.md`); the flow can
+start directly. **Coordinate with** the brain-side v2 re-seed of the 5 `state.json` files (see Remaining
+work #1) — the validator builds/tests against v2 fixtures, but a live-clean `--state` run needs the
+re-seed.
