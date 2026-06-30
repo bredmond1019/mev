@@ -118,9 +118,11 @@ When `--state` is passed, `mev` runs the full OKF schema pass first, then append
 
 1. **Discovery** — finds all `planning/state.json` files: the HQ brain state, each tier sub-brain state (via `tiers[].rollup` in the HQ state), and each leaf project state (via `[[repos]]` in `brain.toml`). Missing files emit `W_STATE_FILE_MISSING`.
 2. **Load** — deserializes each discovered file. Unparseable files emit `E_STATE_MALFORMED_JSON`.
-3. **Schema ring** — checks field validity within each file (kind membership, status enum values, blocked_by well-formedness, kind-appropriate sections).
-4. **Graph** — builds the cross-repo block-dependency graph from all loaded files and checks it for integrity violations.
-5. **Rollup** — checks that brain `repos[]` headline entries (now/next) match their children's actual `focus` values.
+3. **Schema ring** — checks field validity within each file (kind membership, status enum values, `blocked_by` well-formedness, kind-appropriate sections). In v2 schema files: validates `depends_on[]` entry well-formedness on track blocks, rejects authored `status:"blocked"` (derived, not authored), and validates `backlog[].status` membership.
+4. **Graph** — builds the cross-repo block-dependency graph from all loaded files (v2: DAG edges sourced from `tracks[].blocks[].depends_on[]`) and checks it for integrity violations, including cycle detection over the `depends_on` DAG and backlog-node integrity.
+5. **Status consistency** — checks that a `closed` block does not depend (via `depends_on`) on a block that is not yet `closed`.
+6. **Rollup** — checks that brain `repos[]` headline entries (now/next) match their children's actual `focus` values.
+7. **Focus drift** — recomputes the expected `focus` from authored `tracks[]` and warns when the stored `focus` disagrees (warning-only; exit code is unchanged).
 
 `--state` takes precedence over `--graph` and `--sync` in the dispatch chain — when `--state` is present, neither `--graph` nor `--sync` are separately invoked. `--links` takes the highest precedence overall; when `--links` is present, `--state`, `--graph`, and `--sync` are not separately invoked.
 
@@ -138,6 +140,11 @@ When `--state` is passed, `mev` runs the full OKF schema pass first, then append
 | `E_STATE_DANGLING_BLOCKED_BY` | Error | A cross-repo block dependency's block does not exist in the named repo |
 | `E_STATE_DANGLING_CROSS_REPO` | Error | A brain `cross_repo[]` edge's endpoint does not resolve to a known block |
 | `W_STATE_ROLLUP_DRIFT` | Warning | Brain `repos[]` headline differs from the child repo's actual `focus` |
+| `E_STATE_CYCLE` | Error | A `depends_on` edge forms a cycle; the cycle path is named in the message |
+| `E_STATE_AUTHORED_BLOCKED` | Error | A `tracks[].blocks[].status` is `"blocked"` — `blocked` is derived, not authored |
+| `E_STATE_STATUS_INCONSISTENT` | Error | A `closed` block has a `type:block` `depends_on` target that is not `closed` |
+| `E_STATE_DANGLING_PROMOTION` | Error | A `status:"promoted"` backlog node's `block` pointer resolves to no `tracks[]` node |
+| `W_STATE_FOCUS_DRIFT` | Warning | Stored `focus` disagrees with the derivation from `tracks[]`; exit code is unchanged |
 
 #### `--links` — link-integrity pass
 
