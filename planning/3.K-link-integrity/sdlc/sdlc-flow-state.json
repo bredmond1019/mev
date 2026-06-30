@@ -2,9 +2,9 @@
   "spec_slug": "3.K-link-integrity",
   "branch": "3.K-link-integrity-flow",
   "started_at": "2026-06-30T08:40:01Z",
-  "updated_at": "2026-06-30T09:04:26Z",
+  "updated_at": "2026-06-30T09:08:16Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.K-link-integrity-flow",
-  "status": "running",
+  "status": "docs",
   "current_task": 6,
   "tasks": {
     "1": {
@@ -107,9 +107,9 @@
     }
   },
   "review": {
-    "verdict": null,
+    "verdict": "PASS",
     "findings": [],
-    "attempts": 0
+    "attempts": 1
   },
   "docs": {
     "changed": [],
@@ -281,13 +281,29 @@
         "filesReadKb": null,
         "inTokEst": 568,
         "outTok": 2441
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 975,
+        "filesReadKb": null,
+        "inTokEst": 975,
+        "outTok": 5189
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 791,
+        "filesReadKb": null,
+        "inTokEst": 791,
+        "outTok": 1924
       }
     ],
     "total": {
-      "promptTokEst": 11199,
+      "promptTokEst": 12965,
       "filesReadKb": 0,
-      "inTokEst": 11199,
-      "outTok": 77634
+      "inTokEst": 12965,
+      "outTok": 84747
     }
   }
 }
