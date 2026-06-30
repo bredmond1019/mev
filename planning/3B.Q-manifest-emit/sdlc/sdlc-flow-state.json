@@ -2,9 +2,9 @@
   "spec_slug": "3B.Q-manifest-emit",
   "branch": "3B.Q-manifest-emit-flow",
   "started_at": "2026-06-30T20:35:15Z",
-  "updated_at": "2026-06-30T21:01:14Z",
+  "updated_at": "2026-06-30T21:05:13Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.Q-manifest-emit-flow",
-  "status": "docs",
+  "status": "done",
   "current_task": 6,
   "tasks": {
     "1": {
@@ -303,13 +303,21 @@
         "filesReadKb": null,
         "inTokEst": 791,
         "outTok": 2160
+      },
+      {
+        "label": "wrap-up",
+        "model": "sonnet",
+        "promptTokEst": 808,
+        "filesReadKb": null,
+        "inTokEst": 808,
+        "outTok": 7751
       }
     ],
     "total": {
-      "promptTokEst": 12965,
+      "promptTokEst": 13773,
       "filesReadKb": 0,
-      "inTokEst": 12965,
-      "outTok": 82472
+      "inTokEst": 13773,
+      "outTok": 90223
     }
   }
 }
