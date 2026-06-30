@@ -10,6 +10,7 @@ pub mod crawl;
 pub mod emit;
 pub mod graph;
 pub mod links;
+pub mod manifest;
 pub mod okf;
 pub mod scope;
 pub mod state;
