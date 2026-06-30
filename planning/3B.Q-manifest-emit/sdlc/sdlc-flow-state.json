@@ -2,10 +2,10 @@
   "spec_slug": "3B.Q-manifest-emit",
   "branch": "3B.Q-manifest-emit-flow",
   "started_at": "2026-06-30T20:35:15Z",
-  "updated_at": "2026-06-30T20:45:40Z",
+  "updated_at": "2026-06-30T20:50:52Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.Q-manifest-emit-flow",
   "status": "running",
-  "current_task": 3,
+  "current_task": 4,
   "tasks": {
     "1": {
       "status": "passed",
@@ -57,6 +57,25 @@
       "files_changed": [
         "src/brain/manifest.rs",
         "src/brain/mod.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Add manifest_brain() library driver and mev manifest CLI subcommand with --pretty flag, plus 5 integration tests in tests/brain_manifest.rs",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Discarded crawl diagnostics in manifest_brain() since validate_brain() is the appropriate path for diagnostic reporting; manifest_brain() returns Err only on hard config failures",
+        "Used find_brain_root() for path resolution in main.rs dispatch (consistent with all other brain subcommands) then passed the resolved root to manifest_brain()",
+        "Integration tests assert on compact JSON string patterns (e.g. '\"doc_id\":null') rather than pretty-printing, making assertions stable across whitespace variations"
+      ],
+      "files_changed": [
+        "src/lib.rs",
+        "src/main.rs",
+        "tests/brain_manifest.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -165,13 +184,37 @@
         "filesReadKb": null,
         "inTokEst": 568,
         "outTok": 2007
+      },
+      {
+        "label": "update-task-4",
+        "model": "haiku",
+        "promptTokEst": 253,
+        "filesReadKb": null,
+        "inTokEst": 253,
+        "outTok": 1195
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 880,
+        "filesReadKb": null,
+        "inTokEst": 880,
+        "outTok": 9486
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 568,
+        "filesReadKb": null,
+        "inTokEst": 568,
+        "outTok": 2651
       }
     ],
     "total": {
-      "promptTokEst": 6096,
+      "promptTokEst": 7797,
       "filesReadKb": 0,
-      "inTokEst": 6096,
-      "outTok": 47899
+      "inTokEst": 7797,
+      "outTok": 61231
     }
   }
 }

@@ -1,6 +1,6 @@
 # Task Spec — Phase 3B, Block Q (Manifest Emit)
 
-**Status:** In progress (Tasks 1–3 passed) · **Last run:** 2026-06-30T20:45:40Z
+**Status:** In progress (Tasks 1–4 passed) · **Last run:** 2026-06-30T20:50:52Z
 
 ## Goal
 Emit the canonical file-list + per-file OKF metadata as JSON from the corpus crawl result, so the

@@ -14,3 +14,8 @@ Validated: gating checks (fast tripwire)
 What: Created src/brain/manifest.rs with ManifestEntry, Manifest structs and build_manifest() function; registered pub mod manifest in brain/mod.rs with 3 unit tests covering entry mapping, JSON serialization, and empty-corpus handling
 Decisions: doc_type field uses #[serde(rename = "doc_type")] on the Rust struct field (named doc_type internally, serializes as doc_type in JSON — consistent with the spec's intent to avoid the `type` keyword without hiding the rename in the JSON output); rel paths are normalized to forward slashes via replace(MAIN_SEPARATOR, '/') for cross-platform JSON portability
 Validated: gating checks (fast tripwire)
+
+## Task 4 — PASSED (1 attempt)
+What: Add manifest_brain() library driver and mev manifest CLI subcommand with --pretty flag, plus 5 integration tests in tests/brain_manifest.rs
+Decisions: Discarded crawl diagnostics in manifest_brain() since validate_brain() is the appropriate path for diagnostic reporting; manifest_brain() returns Err only on hard config failures; Used find_brain_root() for path resolution in main.rs dispatch (consistent with all other brain subcommands) then passed the resolved root to manifest_brain(); Integration tests assert on compact JSON string patterns (e.g. '"doc_id":null') rather than pretty-printing, making assertions stable across whitespace variations
+Validated: gating checks (fast tripwire)
