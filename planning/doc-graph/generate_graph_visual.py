@@ -69,9 +69,12 @@ def generate_graph():
     # Prepare vis.js data
     vis_nodes = []
     for n in connected_nodes:
+        # Create a shorter label from title
+        title_str = str(n['title'])
+        short_label = title_str if len(title_str) <= 30 else title_str[:27] + "..."
         vis_nodes.append({
             "id": n["id"],
-            "label": n["label"],
+            "label": short_label,
             "group": n["scope"],
             "value": n["degree"],
             "title": f"<div style='padding:5px; max-width: 300px;'><b>{n['title']}</b><br><i>{n['doc_type']}</i><br>ID: {n['id']}</div>"
@@ -120,8 +123,14 @@ def generate_graph():
     <p>Hub nodes are sized larger. Colors denote repository scope. Hover over a node for details.</p>
     
     <div style="margin-top: 15px;">
-        <input type="text" id="searchInput" placeholder="Search node IDs...">
+        <input type="text" id="searchInput" placeholder="Search by Title or ID...">
         <button onclick="searchNode()">Focus Node</button>
+    </div>
+    
+    <div style="margin-top: 10px;">
+        <select id="scopeFilter" onchange="filterScope()">
+            <option value="">-- Show All Scopes --</option>
+        </select>
     </div>
     
     <div style="margin-top: 10px;">
@@ -147,9 +156,9 @@ def generate_graph():
     var options = {{
         nodes: {{
             shape: 'dot',
-            font: {{ color: '#c9d1d9', size: 12, face: 'sans-serif' }},
+            font: {{ color: '#c9d1d9', size: 14, face: 'sans-serif' }},
             borderWidth: 2,
-            scaling: {{ min: 10, max: 40, label: {{ enabled: true, min: 10, max: 20 }} }},
+            scaling: {{ min: 10, max: 50, label: {{ enabled: true, min: 14, max: 24 }} }},
             shadow: {{ enabled: true, color: 'rgba(0,0,0,0.8)', size: 10, x: 2, y: 2 }}
         }},
         edges: {{
@@ -159,15 +168,16 @@ def generate_graph():
         }},
         groups: {{}},
         physics: {{
-            barnesHut: {{ gravitationalConstant: -3500, centralGravity: 0.2, springLength: 120, springConstant: 0.04 }},
+            barnesHut: {{ gravitationalConstant: -8000, centralGravity: 0.1, springLength: 250, springConstant: 0.04 }},
             minVelocity: 0.75,
             solver: 'barnesHut'
         }},
         interaction: {{ hover: true, tooltipDelay: 50, zoomView: true }}
     }};
     
-    // Auto-assign colors to groups
-    var groups = [...new Set(rawNodes.map(n => n.group))];
+    // Auto-assign colors to groups and populate dropdown
+    var groups = [...new Set(rawNodes.map(n => n.group))].sort();
+    var select = document.getElementById('scopeFilter');
     groups.forEach((g, idx) => {{
         var color = colorPalette[idx % colorPalette.length];
         options.groups[g] = {{
@@ -178,6 +188,11 @@ def generate_graph():
                 hover: {{ background: '#ffffff', border: color }}
             }}
         }};
+        
+        var opt = document.createElement('option');
+        opt.value = g;
+        opt.innerHTML = g;
+        select.appendChild(opt);
     }});
     
     var network = new vis.Network(container, data, options);
@@ -188,15 +203,29 @@ def generate_graph():
         
         var matches = rawNodes.filter(n => n.id.toLowerCase().includes(term) || (n.title && n.title.toLowerCase().includes(term)));
         if (matches.length > 0) {{
-            network.focus(matches[0].id, {{ scale: 1.5, animation: {{ duration: 500, easingFunction: 'easeInOutQuad' }} }});
+            network.focus(matches[0].id, {{ scale: 1.2, animation: {{ duration: 500, easingFunction: 'easeInOutQuad' }} }});
             network.selectNodes([matches[0].id]);
         }}
     }}
     
+    function filterScope() {{
+        var scope = document.getElementById('scopeFilter').value;
+        if (!scope) {{
+            nodes.update(rawNodes.map(n => ({{id: n.id, hidden: false}})));
+            edges.update(rawEdges.map(e => ({{id: e.from, hidden: false}}))); // Just triggering update
+            return;
+        }}
+        
+        // Hide nodes not in scope
+        nodes.update(rawNodes.map(n => ({{id: n.id, hidden: n.group !== scope}})));
+    }}
+    
     function resetHighlight() {{
+        document.getElementById('searchInput').value = '';
+        document.getElementById('scopeFilter').value = '';
+        nodes.update(rawNodes.map(n => ({{id: n.id, hidden: false}})));
         network.unselectAll();
         network.fit({{ animation: {{ duration: 500, easingFunction: 'easeInOutQuad' }} }});
-        document.getElementById('searchInput').value = '';
     }}
 </script>
 </body>
