@@ -216,6 +216,107 @@ mev --json validate-brain --links ~/Dev/agentic-portfolio
 
 ---
 
+### `manifest [--pretty] [path]`
+
+Emit a JSON manifest of every file in the Brain corpus.
+
+```bash
+mev manifest [--pretty] [path]
+```
+
+| Argument / Flag | Default | Description |
+|---|---|---|
+| `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
+| `--pretty` | off | Emit pretty-printed (indented) JSON instead of compact JSON |
+
+Resolves `brain.toml` by walking up from `path`. If no `brain.toml` is found, the process
+exits 1 with an error message on stderr.
+
+The output is the manifest JSON written directly to stdout — there is no `--json` envelope
+wrapper; the output *is* JSON.
+
+#### Output shape
+
+```json
+{
+  "version": "1",
+  "root": "/path/to/brain",
+  "entries": [
+    {
+      "rel": "planning/status.md",
+      "scope": "brain",
+      "doc_id": "mev-status",
+      "doc_type": "ProjectStatus",
+      "title": "MEV Status",
+      "description": "Current project state for the mev validator.",
+      "layer": ["factory"],
+      "project": "mev",
+      "status": "active",
+      "keywords": ["mev", "status", "validator"]
+    },
+    {
+      "rel": "README.md",
+      "scope": "brain",
+      "doc_id": null,
+      "doc_type": null,
+      "title": null,
+      "description": null,
+      "layer": null,
+      "project": null,
+      "status": null,
+      "keywords": null
+    }
+  ]
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `version` | string | Schema version — currently `"1"` |
+| `root` | string | Display path of the HQ root used for the crawl |
+| `entries` | array | All corpus files, in walk order |
+| `entries[].rel` | string | Path relative to the HQ crawl root (forward-slash separated) |
+| `entries[].scope` | string | Stable scope slug of the owning registry unit (e.g. `"brain"`, `"mev"`) |
+| `entries[].doc_id` | string \| null | OKF `doc_id` field; `null` when not present in frontmatter |
+| `entries[].doc_type` | string \| null | OKF `type` field (serialized as `doc_type`); `null` when absent |
+| `entries[].title` | string \| null | OKF `title` field; `null` when absent |
+| `entries[].description` | string \| null | OKF `description` field; `null` when absent |
+| `entries[].layer` | array \| null | OKF `layer` field (closed-set list); `null` when absent |
+| `entries[].project` | string \| null | OKF `project` field; `null` when absent |
+| `entries[].status` | string \| null | OKF `status` field; `null` when absent |
+| `entries[].keywords` | array \| null | OKF `keywords` field (3–7 free-form terms); `null` when absent |
+
+Files without parseable frontmatter appear in the manifest with all metadata fields set to
+`null` (graceful degradation — the OKF validator reports the error separately).
+
+#### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Manifest emitted successfully |
+| `1` | `brain.toml` not found, or a runtime error prevented crawl completion |
+
+**Examples:**
+
+```bash
+# Compact JSON from the current directory
+mev manifest
+
+# Compact JSON from an explicit brain root
+mev manifest ~/Dev/agentic-portfolio
+
+# Pretty-printed JSON
+mev manifest --pretty
+
+# Pretty-printed JSON from an explicit brain root
+mev manifest --pretty ~/Dev/agentic-portfolio
+
+# Pipe compact JSON into jq
+mev manifest | jq '.entries | length'
+```
+
+---
+
 ### `emit-state [--write] [path]`
 
 Regenerate all derived views in the Brain corpus from the authored `tracks[]` DAG and write them in place (with `--write`) or report what would change (dry-run, without `--write`).
