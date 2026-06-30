@@ -2,10 +2,10 @@
   "spec_slug": "3B.T-state-table-rollup-emit",
   "branch": "3B.T-state-table-rollup-emit-flow",
   "started_at": "2026-06-30T14:17:03Z",
-  "updated_at": "2026-06-30T14:17:03Z",
+  "updated_at": "2026-06-30T14:22:28Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.T-state-table-rollup-emit-flow",
   "status": "running",
-  "current_task": 1,
+  "current_task": 2,
   "tasks": {
     "1": {
       "status": "passed",
@@ -23,6 +23,25 @@
       "files_changed": [
         "src/brain/state.rs",
         "tests/brain_state.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Created src/brain/emit.rs with EmitError (thiserror), wave_order, render_wave_table, and splice_generated; registered pub mod emit in mod.rs; added 18 integration tests in tests/brain_emit.rs covering all spec requirements",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "render_wave_table accepts graph for API symmetry/forward-compat but uses conservative cross-repo blocking (unmet unless same-repo closed) since it only receives one repo's StateFile",
+        "splice_generated preserves original trailing-newline behaviour: result ends with newline iff original did",
+        "EmitError::MissingSentinel is returned for both absent BEGIN and absent END (spec calls both 'missing or unbalanced')"
+      ],
+      "files_changed": [
+        "src/brain/emit.rs",
+        "src/brain/mod.rs",
+        "tests/brain_emit.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -83,13 +102,37 @@
         "filesReadKb": null,
         "inTokEst": 588,
         "outTok": 1289
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 263,
+        "filesReadKb": null,
+        "inTokEst": 263,
+        "outTok": 930
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 915,
+        "filesReadKb": null,
+        "inTokEst": 915,
+        "outTok": 13910
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 588,
+        "filesReadKb": null,
+        "inTokEst": 588,
+        "outTok": 2135
       }
     ],
     "total": {
-      "promptTokEst": 2789,
+      "promptTokEst": 4555,
       "filesReadKb": 0,
-      "inTokEst": 2789,
-      "outTok": 30677
+      "inTokEst": 4555,
+      "outTok": 47652
     }
   }
 }
