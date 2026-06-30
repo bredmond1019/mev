@@ -32,7 +32,8 @@ src/
     ├── scope.rs    ← scope_units(), scope_for(), owning_unit() — registry-driven scope resolver
     ├── sync.rs     ← (internal) sync helpers
     ├── graph.rs    ← EdgeKind, Edge, Node, Graph, GraphArtifact, DocMeta; build_graph(), check_graph(), read_doc_metadata() — Phase 3 Block J
-    ├── state.rs    ← StateFile, TrackBlock, Backlog, Origin, StateGraph, StateNode, StateEdge, StateSource; discover_state_files(), load_state(), check_schema(), build_state_graph(), check_state_graph(), check_rollup(), detect_cycles(), ready_order(), check_focus_drift() — Phase 3 Block P / P2 (v2: depends_on DAG, cycle detection, derived-blocked enforcement, backlog nodes, focus-drift warnings)
+    ├── state.rs    ← StateFile, TrackBlock, Backlog, Origin, StateGraph, StateNode, StateEdge, StateSource; discover_state_files(), load_state(), check_schema(), build_state_graph(), check_state_graph(), check_rollup(), detect_cycles(), ready_order(), check_focus_drift(), derive_focus(), derive_rollup(), derive_cross_repo() — Phase 3 Block P / P2 / T (v2: depends_on DAG, cycle detection, derived-blocked enforcement, backlog nodes, focus-drift warnings, single-source derivation helpers)
+    ├── emit.rs     ← EmitError, EmitAction, EmitPlan; wave_order(), render_wave_table(), splice_generated(), plan_state_json(), plan_master_plan_tables(), apply_plan() — Phase 3 Block T (derived-view generation: wave tables, focus regen, brain rollup)
     └── links.rs    ← LinkKind, LinkRef; extract_links(), check_links(), collect_doc_ids(), read_moves_pending(), check_moved_references() — Phase 3 Block K
 
 tests/
@@ -242,8 +243,11 @@ The state module discovers, loads, and validates all `planning/state.json` files
 | `check_status_consistency` | `(&[(StateSource, StateFile)]) -> Vec<Diagnostic>` | Emits `E_STATE_STATUS_INCONSISTENT` when a `closed` block has a `type:block` `depends_on` target that is not `closed`. Dangling targets are skipped (reported by `check_state_graph`). |
 | `check_backlog_integrity` | `(&[(StateSource, StateFile)], &StateGraph) -> Vec<Diagnostic>` | Backlog-node integrity: dangling `depends_on` targets (`E_STATE_DANGLING_BLOCKED_BY`) and orphan/unresolved promoted nodes (`E_STATE_DANGLING_PROMOTION`). |
 | `ready_order` | `(&StateGraph, &[(StateSource, StateFile)]) -> Vec<String>` | Reusable standalone function: returns open blocks ordered by `wave` (tiebreak: track order, array order) whose every `type:block` dep is `closed` and which have no `type:external` deps. Forward-compat input for `MV.3B.T` topo-emit. |
-| `check_focus_drift` | `(&StateSource, &StateFile, &StateGraph, &[(StateSource, StateFile)]) -> Vec<Diagnostic>` | Recomputes the expected `focus` from authored `tracks[]` (`now` = `in_progress`, `blocked` = unmet `depends_on`, `next` = `ready_order` ∩ `open`) and emits `W_STATE_FOCUS_DRIFT` (warning, exit 0) on block-id set mismatch. |
+| `check_focus_drift` | `(&StateSource, &StateFile, &StateGraph, &[(StateSource, StateFile)]) -> Vec<Diagnostic>` | Recomputes the expected `focus` from authored `tracks[]` by calling `derive_focus` and emits `W_STATE_FOCUS_DRIFT` (warning, exit 0) on block-id set mismatch. Shares the same derivation logic as `mev emit-state` — they cannot disagree. |
 | `check_rollup` | `(&Path, &StateFile, &HashMap<String, StateFile>) -> Vec<Diagnostic>` | Rollup drift check: compares brain `repos[]` now/next headline entries against each child's actual `focus` values. Emits `W_STATE_ROLLUP_DRIFT` on mismatch. |
+| `derive_focus` | `(&StateSource, &StateFile, &StateGraph, &[(StateSource, StateFile)]) -> DerivedFocus` | **Single-source derivation** — computes the expected `focus` from authored `tracks[]`: `now` = `in_progress` blocks; `next` = ready open blocks in `wave` order; `blocked` = open blocks with an unmet `depends_on`, each carrying the unmet subset as `blocked_by[]`. Called by both `check_focus_drift` and the emit planners. |
+| `derive_cross_repo` | `(&[(StateSource, StateFile)]) -> Vec<CrossRepoEdge>` | For every `tracks[].blocks[].depends_on` entry of `{type:"block"}` whose `repo` differs from the owning repo, produces a `CrossRepoEdge`. Same-repo deps are excluded. |
+| `derive_rollup` | `(&[(StateSource, StateFile)], &StateGraph, &[(StateSource, StateFile)]) -> Vec<RepoRollup>` | For each leaf (`kind == "project"`), builds a `RepoRollup { repo, tier, now, next, blocked }` from that child's `derive_focus` result, mapping block ids back to `Block { id, title, status, blocked_by }` using the child's `tracks[]`. |
 
 #### State types
 
@@ -259,10 +263,49 @@ The state module discovers, loads, and validates all `planning/state.json` files
 | `StateGraph` | Cross-repo block-dependency graph: `nodes: Vec<StateNode>`, `edges: Vec<StateEdge>`. Serde-serializable. |
 | `StateNode` | Graph node: `repo`, `id`, `title`, `status`, `source_path` (skipped in serialization). |
 | `StateEdge` | Graph edge: `from_repo`, `from_id`, `to_repo`, `to_id`, `kind` (`blocked_by` or `cross_repo`), `source_path` (skipped in serialization). |
+| `DerivedFocus` | Output of `derive_focus`: `now: Vec<String>`, `next: Vec<String>`, `blocked: Vec<(String, Vec<BlockedBy>)>` — block ids (and, for `blocked`, the unmet subset of each block's `depends_on`). |
 
 #### Public library entry point
 
 `validate_brain_state(root: &Path) -> anyhow::Result<Report>` (in `src/lib.rs`) runs the full OKF schema pass followed by the multi-step state pipeline (discovery → load → schema → graph build + check → cycle detection → status consistency → backlog integrity → rollup → focus drift) and appends all state diagnostics to the same `Report`. Invoked by `mev validate-brain --state`.
+
+---
+
+### Emit module (`src/brain/emit.rs`) — Phase 3 Block T
+
+The emit module is the **single derivation engine** for all generated views declared by the v2 state schema. It is a pure compiler (files in → files out; no DB, no network), and its planners share the same `derive_focus` / `derive_rollup` / `derive_cross_repo` helpers used by the validator's drift checks — so the emit is, by construction, the fixed point of `check_focus_drift` and `check_rollup`.
+
+#### Public functions
+
+| Function | Signature | Description |
+|---|---|---|
+| `wave_order` | `(&StateGraph, &[(StateSource, StateFile)]) -> Vec<String>` | All block keys (`"repo:id"`) sorted by `wave` ascending (`None` last), tiebreak by track iteration order then block array index. Full-roadmap sibling of `ready_order` — includes every block regardless of status. |
+| `render_wave_table` | `(&str, &StateFile, &StateGraph) -> String` | Renders a Markdown table of one repo's blocks in wave order. Columns: `Wave \| Block \| Title \| Status \| Depends on`. Open blocks with an unmet `depends_on` render as `blocked` in the Status column. |
+| `splice_generated` | `(&str, &str, &str) -> Result<String, EmitError>` | Idempotent sentinel-splice: replaces the text between `<!-- BEGIN generated:{marker} -->` and `<!-- END generated:{marker} -->` with `generated`, preserving every line outside the sentinels verbatim. Returns `EmitError` when a sentinel is missing or unbalanced. |
+| `plan_state_json` | `(&[(StateSource, StateFile)], &StateGraph) -> EmitPlan` | For each loaded state file, clones it, regenerates derived sections (leaf: `focus`; brain: `repos[]` + `cross_repo[]`), re-serializes, and adds an `EmitAction` only when the content actually changed. Authored fields survive the round-trip unchanged. |
+| `plan_master_plan_tables` | `(&[(StateSource, StateFile)], &StateGraph) -> EmitPlan` | For each state file, resolves the sibling `master-plan.md`; if it exists and carries the `wave-table` sentinels, splices the rendered table and adds an `EmitAction`. A missing file or sentinels yields `W_EMIT_NO_SENTINEL` (never invents sentinels). |
+| `apply_plan` | `(&EmitPlan, bool) -> Vec<Diagnostic>` | When `write` is `true`, writes each action's `new_content` to its `path` and emits `I_EMIT_WROTE` per file. When `false` (dry-run), writes nothing and emits `W_EMIT_DRY_RUN` per planned action. Always surfaces the plan's own diagnostics. |
+
+#### Emit types
+
+| Type | Description |
+|---|---|
+| `EmitError` | thiserror error for sentinel failures: `MissingSentinel { marker, which }`. |
+| `EmitAction` | A single proposed write: `path: PathBuf`, `new_content: String`, `note: String`. |
+| `EmitPlan` | A collection of proposed writes and accompanying diagnostics: `actions: Vec<EmitAction>`, `diagnostics: Vec<Diagnostic>`. |
+
+#### Diagnostic locators emitted by the emit module
+
+| Locator | Severity | Condition |
+|---|---|---|
+| `W_EMIT_DRY_RUN` | Warning | Planned action in dry-run mode; no file written. |
+| `I_EMIT_WROTE` | Warning | File written in `--write` mode. |
+| `W_EMIT_NO_SENTINEL` | Warning | `master-plan.md` is missing the `wave-table` sentinel pair; file skipped. |
+| `E_EMIT_WRITE_FAILED` | Error | IO error writing a file. |
+
+#### Public library entry point
+
+`emit_state(root: &Path, write: bool) -> anyhow::Result<Report>` (in `src/lib.rs`) resolves `brain.toml`, discovers and loads all state files, builds the graph, runs `plan_state_json` and `plan_master_plan_tables`, applies the plan with `apply_plan(write)`, and collects all diagnostics into a `Report`. Invoked by `mev emit-state`.
 
 ---
 
