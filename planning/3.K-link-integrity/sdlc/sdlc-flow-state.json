@@ -2,10 +2,10 @@
   "spec_slug": "3.K-link-integrity",
   "branch": "3.K-link-integrity-flow",
   "started_at": "2026-06-30T08:40:01Z",
-  "updated_at": "2026-06-30T08:40:01Z",
+  "updated_at": "2026-06-30T08:45:38Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.K-link-integrity-flow",
   "status": "running",
-  "current_task": 1,
+  "current_task": 2,
   "tasks": {
     "1": {
       "status": "passed",
@@ -21,6 +21,23 @@
       "files_changed": [
         "src/brain/links.rs",
         "src/brain/mod.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added check_links (resolves Markdown/FileUri/WikiLink refs with E_LINK_* diagnostics) and collect_doc_ids (D5-seam bare doc_id extractor) to src/brain/links.rs, with 9 new unit tests covering all required scenarios.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "_root parameter kept in check_links signature for symmetry with sibling check_* functions (not used in this pass — relative markdown links resolve from entry.path)",
+        "file:// stripping uses strip_prefix(\"file://\") so file:///abs/path → /abs/path correctly",
+        "brain_only_config helper removed from tests — not needed since all tests construct CorpusEntry directly"
+      ],
+      "files_changed": [
+        "src/brain/links.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -81,13 +98,37 @@
         "filesReadKb": null,
         "inTokEst": 568,
         "outTok": 1707
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 253,
+        "filesReadKb": null,
+        "inTokEst": 253,
+        "outTok": 814
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 880,
+        "filesReadKb": null,
+        "inTokEst": 880,
+        "outTok": 13795
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 568,
+        "filesReadKb": null,
+        "inTokEst": 568,
+        "outTok": 1765
       }
     ],
     "total": {
-      "promptTokEst": 2694,
+      "promptTokEst": 4395,
       "filesReadKb": 0,
-      "inTokEst": 2694,
-      "outTok": 16854
+      "inTokEst": 4395,
+      "outTok": 33228
     }
   }
 }
