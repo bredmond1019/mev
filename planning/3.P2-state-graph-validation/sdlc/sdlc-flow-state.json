@@ -1,0 +1,92 @@
+{
+  "spec_slug": "3.P2-state-graph-validation",
+  "branch": "3.P2-state-graph-validation-flow",
+  "started_at": "2026-06-30T10:03:46Z",
+  "updated_at": "2026-06-30T10:03:46Z",
+  "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.P2-state-graph-validation-flow",
+  "status": "running",
+  "current_task": 1,
+  "tasks": {
+    "1": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Migrate src/brain/state.rs to the v2 state schema: add Origin/Backlog structs, extend TrackBlock with depends_on/wave/origin, rename Block.block and Endpoint.block to id with serde aliases for v1 compat, add backlog[] to StateFile, cascade all internal .block references to .id, and migrate fixture JSON keys to canonical v2 form.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Used #[serde(alias = \"block\")] on Block.id and Endpoint.id rather than renaming the JSON key alone — this preserves backward compatibility with any v1 fixtures that still use the \"block\" key while making canonical v2 fixtures use \"id\".",
+        "Added backlog: vec![] to the two Rust StateFile struct constructors in test helpers so they compile against the new required field; all other StateFile instances are deserialized from JSON (which defaults via #[serde(default)]).",
+        "Migrated all fixture JSON strings to use \"id\" key (step 1.8) even though the serde alias makes this belt-and-suspenders — the spec explicitly requires canonical v2 form in the in-file fixtures."
+      ],
+      "files_changed": [
+        "src/brain/state.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    }
+  },
+  "review": {
+    "verdict": null,
+    "findings": [],
+    "attempts": 0
+  },
+  "docs": {
+    "changed": [],
+    "created": []
+  },
+  "bail_reason": null,
+  "pr": {
+    "url": null,
+    "number": null
+  },
+  "tokens": {
+    "stages": [
+      {
+        "label": "worktree-setup",
+        "model": "haiku",
+        "promptTokEst": 786,
+        "filesReadKb": null,
+        "inTokEst": 786,
+        "outTok": 8683
+      },
+      {
+        "label": "enumerate",
+        "model": "haiku",
+        "promptTokEst": 234,
+        "filesReadKb": null,
+        "inTokEst": 234,
+        "outTok": 772
+      },
+      {
+        "label": "update-task-1",
+        "model": "haiku",
+        "promptTokEst": 262,
+        "filesReadKb": null,
+        "inTokEst": 262,
+        "outTok": 849
+      },
+      {
+        "label": "implement-1-1",
+        "model": "sonnet",
+        "promptTokEst": 911,
+        "filesReadKb": null,
+        "inTokEst": 911,
+        "outTok": 18569
+      },
+      {
+        "label": "test-1-1",
+        "model": "haiku",
+        "promptTokEst": 586,
+        "filesReadKb": null,
+        "inTokEst": 586,
+        "outTok": 1553
+      }
+    ],
+    "total": {
+      "promptTokEst": 2779,
+      "filesReadKb": 0,
+      "inTokEst": 2779,
+      "outTok": 30426
+    }
+  }
+}
