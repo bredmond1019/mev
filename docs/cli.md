@@ -216,6 +216,76 @@ mev --json validate-brain --links ~/Dev/agentic-portfolio
 
 ---
 
+### `emit-state [--write] [path]`
+
+Regenerate all derived views in the Brain corpus from the authored `tracks[]` DAG and write them in place (with `--write`) or report what would change (dry-run, without `--write`).
+
+`mev emit-state` is the **single derivation engine** that `/log-work` shells out to for regenerating leaf `focus` fields, the brain `repos[]` / `cross_repo[]` rollup, and the master-plan wave/dependency tables. Because the validator's `check_focus_drift` and `check_rollup` share the same `derive_focus` / `derive_rollup` functions, running `mev emit-state --write` followed by `mev validate-brain --state` on the same corpus will report zero `W_STATE_FOCUS_DRIFT` and zero `W_STATE_ROLLUP_DRIFT` — the emit is, by construction, the fixed point of the drift check.
+
+```bash
+mev emit-state [--write] [path]
+```
+
+| Argument / Flag | Default | Description |
+|---|---|---|
+| `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
+| `--write` | off | Write the derived views in place. Without this flag the command is a dry-run |
+
+#### Derived views updated
+
+- **Leaf `state.json`** (`kind == "project"`): regenerates `focus` — `now` = blocks with `status: in_progress`; `next` = ready open blocks in `wave` order; `blocked` = open blocks with an unmet `depends_on`, each carrying the unmet `blocked_by[]` subset. Authored `tracks[]` and all other fields survive the round-trip unchanged.
+- **Brain `state.json`** (`kind == "brain"`): regenerates `repos[]` (each child's derived focus as a `RepoRollup`) and `cross_repo[]` (cross-repo `depends_on` edges). Authored `tracks[]`, `backlog[]`, `tiers[]`, and the brain file's own `focus` are left untouched.
+- **`master-plan.md` wave tables**: splices a rendered wave/dependency Markdown table between the `<!-- BEGIN generated:wave-table -->` and `<!-- END generated:wave-table -->` sentinels. All narrative lines outside the sentinels are preserved verbatim. Re-running the emit is idempotent — if the splice produces no change, no `EmitAction` is recorded.
+
+#### Sentinel contract
+
+The sentinel pair format is:
+
+```markdown
+<!-- BEGIN generated:wave-table -->
+| Wave | Block | Title | Status | Depends on |
+| --- | --- | --- | --- | --- |
+... (generated rows) ...
+<!-- END generated:wave-table -->
+```
+
+- Both `BEGIN` and `END` sentinels must be present and balanced; a missing or unbalanced pair causes a `W_EMIT_NO_SENTINEL` warning and the file is skipped — sentinels are never invented into arbitrary prose.
+- Re-splicing an already-emitted table is idempotent.
+
+#### Diagnostic codes
+
+| Locator | Severity | Condition |
+|---|---|---|
+| `W_EMIT_DRY_RUN` | Warning | Planned action (dry-run only; no file written) |
+| `I_EMIT_WROTE` | Warning | File written (`--write` mode) |
+| `W_EMIT_NO_SENTINEL` | Warning | `master-plan.md` is missing the `wave-table` sentinel pair; file skipped |
+| `E_EMIT_WRITE_FAILED` | Error | IO error writing a file; causes exit 1 |
+| `E_CONFIG_NOT_FOUND` | Error | `brain.toml` could not be located by walking up from `path`; causes exit 1 |
+
+**Examples:**
+
+```bash
+# Dry-run from the current directory (reports planned changes, writes nothing)
+mev emit-state
+
+# Dry-run from an explicit brain root
+mev emit-state ~/Dev/agentic-portfolio
+
+# Write derived views in place
+mev emit-state --write
+
+# Write derived views from an explicit brain root
+mev emit-state --write ~/Dev/agentic-portfolio
+
+# Machine-readable dry-run output
+mev --json emit-state
+
+# Machine-readable write output
+mev --json emit-state --write ~/Dev/agentic-portfolio
+```
+
+---
+
 ## Exit codes
 
 | Code | Meaning |
