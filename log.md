@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-06-29T17:50:21-0300"
+timestamp: "2026-06-30T06:29:46-0300"
 ---
 
 # Log — mev
@@ -31,6 +31,11 @@ e1c86e6 feat: implement 3.K-link-integrity-task4
 b1c3989 chore: flow state — task 3 passed
 782f4ad feat: implement 3.K-link-integrity-task3
 ```
+
+### MV.3.K merged (PR #6) + `--links` dispatch precedence fix
+- **What:** `3.K-link-integrity` merged via PR #6 (merge commit `334ae4a`). Ran `/sdlc-flow 3.K-link-integrity` to completion (6 tasks, PASS), then a post-merge `/code-review low`. The review caught a real docs/code mismatch: the `validate-brain` dispatch ladder in `src/main.rs` placed the `--links` branch **last** (lowest precedence), contradicting `docs/cli.md`, `docs/architecture.md`, and the recorded task decision that `--links` outranks `--state`. Fix: moved `links` to the **top** of the ladder; added binary-spawning integration test `links_flag_outranks_state_in_dispatch` in `tests/brain_links.rs` (commit `973b3df`). Test count now **237** (was 236). Local `main` rebased to preserve an unpushed planning-doc commit → `main` at `b1fb953`, in sync with `origin/main`. Worktree `trees/3.K-link-integrity-flow` removed, branch deleted. `mev validate-brain --links` is live.
+- **Why:** Block K is the link-integrity sibling of the doc-graph corpus engine; the precedence bug would have let `--links` silently lose to `--state` at the CLI, contradicting documented behavior — fixing it keeps the dispatch contract consistent with docs/spec.
+- **Refs:** PR #6; commit `973b3df`; merge `334ae4a`; `main` `b1fb953`; `planning/3.K-link-integrity/`; `master-plan.md`.
 
 ---
 
