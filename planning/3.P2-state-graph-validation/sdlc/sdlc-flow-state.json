@@ -2,10 +2,10 @@
   "spec_slug": "3.P2-state-graph-validation",
   "branch": "3.P2-state-graph-validation-flow",
   "started_at": "2026-06-30T10:03:46Z",
-  "updated_at": "2026-06-30T10:10:45Z",
+  "updated_at": "2026-06-30T10:18:36Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.P2-state-graph-validation-flow",
   "status": "running",
-  "current_task": 2,
+  "current_task": 3,
   "tasks": {
     "1": {
       "status": "passed",
@@ -38,6 +38,24 @@
       "files_changed": [
         "src/brain/state.rs",
         "tests/brain_state.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "3": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Add detect_cycles (DFS, E_STATE_CYCLE with path) and ready_order (wave-ordered ready-open blocks, standalone for MV.3B.T) to src/brain/state.rs, with 13 unit tests covering all spec cases.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "detect_cycles_dfs is a private module-level function (not nested in detect_cycles) using fully-qualified HashMap/HashSet types to avoid import scope issues",
+        "ready_order accepts _graph parameter (unused, prefixed with underscore) for MV.3B.T forward-compat without triggering clippy unused-variable warning",
+        "wave=None treated as i64::MAX (lowest priority, goes last) for stable ordering",
+        "CrossRepo edges are excluded from cycle detection — only BlockedBy edges form the authoritative DAG"
+      ],
+      "files_changed": [
+        "src/brain/state.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -122,13 +140,37 @@
         "filesReadKb": null,
         "inTokEst": 586,
         "outTok": 1686
+      },
+      {
+        "label": "update-task-3",
+        "model": "haiku",
+        "promptTokEst": 262,
+        "filesReadKb": null,
+        "inTokEst": 262,
+        "outTok": 913
+      },
+      {
+        "label": "implement-3-1",
+        "model": "sonnet",
+        "promptTokEst": 911,
+        "filesReadKb": null,
+        "inTokEst": 911,
+        "outTok": 21013
+      },
+      {
+        "label": "test-3-1",
+        "model": "haiku",
+        "promptTokEst": 586,
+        "filesReadKb": null,
+        "inTokEst": 586,
+        "outTok": 1807
       }
     ],
     "total": {
-      "promptTokEst": 4538,
+      "promptTokEst": 6297,
       "filesReadKb": 0,
-      "inTokEst": 4538,
-      "outTok": 52975
+      "inTokEst": 6297,
+      "outTok": 76708
     }
   }
 }
