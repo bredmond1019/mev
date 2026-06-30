@@ -366,6 +366,7 @@ mod tests {
             rel,
             stem,
             scope: scope.to_string(),
+            metadata: None,
         }
     }
 

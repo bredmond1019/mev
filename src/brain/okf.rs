@@ -8,7 +8,7 @@
 //! `deny_unknown_fields`), read/parse failures short-circuit to a single diagnostic,
 //! and every field violation gets its own precise-locator diagnostic.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::Diagnostic;
 use crate::brain::config::BrainConfig;
@@ -28,7 +28,10 @@ use crate::shared::{extract_frontmatter, non_empty};
 ///
 /// `layer` is a list per the settled canonical form — the live corpus only uses
 /// `[brain, meta]`-style lists, never bare scalars.
-#[derive(Debug, Deserialize)]
+///
+/// `Serialize` is derived so [`crate::brain::crawl::CorpusEntry`] can carry parsed
+/// metadata and emit it in the manifest (D5 extract-once refactor, Block Q).
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OkfFrontmatter {
     /// `type` field (renamed because `type` is a Rust keyword).
     #[serde(rename = "type")]
