@@ -78,7 +78,7 @@ Extend `mev validate-brain --state` to guard the **v2 state schema** — the ful
 - `docs/architecture.md`: update the `src/brain/state.rs` one-liner to mention DAG/cycle/backlog if it enumerates the module's checks.
 - **Owns:** `docs/cli.md`, `docs/architecture.md`.
 
-### 8. Validate
+### 8. Validate (PASSED)
 - Run the Validation Commands listed below and confirm all pass.
 
 ## Acceptance Criteria
