@@ -623,6 +623,7 @@ mod tests {
                 .unwrap()
                 .to_string(),
             scope: "brain".to_string(),
+            metadata: None,
         }
     }
 
@@ -848,6 +849,7 @@ mod tests {
             rel: std::path::PathBuf::from("docs/file.md"),
             stem: "file".to_string(),
             scope: "brain".to_string(),
+            metadata: None,
         };
         let corpus = Corpus {
             entries: vec![entry],

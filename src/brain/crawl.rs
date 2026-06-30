@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 
 use crate::Diagnostic;
 use crate::brain::config::BrainConfig;
+use crate::brain::okf::OkfFrontmatter;
+use crate::shared::extract_frontmatter;
 
 // ---------------------------------------------------------------------------
 // MdFile
@@ -44,6 +46,10 @@ pub struct MdFile {
 /// `scope` is the stable slug of the owning registry unit (from `brain.toml`'s
 /// `[[repos]]` entries), resolved once at crawl time so the graph block and the
 /// Phase 3B Block Q manifest emitter both get it without re-crawling.
+///
+/// `metadata` holds the parsed OKF frontmatter from the file, extracted once
+/// during the crawl (D5 extract-once refactor).  `None` if the file has no
+/// frontmatter or the frontmatter cannot be parsed.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CorpusEntry {
     /// Absolute path as walked.
@@ -54,6 +60,9 @@ pub struct CorpusEntry {
     pub stem: String,
     /// Stable slug of the owning scope unit (e.g. `"brain"`, `"mev"`, `"core"`).
     pub scope: String,
+    /// Parsed OKF frontmatter, extracted once at crawl time (D5 extract-once).
+    /// `None` if the file has no frontmatter or the YAML cannot be parsed.
+    pub metadata: Option<OkfFrontmatter>,
 }
 
 /// The complete Brain corpus: every `.md` file that belongs to the multi-root
@@ -367,11 +376,19 @@ pub fn crawl_corpus(root: &Path, config: &BrainConfig) -> (Corpus, Vec<Diagnosti
             .unwrap_or("")
             .to_string();
 
+        // D5 extract-once: parse frontmatter once here; callers (graph, manifest) use
+        // entry.metadata directly and never re-read the file for frontmatter.
+        let metadata = std::fs::read_to_string(path).ok().and_then(|contents| {
+            let yaml = extract_frontmatter(&contents)?;
+            serde_yaml::from_str::<OkfFrontmatter>(yaml).ok()
+        });
+
         entries.push(CorpusEntry {
             path: path.to_path_buf(),
             rel,
             stem,
             scope,
+            metadata,
         });
     }
 
@@ -570,12 +587,14 @@ mod tests {
 
     #[test]
     fn corpus_is_serializable_to_json() {
-        // Build a minimal in-memory corpus entry and verify serde_json serializes it.
+        // Build a minimal in-memory corpus entry and verify serde_json serializes it,
+        // including the metadata field (None → null in JSON).
         let entry = CorpusEntry {
             path: std::path::PathBuf::from("/hq/planning/status.md"),
             rel: std::path::PathBuf::from("planning/status.md"),
             stem: "status".to_string(),
             scope: "brain".to_string(),
+            metadata: None,
         };
         let corpus = Corpus {
             entries: vec![entry],
@@ -584,6 +603,69 @@ mod tests {
         assert!(json.contains("\"scope\":\"brain\""));
         assert!(json.contains("\"stem\":\"status\""));
         assert!(json.contains("\"entries\""));
+        // metadata field must be present in serialized output (null when None).
+        assert!(
+            json.contains("\"metadata\""),
+            "metadata field must appear in JSON"
+        );
+    }
+
+    #[test]
+    fn corpus_entry_with_frontmatter_carries_metadata() {
+        let dir = std::env::temp_dir().join("mev-corpus-metadata-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("planning")).unwrap();
+        // Write a file with valid OKF frontmatter.
+        std::fs::write(
+            dir.join("planning/status.md"),
+            "---\ntype: ProjectStatus\ntitle: MEV Status\ndescription: Current state.\ndoc_id: mev-status\n---\n# body\n",
+        ).unwrap();
+        // Write a file with no frontmatter.
+        std::fs::write(dir.join("README.md"), b"# README\nNo frontmatter here.\n").unwrap();
+
+        let cfg = brain_only_config();
+        let (corpus, diags) = crawl_corpus(&dir, &cfg);
+        assert!(diags.is_empty(), "expected no diagnostics: {diags:?}");
+
+        // Find the entry for planning/status.md — it should carry Some(metadata).
+        let status_entry = corpus
+            .entries
+            .iter()
+            .find(|e| e.stem == "status")
+            .expect("planning/status.md must be in corpus");
+        assert!(
+            status_entry.metadata.is_some(),
+            "entry with valid frontmatter must carry Some(metadata)"
+        );
+        let meta = status_entry.metadata.as_ref().unwrap();
+        assert_eq!(
+            meta.type_.as_deref(),
+            Some("ProjectStatus"),
+            "type_ must match frontmatter"
+        );
+        assert_eq!(
+            meta.title.as_deref(),
+            Some("MEV Status"),
+            "title must match frontmatter"
+        );
+        assert_eq!(
+            meta.doc_id.as_deref(),
+            Some("mev-status"),
+            "doc_id must match frontmatter"
+        );
+
+        // Find the entry for README.md — it should carry None.
+        let readme_entry = corpus
+            .entries
+            .iter()
+            .find(|e| e.stem == "README")
+            .expect("README.md must be in corpus");
+        assert!(
+            readme_entry.metadata.is_none(),
+            "entry without frontmatter must carry None metadata"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // --- crawl_corpus end-to-end walk ---
