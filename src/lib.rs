@@ -12,6 +12,10 @@ pub mod theme;
 mod validator;
 pub use brain::BrainValidator;
 pub use brain::crawl::{MdFile, crawl_brain};
+pub use brain::emit::{
+    EmitAction, EmitError, EmitPlan, apply_plan, plan_master_plan_tables, plan_state_json,
+    render_wave_table, splice_generated, wave_order,
+};
 pub use brain::graph::{Graph, build_graph, check_graph};
 pub use brain::links::{
     LinkKind, LinkRef, check_links, check_moved_references, collect_doc_ids, extract_links,
@@ -397,6 +401,95 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
         let drift_diags = check_focus_drift(src, file, &graph, &loaded);
         report.diagnostics.extend(drift_diags);
     }
+
+    Ok(report)
+}
+
+/// Generate derived views for the company-brain repo and optionally write them.
+///
+/// Phase 3, Block T: the single derivation engine for every generated view the v2
+/// state schema declares. Resolves `brain.toml`, discovers and loads all
+/// `planning/state.json` files, builds the block-dependency graph, then runs both
+/// planners:
+///
+/// - [`brain::emit::plan_state_json`] — regenerates leaf `focus` (now/next/blocked)
+///   and brain `repos[]`/`cross_repo[]` from the authored `tracks[]` DAG.
+/// - [`brain::emit::plan_master_plan_tables`] — splices the wave/dependency table into
+///   any `master-plan.md` that carries the `<!-- BEGIN generated:wave-table -->`
+///   sentinels.
+///
+/// When `write` is `false` (default), the function is a **dry-run**: no files are
+/// written and each planned action is reported as a `W_EMIT_DRY_RUN` diagnostic.
+/// When `write` is `true`, the derived content is written in place and each write
+/// is reported as an `I_EMIT_WROTE` diagnostic.
+///
+/// A master-plan file lacking the sentinels is skipped with a `W_EMIT_NO_SENTINEL`
+/// warning — the emitter never splices into arbitrary prose.
+///
+/// Resolves `brain.toml` the same way as [`validate_brain`] — see that function's
+/// doc for the `E_CONFIG_NOT_FOUND` fallback behaviour.
+pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report> {
+    use brain::config::find_brain_config;
+    use brain::emit::{apply_plan, plan_master_plan_tables, plan_state_json};
+    use brain::state::{StateLoadError, build_state_graph, discover_state_files, load_state};
+
+    let config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            let mut report = Report::default();
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    let mut report = Report::default();
+
+    // 1. Discovery: find all planning/state.json files.
+    let (sources, discovery_diags) = discover_state_files(root, &config);
+    report.diagnostics.extend(discovery_diags);
+
+    // 2. Load each discovered file.
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    for src in &sources {
+        match load_state(&src.abs_path) {
+            Ok(file) => {
+                loaded.push((src.clone(), file));
+            }
+            Err(StateLoadError::Parse { .. }) => {
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    "state.json is not valid JSON or does not match the expected schema"
+                        .to_string(),
+                ));
+            }
+            Err(StateLoadError::Io { source, .. }) => {
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("could not read state.json: {source}"),
+                ));
+            }
+        }
+    }
+
+    // 3. Build the block-dependency graph.
+    let graph = build_state_graph(&loaded);
+
+    // 4. Run both planners and merge their results.
+    let state_plan = plan_state_json(&loaded, &graph);
+    let mp_plan = plan_master_plan_tables(&loaded, &graph);
+
+    // 5. Apply both plans (write or dry-run).
+    let state_diags = apply_plan(&state_plan, write);
+    let mp_diags = apply_plan(&mp_plan, write);
+
+    report.diagnostics.extend(state_diags);
+    report.diagnostics.extend(mp_diags);
 
     Ok(report)
 }

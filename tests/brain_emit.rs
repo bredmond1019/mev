@@ -1035,3 +1035,346 @@ mod task3_planners {
         assert!(wrote_diag.is_some(), "expected I_EMIT_WROTE diagnostic");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Task 4 — emit_state library driver + CLI surface
+// ---------------------------------------------------------------------------
+
+mod task4_emit_state {
+    use std::fs;
+    use std::path::Path;
+
+    // -----------------------------------------------------------------------
+    // Fixture helpers (mirrored from brain_state.rs)
+    // -----------------------------------------------------------------------
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("mev-emit-state-{tag}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_file(root: &Path, rel: &str, content: &str) {
+        let target = root.join(rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&target, content.as_bytes()).unwrap();
+    }
+
+    fn write_json(root: &Path, rel: &str, value: &serde_json::Value) {
+        write_file(root, rel, &serde_json::to_string_pretty(value).unwrap());
+    }
+
+    /// Write a minimal `brain.toml` that registers two leaf repos (alpha, beta).
+    fn write_brain_toml(root: &Path) {
+        let toml = r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "alpha"
+tier = "primary"
+repo_path = "repos/alpha"
+status_file = "repos/alpha/planning/status.md"
+cache_doc = "docs/projects/alpha.md"
+heading = "Alpha"
+
+[[repos]]
+slug = "beta"
+tier = "primary"
+repo_path = "repos/beta"
+status_file = "repos/beta/planning/status.md"
+cache_doc = "docs/projects/beta.md"
+heading = "Beta"
+"#;
+        fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
+    }
+
+    /// Write a stale HQ brain state.json (repos[] is wrong — it caches alpha with empty now).
+    fn write_stale_brain_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "hq",
+            "kind": "brain",
+            "updated": "2026-06-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "repos": [
+                {
+                    "repo": "alpha",
+                    "now": [],   // stale: alpha actually has in_progress
+                    "next": [],
+                    "blocked": []
+                }
+            ],
+            "cross_repo": []
+        });
+        write_json(root, "planning/state.json", &state);
+    }
+
+    /// Write an alpha leaf state.json with one in_progress block.
+    fn write_alpha_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "alpha",
+            "kind": "project",
+            "updated": "2026-06-29",
+            "focus": {
+                "now": [{ "id": "AL.1.A", "title": "Alpha block A", "status": "in_progress" }],
+                "next": [],
+                "blocked": []
+            },
+            "tracks": [
+                {
+                    "title": "Phase 1",
+                    "blocks": [
+                        { "id": "AL.1.A", "title": "Alpha block A", "status": "in_progress" },
+                        { "id": "AL.1.B", "title": "Alpha block B", "status": "open" }
+                    ]
+                }
+            ]
+        });
+        write_json(root, "repos/alpha/planning/state.json", &state);
+    }
+
+    /// Write a beta leaf state.json with a stale focus (now should be empty, but is set to "BE.1.A").
+    fn write_stale_beta_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "beta",
+            "kind": "project",
+            "updated": "2026-06-29",
+            "focus": {
+                "now": [{ "id": "BE.1.A", "title": "Beta block A", "status": "in_progress" }],  // stale
+                "next": [],
+                "blocked": []
+            },
+            "tracks": [
+                {
+                    "title": "Phase 1",
+                    "blocks": [
+                        { "id": "BE.1.A", "title": "Beta block A", "status": "open" }  // open, not in_progress
+                    ]
+                }
+            ]
+        });
+        write_json(root, "repos/beta/planning/state.json", &state);
+    }
+
+    /// Build the full stale fixture (stale brain + alpha + stale beta).
+    fn write_stale_fixture(root: &Path) {
+        write_brain_toml(root);
+        write_stale_brain_state(root);
+        write_alpha_state(root);
+        write_stale_beta_state(root);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1 — dry-run leaves files unchanged and reports W_EMIT_DRY_RUN
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dry_run_leaves_files_unchanged() {
+        let dir = temp_dir("dry-run");
+        write_stale_fixture(&dir);
+
+        let alpha_state_path = dir.join("repos/alpha/planning/state.json");
+        let beta_state_path = dir.join("repos/beta/planning/state.json");
+        let brain_state_path = dir.join("planning/state.json");
+
+        let alpha_before = fs::read(&alpha_state_path).unwrap();
+        let beta_before = fs::read(&beta_state_path).unwrap();
+        let brain_before = fs::read(&brain_state_path).unwrap();
+
+        let report = mev::emit_state(&dir, false).expect("emit_state should not error");
+
+        // No files must have changed.
+        assert_eq!(
+            fs::read(&alpha_state_path).unwrap(),
+            alpha_before,
+            "alpha state.json must be unchanged in dry-run"
+        );
+        assert_eq!(
+            fs::read(&beta_state_path).unwrap(),
+            beta_before,
+            "beta state.json must be unchanged in dry-run"
+        );
+        assert_eq!(
+            fs::read(&brain_state_path).unwrap(),
+            brain_before,
+            "brain state.json must be unchanged in dry-run"
+        );
+
+        // No errors.
+        assert_eq!(
+            report.error_count(),
+            0,
+            "dry-run on valid fixture should produce no errors; got: {:#?}",
+            report.diagnostics
+        );
+
+        // At least one W_EMIT_DRY_RUN diagnostic (the stale files should produce planned actions).
+        let dry_run_diags: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "W_EMIT_DRY_RUN")
+            .collect();
+        assert!(
+            !dry_run_diags.is_empty(),
+            "expected at least one W_EMIT_DRY_RUN diagnostic; got none. All diagnostics: {:#?}",
+            report.diagnostics
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2 — write=true updates derived views in place
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_mode_updates_derived_views() {
+        let dir = temp_dir("write-mode");
+        write_stale_fixture(&dir);
+
+        let beta_state_path = dir.join("repos/beta/planning/state.json");
+        let beta_before: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&beta_state_path).unwrap()).unwrap();
+
+        // Confirm stale: beta focus.now should show "in_progress" (stale) when beta's block is "open".
+        let before_now = beta_before["focus"]["now"].as_array().unwrap();
+        assert!(
+            !before_now.is_empty(),
+            "fixture must be stale (now should be non-empty before emit)"
+        );
+
+        let report = mev::emit_state(&dir, true).expect("emit_state should not error");
+
+        // No errors.
+        assert_eq!(
+            report.error_count(),
+            0,
+            "write-mode on valid fixture should produce no errors; got: {:#?}",
+            report.diagnostics
+        );
+
+        // At least one I_EMIT_WROTE diagnostic.
+        let wrote_diags: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "I_EMIT_WROTE")
+            .collect();
+        assert!(
+            !wrote_diags.is_empty(),
+            "expected at least one I_EMIT_WROTE diagnostic; got none. All: {:#?}",
+            report.diagnostics
+        );
+
+        // Beta's focus.now must now be empty (block is "open", not "in_progress").
+        let beta_after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&beta_state_path).unwrap()).unwrap();
+        let after_now = beta_after["focus"]["now"].as_array().unwrap();
+        assert!(
+            after_now.is_empty(),
+            "after emit, beta focus.now must be empty (block is open); got: {after_now:?}"
+        );
+
+        // Beta's tracks[] must be preserved — check the block id and status survive.
+        let beta_tracks = &beta_after["tracks"];
+        let first_block = &beta_tracks[0]["blocks"][0];
+        assert_eq!(
+            first_block["id"].as_str().unwrap(),
+            "BE.1.A",
+            "beta tracks[0].blocks[0].id must survive round-trip"
+        );
+        assert_eq!(
+            first_block["status"].as_str().unwrap(),
+            "open",
+            "beta tracks[0].blocks[0].status must survive round-trip"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3 — write=true then emit_state again produces no further changes (fixed-point)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn second_run_is_idempotent() {
+        let dir = temp_dir("idempotent");
+        write_stale_fixture(&dir);
+
+        // First write.
+        mev::emit_state(&dir, true).expect("first emit should not error");
+
+        // Snapshot file contents after first write.
+        let alpha_after1 = fs::read(dir.join("repos/alpha/planning/state.json")).unwrap();
+        let beta_after1 = fs::read(dir.join("repos/beta/planning/state.json")).unwrap();
+        let brain_after1 = fs::read(dir.join("planning/state.json")).unwrap();
+
+        // Second write.
+        let report2 = mev::emit_state(&dir, true).expect("second emit should not error");
+
+        // No I_EMIT_WROTE diagnostics on the second run (nothing changed).
+        let wrote2: Vec<_> = report2
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "I_EMIT_WROTE")
+            .collect();
+        assert!(
+            wrote2.is_empty(),
+            "second run should produce no writes (fixed-point); got: {wrote2:#?}"
+        );
+
+        // Files must be identical.
+        assert_eq!(
+            fs::read(dir.join("repos/alpha/planning/state.json")).unwrap(),
+            alpha_after1,
+            "alpha state must be stable after second emit"
+        );
+        assert_eq!(
+            fs::read(dir.join("repos/beta/planning/state.json")).unwrap(),
+            beta_after1,
+            "beta state must be stable after second emit"
+        );
+        assert_eq!(
+            fs::read(dir.join("planning/state.json")).unwrap(),
+            brain_after1,
+            "brain state must be stable after second emit"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4 — emit_state on a dir without brain.toml returns E_CONFIG_NOT_FOUND
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn missing_brain_toml_returns_config_error() {
+        let dir = temp_dir("no-config");
+        // No brain.toml — emit_state must return E_CONFIG_NOT_FOUND.
+        // (walk-up may find a brain.toml in an ancestor — guard against that.)
+        let has_ancestor = mev::brain::config::find_brain_config(&dir).is_ok();
+        if has_ancestor {
+            // Running on a machine where an ancestor has brain.toml — skip assertion.
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let report = mev::emit_state(&dir, false).expect("emit_state should not panic");
+        let config_err = report
+            .diagnostics
+            .iter()
+            .find(|d| d.locator == "E_CONFIG_NOT_FOUND");
+        assert!(
+            config_err.is_some(),
+            "expected E_CONFIG_NOT_FOUND; got: {:#?}",
+            report.diagnostics
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
