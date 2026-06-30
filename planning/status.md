@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-06-30T06:33:51-0300"
+timestamp: "2026-06-30T08:10:00-0300"
 now: "MV.3.P2 Done — v2 state-graph validator implemented + PASS (8 tasks, 275 tests). Next: MV.3.L (structural coverage) or MV.3B.Q (manifest emit / Phase 3B); coordinate brain-side v2 state.json re-seed for live validation."
 next: "MV.3.L (structural coverage: index.md ↔ dir, D17); MV.3B.Q (manifest emit / Phase 3B); MV.3B.T (table/rollup emit from v2 state graph) — see master-plan.md for ordering"
 blocked: []
@@ -16,7 +16,7 @@ blocked: []
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-30 — `MV.3.P2` (state-graph expansion validation) fully implemented and PASS (8 tasks, 275 tests). Migrated `src/brain/state.rs` to v2 schema (Task 1: `depends_on`/`wave`/`origin` on `TrackBlock`, `Backlog` struct, serde alias for backward compat); re-sourced DAG edges from `tracks[].blocks[].depends_on[]` + added `E_STATE_AUTHORED_BLOCKED` (Task 2); implemented `detect_cycles` (DFS, `E_STATE_CYCLE`) + standalone `ready_order` (Task 3); added status-consistency + backlog-node integrity checks (`E_STATE_STATUS_INCONSISTENT`, `E_STATE_DANGLING_PROMOTION`) (Task 4); added `check_focus_drift` → `W_STATE_FOCUS_DRIFT` warning (Task 5); wired all new checks into `validate_brain_state` pipeline + migrated integration fixtures to v2 (Task 6); updated `docs/cli.md` + `docs/architecture.md` (Task 7); all four harness gates confirmed green (Task 8). Note: live brain `--state` run will correctly fail until the brain-side re-seed of 5 live `state.json` files to v2 lands — that step is coordinated, not blocked on mev.
+**Last updated:** 2026-06-30 — `MV.3.P2` (state-graph expansion validation) fully implemented and PASS (8 tasks, 275 tests). Migrated `src/brain/state.rs` to v2 schema (Task 1: `depends_on`/`wave`/`origin` on `TrackBlock`, `Backlog` struct, serde alias for backward compat); re-sourced DAG edges from `tracks[].blocks[].depends_on[]` + added `E_STATE_AUTHORED_BLOCKED` (Task 2); implemented `detect_cycles` (DFS, `E_STATE_CYCLE`) + standalone `ready_order` (Task 3); added status-consistency + backlog-node integrity checks (`E_STATE_STATUS_INCONSISTENT`, `E_STATE_DANGLING_PROMOTION`) (Task 4); added `check_focus_drift` → `W_STATE_FOCUS_DRIFT` warning (Task 5); wired all new checks into `validate_brain_state` pipeline + migrated integration fixtures to v2 (Task 6); updated `docs/cli.md` + `docs/architecture.md` (Task 7); all four harness gates confirmed green (Task 8). Merged via PR #7; post-review `/code-review low` was clean on the code, and a follow-up doc fix corrected `docs/architecture.md` (the `check_focus_drift` signature, a backlog-integrity check misattributed to `check_state_graph`, and two missing function rows). Note: live brain `--state` run will correctly fail until the brain-side re-seed of 5 live `state.json` files to v2 lands — that step is coordinated, not blocked on mev.
 
 **Current focus:** `MV.3.P2` Done — next: `MV.3.L` (structural coverage: `index.md` ↔ dir, D17) or `MV.3B.Q` (manifest emit / Phase 3B); see master-plan.md for ordering
 
