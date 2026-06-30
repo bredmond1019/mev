@@ -100,7 +100,7 @@ at-a-glance index and token accounting artifact.
 ### Report-file contract (sdlc-run / sdlc-task)
 Reports are named `[taskN-]<stage>.md` under `sdlc/reports/`. `/sdlc-flow` does not use this
 contract — it uses `sdlc-flow-state.json` + `worklog.md` instead (see
-[D31](../../planning/decisions/D31-committed-authoritative-state.md)).
+D31).
 
 | Report | Written by | Read by |
 |---|---|---|
@@ -109,8 +109,8 @@ contract — it uses `sdlc-flow-state.json` + `worklog.md` instead (see
 | `[taskN-]review.md` | review | fix, document |
 | `[taskN-]document.md` | document | — |
 | `[taskN-]workflow.md` | wrap-up (sdlc-run) | humans, `/review-workflow` |
-| `sdlc-flow-state.json` | `/sdlc-flow` state-writer ([D31](../../planning/decisions/D31-committed-authoritative-state.md)) | `--resume`, end-review localization, PR body — **committed** |
-| `worklog.md` | `/sdlc-flow` state-writer ([D31](../../planning/decisions/D31-committed-authoritative-state.md)) | human-readable run trail — **committed** |
+| `sdlc-flow-state.json` | `/sdlc-flow` state-writer (D31) | `--resume`, end-review localization, PR body — **committed** |
+| `worklog.md` | `/sdlc-flow` state-writer (D31) | human-readable run trail — **committed** |
 
 ### The two hard gates
 1. **Review gates Document** — `/document` refuses to run unless the review verdict is `PASS`.
@@ -120,7 +120,7 @@ contract — it uses `sdlc-flow-state.json` + `worklog.md` instead (see
 
 ### Validation is policy, not mechanism
 No engine ships stack defaults. Each project declares its validation commands (and optional UI-test
-stage) in [`planning/harness.json`](../harness-json.md). The test/review stages run exactly those
+stage) in `planning/harness.json`. The test/review stages run exactly those
 checks; absent a config they fall back to the spec's `## Validation Commands` block and disable the
 UI-test stage. **Universal** rules stay hardcoded (no emoji in changed markdown, every change ships with
 tests, parallel port = `port + taskNumber`).
@@ -169,7 +169,7 @@ each engine's committed state file — check the state JSON for real figures fro
 
 > **Token roll-up note:** all engines record **substantive-stages-only** totals — cheap Haiku helper
 > agents (state writers, enumerate, update-task) are excluded. See
-> [D37](../../planning/decisions/D37-unified-committed-state-and-telemetry.md).
+> D37.
 
 ---
 
@@ -184,6 +184,6 @@ each engine's committed state file — check the state JSON for real figures fro
 
 ## Related
 
-- [harness-json.md](../harness-json.md) — the `planning/harness.json` config the engines read.
+- harness-json.md — the `planning/harness.json` config the engines read.
 - [`.claude/commands/README.md`](../../.claude/commands/README.md) — the command catalog.
 - [`planning/decisions/`](../../planning/decisions/index.md) — the ADRs behind each behavior (D6–D43).

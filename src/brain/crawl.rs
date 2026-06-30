@@ -265,7 +265,7 @@ pub(crate) fn is_corpus_member(rel_to_unit: &Path) -> bool {
 /// - `handoff.md` — transient session artifact, never a stable corpus member.
 /// - Any file whose **name** starts with `_` — draft/working files excluded by convention.
 pub(crate) fn is_ephemeral(file_name: &str) -> bool {
-    file_name == "handoff.md" || file_name.starts_with('_')
+    matches!(file_name, "handoff.md" | "tasks.md" | "breakdown.md" | "worklog.md") || file_name.starts_with('_')
 }
 
 /// Walk `root` and return an owned, serializable [`Corpus`] plus any walk-error diagnostics.

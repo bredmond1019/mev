@@ -87,7 +87,7 @@ flowchart TD
 | **update-task** | haiku | Marks the current task in-progress in `tasks.md` (surgical checkbox edit). Does not commit — the state-writer commits it bundled with the state. |
 | **Implement** | sonnet | Executes task N against the spec (and `breakdown.md` if present). Runs the D8 completeness self-check before committing `feat:`. |
 | **Fast test** | haiku | Runs the `gates:true` checks from `harness.json` (the per-task tripwire). Falls back to the spec's `## Validation Commands` if no config. Also runs the universal emoji gate on changed markdown. |
-| **Triage** | sonnet | Classifies a test failure as `RETRYABLE` (transient, or the failure changed — progress is possible) or `MAJOR` (an immediate-bail reason fires, or no progress). See [D32](../../planning/decisions/D32-triage-gated-bail.md). Bail means: break to end-review with `draft` flag. |
+| **Triage** | sonnet | Classifies a test failure as `RETRYABLE` (transient, or the failure changed — progress is possible) or `MAJOR` (an immediate-bail reason fires, or no progress). See D32. Bail means: break to end-review with `draft` flag. |
 | **Fix** | sonnet | Targeted fix for the failing checks only — never a re-implement. Escalates to `opus` on the final attempt (`ESCALATION_MODEL`). |
 | **End-review** | sonnet | ONE consolidated review over the integrated tree. Re-runs the **full** gating suite (authoritative). Reads `git diff <prBase>..HEAD` + `tasks.md` acceptance criteria + the committed `state.json` as the localization index. Verdict: `PASS` / `PARTIAL` / `FAIL`. |
 | **Review fix** | sonnet | Bounded fix for localized end-review findings. Escalates to `opus` on the final pass. A broad or structural finding bails instead (triage decision). |
@@ -129,7 +129,7 @@ replaces the 5 × N report files:
 
 > **Token roll-up note:** `tokens.total` covers substantive stages (implement, test, fix, review,
 > docs, wrap-up). Cheap Haiku helper agents (state writers, enumerate, update-task) are excluded.
-> See [D37](../../planning/decisions/D37-unified-committed-state-and-telemetry.md).
+> See D37.
 
 A **Haiku state-writer agent** stamps `started_at`/`updated_at` and commits both files (bundled
 with the `tasks.md` checkbox edit) in one `chore: flow state — <label>` commit per task/phase.
@@ -163,7 +163,7 @@ the `flow` block. Every key has a CLI flag that overrides it for a single run.
 
 Projects append project-specific reasons via `flow.bailReasons[]`. The triage agent's bias is
 **when unsure, bail** — a wasted retry loop costs more than one human glance at a draft PR. See
-[D32](../../planning/decisions/D32-triage-gated-bail.md).
+D32.
 
 ---
 
