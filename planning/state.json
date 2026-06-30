@@ -5,62 +5,156 @@
   "focus": {
     "now": [],
     "next": [
-      { "id": "MV.3.L", "title": "Structural coverage (index.md ↔ dir)" },
-      { "id": "MV.3B.R", "title": "Graph emit → Postgres edges table + structural query surface" }
+      {
+        "id": "MV.3.L",
+        "title": "Structural coverage (index.md ↔ dir)",
+        "status": null,
+        "note": null,
+        "repo": null,
+        "blocked_by": []
+      },
+      {
+        "id": "MV.3B.R",
+        "title": "Graph emit → Postgres edges table + structural query surface",
+        "status": null,
+        "note": null,
+        "repo": null,
+        "blocked_by": []
+      }
     ],
-    "blocked": []
+    "blocked": [
+      {
+        "id": "MV.3B.S",
+        "title": "Graph-aware RAG (orchestrator integration)",
+        "status": null,
+        "note": null,
+        "repo": null,
+        "blocked_by": [
+          {
+            "type": "block",
+            "repo": "mev",
+            "id": "MV.3B.R",
+            "what": null
+          }
+        ]
+      }
+    ]
   },
   "tracks": [
     {
       "title": "Phase 3 — Brain graph",
       "blocks": [
-        { "id": "MV.3.J", "title": "Global scope:doc_id graph + check_graph diagnostics", "status": "closed", "wave": 1, "depends_on": [] },
-        { "id": "MV.3.K", "title": "Link integrity (markdown / file:// / [[wiki]] links)", "status": "closed", "wave": 2, "depends_on": [] },
-        { "id": "MV.3.P", "title": "State integrity (state.json schema + block graph)", "status": "closed", "wave": 2, "depends_on": [] },
+        {
+          "id": "MV.3.J",
+          "title": "Global scope:doc_id graph + check_graph diagnostics",
+          "status": "closed",
+          "depends_on": [],
+          "wave": 1,
+          "origin": null
+        },
+        {
+          "id": "MV.3.K",
+          "title": "Link integrity (markdown / file:// / [[wiki]] links)",
+          "status": "closed",
+          "depends_on": [],
+          "wave": 2,
+          "origin": null
+        },
+        {
+          "id": "MV.3.P",
+          "title": "State integrity (state.json schema + block graph)",
+          "status": "closed",
+          "depends_on": [],
+          "wave": 2,
+          "origin": null
+        },
         {
           "id": "MV.3.P2",
           "title": "State-graph expansion validation (v2 schema — depends_on DAG, cycle detection, focus drift)",
           "status": "closed",
-          "wave": 3,
           "depends_on": [
-            { "type": "block", "repo": "mev", "id": "MV.3.P", "what": "v2 validation extends the v1 state-integrity foundation" }
-          ]
+            {
+              "type": "block",
+              "repo": "mev",
+              "id": "MV.3.P",
+              "what": "v2 validation extends the v1 state-integrity foundation"
+            }
+          ],
+          "wave": 3,
+          "origin": null
         },
-        { "id": "MV.3.L", "title": "Structural coverage (index.md ↔ dir)", "status": "open", "wave": 4, "depends_on": [] }
+        {
+          "id": "MV.3.L",
+          "title": "Structural coverage (index.md ↔ dir)",
+          "status": "open",
+          "depends_on": [],
+          "wave": 4,
+          "origin": null
+        }
       ]
     },
     {
       "title": "Phase 3B — Manifest + graph emit",
       "blocks": [
-        { "id": "MV.3B.Q", "title": "Manifest emit — validated corpus list for index_brain.py", "status": "closed", "wave": 4, "depends_on": [] },
+        {
+          "id": "MV.3B.Q",
+          "title": "Manifest emit — validated corpus list for index_brain.py",
+          "status": "closed",
+          "depends_on": [],
+          "wave": 4,
+          "origin": null
+        },
         {
           "id": "MV.3B.R",
           "title": "Graph emit → Postgres edges table + structural query surface",
           "status": "open",
-          "wave": 5,
           "depends_on": [
-            { "type": "block", "repo": "mev", "id": "MV.3B.Q" }
-          ]
+            {
+              "type": "block",
+              "repo": "mev",
+              "id": "MV.3B.Q",
+              "what": null
+            }
+          ],
+          "wave": 5,
+          "origin": null
         },
         {
           "id": "MV.3B.T",
           "title": "Table/rollup emit from v2 state graph",
           "status": "closed",
-          "wave": 5,
           "depends_on": [
-            { "type": "block", "repo": "mev", "id": "MV.3.P2", "what": "emits derived focus/rollup tables from the v2 state graph" }
-          ]
+            {
+              "type": "block",
+              "repo": "mev",
+              "id": "MV.3.P2",
+              "what": "emits derived focus/rollup tables from the v2 state graph"
+            }
+          ],
+          "wave": 5,
+          "origin": null
         },
         {
           "id": "MV.3B.S",
           "title": "Graph-aware RAG (orchestrator integration)",
           "status": "open",
-          "wave": 6,
           "depends_on": [
-            { "type": "block", "repo": "mev", "id": "MV.3B.R" }
-          ]
+            {
+              "type": "block",
+              "repo": "mev",
+              "id": "MV.3B.R",
+              "what": null
+            }
+          ],
+          "wave": 6,
+          "origin": null
         }
       ]
     }
-  ]
+  ],
+  "repos": [],
+  "cross_repo": [],
+  "tiers": [],
+  "note": null,
+  "backlog": []
 }

@@ -1,105 +1,113 @@
-#!/usr/bin/env python3
-import json
-import os
-import subprocess
+use crate::brain::manifest::Manifest;
+use std::collections::HashMap;
+use std::path::Path;
 
-def generate_graph():
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    portfolio_root = os.path.abspath(os.path.join(script_dir, "../../../../"))
-    mev_path = os.path.abspath(os.path.join(script_dir, "../../target/release/mev"))
-    
-    print(f"Running mev manifest from {mev_path}...")
-    
-    result = subprocess.run([mev_path, "manifest", portfolio_root], capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"Failed to run mev manifest. Ensure it is built. Error: {result.stderr}")
-        return
+#[derive(serde::Serialize)]
+struct VisNode {
+    id: String,
+    label: String,
+    group: String,
+    value: usize,
+    title: String,
+}
 
-    data = json.loads(result.stdout)
-    edges = []
-    
-    # Store rich node info
-    node_info = {}
-    
-    # Pre-process entries to build node catalog
-    for entry in data.get("entries", []):
-        doc_id = entry.get("doc_id")
-        scope = entry.get("scope", "unknown")
-        if doc_id:
-            node_id = f"{scope}:{doc_id}"
-            node_info[node_id] = {
-                "id": node_id,
-                "label": doc_id,
-                "scope": scope,
-                "title": entry.get("title") or doc_id,
-                "doc_type": entry.get("doc_type") or "Document",
-                "degree": 0
+#[derive(serde::Serialize)]
+struct VisEdge {
+    from: String,
+    to: String,
+}
+
+pub fn generate_graph_visual(manifest: &Manifest, out_dir: &Path) -> anyhow::Result<()> {
+    // 1. Pre-process to build node catalog
+    let mut node_degrees: HashMap<String, usize> = HashMap::new();
+    let mut edges = Vec::new();
+
+    // 2. Pass edges
+    for entry in &manifest.entries {
+        if let Some(doc_id) = &entry.doc_id {
+            let node_id = format!("{}:{}", entry.scope, doc_id);
+            if let Some(related) = &entry.related {
+                for r in related {
+                    let target = if r.contains(':') {
+                        r.to_string()
+                    } else {
+                        format!("{}:{}", entry.scope, r)
+                    };
+                    edges.push(VisEdge { from: node_id.clone(), to: target.clone() });
+                    *node_degrees.entry(node_id.clone()).or_insert(0) += 1;
+                    *node_degrees.entry(target.clone()).or_insert(0) += 1;
+                }
             }
+        }
+    }
 
-    # First pass over edges
-    for entry in data.get("entries", []):
-        doc_id = entry.get("doc_id")
-        scope = entry.get("scope", "unknown")
-        if doc_id:
-            node_id = f"{scope}:{doc_id}"
-            related = entry.get("related") or []
-            for r in related:
-                target = r if ":" in r else f"{scope}:{r}"
-                edges.append({"from": node_id, "to": target})
-                
-                # Ensure target exists in node_info even if it wasn't in the manifest
-                if target not in node_info:
-                    target_scope = target.split(":")[0] if ":" in target else "unknown"
-                    node_info[target] = {
-                        "id": target,
-                        "label": target.split(":")[-1],
-                        "scope": target_scope,
-                        "title": target,
-                        "doc_type": "Unknown",
-                        "degree": 0
-                    }
-                
-                # Increment degree for sizing
-                node_info[node_id]["degree"] += 1
-                node_info[target]["degree"] += 1
-
-    # Filter out isolated nodes
-    connected_nodes = [n for n in node_info.values() if n["degree"] > 0]
+    let mut vis_nodes = Vec::new();
+    for entry in &manifest.entries {
+        if let Some(doc_id) = &entry.doc_id {
+            let node_id = format!("{}:{}", entry.scope, doc_id);
+            if let Some(&degree) = node_degrees.get(&node_id) {
+                if degree > 0 {
+                    let raw_title = entry.title.clone().unwrap_or_else(|| doc_id.clone());
+                    let short_label = if raw_title.len() <= 30 {
+                        raw_title.clone()
+                    } else {
+                        format!("{}...", &raw_title[..27])
+                    };
+                    let doc_type = entry.doc_type.clone().unwrap_or_else(|| "Document".to_string());
+                    
+                    vis_nodes.push(VisNode {
+                        id: node_id.clone(),
+                        label: short_label,
+                        group: entry.scope.clone(),
+                        value: degree,
+                        title: format!("<div style='padding:5px; max-width: 300px;'><b>{}</b><br><i>{}</i><br>ID: {}</div>", raw_title, doc_type, node_id),
+                    });
+                    
+                    // Remove from node_degrees so we can process implicit targets
+                    node_degrees.remove(&node_id);
+                }
+            }
+        }
+    }
     
-    # Prepare vis.js data
-    vis_nodes = []
-    for n in connected_nodes:
-        # Create a shorter label from title
-        title_str = str(n['title'])
-        short_label = title_str if len(title_str) <= 30 else title_str[:27] + "..."
-        vis_nodes.append({
-            "id": n["id"],
-            "label": short_label,
-            "group": n["scope"],
-            "value": n["degree"],
-            "title": f"<div style='padding:5px; max-width: 300px;'><b>{n['title']}</b><br><i>{n['doc_type']}</i><br>ID: {n['id']}</div>"
-        })
+    // Add missing target nodes
+    for (node_id, degree) in node_degrees {
+        if degree > 0 {
+            let scope = node_id.split(':').next().unwrap_or("unknown").to_string();
+            let label = node_id.split(':').last().unwrap_or(&node_id).to_string();
+            vis_nodes.push(VisNode {
+                id: node_id.clone(),
+                label: label.clone(),
+                group: scope,
+                value: degree,
+                title: format!("<div style='padding:5px; max-width: 300px;'><b>{}</b><br><i>Unknown</i><br>ID: {}</div>", label, node_id),
+            });
+        }
+    }
 
-    md_path = os.path.join(script_dir, "graph.md")
-    html_path = os.path.join(script_dir, "graph.html")
-    
-    with open(md_path, "w") as f:
-        f.write("---\n")
-        f.write("type: Reference\n")
-        f.write("title: Brain Knowledge Graph Visual\n")
-        f.write("description: \"Interactive visualization of the scope:doc_id nodes and their related: edges across the portfolio.\"\n")
-        f.write("doc_id: brain-graph-visual\n")
-        f.write("layer: [meta]\n")
-        f.write("project: mev\n")
-        f.write("status: active\n")
-        f.write("---\n\n")
-        
-        f.write("# Brain Knowledge Graph Visual\n\n")
-        f.write(f"The knowledge graph is too large to render via Markdown ({len(connected_nodes)} nodes, {len(edges)} edges). ")
-        f.write("Instead, an **interactive HTML graph** has been generated.\n\n")
-        f.write("Open the `graph.html` file in this directory in any web browser to explore the graph. You can zoom, pan, and drag nodes to see their relationships.\n")
+    let nodes_json = serde_json::to_string(&vis_nodes)?;
+    let edges_json = serde_json::to_string(&edges)?;
+    let node_count = vis_nodes.len();
+    let edge_count = edges.len();
 
-    html_content = f"""<!DOCTYPE html>
+    let md_content = format!(r#"---
+type: Reference
+title: Brain Knowledge Graph Visual
+description: "Interactive visualization of the scope:doc_id nodes and their related: edges across the portfolio."
+doc_id: brain-graph-visual
+layer: [meta]
+project: mev
+status: active
+---
+
+# Brain Knowledge Graph Visual
+
+The knowledge graph is too large to render via Markdown ({node_count} nodes, {edge_count} edges). Instead, an **interactive HTML graph** has been generated.
+
+Open the `graph.html` file in this directory in any web browser to explore the graph. You can zoom, pan, and drag nodes to see their relationships.
+"#);
+
+    let html_content = format!(r#"<!DOCTYPE html>
 <html>
 <head>
     <title>Brain Knowledge Graph</title>
@@ -119,7 +127,7 @@ def generate_graph():
 <body>
 <div id="ui-panel">
     <h2>Bastion Brain Graph</h2>
-    <p>Nodes: <b>{len(connected_nodes)}</b> &nbsp;|&nbsp; Edges: <b>{len(edges)}</b></p>
+    <p>Nodes: <b>{node_count}</b> &nbsp;|&nbsp; Edges: <b>{edge_count}</b></p>
     <p>Hub nodes are sized larger. Colors denote repository scope. Hover over a node for details.</p>
     
     <div style="margin-top: 15px;">
@@ -139,8 +147,8 @@ def generate_graph():
 </div>
 <div id="mynetwork"></div>
 <script type="text/javascript">
-    var rawNodes = {json.dumps(vis_nodes)};
-    var rawEdges = {json.dumps(edges)};
+    var rawNodes = {nodes_json};
+    var rawEdges = {edges_json};
     
     var nodes = new vis.DataSet(rawNodes);
     var edges = new vis.DataSet(rawEdges);
@@ -229,14 +237,14 @@ def generate_graph():
     }}
 </script>
 </body>
-</html>"""
+</html>"#);
 
-    with open(html_path, "w") as f:
-        f.write(html_content)
-
-    print(f"Graph successfully generated with {len(connected_nodes)} connected nodes and {len(edges)} edges.")
-    print(f"-> {md_path}")
-    print(f"-> {html_path}")
-
-if __name__ == "__main__":
-    generate_graph()
+    std::fs::create_dir_all(out_dir)?;
+    std::fs::write(out_dir.join("graph.md"), md_content)?;
+    std::fs::write(out_dir.join("graph.html"), html_content)?;
+    
+    println!("Graph successfully generated with {node_count} connected nodes and {edge_count} edges.");
+    println!("-> {}", out_dir.join("graph.md").display());
+    println!("-> {}", out_dir.join("graph.html").display());
+    Ok(())
+}
