@@ -13,6 +13,10 @@ mod validator;
 pub use brain::BrainValidator;
 pub use brain::crawl::{MdFile, crawl_brain};
 pub use brain::graph::{Graph, build_graph, check_graph};
+pub use brain::links::{
+    LinkKind, LinkRef, check_links, check_moved_references, collect_doc_ids, extract_links,
+    read_moves_pending,
+};
 pub use brain::okf::{OkfFrontmatter, validate_md_file};
 pub use learn_ai::LearnAiValidator;
 pub use learn_ai::crawl::{ContentFile, Corpus, FileKind, Locale, crawl};
@@ -227,6 +231,57 @@ pub fn validate_brain_graph(root: &std::path::Path) -> anyhow::Result<Report> {
     let artifact = build_graph(&corpus, &config);
     let graph_diags = check_graph(&artifact);
     report.diagnostics.extend(graph_diags);
+
+    Ok(report)
+}
+
+/// Validate the company-brain repo for OKF frontmatter compliance **plus** the
+/// link-integrity pass: flags dead markdown links, dead `file://` URIs, dangling
+/// `[[wikilink]]` slugs, and references still pointing at paths listed in
+/// `.brain-moves-pending`.
+///
+/// Phase 3, Block K: runs the full schema pass (identical to [`validate_brain`]) and
+/// then crawls the corpus once, calling [`brain::links::check_links`] and
+/// [`brain::links::check_moved_references`].  The `doc_ids` set is derived from the
+/// same corpus via [`brain::links::collect_doc_ids`] (D5 single-seam discipline).
+///
+/// Error-severity diagnostics (`E_LINK_*`) cause `report.is_failure()` → `true`
+/// (exit 1).
+///
+/// Resolves `brain.toml` the same way as [`validate_brain`] — see that function's
+/// doc for the `E_CONFIG_NOT_FOUND` fallback behaviour.
+pub fn validate_brain_links(root: &std::path::Path) -> anyhow::Result<Report> {
+    use brain::config::find_brain_config;
+    use brain::crawl::crawl_corpus;
+    use brain::links::{check_links, check_moved_references, collect_doc_ids, read_moves_pending};
+
+    let config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            let mut report = Report::default();
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    // Schema pass (OKF frontmatter) — reuse BrainValidator.
+    let mut report = BrainValidator::new(config.clone()).run(root);
+
+    // Link-integrity pass — crawl corpus once, then run both link checks.
+    let (corpus, crawl_diags) = crawl_corpus(root, &config);
+    report.diagnostics.extend(crawl_diags);
+
+    let doc_ids = collect_doc_ids(&corpus);
+    let link_diags = check_links(&corpus, root, &doc_ids);
+    report.diagnostics.extend(link_diags);
+
+    let moved_paths = read_moves_pending(root);
+    let moved_diags = check_moved_references(&corpus, root, &moved_paths);
+    report.diagnostics.extend(moved_diags);
 
     Ok(report)
 }
