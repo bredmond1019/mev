@@ -60,6 +60,7 @@ at the top; only pipeline state lives under `sdlc/`.
 |---|---|---|
 | `herdr-mev-patterns/` | Research notes — herdr patterns applicable to mev graph/crawl/validation (Block J done; patterns Q/R/S/watch deferred) | Active |
 | `3.P-state-integrity/` | Task spec for `MV.3.P` — `mev validate-brain --state`: state.json schema + cross-repo block-dependency graph integrity | Spec drafted |
+| `3.K-link-integrity/` | Task spec for `MV.3.K` — `mev validate-brain --links`: markdown/`file://`/`[[wikilink]]` resolution + `.brain-moves-pending` re-check | Spec drafted |
 
 ## Archived Concept Folders
 
