@@ -12,7 +12,7 @@ related: [master-plan, status, 3-P-state-integrity-tasks, state-json-schema]
 
 # Task Spec — Phase 3, Block P2 (State-graph expansion validation)
 
-**Status:** Task 5 passed · **Last run:** 2026-06-30T10:32:59Z
+**Status:** All 8 tasks passed — PASS · **Last run:** 2026-06-30T10:53:34Z
 
 ## Goal
 Extend `mev validate-brain --state` to guard the **v2 state schema** — the full work-block DAG: validate `depends_on` resolution + acyclicity, reject the now-derived `blocked` status, check status consistency and backlog nodes, and warn on `focus`/rollup derivation drift.
@@ -105,4 +105,8 @@ cargo build --release
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the spec. -->
-_No amendments yet._
+- 2026-06-30 [task 1] Used `#[serde(alias = "block")]` on `Block.id` and `Endpoint.id` rather than a pure rename — preserves v1 fixture backward compat; spec said "rename/cascade" without specifying alias approach.
+- 2026-06-30 [task 2] `tests/brain_state.rs` (task 6's owned file) was also updated in task 2 to keep the full test suite green after the `focus.blocked_by[]` edge source was removed; spec assigned that file exclusively to task 6.
+- 2026-06-30 [task 3] `ready_order` accepts an unused `_graph` parameter (prefixed to suppress clippy) for forward-compat with `MV.3B.T`; `wave=None` treated as `i64::MAX` (lowest priority) — neither detail was specified in the spec.
+- 2026-06-30 [task 5] `check_focus_drift` silently skips files with empty `tracks[]` to avoid false positives on aggregated brain files — the spec did not specify this guard.
+- 2026-06-30 [task 6] `check_focus_drift` is wired to run on all loaded files (not filtered to project-kind only) — spec implied per-file scope without specifying file-kind filtering.

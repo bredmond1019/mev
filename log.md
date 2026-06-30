@@ -17,6 +17,23 @@ timestamp: "2026-06-30T06:33:51-0300"
 
 ---
 
+## 2026-06-30 — MV.3.P2 complete: v2 state-graph expansion validator (8 tasks, PASS, 275 tests)
+
+Implemented the full Block P2 v2 state-graph expansion validator across 8 tasks (all PASS, single attempt each). Task 1 migrated `src/brain/state.rs` to the v2 serde model: `Origin`/`Backlog` structs, `depends_on`/`wave`/`origin` added to `TrackBlock`, `Block.block`/`Endpoint.block` renamed to `id` with serde aliases for v1 backward compat, `backlog[]` added to `StateFile`, and all in-file fixture JSON migrated to canonical v2 form. Task 2 re-sourced DAG edges from `tracks[].blocks[].depends_on[]` (replacing the v1 `focus.blocked_by[]` edge source), added `E_STATE_AUTHORED_BLOCKED` for track blocks with a hand-authored `"blocked"` status, and extended `check_schema` to validate `backlog[].status` ∈ `{idea, ready, promoted}`. Task 3 added `detect_cycles` (DFS-based, emits `E_STATE_CYCLE` with cycle path) and a standalone `ready_order` (wave-ordered ready+open blocks, built as a reusable function for the future `MV.3B.T` emit step). Task 4 added `check_status_consistency` (`E_STATE_STATUS_INCONSISTENT` when a closed block depends on a non-closed block) and `check_backlog_integrity` (`E_STATE_DANGLING_BLOCKED_BY` for unresolvable backlog deps, `E_STATE_DANGLING_PROMOTION` for promoted backlog nodes whose `block` pointer resolves to nothing). Task 5 added `check_focus_drift` which recomputes `focus.now/next/blocked` from `tracks[]` and emits `W_STATE_FOCUS_DRIFT` (warning, exit 0) on mismatch, reusing `ready_order`. Task 6 wired all four new checks into the `validate_brain_state` pipeline in `src/lib.rs`, migrated the integration fixtures in `tests/brain_state.rs` to v2, and added 6 new end-to-end tests (10 total). Task 7 updated `docs/cli.md` (new diagnostic codes, expanded `--state` pipeline description) and `docs/architecture.md` (v2 types, function map). Task 8 confirmed all four harness gates green: `cargo fmt --check`, `clippy -D warnings`, `cargo test` (275 tests, 0 failures), `cargo build --release`. Final review verdict: PASS (no findings). Next: coordinate the brain-side re-seed of the 5 live `state.json` files to v2 to enable live `--state` validation, then `MV.3.L` (structural coverage) or `MV.3B.Q` (manifest emit).
+
+```
+ce336e4 chore: flow state — task 8 passed
+2032d44 chore: mark Task 8 validate passed — all harness gates green (275 tests)
+25c3626 chore: flow state — task 7 passed
+78a606b docs: update cli.md and architecture.md for 3.P2 state-graph v2 (Task 7)
+0f47c99 chore: flow state — task 6 passed
+cbd16f2 feat: implement 3.P2-state-graph-validation-task6
+e495bb9 chore: flow state — task 5 passed
+833f404 feat: implement 3.P2-state-graph-validation-task5
+```
+
+---
+
 ## 2026-06-30 — MV.3.K complete: link integrity validator (`validate-brain --links`)
 
 Implemented the full Block K link integrity layer (all 6 tasks, PASS verdict, 236 tests). Task 1 added `src/brain/links.rs` with a `LinkKind`/`LinkRef` model and `extract_links()` — a single-pass byte-scan state machine (no new regex dependency) that captures markdown `[text](path)`, bare/embedded `file://` URIs, and `[[wikilink]]` targets while correctly skipping external URLs and pure in-page anchors. Task 2 added `check_links()` resolving all three link kinds against the corpus: dead markdown refs emit `E_LINK_DEAD_MARKDOWN`, dead `file://` paths emit `E_LINK_DEAD_FILE_URI`, unknown wikilink slugs emit `E_LINK_DANGLING_WIKILINK`; a `collect_doc_ids()` helper reuses the existing `read_doc_metadata` D5 seam to avoid re-parsing frontmatter. Task 3 added `read_moves_pending()` and `check_moved_references()` consuming the `.brain-moves-pending` ephemeral hook file, emitting `E_LINK_MOVED_REFERENCE` for stale markdown/file:// refs pointing at moved paths (WikiLink slug-resolution intentionally excluded as scope-correct). Task 4 wired everything into a `validate_brain_links()` public API and a `--links` CLI flag on the `ValidateBrain` subcommand, with a UTF-8 boundary panic in the byte scanner fixed during this task; 9 end-to-end integration tests cover all four diagnostic codes plus the clean-corpus and JSON-envelope paths. Task 5 documented the `--links` flag and all four `E_LINK_*` codes in `docs/cli.md` and added the `links.rs` module to `docs/architecture.md`. Task 6 confirmed all four harness gates green (fmt, clippy, 236 tests, release build). A live run against the company brain confirmed genuine findings: dangling `[[bin]]`/`[[test]]` wikilinks in claude-sdk-rs status docs, dead `file://` URIs with placeholder paths, and dead markdown links in SECURITY.md. Next: `MV.3.L` (structural coverage: `index.md` ↔ dir) or `MV.3B.Q` (manifest emit / Phase 3B).
