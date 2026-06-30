@@ -19,6 +19,29 @@ timestamp: "2026-06-30T08:09:28-0300"
 
 ## 2026-06-30
 
+### MV.3B.T complete: state-graph table + rollup emit (`emit-state` subcommand, 6 tasks, PASS, 275 tests)
+
+Implemented the full Block 3B.T single-derivation emit engine across 6 tasks (all PASS). Task 1 extracted `derive_focus`, `derive_rollup`, and `derive_cross_repo` from `check_focus_drift` into reusable public functions in `src/brain/state.rs` — `DerivedFocus { now, next, blocked }` returning derived block ids (with unmet `depends_on` subsets for `blocked`); `check_focus_drift` now delegates to `derive_focus` so the validator and emitter share one derivation; 8 integration tests added. Task 2 created `src/brain/emit.rs` with `EmitError` (thiserror), `wave_order` (all-block wave sort, `None`-last), `render_wave_table` (Markdown table with derived `blocked` status), and `splice_generated` (idempotent sentinel-aware splice of `<!-- BEGIN/END generated:{marker} -->` regions); 18 integration tests in `tests/brain_emit.rs`. Task 3 added `EmitAction`/`EmitPlan` types, `plan_state_json` (leaf focus regen + brain rollup regen with fixed-point check), `plan_master_plan_tables` (sentinel-aware wave-table splice — missing sentinels yield `W_EMIT_NO_SENTINEL`, never forced into prose), and `apply_plan` (dry-run/write split); 14 integration tests covering fixed-point property, idempotency, and dry-run/write behaviour. Task 4 added the `emit_state` library driver (`src/lib.rs`) and the `emit-state` CLI subcommand (`src/main.rs`) with `--write` flag; default is dry-run; exits from `report.is_failure()`; 4 integration tests. Task 5 updated `docs/cli.md` (subcommand reference, sentinel contract, diagnostic codes) and `docs/architecture.md` (emit module map + function table, `derive_*` helpers). Task 6 confirmed all four harness gates green: `cargo fmt --check`, `clippy -D warnings`, `cargo test` (275 tests, 0 failures), `cargo build --release`. Final review verdict: PASS (no findings). `mev emit-state --write` is now the fixed point of `mev validate-brain --state`: running emit then validate reports zero `W_STATE_FOCUS_DRIFT` / `W_STATE_ROLLUP_DRIFT`. Next: `MV.3.L` (structural coverage) or `MV.3B.Q` (manifest emit / Phase 3B).
+
+```
+8bffa82 chore: flow state — docs
+decdef0 chore: flow state — task 6 passed
+f85af39 chore: flow state — task 5 passed
+9082dae feat: implement 3B.T-state-table-rollup-emit-task5
+c6d8595 chore: flow state — task 4 passed
+4b8bb76 feat: implement 3B.T-state-table-rollup-emit-task4
+61dd986 chore: flow state — task 3 passed
+0309e40 feat: implement 3B.T-state-table-rollup-emit-task3
+f943487 chore: flow state — task 2 passed
+55e9653 feat: implement 3B.T-state-table-rollup-emit-task2
+3b86689 chore: flow state — task 1 passed
+c141664 feat: implement 3B.T-state-table-rollup-emit-task1
+```
+
+---
+
+## 2026-06-30
+
 ### MV.3.P2 merged via PR #7 — v2 state-graph validator (8 tasks, 275 tests, PASS)
 
 - **What:** Ran `/sdlc-flow 3.P2-state-graph-validation` to completion (8 tasks, PASS, 275 tests) and merged it via **PR #7** (merge commit `460d0cd`). MV.3.P2 migrates `src/brain/state.rs` to the v2 `state.json` schema: `depends_on` DAG on track blocks, `detect_cycles` (`E_STATE_CYCLE`), `ready_order`, `check_status_consistency` (`E_STATE_STATUS_INCONSISTENT`), `check_backlog_integrity` (`E_STATE_DANGLING_PROMOTION`), `check_focus_drift` (`W_STATE_FOCUS_DRIFT`), and `E_STATE_AUTHORED_BLOCKED` — all wired into `validate_brain_state`. Post-merge `/code-review low` found no code issues; a follow-up doc fix (commit `1edbd21`) corrected `docs/architecture.md`: the `check_focus_drift` signature (was missing the 4th `files` arg), backlog integrity wrongly attributed to `check_state_graph` (it is `check_backlog_integrity`), and two missing function-table rows (`check_status_consistency`, `check_backlog_integrity`). Local `main` fast-forwarded cleanly; worktree `trees/3.P2-state-graph-validation-flow` removed, branch deleted; `main == origin/main` at `460d0cd`.
