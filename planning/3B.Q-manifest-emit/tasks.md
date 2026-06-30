@@ -1,6 +1,6 @@
 # Task Spec — Phase 3B, Block Q (Manifest Emit)
 
-**Status:** In progress (Tasks 1–4 passed) · **Last run:** 2026-06-30T20:50:52Z
+**Status:** Done (all 6 tasks passed, PASS) · **Last run:** 2026-06-30
 
 ## Goal
 Emit the canonical file-list + per-file OKF metadata as JSON from the corpus crawl result, so the
@@ -125,4 +125,4 @@ cargo build --release
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the spec. -->
-_No amendments yet._
+- 2026-06-30 [task 2] Removed the 3 `read_doc_metadata` unit tests from `graph.rs` along with the function — the spec said "all existing graph unit tests must pass unchanged" but those tests directly tested the removed seam and cannot pass once `read_doc_metadata` is deleted; behavior-level graph tests all pass unchanged.
