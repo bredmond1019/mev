@@ -19,3 +19,8 @@ Validated: gating checks (fast tripwire)
 What: Added check_status_consistency (E_STATE_STATUS_INCONSISTENT) and check_backlog_integrity (E_STATE_DANGLING_BLOCKED_BY + E_STATE_DANGLING_PROMOTION) functions with 8 unit tests; all 267 state module tests pass and all harness gates green.
 Decisions: check_status_consistency silently skips dangling deps (dep key not in status_map) to avoid double-reporting with check_state_graph's E_STATE_DANGLING_BLOCKED_BY; check_backlog_integrity emits E_STATE_DANGLING_PROMOTION for both cases: promoted node with no block pointer AND promoted node with a block pointer that resolves to nothing; Both functions are standalone public functions rather than extensions of check_state_graph, matching the spec's 'new check fns' language and keeping separation clean for task 6 wiring
 Validated: gating checks (fast tripwire)
+
+## Task 5 — PASSED (1 attempt)
+What: Add check_focus_drift to src/brain/state.rs — recomputes focus.now/next/blocked from tracks[] and emits W_STATE_FOCUS_DRIFT (warning, exit 0) on mismatch; 8 unit tests covering all cases.
+Decisions: Skips files with empty tracks[] (brain files whose focus comes from aggregated child repos would produce false positives); Signature takes (src, file, graph, files) so ready_order can be called cross-file for accurate next derivation; open blocks with any External dep or any unclosed Block dep go into derived blocked; ready_order output filtered by repo prefix gives derived next
+Validated: gating checks (fast tripwire)
