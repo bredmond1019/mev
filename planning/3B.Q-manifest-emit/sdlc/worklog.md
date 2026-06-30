@@ -29,3 +29,6 @@ Validated: gating checks (fast tripwire)
 What: Task 6 is a pure validation gate — all four harness commands pass (fmt, clippy, test, build) and `cargo run -- manifest --help` prints correct subcommand help
 Decisions: No code changes needed — Task 6 is purely a validation task; the working tree was already clean from Tasks 1–5
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: none
