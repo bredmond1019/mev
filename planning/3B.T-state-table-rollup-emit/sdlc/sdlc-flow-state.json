@@ -2,9 +2,9 @@
   "spec_slug": "3B.T-state-table-rollup-emit",
   "branch": "3B.T-state-table-rollup-emit-flow",
   "started_at": "2026-06-30T14:17:03Z",
-  "updated_at": "2026-06-30T14:51:30Z",
+  "updated_at": "2026-06-30T14:58:49Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.T-state-table-rollup-emit-flow",
-  "status": "running",
+  "status": "docs",
   "current_task": 6,
   "tasks": {
     "1": {
@@ -115,9 +115,9 @@
     }
   },
   "review": {
-    "verdict": null,
+    "verdict": "PASS",
     "findings": [],
-    "attempts": 0
+    "attempts": 1
   },
   "docs": {
     "changed": [],
@@ -313,13 +313,29 @@
         "filesReadKb": null,
         "inTokEst": 588,
         "outTok": 2420
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 1010,
+        "filesReadKb": null,
+        "inTokEst": 1010,
+        "outTok": 7960
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 818,
+        "filesReadKb": null,
+        "inTokEst": 818,
+        "outTok": 2830
       }
     ],
     "total": {
-      "promptTokEst": 13471,
+      "promptTokEst": 15299,
       "filesReadKb": 0,
-      "inTokEst": 13471,
-      "outTok": 107806
+      "inTokEst": 15299,
+      "outTok": 118596
     }
   }
 }

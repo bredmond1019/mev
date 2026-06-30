@@ -29,3 +29,6 @@ Validated: gating checks (fast tripwire)
 What: Task 6 (Validate): all four harness gates pass — cargo fmt --check, cargo clippy -D warnings, cargo test (275 tests), cargo build --release; no source changes needed.
 Fixed via: The test stage returned null (failCount=?, failed=) which indicates the pipeline runner failed to capture output, not a code defect — all four harness gates pass cleanly when run directly (275 tests, 0 failures; fmt, clippy, test, build all green).
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: none
