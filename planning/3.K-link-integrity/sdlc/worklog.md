@@ -9,3 +9,8 @@ Validated: gating checks (fast tripwire)
 What: Added check_links (resolves Markdown/FileUri/WikiLink refs with E_LINK_* diagnostics) and collect_doc_ids (D5-seam bare doc_id extractor) to src/brain/links.rs, with 9 new unit tests covering all required scenarios.
 Decisions: _root parameter kept in check_links signature for symmetry with sibling check_* functions (not used in this pass — relative markdown links resolve from entry.path); file:// stripping uses strip_prefix("file://") so file:///abs/path → /abs/path correctly; brain_only_config helper removed from tests — not needed since all tests construct CorpusEntry directly
 Validated: gating checks (fast tripwire)
+
+## Task 3 — PASSED (1 attempt)
+What: Added read_moves_pending and check_moved_references to src/brain/links.rs; missing .brain-moves-pending produces no diagnostics, stale markdown/file:// refs to moved paths emit E_LINK_MOVED_REFERENCE
+Decisions: normalize_path uses lexical component walking (no canonicalize) so it works on paths that may no longer exist on disk; WikiLink targets are slug-based and excluded from moved-reference scanning — only Markdown and FileUri links are path-resolved against moved_paths
+Validated: gating checks (fast tripwire)

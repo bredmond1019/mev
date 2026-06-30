@@ -2,10 +2,10 @@
   "spec_slug": "3.K-link-integrity",
   "branch": "3.K-link-integrity-flow",
   "started_at": "2026-06-30T08:40:01Z",
-  "updated_at": "2026-06-30T08:45:38Z",
+  "updated_at": "2026-06-30T08:49:57Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.K-link-integrity-flow",
   "status": "running",
-  "current_task": 2,
+  "current_task": 3,
   "tasks": {
     "1": {
       "status": "passed",
@@ -35,6 +35,22 @@
         "_root parameter kept in check_links signature for symmetry with sibling check_* functions (not used in this pass — relative markdown links resolve from entry.path)",
         "file:// stripping uses strip_prefix(\"file://\") so file:///abs/path → /abs/path correctly",
         "brain_only_config helper removed from tests — not needed since all tests construct CorpusEntry directly"
+      ],
+      "files_changed": [
+        "src/brain/links.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "3": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added read_moves_pending and check_moved_references to src/brain/links.rs; missing .brain-moves-pending produces no diagnostics, stale markdown/file:// refs to moved paths emit E_LINK_MOVED_REFERENCE",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "normalize_path uses lexical component walking (no canonicalize) so it works on paths that may no longer exist on disk",
+        "WikiLink targets are slug-based and excluded from moved-reference scanning — only Markdown and FileUri links are path-resolved against moved_paths"
       ],
       "files_changed": [
         "src/brain/links.rs"
@@ -122,13 +138,37 @@
         "filesReadKb": null,
         "inTokEst": 568,
         "outTok": 1765
+      },
+      {
+        "label": "update-task-3",
+        "model": "haiku",
+        "promptTokEst": 253,
+        "filesReadKb": null,
+        "inTokEst": 253,
+        "outTok": 1405
+      },
+      {
+        "label": "implement-3-1",
+        "model": "sonnet",
+        "promptTokEst": 880,
+        "filesReadKb": null,
+        "inTokEst": 880,
+        "outTok": 7507
+      },
+      {
+        "label": "test-3-1",
+        "model": "haiku",
+        "promptTokEst": 568,
+        "filesReadKb": null,
+        "inTokEst": 568,
+        "outTok": 1796
       }
     ],
     "total": {
-      "promptTokEst": 4395,
+      "promptTokEst": 6096,
       "filesReadKb": 0,
-      "inTokEst": 4395,
-      "outTok": 33228
+      "inTokEst": 6096,
+      "outTok": 43936
     }
   }
 }
