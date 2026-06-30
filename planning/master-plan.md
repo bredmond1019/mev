@@ -348,14 +348,17 @@ JSON; never touches a DB); persistence and the AI layer are the orchestrator's. 
 - **Note:** this block is orchestrator-side work, tracked here only because mev's emitted edge model is its
   contract. It does not change mev.
 
-### MV.3B.T — State-graph table + rollup emit (the `MV.3B.R` parallel)
-- **What:** Emit the derived views the v2 state schema declares **generated**: the master-plan
-  **wave/dependency tables** (written into `master-plan.md` between sentinel comments
-  `<!-- BEGIN generated:wave-table -->` … `<!-- END -->` so narrative is never clobbered) and the brain
-  `repos[]` / `cross_repo[]` rollup. Reads the union of all repos' `tracks[]`, builds the work-block DAG
-  (reusing `MV.3.P2`'s graph + topo ordering), and emits — same **pure compiler** model as `MV.3B.R`
-  (files in → artifact out; no DB, no network). Settles D3 (Option B): mev owns table generation, not a
-  conversational `/log-work` agent.
+### MV.3B.T — State-graph derived-view emit (the `MV.3B.R` parallel)
+- **What:** Make mev the **single derivation engine** (`mev emit-state`) for every derived view the v2
+  state schema declares **generated**: the leaf **`focus`** snapshot (now/next/blocked), the brain
+  `repos[]` / `cross_repo[]` rollup, and the master-plan **wave/dependency tables** (written into
+  `master-plan.md` between sentinel comments `<!-- BEGIN generated:wave-table -->` … `<!-- END -->` so
+  narrative is never clobbered). Reads the union of all repos' `tracks[]`, builds the work-block DAG
+  (reusing `MV.3.P2`'s graph + topo ordering and the **same `derive_focus` the drift check uses**), and
+  emits — same **pure compiler** model as `MV.3B.R` (files in → artifact out; no DB, no network).
+  **`/log-work` regenerates state by shelling out to `mev emit-state --write`** rather than re-deriving
+  in a brain command, so the validator and the writer share one derivation. Settles D3 (Option B): mev
+  owns derived-view generation, not a conversational `/log-work` agent.
 - **Acceptance:** the emitted tables match the authored DAG (wave order + dependency columns);
   regeneration preserves every line of narrative outside the sentinels; the brain rollup matches the
   children's `tracks[]`; mev writes nothing to any DB.
@@ -402,7 +405,7 @@ existence — applied across content types.
 | 3B | MV.3B.Q | Manifest emit (file-list + metadata JSON) | Embedder consumes it; kill double crawl | Corpus engine output (D4) |
 | 3B | MV.3B.R | Graph emit + structural query surface | Free/exact "where/what's connected" answers | Knowledge graph as product (D4) |
 | 3B | MV.3B.S | Graph-aware RAG *(orchestrator)* | Fuse semantic + structural retrieval | The two-mode endgame (D4) |
-| 3B | MV.3B.T | State-graph table + rollup emit | Generate master-plan tables + brain rollup | Corpus engine output (D3/D4) |
+| 3B | MV.3B.T | State-graph derived-view emit (`emit-state`) | Generate leaf `focus` + master-plan tables + brain rollup (single engine `/log-work` calls) | Corpus engine output (D3/D4) |
 | 4 | — | Blog validation + code-block/link linting | Cover a fourth content type | Whole-tree coverage |
 | 5+ | — | `watch` (hot-reload) + `compile` (manifest.json) | Speed + precompiled index | Differentiating build |
 
