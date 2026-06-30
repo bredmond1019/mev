@@ -17,6 +17,23 @@ timestamp: "2026-06-29T17:50:21-0300"
 
 ---
 
+## 2026-06-30 — MV.3.K complete: link integrity validator (`validate-brain --links`)
+
+Implemented the full Block K link integrity layer (all 6 tasks, PASS verdict, 236 tests). Task 1 added `src/brain/links.rs` with a `LinkKind`/`LinkRef` model and `extract_links()` — a single-pass byte-scan state machine (no new regex dependency) that captures markdown `[text](path)`, bare/embedded `file://` URIs, and `[[wikilink]]` targets while correctly skipping external URLs and pure in-page anchors. Task 2 added `check_links()` resolving all three link kinds against the corpus: dead markdown refs emit `E_LINK_DEAD_MARKDOWN`, dead `file://` paths emit `E_LINK_DEAD_FILE_URI`, unknown wikilink slugs emit `E_LINK_DANGLING_WIKILINK`; a `collect_doc_ids()` helper reuses the existing `read_doc_metadata` D5 seam to avoid re-parsing frontmatter. Task 3 added `read_moves_pending()` and `check_moved_references()` consuming the `.brain-moves-pending` ephemeral hook file, emitting `E_LINK_MOVED_REFERENCE` for stale markdown/file:// refs pointing at moved paths (WikiLink slug-resolution intentionally excluded as scope-correct). Task 4 wired everything into a `validate_brain_links()` public API and a `--links` CLI flag on the `ValidateBrain` subcommand, with a UTF-8 boundary panic in the byte scanner fixed during this task; 9 end-to-end integration tests cover all four diagnostic codes plus the clean-corpus and JSON-envelope paths. Task 5 documented the `--links` flag and all four `E_LINK_*` codes in `docs/cli.md` and added the `links.rs` module to `docs/architecture.md`. Task 6 confirmed all four harness gates green (fmt, clippy, 236 tests, release build). A live run against the company brain confirmed genuine findings: dangling `[[bin]]`/`[[test]]` wikilinks in claude-sdk-rs status docs, dead `file://` URIs with placeholder paths, and dead markdown links in SECURITY.md. Next: `MV.3.L` (structural coverage: `index.md` ↔ dir) or `MV.3B.Q` (manifest emit / Phase 3B).
+
+```
+e62f481 chore: flow state — docs
+34b01f1 chore: flow state — task 6 passed
+32ea092 chore: flow state — task 5 passed
+7223483 feat: implement 3.K-link-integrity-task5
+8b70af3 chore: flow state — task 4 passed
+e1c86e6 feat: implement 3.K-link-integrity-task4
+b1c3989 chore: flow state — task 3 passed
+782f4ad feat: implement 3.K-link-integrity-task3
+```
+
+---
+
 ## 2026-06-29 — MV.3.P complete: post-flow code-review fix + PR #5 merged
 
 - **What:** MV.3.P (`validate-brain --state`) fully implemented and merged. All 7 tasks PASS; 209 tests green. Post-flow `/code-review low --fix` removed dead `(usize, &PathBuf)` tuple from `node_counts` in `check_state_graph` (path stored but never read). PR #5 merged, worktree cleaned, `main` pushed to origin.

@@ -55,12 +55,12 @@ mev --json validate
 
 ---
 
-### `validate-brain [--sync] [--graph] [--state] [path]`
+### `validate-brain [--sync] [--graph] [--state] [--links] [path]`
 
-Validate the Bastion Brain repo for OKF frontmatter compliance, and optionally check cross-repo sync watermark integrity, global knowledge-graph integrity, or state.json schema and block-dependency graph integrity.
+Validate the Bastion Brain repo for OKF frontmatter compliance, and optionally check cross-repo sync watermark integrity, global knowledge-graph integrity, state.json schema and block-dependency graph integrity, or link integrity.
 
 ```bash
-mev validate-brain [--sync] [--graph] [--state] [path]
+mev validate-brain [--sync] [--graph] [--state] [--links] [path]
 ```
 
 | Argument / Flag | Default | Description |
@@ -69,6 +69,7 @@ mev validate-brain [--sync] [--graph] [--state] [path]
 | `--sync` | off | Also run the cross-repo sync watermark check (see below) |
 | `--graph` | off | Also run the global `scope:doc_id` knowledge-graph integrity check (see below). Takes precedence over `--sync` when both flags are present — `--graph` is a superset. |
 | `--state` | off | Also run the `planning/state.json` schema and cross-repo block-dependency graph integrity check (see below). Takes precedence over `--graph` and `--sync` in the dispatch chain. |
+| `--links` | off | Also run the link-integrity pass (see below) — flag dead markdown links, broken `file://` URIs, dangling `[[wikilinks]]`, and references to moved/deleted paths. Takes precedence over `--state`, `--graph`, and `--sync` in the dispatch chain. |
 
 Resolves `brain.toml` by walking up from `path`. If no `brain.toml` is found, a fatal `Error`-severity diagnostic with locator `E_CONFIG_NOT_FOUND` is emitted and the process exits 1.
 
@@ -121,7 +122,7 @@ When `--state` is passed, `mev` runs the full OKF schema pass first, then append
 4. **Graph** — builds the cross-repo block-dependency graph from all loaded files and checks it for integrity violations.
 5. **Rollup** — checks that brain `repos[]` headline entries (now/next) match their children's actual `focus` values.
 
-`--state` takes the highest precedence in the dispatch chain — when `--state` is present, `--graph` and `--sync` are not separately invoked.
+`--state` takes precedence over `--graph` and `--sync` in the dispatch chain — when `--state` is present, neither `--graph` nor `--sync` are separately invoked. `--links` takes the highest precedence overall; when `--links` is present, `--state`, `--graph`, and `--sync` are not separately invoked.
 
 | Locator | Severity | Condition |
 |---|---|---|
@@ -137,6 +138,28 @@ When `--state` is passed, `mev` runs the full OKF schema pass first, then append
 | `E_STATE_DANGLING_BLOCKED_BY` | Error | A cross-repo block dependency's block does not exist in the named repo |
 | `E_STATE_DANGLING_CROSS_REPO` | Error | A brain `cross_repo[]` edge's endpoint does not resolve to a known block |
 | `W_STATE_ROLLUP_DRIFT` | Warning | Brain `repos[]` headline differs from the child repo's actual `focus` |
+
+#### `--links` — link-integrity pass
+
+When `--links` is passed, `mev` runs the full OKF schema pass first, then appends a link-integrity pass:
+
+1. **Extract** — parses every corpus file for markdown `[text](path)` inline links, `file://` URIs, and `[[wikilink]]` references. External links (`http://`, `https://`, `mailto:`, `tel:`, protocol-relative `//`) and pure in-page anchors (`#section`) are unconditionally skipped.
+2. **Resolve** — checks each local reference on disk:
+   - Relative markdown links are resolved against the referring file's directory.
+   - `file://` URIs are resolved to absolute paths.
+   - `[[wikilinks]]` are matched against the set of authored `doc_id`s in the corpus.
+3. **Moved-reference re-check** — reads `.brain-moves-pending` from the brain root (optional/ephemeral; if missing, no diagnostics are added). Each line is `<ISO-date> <path...>`; the pass flags any corpus reference that still targets a moved or deleted path.
+
+The pass is **read-only** — it never mutates the corpus (D25).
+
+| Locator | Severity | Condition |
+|---|---|---|
+| `E_LINK_DEAD_MARKDOWN` | Error | A markdown `[text](path)` link's resolved path does not exist on disk |
+| `E_LINK_DEAD_FILE_URI` | Error | A `file://` URI's resolved path does not exist on disk |
+| `E_LINK_DANGLING_WIKILINK` | Error | A `[[wikilink]]` target slug is not present in the corpus `doc_id` set |
+| `E_LINK_MOVED_REFERENCE` | Error | A markdown or `file://` reference still points at a path listed in `.brain-moves-pending` |
+
+Any error-severity diagnostic causes exit 1.
 
 **Examples:**
 
@@ -173,6 +196,15 @@ mev --json validate-brain --graph ~/Dev/agentic-portfolio
 
 # Machine-readable output including state diagnostics
 mev --json validate-brain --state ~/Dev/agentic-portfolio
+
+# OKF pass + link-integrity check
+mev validate-brain --links
+
+# Explicit path with link-integrity check
+mev validate-brain --links ~/Dev/agentic-portfolio
+
+# Machine-readable output including link diagnostics
+mev --json validate-brain --links ~/Dev/agentic-portfolio
 ```
 
 ---
