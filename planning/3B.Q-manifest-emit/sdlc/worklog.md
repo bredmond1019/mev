@@ -24,3 +24,8 @@ Validated: gating checks (fast tripwire)
 What: Updated docs/cli.md with the manifest subcommand reference (arguments, --pretty flag, output shape, exit codes, sample JSON) and docs/architecture.md with the manifest module entry, ManifestEntry/Manifest types, build_manifest function, D5 extract-once refactor note, and removal of read_doc_metadata.
 Decisions: Inserted the manifest section in cli.md between emit-state and the surrounding --- delimiters to match the existing subcommand layout; Updated architecture.md graph.rs module-map line to note read_doc_metadata removal inline rather than deleting the DocMeta type entry, since DocMeta still exists in that module; Updated collect_doc_ids description in links.rs section to drop the stale 'reuses read_doc_metadata' phrasing
 Validated: gating checks (fast tripwire)
+
+## Task 6 — PASSED (1 attempt)
+What: Task 6 is a pure validation gate — all four harness commands pass (fmt, clippy, test, build) and `cargo run -- manifest --help` prints correct subcommand help
+Decisions: No code changes needed — Task 6 is purely a validation task; the working tree was already clean from Tasks 1–5
+Validated: gating checks (fast tripwire)
