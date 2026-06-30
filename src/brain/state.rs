@@ -3431,6 +3431,7 @@ mod tests {
             tiers: vec![],
             note: None,
             backlog: vec![],
+            carryover: vec![],
         };
         let src = StateSource {
             repo_slug: repo.to_string(),
@@ -3706,6 +3707,7 @@ mod tests {
             tiers: vec![],
             note: None,
             backlog: vec![],
+            carryover: vec![],
         };
         let src = StateSource {
             repo_slug: repo.to_string(),
@@ -3863,6 +3865,7 @@ mod tests {
             tiers: vec![],
             note: None,
             backlog: backlog_nodes,
+            carryover: vec![],
         };
         let src = StateSource {
             repo_slug: repo.to_string(),
@@ -4013,6 +4016,7 @@ mod tests {
             tiers: vec![],
             note: None,
             backlog: vec![],
+            carryover: vec![],
         };
         let mev_src = StateSource {
             repo_slug: "mev".to_string(),
@@ -4077,6 +4081,7 @@ mod tests {
             tiers: vec![],
             note: None,
             backlog: vec![],
+            carryover: vec![],
         }
     }
 
@@ -4119,6 +4124,7 @@ mod tests {
             tiers: vec![],
             note: None,
             backlog: vec![],
+            carryover: vec![],
         }
     }
 
@@ -4273,6 +4279,7 @@ mod tests {
             tiers: vec![],
             note: None,
             backlog: vec![],
+            carryover: vec![],
         };
         let src = StateSource {
             repo_slug: repo.to_string(),
@@ -4460,6 +4467,7 @@ mod tests {
             tiers: vec![],
             note: None,
             backlog: vec![],
+            carryover: vec![],
         };
         let src = StateSource {
             repo_slug: "hq".to_string(),
@@ -4571,3 +4579,69 @@ mod tests {
         );
     }
 }
+
+    // -----------------------------------------------------------------------
+    // Carryover tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn carryover_array_deserializes() {
+        let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "some-caveat",
+      "scope": { "repo": "bastion" },
+      "kind": "constraint",
+      "text": "A durable caveat.",
+      "created": "2026-06-30"
+    }
+  ]
+}"#;
+        let file: StateFile = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(file.carryover.len(), 1);
+        assert_eq!(file.carryover[0].slug, "some-caveat");
+        assert_eq!(file.carryover[0].scope.repo.as_deref(), Some("bastion"));
+        assert!(file.carryover[0].scope.tier.is_none());
+        assert_eq!(file.carryover[0].kind, "constraint");
+    }
+
+    #[test]
+    fn carryover_schema_checks() {
+        let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "bad-kind",
+      "scope": { "repo": "bastion" },
+      "kind": "unknown_kind",
+      "text": "Bad kind.",
+      "created": "2026-06-30"
+    },
+    {
+      "slug": "bad-scope",
+      "scope": { "repo": "bastion", "tier": "core" },
+      "kind": "known_issue",
+      "text": "Malformed scope.",
+      "created": "2026-06-30"
+    }
+  ]
+}"#;
+        let file: StateFile = serde_json::from_str(json).unwrap();
+        let src = StateSource {
+            repo_slug: "bastion".to_string(),
+            abs_path: PathBuf::from("planning/state.json"),
+            expected_kind: "project",
+        };
+        let diags = check_schema(&src, &file);
+        
+        let bad_kind = diags.iter().any(|d| d.locator == "E_STATE_SCHEMA_BAD_KIND" && d.message.contains("bad-kind"));
+        let bad_scope = diags.iter().any(|d| d.locator == "E_STATE_SCHEMA_MALFORMED_SCOPE" && d.message.contains("bad-scope"));
+        
+        assert!(bad_kind, "Should flag bad kind");
+        assert!(bad_scope, "Should flag malformed scope");
+    }

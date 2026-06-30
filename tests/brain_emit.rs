@@ -41,6 +41,7 @@ fn make_leaf(repo: &str, tracks: Vec<Track>) -> StateFile {
         tiers: vec![],
         note: None,
         backlog: vec![],
+        carryover: vec![],
     }
 }
 
@@ -529,6 +530,7 @@ mod task3_planners {
             tiers: vec![],
             note: None,
             backlog: vec![],
+            carryover: vec![],
         }
     }
 
@@ -548,6 +550,7 @@ mod task3_planners {
             tiers: vec![],
             note: None,
             backlog: vec![],
+            carryover: vec![],
         }
     }
 
