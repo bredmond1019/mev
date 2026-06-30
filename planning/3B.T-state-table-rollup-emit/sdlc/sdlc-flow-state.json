@@ -2,10 +2,10 @@
   "spec_slug": "3B.T-state-table-rollup-emit",
   "branch": "3B.T-state-table-rollup-emit-flow",
   "started_at": "2026-06-30T14:17:03Z",
-  "updated_at": "2026-06-30T14:22:28Z",
+  "updated_at": "2026-06-30T14:28:57Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.T-state-table-rollup-emit-flow",
   "status": "running",
-  "current_task": 2,
+  "current_task": 3,
   "tasks": {
     "1": {
       "status": "passed",
@@ -41,6 +41,24 @@
       "files_changed": [
         "src/brain/emit.rs",
         "src/brain/mod.rs",
+        "tests/brain_emit.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "3": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added EmitAction/EmitPlan types, plan_state_json (leaf focus regen + brain rollup regen with fixed-point check), plan_master_plan_tables (sentinel-aware wave-table splice), and apply_plan (dry-run/write split) to src/brain/emit.rs; 14 new integration tests in tests/brain_emit.rs covering all planner paths, fixed-point property, idempotency, and dry-run/write behaviour.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Compared canonical serde_json::to_string_pretty outputs (both without trailing newline) for the fixed-point check — new_content gets +\\n appended only on write, so first write normalises any missing trailing newline after which the file is a true fixed point.",
+        "I_EMIT_WROTE uses Warning severity (no info level in Diagnostic) per the breakdown note; only E_EMIT_WRITE_FAILED is Error severity.",
+        "Removed unused make_src/make_brain_src helpers from the task3 test module to eliminate clippy dead_code warnings before formatting."
+      ],
+      "files_changed": [
+        "src/brain/emit.rs",
         "tests/brain_emit.rs"
       ],
       "commit": "",
@@ -126,13 +144,37 @@
         "filesReadKb": null,
         "inTokEst": 588,
         "outTok": 2135
+      },
+      {
+        "label": "update-task-3",
+        "model": "haiku",
+        "promptTokEst": 263,
+        "filesReadKb": null,
+        "inTokEst": 263,
+        "outTok": 1369
+      },
+      {
+        "label": "implement-3-1",
+        "model": "sonnet",
+        "promptTokEst": 915,
+        "filesReadKb": null,
+        "inTokEst": 915,
+        "outTok": 14929
+      },
+      {
+        "label": "test-3-1",
+        "model": "haiku",
+        "promptTokEst": 588,
+        "filesReadKb": null,
+        "inTokEst": 588,
+        "outTok": 2014
       }
     ],
     "total": {
-      "promptTokEst": 4555,
+      "promptTokEst": 6321,
       "filesReadKb": 0,
-      "inTokEst": 4555,
-      "outTok": 47652
+      "inTokEst": 6321,
+      "outTok": 65964
     }
   }
 }
