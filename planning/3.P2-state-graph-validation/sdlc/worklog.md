@@ -14,3 +14,8 @@ Validated: gating checks (fast tripwire)
 What: Add detect_cycles (DFS, E_STATE_CYCLE with path) and ready_order (wave-ordered ready-open blocks, standalone for MV.3B.T) to src/brain/state.rs, with 13 unit tests covering all spec cases.
 Decisions: detect_cycles_dfs is a private module-level function (not nested in detect_cycles) using fully-qualified HashMap/HashSet types to avoid import scope issues; ready_order accepts _graph parameter (unused, prefixed with underscore) for MV.3B.T forward-compat without triggering clippy unused-variable warning; wave=None treated as i64::MAX (lowest priority, goes last) for stable ordering; CrossRepo edges are excluded from cycle detection — only BlockedBy edges form the authoritative DAG
 Validated: gating checks (fast tripwire)
+
+## Task 4 — PASSED (1 attempt)
+What: Added check_status_consistency (E_STATE_STATUS_INCONSISTENT) and check_backlog_integrity (E_STATE_DANGLING_BLOCKED_BY + E_STATE_DANGLING_PROMOTION) functions with 8 unit tests; all 267 state module tests pass and all harness gates green.
+Decisions: check_status_consistency silently skips dangling deps (dep key not in status_map) to avoid double-reporting with check_state_graph's E_STATE_DANGLING_BLOCKED_BY; check_backlog_integrity emits E_STATE_DANGLING_PROMOTION for both cases: promoted node with no block pointer AND promoted node with a block pointer that resolves to nothing; Both functions are standalone public functions rather than extensions of check_state_graph, matching the spec's 'new check fns' language and keeping separation clean for task 6 wiring
+Validated: gating checks (fast tripwire)
