@@ -481,8 +481,17 @@ pub fn discover_state_files(
 // Schema-ring checks
 // ---------------------------------------------------------------------------
 
-/// Valid `status` values for `focus.now` and `focus.blocked` block entries.
+/// Valid `status` values for `focus.now` and `focus.blocked` block entries (derived view).
 const VALID_STATUSES: &[&str] = &["open", "in_progress", "blocked", "closed"];
+
+/// Valid *authored* `status` values for `tracks[].blocks[]` entries.
+///
+/// `"blocked"` is intentionally excluded — it is a derived property, never an authored one.
+/// Any block authored with `"blocked"` triggers `E_STATE_AUTHORED_BLOCKED`.
+const VALID_TRACK_BLOCK_STATUSES: &[&str] = &["open", "in_progress", "closed"];
+
+/// Valid `status` values for `backlog[]` entries (HQ brain only).
+const VALID_BACKLOG_STATUSES: &[&str] = &["idea", "ready", "promoted"];
 
 /// Validate the schema-ring constraints for a successfully-deserialized
 /// [`StateFile`].
@@ -504,6 +513,14 @@ const VALID_STATUSES: &[&str] = &["open", "in_progress", "blocked", "closed"];
 /// 5. **Kind-appropriate sections** (`E_STATE_SCHEMA_MISSING_FIELD`, warning)
 ///    — a `project` file is expected to carry `tracks[]`; a `brain` file is
 ///    expected to carry `repos[]`.
+/// 6. **Authored `tracks[].blocks[].status` not `"blocked"`**
+///    (`E_STATE_AUTHORED_BLOCKED`) — `"blocked"` is a derived property; an
+///    authored track-block must use `{open, in_progress, closed}` only.
+/// 7. **`tracks[].blocks[].depends_on` well-formedness**
+///    (`E_STATE_SCHEMA_BAD_BLOCKED_BY`) — a `{type:"block"}` `depends_on`
+///    entry must have non-empty `repo` and `id`.
+/// 8. **`backlog[].status` enum** (`E_STATE_SCHEMA_BAD_STATUS`) — every
+///    backlog node's `status` must be one of `{idea, ready, promoted}`.
 pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
     let mut diags: Vec<Diagnostic> = Vec::new();
     let path = &src.abs_path;
@@ -601,6 +618,79 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
         ));
     }
 
+    // --- 6. Authored track-block status must not be "blocked" (v2: blocked is derived) ---
+    // --- 7. depends_on entry well-formedness ---
+    for track in &file.tracks {
+        for block in &track.blocks {
+            // check 6: authored status must not be "blocked"
+            if let Some(status) = &block.status {
+                if status == "blocked" {
+                    diags.push(Diagnostic::error(
+                        path,
+                        "E_STATE_AUTHORED_BLOCKED",
+                        format!(
+                            "track block '{}' has authored status 'blocked'; \
+                             'blocked' is a derived property — use open/in_progress/closed",
+                            block.id
+                        ),
+                    ));
+                } else if !VALID_TRACK_BLOCK_STATUSES.contains(&status.as_str()) {
+                    // Also catch other invalid statuses on track blocks.
+                    diags.push(Diagnostic::error(
+                        path,
+                        "E_STATE_SCHEMA_BAD_STATUS",
+                        format!(
+                            "track block '{}' has invalid status '{}'; expected one of: {}",
+                            block.id,
+                            status,
+                            VALID_TRACK_BLOCK_STATUSES.join(", ")
+                        ),
+                    ));
+                }
+            }
+
+            // check 7: depends_on {type:block} entries must have non-empty repo and id
+            for dep in &block.depends_on {
+                if let BlockedBy::Block { repo, id, .. } = dep {
+                    let repo_empty = repo.trim().is_empty();
+                    let id_empty = id.trim().is_empty();
+                    if repo_empty || id_empty {
+                        diags.push(Diagnostic::error(
+                            path,
+                            "E_STATE_SCHEMA_BAD_BLOCKED_BY",
+                            format!(
+                                "depends_on entry in track block '{}' is missing required \
+                                 field(s): {}",
+                                block.id,
+                                [repo_empty.then_some("'repo'"), id_empty.then_some("'id'")]
+                                    .into_iter()
+                                    .flatten()
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // --- 8. backlog[].status enum (HQ brain only) ---
+    for item in &file.backlog {
+        if !VALID_BACKLOG_STATUSES.contains(&item.status.as_str()) {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_SCHEMA_BAD_STATUS",
+                format!(
+                    "backlog item '{}' has invalid status '{}'; expected one of: {}",
+                    item.slug,
+                    item.status,
+                    VALID_BACKLOG_STATUSES.join(", ")
+                ),
+            ));
+        }
+    }
+
     diags
 }
 
@@ -682,12 +772,16 @@ pub struct StateGraph {
 /// `"repo:id"`).
 ///
 /// # Edges
-/// - One [`StateEdge`] with `kind: BlockedBy` per `{type:"block"}` entry
-///   in any file's `focus.*.blocked_by[]`.  The `from` key is the blocked
-///   block's own `"repo:id"` (using the `block.repo` field if present, else
-///   the owning file's slug); `to_ref` is `"{blocked_by.repo}:{blocked_by.id}"`.
+/// - One [`StateEdge`] with `kind: BlockedBy` per `{type:"block"}` entry in
+///   any file's `tracks[].blocks[].depends_on[]`.  The `from` key is the
+///   owning block's `"repo:id"` (the block that declares the dependency);
+///   `to_ref` is `"{dep.repo}:{dep.id}"`.  External entries are skipped —
+///   they are leaf constraints, not graph edges.
 /// - One [`StateEdge`] with `kind: CrossRepo` per brain-file `cross_repo[]`
 ///   entry.
+///
+/// `focus.*.blocked_by[]` is intentionally **not** an edge source in v2 —
+/// `focus` is a derived view, not the authoritative DAG.
 ///
 /// Nodes and edges are emitted even when they are later found to be dangling
 /// — the separation of build and check is intentional (see `MV.3.J` pattern).
@@ -698,40 +792,30 @@ pub fn build_state_graph(files: &[(StateSource, StateFile)]) -> StateGraph {
     for (src, file) in files {
         let path = &src.abs_path;
 
-        // --- Nodes: one per tracks[].blocks[] entry ---
+        // --- Nodes + BlockedBy edges: from tracks[].blocks[] ---
         for track in &file.tracks {
             for block in &track.blocks {
+                let from_key = format!("{}:{}", src.repo_slug, block.id);
+
                 nodes.push(StateNode {
-                    key: format!("{}:{}", src.repo_slug, block.id),
+                    key: from_key.clone(),
                     repo: src.repo_slug.clone(),
                     id: block.id.clone(),
                     title: block.title.clone(),
                     source_path: path.clone(),
                 });
-            }
-        }
 
-        // --- BlockedBy edges: from focus.*.blocked_by[]{type:block} ---
-        let all_focus = file
-            .focus
-            .now
-            .iter()
-            .chain(file.focus.next.iter())
-            .chain(file.focus.blocked.iter());
-
-        for block in all_focus {
-            // The `from` block may live in a child repo (brain focus carries `repo`).
-            let from_repo = block.repo.as_deref().unwrap_or(src.repo_slug.as_str());
-            let from_key = format!("{}:{}", from_repo, block.id);
-
-            for bb in &block.blocked_by {
-                if let BlockedBy::Block { repo, id, .. } = bb {
-                    edges.push(StateEdge {
-                        from: from_key.clone(),
-                        to_ref: format!("{repo}:{id}"),
-                        kind: StateEdgeKind::BlockedBy,
-                        source_path: path.clone(),
-                    });
+                // BlockedBy edges: one per {type:block} depends_on entry.
+                // External entries are leaf constraints, not graph edges — skip.
+                for dep in &block.depends_on {
+                    if let BlockedBy::Block { repo, id, .. } = dep {
+                        edges.push(StateEdge {
+                            from: from_key.clone(),
+                            to_ref: format!("{repo}:{id}"),
+                            kind: StateEdgeKind::BlockedBy,
+                            source_path: path.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -1825,7 +1909,7 @@ mod tests {
         // alpha has block AL.1.A in tracks
         let pair_a = leaf_pair(dir.path(), "alpha", "AL.1.A");
 
-        // beta's focus.blocked references alpha's block "AL.1.GHOST" which does NOT exist
+        // beta's tracks[].blocks[].depends_on references alpha's block "AL.1.GHOST" which does NOT exist
         let beta_json = r#"{
   "repo": "beta",
   "kind": "project",
@@ -1834,16 +1918,19 @@ mod tests {
     "now": [],
     "next": [],
     "blocked": [
-      {
-        "id": "BE.1.A",
-        "title": "Blocked work",
-        "blocked_by": [
-          { "type": "block", "repo": "alpha", "id": "AL.1.GHOST" }
-        ]
-      }
+      { "id": "BE.1.A", "title": "Blocked work" }
     ]
   },
-  "tracks": [{ "title": "Phase 1", "blocks": [{ "id": "BE.1.A", "title": "Blocked work" }] }]
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [{
+      "id": "BE.1.A",
+      "title": "Blocked work",
+      "depends_on": [
+        { "type": "block", "repo": "alpha", "id": "AL.1.GHOST" }
+      ]
+    }]
+  }]
 }"#;
         let pair_b = make_pair(dir.path(), "beta-state.json", "project", beta_json);
 
@@ -1866,7 +1953,7 @@ mod tests {
     fn check_detects_unknown_repo_in_blocked_by() {
         let dir = tempfile::tempdir().expect("tempdir");
 
-        // Only one repo in the corpus
+        // Only one repo in the corpus; the block's depends_on references an unknown repo.
         let alpha_json = r#"{
   "repo": "alpha",
   "kind": "project",
@@ -1874,17 +1961,18 @@ mod tests {
   "focus": {
     "now": [],
     "next": [],
-    "blocked": [
-      {
-        "id": "AL.1.A",
-        "title": "Blocked",
-        "blocked_by": [
-          { "type": "block", "repo": "ghost-repo", "id": "GH.1.X" }
-        ]
-      }
-    ]
+    "blocked": [{ "id": "AL.1.A", "title": "Blocked" }]
   },
-  "tracks": [{ "title": "P1", "blocks": [{ "id": "AL.1.A", "title": "Blocked" }] }]
+  "tracks": [{
+    "title": "P1",
+    "blocks": [{
+      "id": "AL.1.A",
+      "title": "Blocked",
+      "depends_on": [
+        { "type": "block", "repo": "ghost-repo", "id": "GH.1.X" }
+      ]
+    }]
+  }]
 }"#;
         let pair = make_pair(dir.path(), "alpha-state.json", "project", alpha_json);
         let files = vec![pair];
@@ -2011,6 +2099,352 @@ mod tests {
             dangling_cross.len(),
             1,
             "expected exactly one E_STATE_DANGLING_CROSS_REPO for ghost 'to' endpoint, got: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 2 — depends_on DAG edges + check_schema v2 checks
+    // -----------------------------------------------------------------------
+
+    /// A v2 leaf fixture with `depends_on` wired through `tracks[].blocks[]`.
+    fn leaf_with_depends_on(
+        dir: &std::path::Path,
+        repo: &str,
+        block_id: &str,
+        dep_repo: &str,
+        dep_id: &str,
+    ) -> (StateSource, StateFile) {
+        let json = format!(
+            r#"{{
+  "repo": "{repo}",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": {{
+    "now": [{{ "id": "{block_id}", "title": "Waiting", "status": "open" }}],
+    "next": [],
+    "blocked": []
+  }},
+  "tracks": [{{
+    "title": "Phase 1",
+    "blocks": [{{
+      "id": "{block_id}",
+      "title": "Waiting",
+      "status": "open",
+      "depends_on": [
+        {{ "type": "block", "repo": "{dep_repo}", "id": "{dep_id}" }}
+      ]
+    }}]
+  }}]
+}}"#
+        );
+        make_pair(dir, &format!("{repo}-state.json"), "project", &json)
+    }
+
+    #[test]
+    fn build_depends_on_edges_from_tracks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // alpha has block AL.1.A that depends_on beta:BE.1.A
+        let pair_alpha = leaf_with_depends_on(dir.path(), "alpha", "AL.1.A", "beta", "BE.1.A");
+        let pair_beta = leaf_pair(dir.path(), "beta", "BE.1.A");
+        let files = vec![pair_alpha, pair_beta];
+
+        let graph = build_state_graph(&files);
+
+        // Two nodes (one per repo)
+        assert_eq!(
+            graph.nodes.len(),
+            2,
+            "expected 2 nodes, got: {:?}",
+            graph.nodes
+        );
+
+        // One BlockedBy edge from depends_on
+        let bb_edges: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == StateEdgeKind::BlockedBy)
+            .collect();
+        assert_eq!(
+            bb_edges.len(),
+            1,
+            "expected exactly one BlockedBy edge from depends_on, got: {:?}",
+            graph.edges
+        );
+        assert_eq!(bb_edges[0].from, "alpha:AL.1.A");
+        assert_eq!(bb_edges[0].to_ref, "beta:BE.1.A");
+    }
+
+    #[test]
+    fn build_external_depends_on_entries_are_excluded_from_edges() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // alpha has a block that depends_on an external constraint only — no graph edges.
+        let alpha_json = r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [{
+      "id": "AL.1.A",
+      "title": "Needs hardware",
+      "status": "open",
+      "depends_on": [
+        { "type": "external", "what": "New Mac Mini delivery" }
+      ]
+    }]
+  }]
+}"#;
+        let pair = make_pair(dir.path(), "alpha-state.json", "project", alpha_json);
+        let files = vec![pair];
+
+        let graph = build_state_graph(&files);
+
+        assert_eq!(graph.nodes.len(), 1, "expected 1 node");
+        assert_eq!(
+            graph.edges.len(),
+            0,
+            "external depends_on must not produce a graph edge, got: {:?}",
+            graph.edges
+        );
+    }
+
+    #[test]
+    fn build_no_edges_from_focus_blocked_by() {
+        // Confirm that focus.blocked_by is NOT an edge source in v2.
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // alpha has a focus.blocked entry with blocked_by — should NOT produce an edge.
+        let alpha_json = r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": {
+    "now": [],
+    "next": [],
+    "blocked": [{
+      "id": "AL.1.A",
+      "title": "Waiting",
+      "blocked_by": [
+        { "type": "block", "repo": "beta", "id": "BE.1.A" }
+      ]
+    }]
+  },
+  "tracks": [{ "title": "P1", "blocks": [{ "id": "AL.1.A", "title": "Waiting" }] }]
+}"#;
+        let pair = make_pair(dir.path(), "alpha-state.json", "project", alpha_json);
+        let files = vec![pair];
+
+        let graph = build_state_graph(&files);
+
+        assert_eq!(
+            graph.edges.len(),
+            0,
+            "focus.blocked_by must not produce edges in v2; got: {:?}",
+            graph.edges
+        );
+    }
+
+    #[test]
+    fn check_schema_authored_blocked_emits_e_state_authored_blocked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        // A track block with authored status "blocked" — this is illegal in v2.
+        let json = r#"{
+  "repo": "test",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [
+      { "id": "T.1", "title": "Should not be authored blocked", "status": "blocked" }
+    ]
+  }]
+}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+
+        let authored_blocked: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_AUTHORED_BLOCKED")
+            .collect();
+        assert_eq!(
+            authored_blocked.len(),
+            1,
+            "expected exactly one E_STATE_AUTHORED_BLOCKED, got: {diags:?}"
+        );
+        assert!(
+            authored_blocked[0].message.contains("T.1"),
+            "E_STATE_AUTHORED_BLOCKED message should name the block id, got: {:?}",
+            authored_blocked[0].message
+        );
+    }
+
+    #[test]
+    fn check_schema_bad_backlog_status_emits_e_state_schema_bad_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "brain");
+
+        // A backlog item with an invalid status value.
+        let json = r#"{
+  "repo": "hq",
+  "kind": "brain",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "repos": [{ "repo": "some-child", "now": [], "next": [], "blocked": [] }],
+  "backlog": [
+    {
+      "slug": "my-idea",
+      "title": "Some idea",
+      "repo": "mev",
+      "type": "feature",
+      "status": "flying"
+    }
+  ]
+}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+
+        let bad_status: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_STATUS")
+            .collect();
+        assert_eq!(
+            bad_status.len(),
+            1,
+            "expected exactly one E_STATE_SCHEMA_BAD_STATUS for bad backlog status, got: {diags:?}"
+        );
+        assert!(
+            bad_status[0].message.contains("my-idea"),
+            "E_STATE_SCHEMA_BAD_STATUS message should name the backlog slug, got: {:?}",
+            bad_status[0].message
+        );
+    }
+
+    #[test]
+    fn check_schema_valid_backlog_statuses_pass() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "brain");
+
+        for status in &["idea", "ready", "promoted"] {
+            let json = format!(
+                r#"{{
+  "repo": "hq",
+  "kind": "brain",
+  "updated": "2026-06-29",
+  "focus": {{ "now": [], "next": [], "blocked": [] }},
+  "repos": [{{ "repo": "c", "now": [], "next": [], "blocked": [] }}],
+  "backlog": [
+    {{
+      "slug": "item-{status}",
+      "title": "Test",
+      "repo": "mev",
+      "type": "feature",
+      "status": "{status}"
+    }}
+  ]
+}}"#
+            );
+            let file = parse_file(&json);
+            let diags = check_schema(&src, &file);
+            let bad: Vec<_> = diags
+                .iter()
+                .filter(|d| {
+                    d.locator == "E_STATE_SCHEMA_BAD_STATUS"
+                        || d.locator == "E_STATE_AUTHORED_BLOCKED"
+                })
+                .collect();
+            assert!(
+                bad.is_empty(),
+                "backlog status '{status}' should be valid, got: {diags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn check_schema_clean_v2_file_with_depends_on_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        // A clean v2 leaf with depends_on in tracks and backlog-free.
+        let json = r#"{
+  "repo": "test",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": {
+    "now": [{ "id": "T.2", "title": "Active", "status": "in_progress" }],
+    "next": [{ "id": "T.1", "title": "Ready" }],
+    "blocked": []
+  },
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [
+      { "id": "T.1", "title": "Ready", "status": "open" },
+      {
+        "id": "T.2",
+        "title": "Active",
+        "status": "in_progress",
+        "depends_on": [
+          { "type": "block", "repo": "other", "id": "OT.1.A" }
+        ],
+        "wave": 1
+      }
+    ]
+  }]
+}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == crate::Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "clean v2 file with depends_on should produce no schema errors, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_schema_depends_on_empty_repo_emits_bad_blocked_by() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        // A track block whose depends_on entry has an empty repo field.
+        let json = r#"{
+  "repo": "test",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [{
+      "id": "T.1",
+      "title": "Work",
+      "depends_on": [
+        { "type": "block", "repo": "", "id": "OT.1.A" }
+      ]
+    }]
+  }]
+}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+        let bad_bb: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_BLOCKED_BY")
+            .collect();
+        assert_eq!(
+            bad_bb.len(),
+            1,
+            "expected one E_STATE_SCHEMA_BAD_BLOCKED_BY for empty depends_on repo, got: {diags:?}"
         );
     }
 

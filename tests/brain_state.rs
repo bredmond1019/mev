@@ -204,8 +204,8 @@ fn dangling_blocked_by_produces_exactly_one_error() {
     let dir = temp_dir("dangling-bb");
     write_clean_fixture(&dir);
 
-    // Overwrite beta's state.json so its focus.blocked references a block that
-    // does not exist in alpha's tracks[].
+    // Overwrite beta's state.json so its tracks[].blocks[].depends_on references a block
+    // that does not exist in alpha's tracks[] (v2: edges come from depends_on, not focus).
     let beta_state = serde_json::json!({
         "repo": "beta",
         "kind": "project",
@@ -213,21 +213,20 @@ fn dangling_blocked_by_produces_exactly_one_error() {
         "focus": {
             "now": [],
             "next": [],
-            "blocked": [
-                {
-                    "block": "BE.1.A",
-                    "title": "Beta waiting on alpha ghost",
-                    "blocked_by": [
-                        { "type": "block", "repo": "alpha", "id": "AL.1.GHOST" }
-                    ]
-                }
-            ]
+            "blocked": [{ "id": "BE.1.A", "title": "Beta waiting on alpha ghost" }]
         },
         "tracks": [
             {
                 "title": "Phase 1",
                 "blocks": [
-                    { "id": "BE.1.A", "title": "Beta block A", "status": "open" }
+                    {
+                        "id": "BE.1.A",
+                        "title": "Beta block A",
+                        "status": "open",
+                        "depends_on": [
+                            { "type": "block", "repo": "alpha", "id": "AL.1.GHOST" }
+                        ]
+                    }
                 ]
             }
         ]
@@ -369,7 +368,8 @@ fn json_round_trip_includes_state_diagnostic() {
     let dir = temp_dir("json-roundtrip");
     write_clean_fixture(&dir);
 
-    // Introduce a dangling blocked_by on beta so there is a State error to serialize.
+    // Introduce a dangling depends_on on beta so there is a State error to serialize.
+    // v2: edges come from tracks[].blocks[].depends_on[], not focus.blocked.blocked_by[].
     let beta_state = serde_json::json!({
         "repo": "beta",
         "kind": "project",
@@ -377,21 +377,20 @@ fn json_round_trip_includes_state_diagnostic() {
         "focus": {
             "now": [],
             "next": [],
-            "blocked": [
-                {
-                    "block": "BE.1.A",
-                    "title": "Beta blocked",
-                    "blocked_by": [
-                        { "type": "block", "repo": "alpha", "id": "AL.1.GHOST" }
-                    ]
-                }
-            ]
+            "blocked": [{ "id": "BE.1.A", "title": "Beta blocked" }]
         },
         "tracks": [
             {
                 "title": "Phase 1",
                 "blocks": [
-                    { "id": "BE.1.A", "title": "Beta block A", "status": "open" }
+                    {
+                        "id": "BE.1.A",
+                        "title": "Beta block A",
+                        "status": "open",
+                        "depends_on": [
+                            { "type": "block", "repo": "alpha", "id": "AL.1.GHOST" }
+                        ]
+                    }
                 ]
             }
         ]
