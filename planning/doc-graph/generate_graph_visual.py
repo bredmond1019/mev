@@ -25,7 +25,7 @@ def generate_graph():
         if doc_id:
             node_id = f"{scope}:{doc_id}"
             # The related field is flattened
-            related = entry.get("related", [])
+            related = entry.get("related") or []
             for r in related:
                 target = r if ":" in r else f"{scope}:{r}"
                 edges.append((node_id, target))
