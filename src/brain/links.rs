@@ -182,8 +182,9 @@ pub fn extract_links(contents: &str) -> Vec<LinkRef> {
             }
         }
 
-        // Try bare file:// URI in prose (not inside a markdown link target)
-        if contents[i..].starts_with("file://") {
+        // Try bare file:// URI in prose (not inside a markdown link target).
+        // Guard with a byte check first to avoid slicing inside a multi-byte sequence.
+        if bytes[i] == b'f' && contents[i..].starts_with("file://") {
             // Extract the URI up to whitespace or end of line or common delimiters
             let rest = &contents[i..];
             let end = rest
@@ -200,7 +201,22 @@ pub fn extract_links(contents: &str) -> Vec<LinkRef> {
             continue;
         }
 
-        i += 1;
+        // Advance by one Unicode scalar value to stay on char boundaries.
+        // `i += 1` would advance into the middle of a multi-byte sequence and cause
+        // a panic on the next `contents[i..]` slice.
+        let ch_width = {
+            let b = bytes[i];
+            if b < 0x80 {
+                1 // ASCII
+            } else if b < 0xE0 {
+                2 // 2-byte UTF-8 sequence
+            } else if b < 0xF0 {
+                3 // 3-byte UTF-8 sequence
+            } else {
+                4 // 4-byte UTF-8 sequence
+            }
+        };
+        i += ch_width;
     }
 
     links
