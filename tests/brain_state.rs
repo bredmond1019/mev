@@ -894,3 +894,334 @@ fn focus_drift_produces_warning_not_error() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Task 1 — derive_focus / derive_cross_repo / derive_rollup unit tests
+// ---------------------------------------------------------------------------
+
+/// Build a minimal (StateSource, StateFile) pair directly in memory for unit tests.
+fn make_leaf_pair_in_memory(
+    repo: &str,
+    tracks_json: serde_json::Value,
+    focus_json: serde_json::Value,
+) -> (mev::brain::state::StateSource, mev::brain::state::StateFile) {
+    use mev::brain::state::{StateFile, StateSource};
+
+    let path = std::path::PathBuf::from(format!("/tmp/{repo}-state.json"));
+    let json = serde_json::json!({
+        "repo": repo,
+        "kind": "project",
+        "updated": "2026-06-30",
+        "focus": focus_json,
+        "tracks": tracks_json,
+    });
+    let file: StateFile = serde_json::from_value(json).expect("fixture must parse");
+    let src = StateSource {
+        repo_slug: repo.to_string(),
+        abs_path: path,
+        expected_kind: "project",
+    };
+    (src, file)
+}
+
+#[test]
+fn derive_focus_regression_check_focus_drift_still_passes_existing_fixtures() {
+    // Regression guard: derive_focus on a fixture where stored focus matches derivation
+    // should produce the correct derived values, and check_focus_drift should report no drift.
+    use mev::brain::state::{build_state_graph, check_focus_drift, derive_focus};
+
+    let (src, file) = make_leaf_pair_in_memory(
+        "alpha",
+        serde_json::json!([{
+            "title": "Phase 1",
+            "blocks": [
+                { "id": "AL.1.A", "title": "Work A", "status": "in_progress" },
+                { "id": "AL.1.B", "title": "Work B", "status": "open" }
+            ]
+        }]),
+        // Stored focus matches derivation: now=A, next=B (no deps), blocked=[]
+        serde_json::json!({
+            "now": [{ "id": "AL.1.A", "title": "Work A", "status": "in_progress" }],
+            "next": [{ "id": "AL.1.B", "title": "Work B" }],
+            "blocked": []
+        }),
+    );
+    let files = vec![(src.clone(), file.clone())];
+    let graph = build_state_graph(&files);
+
+    let derived = derive_focus(&src, &file, &graph, &files);
+
+    // derive_focus: A in now, B in next (open, no deps), blocked empty.
+    assert_eq!(derived.now, vec!["AL.1.A".to_string()]);
+    assert_eq!(derived.next, vec!["AL.1.B".to_string()]);
+    assert!(derived.blocked.is_empty());
+
+    // check_focus_drift must report no drift (stored matches derivation).
+    let diags = check_focus_drift(&src, &file, &graph, &files);
+    assert!(
+        diags.is_empty(),
+        "check_focus_drift should report no drift for in-sync fixture, got: {diags:?}"
+    );
+}
+
+#[test]
+fn derive_focus_blocked_carries_unmet_subset() {
+    // An open block with an unmet Block dep appears in blocked, and the unmet
+    // dep is included in the returned Vec<BlockedBy>.
+    use mev::brain::state::{BlockedBy, build_state_graph, derive_focus};
+
+    // alpha block B depends on alpha block A, which is still "open" (not closed).
+    let (src, file) = make_leaf_pair_in_memory(
+        "alpha",
+        serde_json::json!([{
+            "title": "Phase 1",
+            "blocks": [
+                { "id": "AL.1.A", "title": "Gate", "status": "open" },
+                {
+                    "id": "AL.1.B",
+                    "title": "Blocked work",
+                    "status": "open",
+                    "depends_on": [{ "type": "block", "repo": "alpha", "id": "AL.1.A" }]
+                }
+            ]
+        }]),
+        serde_json::json!({ "now": [], "next": [], "blocked": [] }),
+    );
+    let files = vec![(src.clone(), file.clone())];
+    let graph = build_state_graph(&files);
+
+    let derived = derive_focus(&src, &file, &graph, &files);
+
+    assert!(derived.now.is_empty(), "no in_progress blocks");
+    // AL.1.B is blocked by AL.1.A (open, not closed).
+    assert_eq!(derived.blocked.len(), 1);
+    let (blocked_id, unmet) = &derived.blocked[0];
+    assert_eq!(blocked_id, "AL.1.B");
+    assert_eq!(unmet.len(), 1, "exactly one unmet dep");
+    match &unmet[0] {
+        BlockedBy::Block { repo, id, .. } => {
+            assert_eq!(repo, "alpha");
+            assert_eq!(id, "AL.1.A");
+        }
+        other => panic!("expected BlockedBy::Block, got {other:?}"),
+    }
+    // AL.1.A is open with no deps → it should be in next (ready).
+    assert!(
+        derived.next.contains(&"AL.1.A".to_string()),
+        "AL.1.A (open, no deps) should be in next, got: {:?}",
+        derived.next
+    );
+    // AL.1.B has an unmet dep → not in next.
+    assert!(
+        !derived.next.contains(&"AL.1.B".to_string()),
+        "AL.1.B (blocked) must not be in next"
+    );
+}
+
+#[test]
+fn derive_focus_external_dep_goes_to_blocked() {
+    use mev::brain::state::{build_state_graph, derive_focus};
+
+    let (src, file) = make_leaf_pair_in_memory(
+        "alpha",
+        serde_json::json!([{
+            "title": "Phase 1",
+            "blocks": [{
+                "id": "AL.1.A",
+                "title": "Needs external",
+                "status": "open",
+                "depends_on": [{ "type": "external", "what": "hardware requirement" }]
+            }]
+        }]),
+        serde_json::json!({ "now": [], "next": [], "blocked": [] }),
+    );
+    let files = vec![(src.clone(), file.clone())];
+    let graph = build_state_graph(&files);
+
+    let derived = derive_focus(&src, &file, &graph, &files);
+
+    assert_eq!(derived.blocked.len(), 1);
+    assert_eq!(derived.blocked[0].0, "AL.1.A");
+    assert!(
+        derived.next.is_empty(),
+        "external-dep block must not be in next"
+    );
+}
+
+#[test]
+fn derive_focus_empty_tracks_returns_empty() {
+    use mev::brain::state::{StateGraph, StateSource, derive_focus};
+
+    // Brain file with no tracks[] — derivation should be undefined (return empty).
+    let path = std::path::PathBuf::from("/tmp/hq-state.json");
+    let json = serde_json::json!({
+        "repo": "hq",
+        "kind": "brain",
+        "updated": "2026-06-30",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "repos": []
+    });
+    let file: mev::brain::state::StateFile =
+        serde_json::from_value(json).expect("fixture must parse");
+    let src = StateSource {
+        repo_slug: "hq".to_string(),
+        abs_path: path,
+        expected_kind: "brain",
+    };
+    let files = vec![(src.clone(), file.clone())];
+    let graph = StateGraph::default();
+
+    let derived = derive_focus(&src, &file, &graph, &files);
+    assert!(derived.now.is_empty());
+    assert!(derived.next.is_empty());
+    assert!(derived.blocked.is_empty());
+}
+
+#[test]
+fn derive_cross_repo_produces_edge_for_cross_repo_dep_and_none_for_same_repo() {
+    use mev::brain::state::derive_cross_repo;
+
+    // alpha block A depends on beta block B (cross-repo) and alpha block C (same-repo).
+    let (src_alpha, file_alpha) = make_leaf_pair_in_memory(
+        "alpha",
+        serde_json::json!([{
+            "title": "Phase 1",
+            "blocks": [
+                {
+                    "id": "AL.1.A",
+                    "title": "Alpha block",
+                    "status": "open",
+                    "depends_on": [
+                        { "type": "block", "repo": "beta", "id": "BE.1.B" },
+                        { "type": "block", "repo": "alpha", "id": "AL.1.C" }
+                    ]
+                },
+                { "id": "AL.1.C", "title": "Same-repo dep", "status": "open" }
+            ]
+        }]),
+        serde_json::json!({ "now": [], "next": [], "blocked": [] }),
+    );
+    let (src_beta, file_beta) = make_leaf_pair_in_memory(
+        "beta",
+        serde_json::json!([{
+            "title": "Phase 1",
+            "blocks": [{ "id": "BE.1.B", "title": "Beta block", "status": "closed" }]
+        }]),
+        serde_json::json!({ "now": [], "next": [], "blocked": [] }),
+    );
+    let files = vec![
+        (src_alpha.clone(), file_alpha.clone()),
+        (src_beta.clone(), file_beta.clone()),
+    ];
+
+    let edges = derive_cross_repo(&files);
+
+    // Only the cross-repo dep (alpha → beta) should produce an edge.
+    assert_eq!(
+        edges.len(),
+        1,
+        "expected exactly one cross-repo edge, got: {edges:?}"
+    );
+    assert_eq!(edges[0].from.repo, "alpha");
+    assert_eq!(edges[0].from.id, "AL.1.A");
+    assert_eq!(edges[0].to.repo, "beta");
+    assert_eq!(edges[0].to.id, "BE.1.B");
+}
+
+#[test]
+fn derive_cross_repo_skips_external_deps() {
+    use mev::brain::state::derive_cross_repo;
+
+    let (src, file) = make_leaf_pair_in_memory(
+        "alpha",
+        serde_json::json!([{
+            "title": "Phase 1",
+            "blocks": [{
+                "id": "AL.1.A",
+                "title": "Block",
+                "status": "open",
+                "depends_on": [{ "type": "external", "what": "hardware" }]
+            }]
+        }]),
+        serde_json::json!({ "now": [], "next": [], "blocked": [] }),
+    );
+    let files = vec![(src, file)];
+    let edges = derive_cross_repo(&files);
+    assert!(
+        edges.is_empty(),
+        "external deps must not produce cross-repo edges, got: {edges:?}"
+    );
+}
+
+#[test]
+fn derive_rollup_reproduces_childs_derived_focus() {
+    use mev::brain::state::{build_state_graph, derive_rollup};
+
+    // alpha: one in_progress block, one open block (no deps → ready).
+    let (src_alpha, file_alpha) = make_leaf_pair_in_memory(
+        "alpha",
+        serde_json::json!([{
+            "title": "Phase 1",
+            "blocks": [
+                { "id": "AL.1.A", "title": "In progress", "status": "in_progress" },
+                { "id": "AL.1.B", "title": "Next up", "status": "open" }
+            ]
+        }]),
+        serde_json::json!({ "now": [], "next": [], "blocked": [] }),
+    );
+    let files = vec![(src_alpha.clone(), file_alpha.clone())];
+    let graph = build_state_graph(&files);
+    let children = files.clone();
+
+    let rollups = derive_rollup(&children, &graph, &files);
+
+    assert_eq!(rollups.len(), 1, "one child → one rollup entry");
+    let rollup = &rollups[0];
+    assert_eq!(rollup.repo, "alpha");
+
+    // now should contain AL.1.A with status in_progress.
+    assert_eq!(rollup.now.len(), 1);
+    assert_eq!(rollup.now[0].id, "AL.1.A");
+    assert_eq!(rollup.now[0].status.as_deref(), Some("in_progress"));
+
+    // next should contain AL.1.B (open, no deps).
+    assert_eq!(rollup.next.len(), 1);
+    assert_eq!(rollup.next[0].id, "AL.1.B");
+
+    // blocked should be empty.
+    assert!(rollup.blocked.is_empty());
+
+    // tier should be None (not derivable from state).
+    assert!(rollup.tier.is_none());
+}
+
+#[test]
+fn derive_rollup_skips_brain_files() {
+    use mev::brain::state::{StateGraph, StateSource, derive_rollup};
+
+    // A brain file should not appear in the rollup output.
+    let path = std::path::PathBuf::from("/tmp/hq-state.json");
+    let json = serde_json::json!({
+        "repo": "hq",
+        "kind": "brain",
+        "updated": "2026-06-30",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "repos": []
+    });
+    let brain_file: mev::brain::state::StateFile =
+        serde_json::from_value(json).expect("fixture must parse");
+    let brain_src = StateSource {
+        repo_slug: "hq".to_string(),
+        abs_path: path,
+        expected_kind: "brain",
+    };
+    let children = vec![(brain_src.clone(), brain_file.clone())];
+    let files = children.clone();
+    let graph = StateGraph::default();
+
+    let rollups = derive_rollup(&children, &graph, &files);
+    assert!(
+        rollups.is_empty(),
+        "brain files must not produce rollup entries, got: {rollups:?}"
+    );
+}
