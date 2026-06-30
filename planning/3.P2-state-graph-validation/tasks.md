@@ -62,7 +62,7 @@ Extend `mev validate-brain --state` to guard the **v2 state schema** — the ful
 - Unit tests: closed-depends-on-open flagged; dangling backlog dep flagged; orphan promoted-node flagged; a clean promote (node `block` matches a real block carrying `origin`) passes.
 - **Owns:** `src/brain/state.rs` (new check fns; may extend `check_state_graph` to fold in backlog edge sources).
 
-### 5. Derivation-drift warnings (focus recompute)
+### 5. Derivation-drift warnings (focus recompute) (in progress)
 - Add `check_focus_drift(file, graph) -> Vec<Diagnostic>`: recompute the expected `focus` from authored `tracks[]` (`now` = `in_progress` blocks; `blocked` = blocks with an unmet `depends_on`; `next` = `ready_order` ∩ `open`) and compare to the stored `focus` (block-id sets only, mirroring `check_rollup`'s set comparison). On mismatch emit **`W_STATE_FOCUS_DRIFT`** (warning — exit 0). Reuse `ready_order` from task 3.
 - Leave `check_rollup` (`W_STATE_ROLLUP_DRIFT`) as-is for now; note in code that v2 will eventually derive `repos[]` from child `tracks[]` (deferred to `MV.3B.T`).
 - Unit tests: a stored `focus` that disagrees with the derived view → one `W_STATE_FOCUS_DRIFT`; an in-sync `focus` → none; drift never raises exit code.
