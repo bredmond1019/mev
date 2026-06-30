@@ -31,23 +31,25 @@ src/
     ├── okf.rs      ← OkfFrontmatter, validate_md_file() — OKF field checks; root-instruction-file exemption
     ├── scope.rs    ← scope_units(), scope_for(), owning_unit() — registry-driven scope resolver
     ├── sync.rs     ← (internal) sync helpers
-    ├── graph.rs    ← EdgeKind, Edge, Node, Graph, GraphArtifact, DocMeta; build_graph(), check_graph(), read_doc_metadata() — Phase 3 Block J
+    ├── graph.rs    ← EdgeKind, Edge, Node, Graph, GraphArtifact, DocMeta; build_graph(), check_graph() — Phase 3 Block J (read_doc_metadata removed by D5 extract-once refactor in Block Q)
     ├── state.rs    ← StateFile, TrackBlock, Backlog, Origin, StateGraph, StateNode, StateEdge, StateSource; discover_state_files(), load_state(), check_schema(), build_state_graph(), check_state_graph(), check_rollup(), detect_cycles(), ready_order(), check_focus_drift(), derive_focus(), derive_rollup(), derive_cross_repo() — Phase 3 Block P / P2 / T (v2: depends_on DAG, cycle detection, derived-blocked enforcement, backlog nodes, focus-drift warnings, single-source derivation helpers)
     ├── emit.rs     ← EmitError, EmitAction, EmitPlan; wave_order(), render_wave_table(), splice_generated(), plan_state_json(), plan_master_plan_tables(), apply_plan() — Phase 3 Block T (derived-view generation: wave tables, focus regen, brain rollup)
-    └── links.rs    ← LinkKind, LinkRef; extract_links(), check_links(), collect_doc_ids(), read_moves_pending(), check_moved_references() — Phase 3 Block K
+    ├── links.rs    ← LinkKind, LinkRef; extract_links(), check_links(), collect_doc_ids(), read_moves_pending(), check_moved_references() — Phase 3 Block K
+    └── manifest.rs ← ManifestEntry, Manifest, build_manifest() — Phase 3 Block Q (canonical corpus manifest for RAG indexer)
 
 tests/
-├── brain_config.rs   ← integration tests for brain.toml loading + BrainConfig
-├── brain_corpus.rs   ← integration tests for crawl_corpus() multi-root walk + scope resolution
-├── brain_crawl.rs    ← integration tests for crawl_brain()
-├── brain_graph.rs    ← integration tests for validate_brain_graph() end-to-end — Phase 3 Block J
-├── brain_links.rs    ← integration tests for validate_brain_links() end-to-end — Phase 3 Block K
-├── brain_okf.rs      ← integration tests for validate_md_file()
-├── brain_state.rs    ← integration tests for validate_brain_state() end-to-end — Phase 3 Block P
-├── brain_validate.rs ← integration tests for BrainValidator end-to-end
-├── smoke.rs          ← integration tests for the learn-ai validate() public API
+├── brain_config.rs    ← integration tests for brain.toml loading + BrainConfig
+├── brain_corpus.rs    ← integration tests for crawl_corpus() multi-root walk + scope resolution
+├── brain_crawl.rs     ← integration tests for crawl_brain()
+├── brain_graph.rs     ← integration tests for validate_brain_graph() end-to-end — Phase 3 Block J
+├── brain_links.rs     ← integration tests for validate_brain_links() end-to-end — Phase 3 Block K
+├── brain_manifest.rs  ← integration tests for manifest_brain() end-to-end — Phase 3 Block Q
+├── brain_okf.rs       ← integration tests for validate_md_file()
+├── brain_state.rs     ← integration tests for validate_brain_state() end-to-end — Phase 3 Block P
+├── brain_validate.rs  ← integration tests for BrainValidator end-to-end
+├── smoke.rs           ← integration tests for the learn-ai validate() public API
 └── fixtures/
-    └── brain.toml    ← minimal fixture — NOT the live brain.toml
+    └── brain.toml     ← minimal fixture — NOT the live brain.toml
 ```
 
 ---
@@ -176,8 +178,16 @@ exit 0 (clean) | exit 1 (any Error)
 | Type | Description |
 |---|---|
 | `MdFile` | Single validated file: `path`, `rel`, `stem` |
-| `CorpusEntry` | Multi-root corpus entry: `path`, `rel`, `stem`, `scope` (owning-unit slug) |
+| `CorpusEntry` | Multi-root corpus entry: `path`, `rel`, `stem`, `scope` (owning-unit slug), `metadata` (D5 extract-once OKF parse result) |
 | `Corpus` | Complete Brain corpus: `entries: Vec<CorpusEntry>`; serde-serializable for manifest emission |
+
+**D5 extract-once refactor (Phase 3B, Block Q):** `CorpusEntry` now carries an
+`Option<OkfFrontmatter>` field (`metadata`). `crawl_corpus()` reads and parses each file's
+frontmatter exactly once during the crawl; the result is stored on the entry and shared by the
+OKF validator, graph builder, link checker, and manifest emitter — no double-parse. A parse
+failure stores `None` (graceful degradation). The `read_doc_metadata()` function that
+previously re-read frontmatter from disk in `graph.rs` has been removed; `build_graph()` now
+derives `doc_id` and `related` directly from `entry.metadata`.
 
 ### Scope resolution (`src/brain/scope.rs`)
 
@@ -197,8 +207,7 @@ The graph module builds and validates the serializable `scope:doc_id` knowledge 
 
 | Function | Signature | Description |
 |---|---|---|
-| `read_doc_metadata` | `(&CorpusEntry) -> DocMeta` | D5 seam — reads `doc_id` and `related` from a corpus entry's inline frontmatter. Degrades gracefully on I/O or parse error (returns empty `DocMeta`). |
-| `build_graph` | `(&Corpus, &BrainConfig) -> GraphArtifact` | Walks the corpus once; files with a `doc_id` become nodes, others become leaves. Returns the serializable graph plus lookup structures. |
+| `build_graph` | `(&Corpus, &BrainConfig) -> GraphArtifact` | Walks the corpus once; files with a `doc_id` become nodes, others become leaves. Derives `doc_id` and `related` from `entry.metadata` (D5 extract-once). Returns the serializable graph plus lookup structures. |
 | `check_graph` | `(&GraphArtifact) -> Vec<Diagnostic>` | Checks the built graph for integrity violations without re-walking the corpus. |
 
 #### Graph types
@@ -318,7 +327,7 @@ The links module extracts and validates all local references (markdown links, `f
 | Function | Signature | Description |
 |---|---|---|
 | `extract_links` | `(&str) -> Vec<LinkRef>` | Parses a file's body and returns all local link references. External links and pure anchors are skipped. |
-| `collect_doc_ids` | `(&Corpus) -> HashSet<String>` | Builds the set of authored bare `doc_id`s from corpus frontmatter — reuses `read_doc_metadata` (D5 seam). |
+| `collect_doc_ids` | `(&Corpus) -> HashSet<String>` | Builds the set of authored bare `doc_id`s from corpus frontmatter — reads `entry.metadata` (the D5 extract-once field on `CorpusEntry`). |
 | `check_links` | `(&Corpus, &Path, &HashSet<String>) -> Vec<Diagnostic>` | For each corpus entry, extracts links and resolves each against the filesystem or the `doc_id` set. Emits `E_LINK_*` diagnostics on resolution failures. |
 | `read_moves_pending` | `(&Path) -> Vec<String>` | Reads `<root>/.brain-moves-pending`; returns the set of moved/deleted repo-relative paths. Missing file returns empty set. |
 | `check_moved_references` | `(&Corpus, &Path, &[String]) -> Vec<Diagnostic>` | Scans the corpus for references that still resolve to a path listed in the moved set. Emits `E_LINK_MOVED_REFERENCE` for each hit. |
@@ -342,3 +351,41 @@ The links module extracts and validates all local references (markdown links, `f
 #### Public library entry point
 
 `validate_brain_links(root: &Path) -> anyhow::Result<Report>` (in `src/lib.rs`) runs the full OKF schema pass, then crawls the corpus once, collects `doc_id`s, runs `check_links`, reads `.brain-moves-pending`, runs `check_moved_references`, and appends all link diagnostics to the same `Report`. Invoked by `mev validate-brain --links`.
+
+---
+
+### Manifest emitter (`src/brain/manifest.rs`) — Phase 3 Block Q
+
+The manifest module converts a pre-crawled `Corpus` into a canonical, JSON-serializable file
+list (`Manifest`) with per-file OKF metadata. Its output is the single source consumed by
+`index_brain.py` — "what's validated == what's embedded" holds by construction.
+
+Design principles:
+- **Pure output** — `build_manifest` does not write to disk; it returns a value the caller
+  serializes to stdout. Consistent with the D4 pure-compiler model.
+- **No re-crawl** — the function consumes a `&Corpus` already built by `crawl_corpus`; callers
+  that also run the OKF validator share the same crawl result.
+- **Graceful degradation** — entries without parseable frontmatter appear in the manifest with
+  all metadata fields set to `null`; the OKF validator reports the error separately.
+
+#### Public function
+
+| Function | Signature | Description |
+|---|---|---|
+| `build_manifest` | `(&Path, &Corpus) -> Manifest` | Maps each `CorpusEntry` to a `ManifestEntry` by extracting OKF fields from `entry.metadata`. The `root` path is stored as a display string in the manifest header. |
+
+#### Manifest types
+
+| Type | Description |
+|---|---|
+| `ManifestEntry` | A single file entry: `rel` (repo-relative path), `scope`, and OKF metadata fields (`doc_id`, `doc_type`, `title`, `description`, `layer`, `project`, `status`, `keywords`) — all metadata fields are `Option`. |
+| `Manifest` | The complete manifest: `version` (`"1"`), `root` (display path of HQ root), `entries: Vec<ManifestEntry>`. Derives `Serialize`. |
+
+`ManifestEntry.doc_type` is the serialized form of the OKF `type` field (renamed to avoid the
+Rust keyword).
+
+#### Public library entry point
+
+`manifest_brain(root: &Path) -> anyhow::Result<Manifest>` (in `src/lib.rs`) resolves
+`brain.toml`, crawls the corpus with `crawl_corpus`, and calls `build_manifest`. The returned
+`Manifest` is a pure value — nothing is written to disk. Invoked by `mev manifest`.
