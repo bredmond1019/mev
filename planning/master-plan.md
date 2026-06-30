@@ -279,6 +279,29 @@ implementation of the brain-program's integrity/freshness work (the `hooks/READM
 - **v2 hardening (additive):** content-hash watermark (catches edits that don't bump the date); structured
   `current_block` comparison (catches an exact in-place mismatch).
 
+### MV.3.P2 — State-graph expansion validation (cycles + status consistency + derivation drift)
+- **What:** Extend `MV.3.P`'s `--state` validator to guard the **v2 schema** — the full work-block DAG
+  (`core/planning/state-schema.md`, settled in `core/planning/state-graph-design-decisions/notes.md`).
+  Beyond P's dangling check it adds: (1) **DAG acyclicity** over `type:block` `depends_on` edges —
+  `E_STATE_CYCLE` reporting the cycle path (NEW; the doc graph needs no equivalent); (2) **status
+  consistency** — reject the now-illegal authored `status: "blocked"` (`E_STATE_AUTHORED_BLOCKED`; blocked
+  is derived, never stored) and flag a `closed` block whose `depends_on` target is not `closed`;
+  (3) `depends_on` resolution extended to the **full** DAG (every block carries edges, not only
+  active-blocked ones); (4) **backlog-node checks** — a `promoted` backlog node whose `block` resolves to
+  nothing, and a backlog `depends_on` that dangles (same `E_STATE_DANGLING_BLOCKED_BY` family, only the
+  source node type differs); (5) **derivation-drift warnings** — recompute `focus` / `repos[]` /
+  `cross_repo[]` from the authored graph and emit `W_STATE_FOCUS_DRIFT` / `W_STATE_ROLLUP_DRIFT` on
+  mismatch. Reuses `MV.3.M`'s cross-repo read mode and `MV.3.P`'s `Serialize`-able `StateGraph`.
+- **Sequencing:** depends on the brain-side `state-schema.md` v2 edit + the 5-file `depends_on` re-seed
+  landing first. Drift stays **warning-only** here; the warn→error flip is a follow-on gated on the
+  `/log-work` derived-view writer existing (so a red build always has a tool that can fix it).
+- **Acceptance:** a cyclic `depends_on` chain is flagged with its path; an authored `status:"blocked"` is
+  rejected; a `closed`-depends-on-non-`closed` pair is flagged; a dangling backlog `depends_on` / orphan
+  `promoted` node is flagged; `focus`/rollup drift is a warning (exit 0); the re-seeded five files
+  validate clean. Governed by **D29 / D36**.
+- **Forward-compat (D4):** the readiness + topological "what's next" ordering computed here is the same
+  logic the emit block (`MV.3B.T`) serializes — build it as a reusable function, not buried in the check.
+
 ---
 
 ## Phase 3B — The Brain as a queryable product (corpus engine outputs, D4)
@@ -325,6 +348,20 @@ JSON; never touches a DB); persistence and the AI layer are the orchestrator's. 
 - **Note:** this block is orchestrator-side work, tracked here only because mev's emitted edge model is its
   contract. It does not change mev.
 
+### MV.3B.T — State-graph table + rollup emit (the `MV.3B.R` parallel)
+- **What:** Emit the derived views the v2 state schema declares **generated**: the master-plan
+  **wave/dependency tables** (written into `master-plan.md` between sentinel comments
+  `<!-- BEGIN generated:wave-table -->` … `<!-- END -->` so narrative is never clobbered) and the brain
+  `repos[]` / `cross_repo[]` rollup. Reads the union of all repos' `tracks[]`, builds the work-block DAG
+  (reusing `MV.3.P2`'s graph + topo ordering), and emits — same **pure compiler** model as `MV.3B.R`
+  (files in → artifact out; no DB, no network). Settles D3 (Option B): mev owns table generation, not a
+  conversational `/log-work` agent.
+- **Acceptance:** the emitted tables match the authored DAG (wave order + dependency columns);
+  regeneration preserves every line of narrative outside the sentinels; the brain rollup matches the
+  children's `tracks[]`; mev writes nothing to any DB.
+- **Note:** this is the block that lets `MV.3.P2` flip derivation drift from warning → error — once the
+  tables and rollup are generated, drift becomes fixable and therefore enforceable.
+
 ---
 
 ## Phase 4 — Depth / Hardening: blog + linting
@@ -361,9 +398,11 @@ existence — applied across content types.
 | 3 | MV.3.L | Structural coverage (`index.md` ↔ dir, D17) | Catch orphan files + dangling rows | Brain correctness (D29) |
 | 3 | MV.3.M | Sync integrity (`synced_from` watermark) | Catch brain↔sub-repo status drift | Brain correctness (D29) |
 | 3 | MV.3.P | State integrity (`state.json` schema + block graph) | Catch dangling `blocked_by` + rollup drift | Brain correctness (D29) |
+| 3 | MV.3.P2 | State-graph expansion validation (cycles + status + drift) | Guard the v2 full DAG (acyclicity, derived blocked, drift) | Brain correctness (D29/D36) |
 | 3B | MV.3B.Q | Manifest emit (file-list + metadata JSON) | Embedder consumes it; kill double crawl | Corpus engine output (D4) |
 | 3B | MV.3B.R | Graph emit + structural query surface | Free/exact "where/what's connected" answers | Knowledge graph as product (D4) |
 | 3B | MV.3B.S | Graph-aware RAG *(orchestrator)* | Fuse semantic + structural retrieval | The two-mode endgame (D4) |
+| 3B | MV.3B.T | State-graph table + rollup emit | Generate master-plan tables + brain rollup | Corpus engine output (D3/D4) |
 | 4 | — | Blog validation + code-block/link linting | Cover a fourth content type | Whole-tree coverage |
 | 5+ | — | `watch` (hot-reload) + `compile` (manifest.json) | Speed + precompiled index | Differentiating build |
 
