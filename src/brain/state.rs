@@ -1002,6 +1002,164 @@ pub fn check_state_graph(
 }
 
 // ---------------------------------------------------------------------------
+// Status-consistency check (Task 4)
+// ---------------------------------------------------------------------------
+
+/// Check that no `closed` block depends on a non-`closed` block.
+///
+/// A block that declares `status: "closed"` with a `{type:"block"}` entry in its
+/// `depends_on[]` that points to a block whose authored status is **not** `"closed"`
+/// is inconsistent — the dependency was not complete before the dependent was closed.
+///
+/// Emits **`E_STATE_STATUS_INCONSISTENT`** for each such pair.  Dependencies whose
+/// target does not exist in any loaded file are silently skipped here — they are
+/// already reported as `E_STATE_DANGLING_BLOCKED_BY` by [`check_state_graph`].
+pub fn check_status_consistency(files: &[(StateSource, StateFile)]) -> Vec<Diagnostic> {
+    use std::collections::HashMap;
+
+    // Build a status lookup: "repo:id" → authored status (None = absent = treated as open).
+    let mut status_map: HashMap<String, Option<String>> = HashMap::new();
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let key = format!("{}:{}", src.repo_slug, block.id);
+                status_map.insert(key, block.status.clone());
+            }
+        }
+    }
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                // Only closed blocks participate in this check.
+                if block.status.as_deref() != Some("closed") {
+                    continue;
+                }
+
+                let from_key = format!("{}:{}", src.repo_slug, block.id);
+
+                for dep in &block.depends_on {
+                    if let BlockedBy::Block { repo, id, .. } = dep {
+                        let dep_key = format!("{repo}:{id}");
+                        // If the dep target is not in any loaded file, skip — it will
+                        // be reported as E_STATE_DANGLING_BLOCKED_BY by check_state_graph.
+                        if let Some(dep_status) = status_map.get(&dep_key) {
+                            let dep_is_closed = dep_status.as_deref() == Some("closed");
+                            if !dep_is_closed {
+                                diags.push(Diagnostic::error(
+                                    &src.abs_path,
+                                    "E_STATE_STATUS_INCONSISTENT",
+                                    format!(
+                                        "closed block '{from_key}' has a non-closed depends_on \
+                                         target '{dep_key}' (status: {})",
+                                        dep_status.as_deref().unwrap_or("open")
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    diags
+}
+
+// ---------------------------------------------------------------------------
+// Backlog-node integrity check (Task 4)
+// ---------------------------------------------------------------------------
+
+/// Validate referential integrity for `backlog[]` nodes (HQ brain files only).
+///
+/// Two checks are performed:
+///
+/// 1. **`E_STATE_DANGLING_BLOCKED_BY`** — a backlog node's `depends_on[]` entry of
+///    `{type:"block"}` references a block that is not registered in any loaded
+///    repo's `tracks[]`.
+///
+/// 2. **`E_STATE_DANGLING_PROMOTION`** — a backlog node whose `status` is `"promoted"`
+///    carries a `block` pointer (or is missing one) that does not resolve to an
+///    existing node in `{backlog.repo}:tracks[]`.
+///
+/// Backlog nodes with `status` other than `"promoted"` are not checked for
+/// promotion integrity (they have no `block` pointer by contract).
+pub fn check_backlog_integrity(
+    files: &[(StateSource, StateFile)],
+    graph: &StateGraph,
+) -> Vec<Diagnostic> {
+    use std::collections::HashSet;
+
+    // Set of all registered "repo:id" keys.
+    let node_set: HashSet<&str> = graph.nodes.iter().map(|n| n.key.as_str()).collect();
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    for (src, file) in files {
+        if file.backlog.is_empty() {
+            continue;
+        }
+
+        let path = &src.abs_path;
+
+        for backlog_node in &file.backlog {
+            // --- 1. Dangling depends_on ---
+            for dep in &backlog_node.depends_on {
+                if let BlockedBy::Block { repo, id, .. } = dep {
+                    let dep_key = format!("{repo}:{id}");
+                    if !node_set.contains(dep_key.as_str()) {
+                        diags.push(Diagnostic::error(
+                            path,
+                            "E_STATE_DANGLING_BLOCKED_BY",
+                            format!(
+                                "backlog node '{}' depends_on references unknown block '{dep_key}'",
+                                backlog_node.slug
+                            ),
+                        ));
+                    }
+                }
+            }
+
+            // --- 2. Orphan promoted node ---
+            if backlog_node.status == "promoted" {
+                match &backlog_node.block {
+                    None => {
+                        // Promoted with no block pointer — the promotion target is unknown.
+                        diags.push(Diagnostic::error(
+                            path,
+                            "E_STATE_DANGLING_PROMOTION",
+                            format!(
+                                "backlog node '{}' has status 'promoted' but no 'block' pointer",
+                                backlog_node.slug
+                            ),
+                        ));
+                    }
+                    Some(block_id) => {
+                        // Promoted and pointing at a block — verify the block exists.
+                        let block_key = format!("{}:{block_id}", backlog_node.repo);
+                        if !node_set.contains(block_key.as_str()) {
+                            diags.push(Diagnostic::error(
+                                path,
+                                "E_STATE_DANGLING_PROMOTION",
+                                format!(
+                                    "backlog node '{}' promoted to block '{block_id}' which does \
+                                     not exist in '{}' tracks[]",
+                                    backlog_node.slug, backlog_node.repo
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    diags
+}
+
+// ---------------------------------------------------------------------------
 // Rollup-drift check (brain files)
 // ---------------------------------------------------------------------------
 
@@ -3092,6 +3250,374 @@ mod tests {
             order,
             vec!["alpha:AL.1.A", "alpha:AL.1.B", "alpha:AL.1.C"],
             "equal-wave blocks should preserve array order, got: {order:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 4 — status consistency + backlog integrity tests
+    // -----------------------------------------------------------------------
+
+    // Helper: build a (StateSource, StateFile) pair with blocks that have known statuses
+    // and depends_on edges. Each block tuple is (id, status, Vec<depends_on>).
+    fn make_consistency_pair(
+        dir: &std::path::Path,
+        repo: &str,
+        blocks: &[(&str, Option<&str>, Vec<BlockedBy>)],
+    ) -> (StateSource, StateFile) {
+        let track_blocks: Vec<TrackBlock> = blocks
+            .iter()
+            .map(|(id, status, deps)| TrackBlock {
+                id: id.to_string(),
+                title: id.to_string(),
+                status: status.map(|s| s.to_string()),
+                depends_on: deps.clone(),
+                wave: None,
+                origin: None,
+            })
+            .collect();
+
+        let path = dir.join(format!("{repo}-state.json"));
+        let file = StateFile {
+            repo: repo.to_string(),
+            kind: "project".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus: Focus::default(),
+            tracks: vec![Track {
+                title: "Phase 1".to_string(),
+                blocks: track_blocks,
+            }],
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+        };
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: path,
+            expected_kind: "project",
+        };
+        (src, file)
+    }
+
+    #[test]
+    fn check_status_consistency_closed_depends_on_open_emits_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // alpha has two blocks: AL.1.A (open) and AL.1.B (closed, depends on AL.1.A).
+        let dep = BlockedBy::Block {
+            repo: "alpha".to_string(),
+            id: "AL.1.A".to_string(),
+            what: None,
+        };
+        let pair = make_consistency_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("open"), vec![]),
+                ("AL.1.B", Some("closed"), vec![dep]),
+            ],
+        );
+        let files = vec![pair];
+        let diags = check_status_consistency(&files);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_STATUS_INCONSISTENT")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "closed block depending on open block should emit exactly one \
+             E_STATE_STATUS_INCONSISTENT, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_status_consistency_closed_depends_on_closed_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Both blocks are closed — no inconsistency.
+        let dep = BlockedBy::Block {
+            repo: "alpha".to_string(),
+            id: "AL.1.A".to_string(),
+            what: None,
+        };
+        let pair = make_consistency_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("closed"), vec![]),
+                ("AL.1.B", Some("closed"), vec![dep]),
+            ],
+        );
+        let files = vec![pair];
+        let diags = check_status_consistency(&files);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_STATUS_INCONSISTENT")
+            .collect();
+        assert!(
+            errs.is_empty(),
+            "closed block depending on closed block should not emit errors, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_status_consistency_closed_depends_on_in_progress_emits_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dep = BlockedBy::Block {
+            repo: "alpha".to_string(),
+            id: "AL.1.A".to_string(),
+            what: None,
+        };
+        let pair = make_consistency_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("in_progress"), vec![]),
+                ("AL.1.B", Some("closed"), vec![dep]),
+            ],
+        );
+        let files = vec![pair];
+        let diags = check_status_consistency(&files);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_STATUS_INCONSISTENT")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "closed block depending on in_progress block should emit E_STATE_STATUS_INCONSISTENT, \
+             got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_status_consistency_dangling_dep_is_skipped_silently() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // AL.1.B is closed but depends on "alpha:AL.1.GHOST" which is not in any file.
+        // Should NOT emit E_STATE_STATUS_INCONSISTENT (that's E_STATE_DANGLING_BLOCKED_BY's job).
+        let dep = BlockedBy::Block {
+            repo: "alpha".to_string(),
+            id: "AL.1.GHOST".to_string(),
+            what: None,
+        };
+        let pair = make_consistency_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.B", Some("closed"), vec![dep])],
+        );
+        let files = vec![pair];
+        let diags = check_status_consistency(&files);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_STATUS_INCONSISTENT")
+            .collect();
+        assert!(
+            errs.is_empty(),
+            "dangling dep (not in any loaded file) should not produce \
+             E_STATE_STATUS_INCONSISTENT (that's check_state_graph's job), got: {diags:?}"
+        );
+    }
+
+    // Helper: build a (StateSource, StateFile) pair that has a backlog[] array.
+    fn make_brain_with_backlog(
+        dir: &std::path::Path,
+        repo: &str,
+        track_blocks: Vec<TrackBlock>,
+        backlog_nodes: Vec<Backlog>,
+    ) -> (StateSource, StateFile) {
+        let path = dir.join(format!("{repo}-state.json"));
+        let file = StateFile {
+            repo: repo.to_string(),
+            kind: "brain".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus: Focus::default(),
+            tracks: if track_blocks.is_empty() {
+                vec![]
+            } else {
+                vec![Track {
+                    title: "Phase 1".to_string(),
+                    blocks: track_blocks,
+                }]
+            },
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: backlog_nodes,
+        };
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: path,
+            expected_kind: "brain",
+        };
+        (src, file)
+    }
+
+    #[test]
+    fn check_backlog_integrity_dangling_depends_on_emits_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Backlog node depends on "mev:MV.3.GHOST" which doesn't exist in any tracks[].
+        let backlog_node = Backlog {
+            slug: "add-foo".to_string(),
+            title: "Add foo".to_string(),
+            repo: "mev".to_string(),
+            kind: "feature".to_string(),
+            status: "idea".to_string(),
+            depends_on: vec![BlockedBy::Block {
+                repo: "mev".to_string(),
+                id: "MV.3.GHOST".to_string(),
+                what: None,
+            }],
+            block: None,
+            notes: None,
+        };
+        let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![backlog_node]);
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_backlog_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "backlog node with dangling depends_on should emit E_STATE_DANGLING_BLOCKED_BY, \
+             got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_backlog_integrity_promoted_no_block_pointer_emits_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Backlog node with status "promoted" but no block pointer.
+        let backlog_node = Backlog {
+            slug: "add-bar".to_string(),
+            title: "Add bar".to_string(),
+            repo: "mev".to_string(),
+            kind: "feature".to_string(),
+            status: "promoted".to_string(),
+            depends_on: vec![],
+            block: None, // missing pointer
+            notes: None,
+        };
+        let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![backlog_node]);
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_backlog_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_PROMOTION")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "promoted backlog node with no block pointer should emit E_STATE_DANGLING_PROMOTION, \
+             got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_backlog_integrity_promoted_block_pointer_resolves_to_nothing_emits_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Backlog node with status "promoted" pointing at a block that doesn't exist.
+        let backlog_node = Backlog {
+            slug: "add-baz".to_string(),
+            title: "Add baz".to_string(),
+            repo: "mev".to_string(),
+            kind: "feature".to_string(),
+            status: "promoted".to_string(),
+            depends_on: vec![],
+            block: Some("MV.3.GHOST".to_string()), // block doesn't exist in mev tracks[]
+            notes: None,
+        };
+        let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![backlog_node]);
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_backlog_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_PROMOTION")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "promoted backlog node with orphan block pointer should emit \
+             E_STATE_DANGLING_PROMOTION, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_backlog_integrity_clean_promotion_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A promoted backlog node pointing at a real block that carries an origin.
+        // The origin back-pointer is structural metadata — the integrity check validates
+        // that the block exists in tracks[], not that it carries an origin field.
+        let real_block = TrackBlock {
+            id: "MV.3.P2".to_string(),
+            title: "P2 block".to_string(),
+            status: Some("in_progress".to_string()),
+            depends_on: vec![],
+            wave: Some(1),
+            origin: Some(Origin {
+                kind: "backlog".to_string(),
+                slug: "add-p2".to_string(),
+            }),
+        };
+        let backlog_node = Backlog {
+            slug: "add-p2".to_string(),
+            title: "Add P2".to_string(),
+            repo: "mev".to_string(),
+            kind: "feature".to_string(),
+            status: "promoted".to_string(),
+            depends_on: vec![],
+            block: Some("MV.3.P2".to_string()), // resolves to the real block
+            notes: None,
+        };
+
+        // Two files: a mev leaf (owns the track block) and hq brain (owns the backlog node).
+        let mev_path = dir.path().join("mev-state.json");
+        let mev_file = StateFile {
+            repo: "mev".to_string(),
+            kind: "project".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus: Focus::default(),
+            tracks: vec![Track {
+                title: "Phase 3".to_string(),
+                blocks: vec![real_block],
+            }],
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+        };
+        let mev_src = StateSource {
+            repo_slug: "mev".to_string(),
+            abs_path: mev_path,
+            expected_kind: "project",
+        };
+
+        let hq_pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![backlog_node]);
+        let files = vec![(mev_src, mev_file), hq_pair];
+        let graph = build_state_graph(&files);
+        let diags = check_backlog_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == crate::Severity::Error)
+            .collect();
+        assert!(
+            errs.is_empty(),
+            "clean promotion (block exists in tracks[]) should produce no errors, \
+             got: {diags:?}"
         );
     }
 
