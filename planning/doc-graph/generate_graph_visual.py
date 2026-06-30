@@ -32,13 +32,14 @@ def generate_graph():
                 nodes.add(node_id)
                 nodes.add(target)
 
-    out_path = os.path.join(script_dir, "graph.md")
+    md_path = os.path.join(script_dir, "graph.md")
+    html_path = os.path.join(script_dir, "graph.html")
     
-    with open(out_path, "w") as f:
+    with open(md_path, "w") as f:
         f.write("---\n")
         f.write("type: Reference\n")
         f.write("title: Brain Knowledge Graph Visual\n")
-        f.write("description: A Mermaid diagram visualizing the scope:doc_id nodes and their related: edges across the portfolio.\n")
+        f.write("description: \"Interactive visualization of the scope:doc_id nodes and their related: edges across the portfolio.\"\n")
         f.write("doc_id: brain-graph-visual\n")
         f.write("layer: [meta]\n")
         f.write("project: mev\n")
@@ -46,19 +47,67 @@ def generate_graph():
         f.write("---\n\n")
         
         f.write("# Brain Knowledge Graph Visual\n\n")
-        f.write("This diagram visualizes the `scope:doc_id` nodes and their `related:` edges across the entire portfolio (showing only connected nodes for clarity).\n\n")
-        f.write("```mermaid\n")
-        f.write("graph TD\n")
-        for n in sorted(nodes):
-            safe_id = n.replace(":", "_").replace("-", "_")
-            f.write(f"    {safe_id}[\"{n}\"]\n")
-        for src, dst in sorted(edges):
-            s_safe = src.replace(":", "_").replace("-", "_")
-            d_safe = dst.replace(":", "_").replace("-", "_")
-            f.write(f"    {s_safe} --> {d_safe}\n")
-        f.write("```\n")
+        f.write(f"The knowledge graph is too large to render via Markdown ({len(nodes)} nodes, {len(edges)} edges). ")
+        f.write("Instead, an **interactive HTML graph** has been generated.\n\n")
+        f.write("Open the `graph.html` file in this directory in any web browser to explore the graph. You can zoom, pan, and drag nodes to see their relationships.\n")
 
-    print(f"Graph successfully generated at {out_path} with {len(nodes)} connected nodes and {len(edges)} edges.")
+    # Generate vis.js interactive HTML
+    vis_nodes = [{"id": n, "label": n} for n in sorted(nodes)]
+    vis_edges = [{"from": src, "to": dst} for src, dst in sorted(edges)]
+    
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Brain Knowledge Graph</title>
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <style type="text/css">
+        body {{ margin: 0; padding: 0; background-color: #1a1a1a; color: #fff; font-family: sans-serif; }}
+        #mynetwork {{ width: 100vw; height: 100vh; border: none; }}
+        #info {{ position: absolute; top: 10px; left: 10px; z-index: 10; background: rgba(0,0,0,0.7); padding: 10px; border-radius: 5px; }}
+    </style>
+</head>
+<body>
+<div id="info">
+    <h2>Brain Knowledge Graph</h2>
+    <p>Nodes: {len(nodes)} | Edges: {len(edges)}</p>
+    <p>Scroll to zoom, drag to pan. Drag nodes to move them.</p>
+</div>
+<div id="mynetwork"></div>
+<script type="text/javascript">
+    var nodes = new vis.DataSet({json.dumps(vis_nodes)});
+    var edges = new vis.DataSet({json.dumps(vis_edges)});
+    var container = document.getElementById('mynetwork');
+    var data = {{ nodes: nodes, edges: edges }};
+    var options = {{
+        nodes: {{
+            shape: 'dot',
+            size: 16,
+            font: {{ color: '#ffffff', size: 14 }},
+            borderWidth: 2,
+            color: {{ background: '#007BFF', border: '#0056b3' }}
+        }},
+        edges: {{
+            color: {{ color: '#666666', highlight: '#ffffff' }},
+            arrows: 'to',
+            smooth: {{ type: 'continuous' }}
+        }},
+        physics: {{
+            barnesHut: {{ gravitationalConstant: -3000, centralGravity: 0.3, springLength: 95, springConstant: 0.04 }},
+            minVelocity: 0.75
+        }},
+        interaction: {{ hover: true }}
+    }};
+    var network = new vis.Network(container, data, options);
+</script>
+</body>
+</html>"""
+
+    with open(html_path, "w") as f:
+        f.write(html_content)
+
+    print(f"Graph successfully generated with {len(nodes)} connected nodes and {len(edges)} edges.")
+    print(f"-> {md_path}")
+    print(f"-> {html_path}")
 
 if __name__ == "__main__":
     generate_graph()
