@@ -237,10 +237,12 @@ The state module discovers, loads, and validates all `planning/state.json` files
 | `load_state` | `(&Path) -> Result<StateFile, StateLoadError>` | Deserializes a `planning/state.json` file into a `StateFile`. Returns `StateLoadError::Malformed` on schema mismatch or `StateLoadError::Io` on I/O failure. |
 | `check_schema` | `(&StateSource, &StateFile) -> Vec<Diagnostic>` | Schema-ring validation: kind membership, `updated` non-empty, status enum values, `blocked_by` well-formedness, kind-appropriate section presence. In v2 files: validates `tracks[].blocks[].depends_on[]` entry well-formedness, rejects authored `status:"blocked"` (`E_STATE_AUTHORED_BLOCKED`), and validates `backlog[].status` membership. |
 | `build_state_graph` | `(&[(StateSource, StateFile)]) -> StateGraph` | Builds the cross-repo block-dependency graph: nodes from `tracks[]` blocks, edges from `depends_on[]` (v2) and `cross_repo[]`. `External`-type `depends_on` entries are leaves, not graph edges. |
-| `check_state_graph` | `(&StateGraph, &[(StateSource, StateFile)]) -> Vec<Diagnostic>` | Graph integrity checks: duplicate block IDs, dangling focus references, unknown repos, dangling blocked_by, dangling cross_repo edges, and backlog-node integrity (`E_STATE_DANGLING_PROMOTION`). |
+| `check_state_graph` | `(&StateGraph, &[(StateSource, StateFile)]) -> Vec<Diagnostic>` | Graph integrity checks: duplicate block IDs, dangling focus references, unknown repos, dangling blocked_by, dangling cross_repo edges. |
 | `detect_cycles` | `(&StateGraph) -> Vec<Diagnostic>` | DFS cycle detection over `depends_on` edges; emits `E_STATE_CYCLE` naming the cycle path (e.g. `A → B → A`). |
+| `check_status_consistency` | `(&[(StateSource, StateFile)]) -> Vec<Diagnostic>` | Emits `E_STATE_STATUS_INCONSISTENT` when a `closed` block has a `type:block` `depends_on` target that is not `closed`. Dangling targets are skipped (reported by `check_state_graph`). |
+| `check_backlog_integrity` | `(&[(StateSource, StateFile)], &StateGraph) -> Vec<Diagnostic>` | Backlog-node integrity: dangling `depends_on` targets (`E_STATE_DANGLING_BLOCKED_BY`) and orphan/unresolved promoted nodes (`E_STATE_DANGLING_PROMOTION`). |
 | `ready_order` | `(&StateGraph, &[(StateSource, StateFile)]) -> Vec<String>` | Reusable standalone function: returns open blocks ordered by `wave` (tiebreak: track order, array order) whose every `type:block` dep is `closed` and which have no `type:external` deps. Forward-compat input for `MV.3B.T` topo-emit. |
-| `check_focus_drift` | `(&StateSource, &StateFile, &StateGraph) -> Vec<Diagnostic>` | Recomputes the expected `focus` from authored `tracks[]` (`now` = `in_progress`, `blocked` = unmet `depends_on`, `next` = `ready_order` ∩ `open`) and emits `W_STATE_FOCUS_DRIFT` (warning, exit 0) on block-id set mismatch. |
+| `check_focus_drift` | `(&StateSource, &StateFile, &StateGraph, &[(StateSource, StateFile)]) -> Vec<Diagnostic>` | Recomputes the expected `focus` from authored `tracks[]` (`now` = `in_progress`, `blocked` = unmet `depends_on`, `next` = `ready_order` ∩ `open`) and emits `W_STATE_FOCUS_DRIFT` (warning, exit 0) on block-id set mismatch. |
 | `check_rollup` | `(&Path, &StateFile, &HashMap<String, StateFile>) -> Vec<Diagnostic>` | Rollup drift check: compares brain `repos[]` now/next headline entries against each child's actual `focus` values. Emits `W_STATE_ROLLUP_DRIFT` on mismatch. |
 
 #### State types
@@ -260,7 +262,7 @@ The state module discovers, loads, and validates all `planning/state.json` files
 
 #### Public library entry point
 
-`validate_brain_state(root: &Path) -> anyhow::Result<Report>` (in `src/lib.rs`) runs the full OKF schema pass followed by the seven-step state pipeline (discovery → load → schema → graph build → cycle detection + graph checks → status consistency → rollup → focus drift) and appends all state diagnostics to the same `Report`. Invoked by `mev validate-brain --state`.
+`validate_brain_state(root: &Path) -> anyhow::Result<Report>` (in `src/lib.rs`) runs the full OKF schema pass followed by the multi-step state pipeline (discovery → load → schema → graph build + check → cycle detection → status consistency → backlog integrity → rollup → focus drift) and appends all state diagnostics to the same `Report`. Invoked by `mev validate-brain --state`.
 
 ---
 
