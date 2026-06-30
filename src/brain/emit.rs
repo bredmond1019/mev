@@ -13,9 +13,14 @@
 //! `plan_state_json`, `plan_master_plan_tables`, `apply_plan`) and the library
 //! entry point (`emit_state`).
 
+use std::collections::HashMap;
+
 use thiserror::Error;
 
-use crate::brain::state::{BlockedBy, StateFile, StateGraph, StateSource};
+use crate::brain::state::{
+    Block, BlockedBy, Focus, StateFile, StateGraph, StateSource, derive_cross_repo, derive_focus,
+    derive_rollup,
+};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -257,4 +262,312 @@ pub fn splice_generated(
     }
 
     Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// Task 3 — EmitAction, EmitPlan, planners, apply_plan
+// ---------------------------------------------------------------------------
+
+/// A single proposed file write produced by a planner.
+///
+/// Pure data — no IO is performed until [`apply_plan`] is called.
+#[derive(Debug, Clone)]
+pub struct EmitAction {
+    /// Absolute path of the file to (over)write.
+    pub path: std::path::PathBuf,
+    /// The complete proposed new contents of the file.
+    pub new_content: String,
+    /// Human note describing what changed (for the dry-run/write diagnostic message).
+    pub note: String,
+}
+
+/// The output of a planner: the proposed writes plus any diagnostics raised while planning
+/// (e.g. a missing-sentinel warning).
+#[derive(Debug, Default)]
+pub struct EmitPlan {
+    pub actions: Vec<EmitAction>,
+    pub diagnostics: Vec<crate::Diagnostic>,
+}
+
+impl EmitPlan {
+    /// Merge another plan's actions and diagnostics into this one.
+    pub fn extend(&mut self, other: EmitPlan) {
+        self.actions.extend(other.actions);
+        self.diagnostics.extend(other.diagnostics);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+/// Map every `tracks[].blocks[]` id in one file to its `(title, authored status)`.
+fn id_index(file: &StateFile) -> HashMap<String, (String, Option<String>)> {
+    let mut map = HashMap::new();
+    for track in &file.tracks {
+        for block in &track.blocks {
+            map.insert(
+                block.id.clone(),
+                (block.title.clone(), block.status.clone()),
+            );
+        }
+    }
+    map
+}
+
+/// Call [`derive_focus`] and rehydrate the returned id lists into a [`Focus`] struct,
+/// filling titles from this file's `tracks[]`.
+fn derived_focus_for(
+    src: &StateSource,
+    file: &StateFile,
+    graph: &StateGraph,
+    files: &[(StateSource, StateFile)],
+) -> Focus {
+    let idx = id_index(file);
+    let d = derive_focus(src, file, graph, files);
+    let title_of = |id: &str| idx.get(id).map(|(t, _)| t.clone()).unwrap_or_default();
+
+    let now = d
+        .now
+        .iter()
+        .map(|id| Block {
+            id: id.clone(),
+            title: title_of(id),
+            status: Some("in_progress".to_string()),
+            note: None,
+            repo: None,
+            blocked_by: Vec::new(),
+        })
+        .collect();
+
+    let next = d
+        .next
+        .iter()
+        .map(|id| Block {
+            id: id.clone(),
+            title: title_of(id),
+            status: None,
+            note: None,
+            repo: None,
+            blocked_by: Vec::new(),
+        })
+        .collect();
+
+    let blocked = d
+        .blocked
+        .iter()
+        .map(|(id, unmet)| Block {
+            id: id.clone(),
+            title: title_of(id),
+            status: None,
+            note: None,
+            repo: None,
+            blocked_by: unmet.clone(),
+        })
+        .collect();
+
+    Focus { now, next, blocked }
+}
+
+// ---------------------------------------------------------------------------
+// plan_state_json
+// ---------------------------------------------------------------------------
+
+/// Plan the derived-section rewrites for every loaded `state.json`.
+///
+/// - Leaf (`kind == "project"`): regenerate `focus` from [`derive_focus`].
+/// - Brain (`kind == "brain"`): regenerate `repos[]` and `cross_repo[]`; the brain
+///   `focus` field is left untouched (its aggregation rule is not yet settled).
+///
+/// An [`EmitAction`] is added only when the re-serialised derived file differs from
+/// the re-serialised original (fixed-point property — no action when already correct).
+pub fn plan_state_json(files: &[(StateSource, StateFile)], graph: &StateGraph) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+
+    // Collect leaf children for the brain rollup derivation.
+    let children: Vec<(StateSource, StateFile)> = files
+        .iter()
+        .filter(|(_, f)| f.kind == "project")
+        .cloned()
+        .collect();
+
+    for (src, file) in files {
+        let mut derived = file.clone();
+
+        match file.kind.as_str() {
+            "project" => {
+                derived.focus = derived_focus_for(src, file, graph, files);
+            }
+            "brain" => {
+                derived.repos = derive_rollup(&children, graph, files);
+                derived.cross_repo = derive_cross_repo(files);
+                // brain `focus` is intentionally left untouched.
+            }
+            _ => continue, // unknown kind already flagged by check_schema
+        }
+
+        // Fixed-point check: compare canonical serialisations (both newline-free).
+        let original = match serde_json::to_string_pretty(file) {
+            Ok(s) => s,
+            Err(e) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &src.abs_path,
+                    "W_EMIT_SERIALIZE_FAILED",
+                    format!(
+                        "could not serialize original state for '{}': {e}",
+                        src.repo_slug
+                    ),
+                ));
+                continue;
+            }
+        };
+        let new_serialised = match serde_json::to_string_pretty(&derived) {
+            Ok(s) => s,
+            Err(e) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &src.abs_path,
+                    "W_EMIT_SERIALIZE_FAILED",
+                    format!(
+                        "could not serialize derived state for '{}': {e}",
+                        src.repo_slug
+                    ),
+                ));
+                continue;
+            }
+        };
+
+        if new_serialised != original {
+            let note = if file.kind == "project" {
+                format!("regenerate focus for '{}'", src.repo_slug)
+            } else {
+                format!("regenerate repos[]/cross_repo[] for '{}'", src.repo_slug)
+            };
+            plan.actions.push(EmitAction {
+                path: src.abs_path.clone(),
+                // Add a trailing newline so the file is a POSIX text file.
+                new_content: format!("{new_serialised}\n"),
+                note,
+            });
+        }
+    }
+
+    plan
+}
+
+// ---------------------------------------------------------------------------
+// plan_master_plan_tables
+// ---------------------------------------------------------------------------
+
+/// Plan the wave-table splice into each state file's sibling `master-plan.md`.
+///
+/// For each loaded state file, locates `<state.json parent>/master-plan.md`.  If
+/// it exists and carries the `wave-table` sentinels, splices the rendered table
+/// and adds an [`EmitAction`].  A missing file or missing sentinels produces a
+/// [`W_EMIT_NO_SENTINEL`] warning diagnostic — never invents sentinels into
+/// arbitrary prose.
+pub fn plan_master_plan_tables(files: &[(StateSource, StateFile)], graph: &StateGraph) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+
+    for (src, file) in files {
+        let Some(planning_dir) = src.abs_path.parent() else {
+            continue;
+        };
+        let mp_path = planning_dir.join("master-plan.md");
+
+        if !mp_path.exists() {
+            plan.diagnostics.push(crate::Diagnostic::warning(
+                &mp_path,
+                "W_EMIT_NO_SENTINEL",
+                format!(
+                    "no master-plan.md beside '{}' state.json; skipping table emit",
+                    src.repo_slug
+                ),
+            ));
+            continue;
+        }
+
+        let original = match std::fs::read_to_string(&mp_path) {
+            Ok(s) => s,
+            Err(e) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &mp_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!("could not read master-plan.md for '{}': {e}", src.repo_slug),
+                ));
+                continue;
+            }
+        };
+
+        let table = render_wave_table(&src.repo_slug, file, graph);
+
+        match splice_generated(&original, "wave-table", &table) {
+            Ok(new_content) => {
+                if new_content != original {
+                    plan.actions.push(EmitAction {
+                        path: mp_path,
+                        new_content,
+                        note: format!("splice wave-table for '{}'", src.repo_slug),
+                    });
+                }
+            }
+            Err(_) => {
+                // Missing or unbalanced sentinels → warning, no write.
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &mp_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "master-plan.md for '{}' has no <!-- BEGIN generated:wave-table --> \
+                         sentinels; skipping",
+                        src.repo_slug
+                    ),
+                ));
+            }
+        }
+    }
+
+    plan
+}
+
+// ---------------------------------------------------------------------------
+// apply_plan
+// ---------------------------------------------------------------------------
+
+/// Execute a plan.
+///
+/// When `write` is `true`, writes each action's `new_content` to its `path` and
+/// emits a `I_EMIT_WROTE` (Warning severity) diagnostic per file.  When `false`
+/// (dry-run), writes nothing and emits a `W_EMIT_DRY_RUN` diagnostic per planned
+/// action.  Always passes through the plan's own diagnostics.
+///
+/// `I_EMIT_WROTE` and `W_EMIT_DRY_RUN` use Warning severity (no info level
+/// exists in [`crate::Diagnostic`]) so they surface in the reporter without
+/// failing the exit code.  Only `E_EMIT_WRITE_FAILED` is Error-severity (a real
+/// IO failure that should abort the run).
+pub fn apply_plan(plan: &EmitPlan, write: bool) -> Vec<crate::Diagnostic> {
+    let mut diags = plan.diagnostics.clone();
+
+    for action in &plan.actions {
+        if write {
+            match std::fs::write(&action.path, action.new_content.as_bytes()) {
+                Ok(()) => diags.push(crate::Diagnostic::warning(
+                    &action.path,
+                    "I_EMIT_WROTE",
+                    format!("wrote: {}", action.note),
+                )),
+                Err(e) => diags.push(crate::Diagnostic::error(
+                    &action.path,
+                    "E_EMIT_WRITE_FAILED",
+                    format!("failed to write {}: {e}", action.path.display()),
+                )),
+            }
+        } else {
+            diags.push(crate::Diagnostic::warning(
+                &action.path,
+                "W_EMIT_DRY_RUN",
+                format!("would write (dry-run): {}", action.note),
+            ));
+        }
+    }
+
+    diags
 }
