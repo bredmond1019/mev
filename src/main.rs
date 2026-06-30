@@ -34,6 +34,7 @@ enum Command {
     /// With --sync, also checks cross-repo synced_from watermark integrity (Phase 3, Block M).
     /// With --graph, also checks the global scope:doc_id knowledge-graph integrity (Phase 3, Block J).
     /// With --state, also checks each repo's planning/state.json schema and cross-repo block graph (Phase 3, Block P).
+    /// With --links, also checks markdown, file://, and [[wikilink]] references for dead or moved targets (Phase 3, Block K).
     ValidateBrain {
         /// Path to search from when locating brain.toml (walks up to find it).
         /// Defaults to the current directory.
@@ -57,6 +58,13 @@ enum Command {
         /// State errors cause exit 1; drift-only warnings exit 0.
         #[arg(long)]
         state: bool,
+        /// Also run the link-integrity pass: flags dead markdown [text](path) links
+        /// (E_LINK_DEAD_MARKDOWN), dead file:// URIs (E_LINK_DEAD_FILE_URI), dangling
+        /// [[wikilink]] slugs (E_LINK_DANGLING_WIKILINK), and references still pointing
+        /// at paths listed in .brain-moves-pending (E_LINK_MOVED_REFERENCE).
+        /// Link errors cause exit 1.
+        #[arg(long)]
+        links: bool,
     },
 }
 
@@ -115,6 +123,7 @@ fn main() -> ExitCode {
             sync,
             graph,
             state,
+            links,
         } => {
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,
@@ -123,7 +132,9 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let result = if state {
+            let result = if links {
+                mev::validate_brain_links(&root)
+            } else if state {
                 mev::validate_brain_state(&root)
             } else if graph {
                 mev::validate_brain_graph(&root)

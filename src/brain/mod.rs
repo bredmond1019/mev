@@ -8,6 +8,7 @@
 pub mod config;
 pub mod crawl;
 pub mod graph;
+pub mod links;
 pub mod okf;
 pub mod scope;
 pub mod state;
