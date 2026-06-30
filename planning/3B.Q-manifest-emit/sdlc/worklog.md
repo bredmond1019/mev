@@ -19,3 +19,8 @@ Validated: gating checks (fast tripwire)
 What: Add manifest_brain() library driver and mev manifest CLI subcommand with --pretty flag, plus 5 integration tests in tests/brain_manifest.rs
 Decisions: Discarded crawl diagnostics in manifest_brain() since validate_brain() is the appropriate path for diagnostic reporting; manifest_brain() returns Err only on hard config failures; Used find_brain_root() for path resolution in main.rs dispatch (consistent with all other brain subcommands) then passed the resolved root to manifest_brain(); Integration tests assert on compact JSON string patterns (e.g. '"doc_id":null') rather than pretty-printing, making assertions stable across whitespace variations
 Validated: gating checks (fast tripwire)
+
+## Task 5 — PASSED (1 attempt)
+What: Updated docs/cli.md with the manifest subcommand reference (arguments, --pretty flag, output shape, exit codes, sample JSON) and docs/architecture.md with the manifest module entry, ManifestEntry/Manifest types, build_manifest function, D5 extract-once refactor note, and removal of read_doc_metadata.
+Decisions: Inserted the manifest section in cli.md between emit-state and the surrounding --- delimiters to match the existing subcommand layout; Updated architecture.md graph.rs module-map line to note read_doc_metadata removal inline rather than deleting the DocMeta type entry, since DocMeta still exists in that module; Updated collect_doc_ids description in links.rs section to drop the stale 'reuses read_doc_metadata' phrasing
+Validated: gating checks (fast tripwire)

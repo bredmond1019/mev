@@ -2,10 +2,10 @@
   "spec_slug": "3B.Q-manifest-emit",
   "branch": "3B.Q-manifest-emit-flow",
   "started_at": "2026-06-30T20:35:15Z",
-  "updated_at": "2026-06-30T20:50:52Z",
+  "updated_at": "2026-06-30T20:55:23Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.Q-manifest-emit-flow",
   "status": "running",
-  "current_task": 4,
+  "current_task": 5,
   "tasks": {
     "1": {
       "status": "passed",
@@ -76,6 +76,24 @@
         "src/lib.rs",
         "src/main.rs",
         "tests/brain_manifest.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "5": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Updated docs/cli.md with the manifest subcommand reference (arguments, --pretty flag, output shape, exit codes, sample JSON) and docs/architecture.md with the manifest module entry, ManifestEntry/Manifest types, build_manifest function, D5 extract-once refactor note, and removal of read_doc_metadata.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Inserted the manifest section in cli.md between emit-state and the surrounding --- delimiters to match the existing subcommand layout",
+        "Updated architecture.md graph.rs module-map line to note read_doc_metadata removal inline rather than deleting the DocMeta type entry, since DocMeta still exists in that module",
+        "Updated collect_doc_ids description in links.rs section to drop the stale 'reuses read_doc_metadata' phrasing"
+      ],
+      "files_changed": [
+        "docs/cli.md",
+        "docs/architecture.md"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -208,13 +226,37 @@
         "filesReadKb": null,
         "inTokEst": 568,
         "outTok": 2651
+      },
+      {
+        "label": "update-task-5",
+        "model": "haiku",
+        "promptTokEst": 253,
+        "filesReadKb": null,
+        "inTokEst": 253,
+        "outTok": 1224
+      },
+      {
+        "label": "implement-5-1",
+        "model": "sonnet",
+        "promptTokEst": 880,
+        "filesReadKb": null,
+        "inTokEst": 880,
+        "outTok": 7698
+      },
+      {
+        "label": "test-5-1",
+        "model": "haiku",
+        "promptTokEst": 568,
+        "filesReadKb": null,
+        "inTokEst": 568,
+        "outTok": 2284
       }
     ],
     "total": {
-      "promptTokEst": 7797,
+      "promptTokEst": 9498,
       "filesReadKb": 0,
-      "inTokEst": 7797,
-      "outTok": 61231
+      "inTokEst": 9498,
+      "outTok": 72437
     }
   }
 }
