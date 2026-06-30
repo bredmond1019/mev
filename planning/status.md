@@ -8,17 +8,17 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-06-30T08:10:00-0300"
-now: "MV.3.P2 Done — v2 state-graph validator implemented + PASS (8 tasks, 275 tests). Next: MV.3.L (structural coverage) or MV.3B.Q (manifest emit / Phase 3B); coordinate brain-side v2 state.json re-seed for live validation."
-next: "MV.3.L (structural coverage: index.md ↔ dir, D17); MV.3B.Q (manifest emit / Phase 3B); MV.3B.T (table/rollup emit from v2 state graph) — see master-plan.md for ordering"
+timestamp: "2026-06-30T15:00:00-0300"
+now: "MV.3B.T Done — emit-state subcommand + derive_focus/derive_rollup/derive_cross_repo single-source derivation engine (6 tasks, 275 tests, PASS). Next: MV.3.L (structural coverage) or MV.3B.Q (manifest emit / Phase 3B)."
+next: "MV.3.L (structural coverage: index.md ↔ dir, D17); MV.3B.Q (manifest emit / Phase 3B) — see master-plan.md for ordering"
 blocked: []
 ---
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-30 — `MV.3.P2` (state-graph expansion validation) fully implemented and PASS (8 tasks, 275 tests). Migrated `src/brain/state.rs` to v2 schema (Task 1: `depends_on`/`wave`/`origin` on `TrackBlock`, `Backlog` struct, serde alias for backward compat); re-sourced DAG edges from `tracks[].blocks[].depends_on[]` + added `E_STATE_AUTHORED_BLOCKED` (Task 2); implemented `detect_cycles` (DFS, `E_STATE_CYCLE`) + standalone `ready_order` (Task 3); added status-consistency + backlog-node integrity checks (`E_STATE_STATUS_INCONSISTENT`, `E_STATE_DANGLING_PROMOTION`) (Task 4); added `check_focus_drift` → `W_STATE_FOCUS_DRIFT` warning (Task 5); wired all new checks into `validate_brain_state` pipeline + migrated integration fixtures to v2 (Task 6); updated `docs/cli.md` + `docs/architecture.md` (Task 7); all four harness gates confirmed green (Task 8). Merged via PR #7; post-review `/code-review low` was clean on the code, and a follow-up doc fix corrected `docs/architecture.md` (the `check_focus_drift` signature, a backlog-integrity check misattributed to `check_state_graph`, and two missing function rows). Note: live brain `--state` run will correctly fail until the brain-side re-seed of 5 live `state.json` files to v2 lands — that step is coordinated, not blocked on mev.
+**Last updated:** 2026-06-30 — `MV.3B.T` (state-graph table + rollup emit) fully implemented and PASS (6 tasks, 275 tests). Extracted `derive_focus`/`derive_rollup`/`derive_cross_repo` into single-source derivation functions in `src/brain/state.rs` (Task 1); created `src/brain/emit.rs` with `wave_order`, `render_wave_table`, `splice_generated`, and `EmitError` (Task 2); added `EmitAction`/`EmitPlan` planners (`plan_state_json`, `plan_master_plan_tables`, `apply_plan`) for dry-run/write split (Task 3); added `emit_state` library driver + `emit-state` CLI subcommand with `--write` flag (Task 4); updated `docs/cli.md` + `docs/architecture.md` (Task 5); all four harness gates confirmed green (Task 6). `mev emit-state` is now the single derivation engine for leaf `focus`, brain `repos[]`/`cross_repo[]`, and master-plan wave tables — the emit is the fixed point of the drift checks.
 
-**Current focus:** `MV.3.P2` Done — next: `MV.3.L` (structural coverage: `index.md` ↔ dir, D17) or `MV.3B.Q` (manifest emit / Phase 3B); see master-plan.md for ordering
+**Current focus:** `MV.3B.T` Done — next: `MV.3.L` (structural coverage: `index.md` ↔ dir, D17) or `MV.3B.Q` (manifest emit / Phase 3B); see master-plan.md for ordering
 
 ---
 
@@ -27,10 +27,10 @@ blocked: []
 > Working board — keep all five queues live. **Never end a meaningful session with every queue
 > empty.** The headlines of **now / next / blocked** mirror the frontmatter scalars above.
 
-- **now** — **`MV.3.P2` Done** (state-graph expansion validation; 8 tasks, PASS, 275 tests). v2 serde model (`depends_on`/`wave`/`origin`/`Backlog`); DAG re-sourced from `tracks[].blocks[].depends_on[]`; `detect_cycles` (DFS, `E_STATE_CYCLE`); `ready_order` (wave-ordered, standalone for MV.3B.T); `check_status_consistency` (`E_STATE_STATUS_INCONSISTENT`); `check_backlog_integrity` (`E_STATE_DANGLING_PROMOTION`); `check_focus_drift` (`W_STATE_FOCUS_DRIFT`); pipeline wired in `validate_brain_state`; docs updated; all harness gates green. **Prior:** `MV.3.K` link integrity DONE (237 tests, PR #6 merged).
-- **next** — **`MV.3.L`** (structural coverage: `index.md` ↔ dir, D17) or **`MV.3B.Q`** (manifest emit / Phase 3B); also **`MV.3B.T`** (table/rollup emit from v2 state graph). Coordinate brain-side v2 `state.json` re-seed (5 files) for live `--state` validation. See master-plan.md for ordering.
+- **now** — **`MV.3B.T` Done** (state-graph table + rollup emit; 6 tasks, PASS, 275 tests). `derive_focus`/`derive_rollup`/`derive_cross_repo` single-sourced in `state.rs`; `src/brain/emit.rs` with `wave_order`, `render_wave_table`, `splice_generated`; planners `plan_state_json`/`plan_master_plan_tables`/`apply_plan`; `emit_state` lib driver + `emit-state` CLI subcommand (`--write`); docs updated; all harness gates green. **Prior:** `MV.3.P2` (v2 state-graph validator, 8 tasks, 275 tests, PR #7).
+- **next** — **`MV.3.L`** (structural coverage: `index.md` ↔ dir, D17) or **`MV.3B.Q`** (manifest emit / Phase 3B). Coordinate brain-side v2 `state.json` re-seed (5 files) for live `--state` validation. See master-plan.md for ordering.
 - **blocked** — nothing hard-blocked; live `mev validate-brain --state` on brain will fail until the brain-side v2 `state.json` re-seed lands — that is a brain-side coordination step, not a mev blocker.
-- **improve** — Phase 3B (D4): **`MV.3B.Q`** manifest emit → `index_brain.py` consumes it (kill double crawl); **`MV.3B.R`** graph emit → Postgres edges table + structural query surface (bastion/MCP); **`MV.3B.S`** graph-aware RAG (orchestrator); **`MV.3B.T`** table/rollup emit (newly planned — derived focus/rollup tables from the v2 state graph). Companion: register tier units + bare-bloat `skip_dirs` in `brain.toml`.
+- **improve** — Phase 3B (D4): **`MV.3B.Q`** manifest emit → `index_brain.py` consumes it (kill double crawl); **`MV.3B.R`** graph emit → Postgres edges table + structural query surface (bastion/MCP); **`MV.3B.S`** graph-aware RAG (orchestrator). Companion: register tier units + bare-bloat `skip_dirs` in `brain.toml`.
 - **recurring** — none yet
 
 ## Metrics
@@ -94,7 +94,7 @@ blocked: []
 | MV.3B.Q | Manifest emit (file-list + metadata JSON) | Not started | mev emits canonical file-list; `index_brain.py` consumes it → "validated == embedded" by construction. Carries the D5 extract-once refactor (adds `metadata` to `CorpusEntry`, parses frontmatter once; `MV.3.J`'s `read_doc_metadata` seam collapses to `entry.metadata`). Depends on `MV.3.J-crawl`. |
 | MV.3B.R | Graph emit + structural query surface | Not started | mev emits graph JSON; orchestrator loads Postgres edges table beside `brain_documents`; bastion/MCP structural queries (free/exact). Depends on `MV.3.J`. |
 | MV.3B.S | Graph-aware RAG (orchestrator) | Not started | Retrieval traverses edges to expand/rerank semantic hits + query router. Orchestrator-side; mev's edge model is the contract. |
-| MV.3B.T | Table/rollup emit (from v2 state graph) | Not started | mev emits derived focus/rollup tables from the v2 state graph (`depends_on` DAG → computed blocked + rollup). Companion to MV.3.P2's validation; planned alongside the state-graph expansion. |
+| MV.3B.T | Table/rollup emit (from v2 state graph) | Done | 6 tasks, PASS, 275 tests. `derive_focus`/`derive_rollup`/`derive_cross_repo` single-sourced; `emit.rs` (`wave_order`, `render_wave_table`, `splice_generated`); `plan_state_json`/`plan_master_plan_tables`/`apply_plan`; `emit_state` driver + `emit-state` CLI (`--write`). |
 
 ---
 

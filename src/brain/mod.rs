@@ -7,6 +7,7 @@
 
 pub mod config;
 pub mod crawl;
+pub mod emit;
 pub mod graph;
 pub mod links;
 pub mod okf;

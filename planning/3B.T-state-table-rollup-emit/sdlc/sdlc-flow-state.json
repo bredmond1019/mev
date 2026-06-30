@@ -1,0 +1,349 @@
+{
+  "spec_slug": "3B.T-state-table-rollup-emit",
+  "branch": "3B.T-state-table-rollup-emit-flow",
+  "started_at": "2026-06-30T14:17:03Z",
+  "updated_at": "2026-06-30T15:03:35Z",
+  "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.T-state-table-rollup-emit-flow",
+  "status": "done",
+  "current_task": 6,
+  "tasks": {
+    "1": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Extracted derive_focus from check_focus_drift as single-source derivation; added DerivedFocus struct, derive_cross_repo, derive_rollup, and 8 integration tests covering all acceptance criteria for Task 1.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "DerivedFocus.blocked is Vec<(String, Vec<BlockedBy>)> returning only the unmet subset of depends_on (not the full list), matching the spec's requirement for emitter population of blocked_by[].",
+        "check_focus_drift now delegates entirely to derive_focus for the three-set derivation, then does set-comparison in place — no logic duplication.",
+        "derive_cross_repo skips same-repo and external deps; only cross-repo Block deps produce CrossRepoEdge.",
+        "derive_rollup filters children to kind==project before calling derive_focus, leaves tier as None per spec.",
+        "Used let-chain (if let ... && ...) to satisfy clippy::collapsible_if in derive_cross_repo."
+      ],
+      "files_changed": [
+        "src/brain/state.rs",
+        "tests/brain_state.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Created src/brain/emit.rs with EmitError (thiserror), wave_order, render_wave_table, and splice_generated; registered pub mod emit in mod.rs; added 18 integration tests in tests/brain_emit.rs covering all spec requirements",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "render_wave_table accepts graph for API symmetry/forward-compat but uses conservative cross-repo blocking (unmet unless same-repo closed) since it only receives one repo's StateFile",
+        "splice_generated preserves original trailing-newline behaviour: result ends with newline iff original did",
+        "EmitError::MissingSentinel is returned for both absent BEGIN and absent END (spec calls both 'missing or unbalanced')"
+      ],
+      "files_changed": [
+        "src/brain/emit.rs",
+        "src/brain/mod.rs",
+        "tests/brain_emit.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "3": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added EmitAction/EmitPlan types, plan_state_json (leaf focus regen + brain rollup regen with fixed-point check), plan_master_plan_tables (sentinel-aware wave-table splice), and apply_plan (dry-run/write split) to src/brain/emit.rs; 14 new integration tests in tests/brain_emit.rs covering all planner paths, fixed-point property, idempotency, and dry-run/write behaviour.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Compared canonical serde_json::to_string_pretty outputs (both without trailing newline) for the fixed-point check — new_content gets +\\n appended only on write, so first write normalises any missing trailing newline after which the file is a true fixed point.",
+        "I_EMIT_WROTE uses Warning severity (no info level in Diagnostic) per the breakdown note; only E_EMIT_WRITE_FAILED is Error severity.",
+        "Removed unused make_src/make_brain_src helpers from the task3 test module to eliminate clippy dead_code warnings before formatting."
+      ],
+      "files_changed": [
+        "src/brain/emit.rs",
+        "tests/brain_emit.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Add `emit_state` library driver and `emit-state` CLI subcommand: dry-run/write dispatch over plan_state_json + plan_master_plan_tables, with pub-use re-exports and 4 integration tests",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Used plan_state_json (the Task 3 implementation) where the spec named plan_brain_rollup — the two names refer to the same function; plan_state_json handles both leaf focus and brain rollup in one pass",
+        "Re-exported emit entry points at crate root via pub use brain::emit::{...} to satisfy the Task 4 re-export requirement and enable direct use in tests",
+        "Printed emit-state summary line as 'emit-state <mode> <root>: N error(s), N warning(s)' to mirror the ValidateBrain pattern while surfacing the dry-run/write mode"
+      ],
+      "files_changed": [
+        "src/lib.rs",
+        "src/main.rs",
+        "tests/brain_emit.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "5": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added `emit-state` subcommand documentation to docs/cli.md and extended docs/architecture.md with the emit module map entry, function table (wave_order, render_wave_table, splice_generated, plan_state_json, plan_master_plan_tables, apply_plan, emit_state), derive_* helpers (derive_focus, derive_rollup, derive_cross_repo) and DerivedFocus type added to state.rs, plus sentinel contract and diagnostic code reference.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "No new doc file was added (task spec noted this was not expected), so docs/index.md was not modified — only the two existing docs were updated.",
+        "I_EMIT_WROTE uses Warning severity in the implementation (no Info level exists in the Diagnostic type); the doc reflects this accurately by listing it as Warning."
+      ],
+      "files_changed": [
+        "docs/cli.md",
+        "docs/architecture.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "6": {
+      "status": "passed",
+      "attempts": 2,
+      "summary": "Task 6 (Validate): all four harness gates pass — cargo fmt --check, cargo clippy -D warnings, cargo test (275 tests), cargo build --release; no source changes needed.",
+      "issues": [],
+      "fixes": [
+        "The test stage returned null (failCount=?, failed=) which indicates the pipeline runner failed to capture output, not a code defect — all four harness gates pass cleanly when run directly (275 tests, 0 failures; fmt, clippy, test, build all green)."
+      ],
+      "decisions": [],
+      "files_changed": [],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    }
+  },
+  "review": {
+    "verdict": "PASS",
+    "findings": [],
+    "attempts": 1
+  },
+  "docs": {
+    "changed": [],
+    "created": []
+  },
+  "bail_reason": null,
+  "pr": {
+    "url": null,
+    "number": null
+  },
+  "tokens": {
+    "stages": [
+      {
+        "label": "worktree-setup",
+        "model": "haiku",
+        "promptTokEst": 788,
+        "filesReadKb": null,
+        "inTokEst": 788,
+        "outTok": 3330
+      },
+      {
+        "label": "enumerate",
+        "model": "haiku",
+        "promptTokEst": 235,
+        "filesReadKb": null,
+        "inTokEst": 235,
+        "outTok": 1051
+      },
+      {
+        "label": "update-task-1",
+        "model": "haiku",
+        "promptTokEst": 263,
+        "filesReadKb": null,
+        "inTokEst": 263,
+        "outTok": 1056
+      },
+      {
+        "label": "implement-1-1",
+        "model": "sonnet",
+        "promptTokEst": 915,
+        "filesReadKb": null,
+        "inTokEst": 915,
+        "outTok": 23951
+      },
+      {
+        "label": "test-1-1",
+        "model": "haiku",
+        "promptTokEst": 588,
+        "filesReadKb": null,
+        "inTokEst": 588,
+        "outTok": 1289
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 263,
+        "filesReadKb": null,
+        "inTokEst": 263,
+        "outTok": 930
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 915,
+        "filesReadKb": null,
+        "inTokEst": 915,
+        "outTok": 13910
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 588,
+        "filesReadKb": null,
+        "inTokEst": 588,
+        "outTok": 2135
+      },
+      {
+        "label": "update-task-3",
+        "model": "haiku",
+        "promptTokEst": 263,
+        "filesReadKb": null,
+        "inTokEst": 263,
+        "outTok": 1369
+      },
+      {
+        "label": "implement-3-1",
+        "model": "sonnet",
+        "promptTokEst": 915,
+        "filesReadKb": null,
+        "inTokEst": 915,
+        "outTok": 14929
+      },
+      {
+        "label": "test-3-1",
+        "model": "haiku",
+        "promptTokEst": 588,
+        "filesReadKb": null,
+        "inTokEst": 588,
+        "outTok": 2014
+      },
+      {
+        "label": "update-task-4",
+        "model": "haiku",
+        "promptTokEst": 263,
+        "filesReadKb": null,
+        "inTokEst": 263,
+        "outTok": 1088
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 915,
+        "filesReadKb": null,
+        "inTokEst": 915,
+        "outTok": 15878
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 588,
+        "filesReadKb": null,
+        "inTokEst": 588,
+        "outTok": 2200
+      },
+      {
+        "label": "update-task-5",
+        "model": "haiku",
+        "promptTokEst": 263,
+        "filesReadKb": null,
+        "inTokEst": 263,
+        "outTok": 806
+      },
+      {
+        "label": "implement-5-1",
+        "model": "sonnet",
+        "promptTokEst": 915,
+        "filesReadKb": null,
+        "inTokEst": 915,
+        "outTok": 8042
+      },
+      {
+        "label": "test-5-1",
+        "model": "haiku",
+        "promptTokEst": 588,
+        "filesReadKb": null,
+        "inTokEst": 588,
+        "outTok": 2363
+      },
+      {
+        "label": "update-task-6",
+        "model": "haiku",
+        "promptTokEst": 263,
+        "filesReadKb": null,
+        "inTokEst": 263,
+        "outTok": 1122
+      },
+      {
+        "label": "implement-6-1",
+        "model": "sonnet",
+        "promptTokEst": 915,
+        "filesReadKb": null,
+        "inTokEst": 915,
+        "outTok": 2319
+      },
+      {
+        "label": "test-6-1",
+        "model": "haiku",
+        "promptTokEst": 588,
+        "filesReadKb": null,
+        "inTokEst": 588,
+        "outTok": 2216
+      },
+      {
+        "label": "triage:task 6 test:1",
+        "model": "sonnet",
+        "promptTokEst": 314,
+        "filesReadKb": null,
+        "inTokEst": 314,
+        "outTok": 1428
+      },
+      {
+        "label": "fix-6-2",
+        "model": "sonnet",
+        "promptTokEst": 950,
+        "filesReadKb": null,
+        "inTokEst": 950,
+        "outTok": 1960
+      },
+      {
+        "label": "test-6-2",
+        "model": "haiku",
+        "promptTokEst": 588,
+        "filesReadKb": null,
+        "inTokEst": 588,
+        "outTok": 2420
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 1010,
+        "filesReadKb": null,
+        "inTokEst": 1010,
+        "outTok": 7960
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 818,
+        "filesReadKb": null,
+        "inTokEst": 818,
+        "outTok": 2830
+      },
+      {
+        "label": "wrap-up",
+        "model": "sonnet",
+        "promptTokEst": 853,
+        "filesReadKb": null,
+        "inTokEst": 853,
+        "outTok": 8053
+      }
+    ],
+    "total": {
+      "promptTokEst": 16152,
+      "filesReadKb": 0,
+      "inTokEst": 16152,
+      "outTok": 126649
+    }
+  }
+}

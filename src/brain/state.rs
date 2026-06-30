@@ -1430,18 +1430,123 @@ pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> V
 }
 
 // ---------------------------------------------------------------------------
-// Focus-drift check (task 5)
+// Focus derivation (MV.3B.T — single-source derivation engine)
+// ---------------------------------------------------------------------------
+
+/// The derived view of a file's focus — computed from `tracks[]` by [`derive_focus`].
+///
+/// All three lists contain canonical block IDs (without the `"repo:"` prefix).
+/// `blocked` additionally carries the **unmet subset** of `depends_on` for each blocked
+/// block — the unmet items are used by the emitter to populate `focus.blocked[].blocked_by[]`.
+#[derive(Debug, Clone, Default)]
+pub struct DerivedFocus {
+    /// Block IDs with authored `status == "in_progress"`.
+    pub now: Vec<String>,
+    /// Block IDs that are ready (open, no external deps, all block deps closed), in wave order.
+    pub next: Vec<String>,
+    /// `(block_id, unmet_deps)` — open blocks with at least one unmet dependency.
+    pub blocked: Vec<(String, Vec<BlockedBy>)>,
+}
+
+/// Derive the expected `focus` from a file's `tracks[]`.
+///
+/// This is the **single derivation** used by both [`check_focus_drift`] (the validator)
+/// and `mev emit-state` (the writer).  Because both call this function, the validator
+/// and the emitter cannot disagree — the emit is, by construction, the fixed point of
+/// the drift check.
+///
+/// Returns an empty [`DerivedFocus`] for files with an empty `tracks[]` (the derivation
+/// is undefined when there is no roadmap catalog — typically brain files).
+///
+/// **Derivation rules:**
+/// - `now` — every `tracks[]` block with authored `status == "in_progress"`.
+/// - `blocked` — every `tracks[]` block that is `open` and has at least one unmet
+///   dependency: any `External` dep, or any `Block` dep whose target is not `closed`.
+///   The returned `blocked` entry carries only the **unmet** subset, not the full
+///   `depends_on` list.
+/// - `next` — every `tracks[]` block returned by [`ready_order`] for this file
+///   (open blocks with no external deps and all block deps `closed`), in wave order.
+pub fn derive_focus(
+    src: &StateSource,
+    file: &StateFile,
+    graph: &StateGraph,
+    files: &[(StateSource, StateFile)],
+) -> DerivedFocus {
+    use std::collections::HashMap;
+
+    if file.tracks.is_empty() {
+        return DerivedFocus::default();
+    }
+
+    // Build a status map: "repo:id" → authored status (None = absent = open).
+    let mut status_map: HashMap<String, Option<String>> = HashMap::new();
+    for (s, f) in files {
+        for track in &f.tracks {
+            for block in &track.blocks {
+                let key = format!("{}:{}", s.repo_slug, block.id);
+                status_map.insert(key, block.status.clone());
+            }
+        }
+    }
+
+    let mut now: Vec<String> = Vec::new();
+    let mut blocked: Vec<(String, Vec<BlockedBy>)> = Vec::new();
+
+    for track in &file.tracks {
+        for block in &track.blocks {
+            let authored_status = block.status.as_deref().unwrap_or("open");
+
+            match authored_status {
+                "in_progress" => {
+                    now.push(block.id.clone());
+                }
+                "open" => {
+                    // Collect the unmet subset of depends_on.
+                    let unmet: Vec<BlockedBy> = block
+                        .depends_on
+                        .iter()
+                        .filter(|d| match d {
+                            BlockedBy::External { .. } => true,
+                            BlockedBy::Block { repo, id, .. } => {
+                                let dep_key = format!("{repo}:{id}");
+                                status_map.get(&dep_key).and_then(|s| s.as_deref())
+                                    != Some("closed")
+                            }
+                        })
+                        .cloned()
+                        .collect();
+                    if !unmet.is_empty() {
+                        blocked.push((block.id.clone(), unmet));
+                    }
+                    // `closed` and `blocked` (invalid authored) are skipped; they
+                    // don't appear in the derived focus.
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // next = ready_order filtered to this file's blocks (returns canonical "repo:id" keys).
+    let ready = ready_order(graph, files);
+    let this_prefix = format!("{}:", src.repo_slug);
+    let next: Vec<String> = ready
+        .into_iter()
+        .filter(|key| key.starts_with(&this_prefix))
+        .map(|key| key[this_prefix.len()..].to_string())
+        .collect();
+
+    DerivedFocus { now, next, blocked }
+}
+
+// ---------------------------------------------------------------------------
+// Focus-drift check (task 5) — rewritten to delegate to derive_focus
 // ---------------------------------------------------------------------------
 
 /// Recompute the expected `focus` from `tracks[]` and warn when it disagrees
 /// with the stored `focus` snapshot.
 ///
-/// **Derivation rules (from the v2 schema design decisions):**
-/// - `now` — every `tracks[]` block with authored `status == "in_progress"`.
-/// - `blocked` — every `tracks[]` block that is `open` and has at least one
-///   unmet dependency: any `External` dep, or any `Block` dep whose target is not `closed`.
-/// - `next` — every `tracks[]` block returned by [`ready_order`] for this
-///   file (open blocks with no external deps and all block deps `closed`).
+/// Delegates to [`derive_focus`] so the validator and the emitter share one
+/// derivation and can never disagree.
 ///
 /// Comparison is **block-id sets only** (mirrors [`check_rollup`]'s strategy —
 /// cosmetic title/note differences are ignored).
@@ -1459,73 +1564,24 @@ pub fn check_focus_drift(
     graph: &StateGraph,
     files: &[(StateSource, StateFile)],
 ) -> Vec<Diagnostic> {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
 
     // Undefined for files without a roadmap catalog.
     if file.tracks.is_empty() {
         return vec![];
     }
 
-    // Build a status map: "repo:id" → authored status (None = absent = open).
-    let mut status_map: HashMap<String, Option<String>> = HashMap::new();
-    for (s, f) in files {
-        for track in &f.tracks {
-            for block in &track.blocks {
-                let key = format!("{}:{}", s.repo_slug, block.id);
-                status_map.insert(key, block.status.clone());
-            }
-        }
-    }
-
-    // Derive the three focus sets from tracks[].
-    let mut derived_now: HashSet<String> = HashSet::new();
-    let mut derived_blocked: HashSet<String> = HashSet::new();
-
-    for track in &file.tracks {
-        for block in &track.blocks {
-            let authored_status = block.status.as_deref().unwrap_or("open");
-
-            match authored_status {
-                "in_progress" => {
-                    derived_now.insert(block.id.clone());
-                }
-                "open" => {
-                    // Is this block gated on something unmet?
-                    let has_unmet = block.depends_on.iter().any(|d| match d {
-                        BlockedBy::External { .. } => true,
-                        BlockedBy::Block { repo, id, .. } => {
-                            let dep_key = format!("{repo}:{id}");
-                            status_map.get(&dep_key).and_then(|s| s.as_deref()) != Some("closed")
-                        }
-                    });
-                    if has_unmet {
-                        derived_blocked.insert(block.id.clone());
-                    }
-                    // `closed` and `blocked` (invalid authored) are skipped; they
-                    // don't appear in the derived focus.
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // next = ready_order filtered to this file's blocks.
-    let ready = ready_order(graph, files);
-    let this_prefix = format!("{}:", src.repo_slug);
-    let derived_next: HashSet<String> = ready
-        .into_iter()
-        .filter(|key| key.starts_with(&this_prefix))
-        .map(|key| key[this_prefix.len()..].to_string())
-        .collect();
+    let derived = derive_focus(src, file, graph, files);
 
     // Compare stored focus to derived (block-id sets only).
     let stored_now: HashSet<&str> = file.focus.now.iter().map(|b| b.id.as_str()).collect();
     let stored_next: HashSet<&str> = file.focus.next.iter().map(|b| b.id.as_str()).collect();
     let stored_blocked: HashSet<&str> = file.focus.blocked.iter().map(|b| b.id.as_str()).collect();
 
-    let derived_now_str: HashSet<&str> = derived_now.iter().map(|s| s.as_str()).collect();
-    let derived_next_str: HashSet<&str> = derived_next.iter().map(|s| s.as_str()).collect();
-    let derived_blocked_str: HashSet<&str> = derived_blocked.iter().map(|s| s.as_str()).collect();
+    let derived_now_str: HashSet<&str> = derived.now.iter().map(|s| s.as_str()).collect();
+    let derived_next_str: HashSet<&str> = derived.next.iter().map(|s| s.as_str()).collect();
+    let derived_blocked_str: HashSet<&str> =
+        derived.blocked.iter().map(|(id, _)| id.as_str()).collect();
 
     if stored_now == derived_now_str
         && stored_next == derived_next_str
@@ -1566,6 +1622,129 @@ pub fn check_focus_drift(
             diffs.join("; ")
         ),
     )]
+}
+
+// ---------------------------------------------------------------------------
+// Cross-repo edge derivation (MV.3B.T)
+// ---------------------------------------------------------------------------
+
+/// Derive cross-repo block dependency edges from all loaded state files.
+///
+/// For every `tracks[].blocks[].depends_on` entry of `{type:"block"}` where the
+/// dependency's `repo` differs from the owning repo, produce a [`CrossRepoEdge`].
+/// Same-repo deps and `{type:"external"}` entries are skipped — they are not
+/// cross-repo structural edges.
+pub fn derive_cross_repo(files: &[(StateSource, StateFile)]) -> Vec<CrossRepoEdge> {
+    let mut edges: Vec<CrossRepoEdge> = Vec::new();
+
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                for dep in &block.depends_on {
+                    if let BlockedBy::Block { repo, id, what } = dep
+                        && repo != &src.repo_slug
+                    {
+                        edges.push(CrossRepoEdge {
+                            from: Endpoint {
+                                repo: src.repo_slug.clone(),
+                                id: block.id.clone(),
+                            },
+                            to: Endpoint {
+                                repo: repo.clone(),
+                                id: id.clone(),
+                            },
+                            note: what.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    edges
+}
+
+// ---------------------------------------------------------------------------
+// Rollup derivation (MV.3B.T)
+// ---------------------------------------------------------------------------
+
+/// Derive the brain `repos[]` rollup from the loaded leaf (`kind == "project"`) state files.
+///
+/// For each child with `kind == "project"`, calls [`derive_focus`] and maps block IDs back
+/// to [`Block`] structs using the child's own `tracks[]` for titles.  The `tier` field is
+/// left `None` — it is not derivable from state alone (it comes from the brain config).
+///
+/// The `graph` and `files` parameters are forwarded to [`derive_focus`] / [`ready_order`]
+/// so cross-repo dependency statuses are resolved correctly.
+pub fn derive_rollup(
+    children: &[(StateSource, StateFile)],
+    graph: &StateGraph,
+    files: &[(StateSource, StateFile)],
+) -> Vec<RepoRollup> {
+    children
+        .iter()
+        .filter(|(_, f)| f.kind == "project")
+        .map(|(src, file)| {
+            let derived = derive_focus(src, file, graph, files);
+
+            // Build a title lookup from this child's tracks[].
+            let mut title_map: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            for track in &file.tracks {
+                for block in &track.blocks {
+                    title_map.insert(block.id.clone(), block.title.clone());
+                }
+            }
+            let title_of = |id: &str| title_map.get(id).cloned().unwrap_or_default();
+
+            let now = derived
+                .now
+                .iter()
+                .map(|id| Block {
+                    id: id.clone(),
+                    title: title_of(id),
+                    status: Some("in_progress".to_string()),
+                    note: None,
+                    repo: None,
+                    blocked_by: Vec::new(),
+                })
+                .collect();
+
+            let next = derived
+                .next
+                .iter()
+                .map(|id| Block {
+                    id: id.clone(),
+                    title: title_of(id),
+                    status: None,
+                    note: None,
+                    repo: None,
+                    blocked_by: Vec::new(),
+                })
+                .collect();
+
+            let blocked = derived
+                .blocked
+                .iter()
+                .map(|(id, unmet)| Block {
+                    id: id.clone(),
+                    title: title_of(id),
+                    status: None,
+                    note: None,
+                    repo: None,
+                    blocked_by: unmet.clone(),
+                })
+                .collect();
+
+            RepoRollup {
+                repo: src.repo_slug.clone(),
+                tier: None,
+                now,
+                next,
+                blocked,
+            }
+        })
+        .collect()
 }
 
 /// Return a deterministically sorted `Vec<&str>` from a `HashSet<&str>` for

@@ -66,6 +66,34 @@ enum Command {
         #[arg(long)]
         links: bool,
     },
+    /// Generate derived views for the Bastion Brain repo (Phase 3, Block T).
+    ///
+    /// By default runs as a dry-run: prints the planned actions (W_EMIT_DRY_RUN) without
+    /// writing any files. Pass --write to apply the changes in place (I_EMIT_WROTE per file).
+    ///
+    /// Derived views regenerated:
+    ///   - Each leaf planning/state.json: `focus` (now/next/blocked) from tracks[].
+    ///   - The brain planning/state.json: `repos[]` and `cross_repo[]` from children.
+    ///   - Each sibling master-plan.md carrying <!-- BEGIN generated:wave-table --> sentinels:
+    ///     the wave/dependency table is spliced in. Files without sentinels are skipped
+    ///     with W_EMIT_NO_SENTINEL (never spliced into arbitrary prose).
+    ///
+    /// Diagnostic codes:
+    ///   W_EMIT_DRY_RUN       — planned action (dry-run only; no file written)
+    ///   I_EMIT_WROTE         — file written (--write mode)
+    ///   W_EMIT_NO_SENTINEL   — master-plan.md missing sentinel pair; skipped
+    ///   E_EMIT_WRITE_FAILED  — IO error writing a file (exit 1)
+    ///   E_CONFIG_NOT_FOUND   — brain.toml could not be located (exit 1)
+    EmitState {
+        /// Path to search from when locating brain.toml (walks up to find it).
+        /// Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Write the derived views in place. Without this flag the command is a dry-run:
+        /// it prints what would be written (W_EMIT_DRY_RUN) without touching any files.
+        #[arg(long)]
+        write: bool,
+    },
 }
 
 fn print_diagnostic(d: &mev::Diagnostic) {
@@ -160,6 +188,50 @@ fn main() -> ExitCode {
                         }
                         println!(
                             "validated {}: {} error(s), {} warning(s)",
+                            root.display(),
+                            report.error_count(),
+                            report.warning_count()
+                        );
+                    }
+                    if report.is_failure() {
+                        ExitCode::FAILURE
+                    } else {
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::EmitState { path, write } => {
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match mev::emit_state(&root, write) {
+                Ok(report) => {
+                    if cli.json {
+                        let envelope = mev::JsonReport::new("brain-emit", &root, &report);
+                        match envelope.to_json() {
+                            Ok(s) => println!("{s}"),
+                            Err(err) => {
+                                eprintln!("error serializing JSON: {err:#}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    } else {
+                        for d in &report.diagnostics {
+                            print_diagnostic(d);
+                        }
+                        let mode = if write { "write" } else { "dry-run" };
+                        println!(
+                            "emit-state {} {}: {} error(s), {} warning(s)",
+                            mode,
                             root.display(),
                             report.error_count(),
                             report.warning_count()
