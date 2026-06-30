@@ -303,7 +303,8 @@ pub fn validate_brain_links(root: &std::path::Path) -> anyhow::Result<Report> {
 pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     use brain::config::find_brain_config;
     use brain::state::{
-        StateLoadError, build_state_graph, check_rollup, check_schema, check_state_graph,
+        StateLoadError, build_state_graph, check_backlog_integrity, check_focus_drift,
+        check_rollup, check_schema, check_state_graph, check_status_consistency, detect_cycles,
         discover_state_files, load_state,
     };
     use std::collections::HashMap;
@@ -364,7 +365,19 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     let graph_diags = check_state_graph(&graph, &loaded);
     report.diagnostics.extend(graph_diags);
 
-    // 5. Rollup-drift checks (brain files only).
+    // 5. Cycle detection — flag any depends_on cycle in the DAG.
+    let cycle_diags = detect_cycles(&graph);
+    report.diagnostics.extend(cycle_diags);
+
+    // 6. Status-consistency check — closed blocks must not depend on non-closed blocks.
+    let consistency_diags = check_status_consistency(&loaded);
+    report.diagnostics.extend(consistency_diags);
+
+    // 7. Backlog-node integrity — dangling deps and orphan promoted nodes.
+    let backlog_diags = check_backlog_integrity(&loaded, &graph);
+    report.diagnostics.extend(backlog_diags);
+
+    // 8. Rollup-drift checks (brain files only).
     // Build a slug → StateFile map of all loaded children (project kind).
     let children: HashMap<String, brain::state::StateFile> = loaded
         .iter()
@@ -377,6 +390,12 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
             let rollup_diags = check_rollup(&src.abs_path, file, &children);
             report.diagnostics.extend(rollup_diags);
         }
+    }
+
+    // 9. Focus-drift warnings (per file with tracks[]).
+    for (src, file) in &loaded {
+        let drift_diags = check_focus_drift(src, file, &graph, &loaded);
+        report.diagnostics.extend(drift_diags);
     }
 
     Ok(report)
