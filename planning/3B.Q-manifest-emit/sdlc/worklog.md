@@ -9,3 +9,8 @@ Validated: gating checks (fast tripwire)
 What: Collapsed read_doc_metadata seam: build_graph and collect_doc_ids now read doc_id/related from entry.metadata (D5 extract-once); removed read_doc_metadata, RawFrontmatter, DocMeta from graph.rs; updated test helpers to pre-parse frontmatter into CorpusEntry.metadata
 Decisions: Removed the 3 read_doc_metadata unit tests from graph.rs along with the function — they tested the removed seam directly; the behavior-level tests for build_graph/check_graph all pass unchanged; Updated write_corpus_entry in links.rs tests (and make_entry in graph.rs tests) to parse frontmatter from content and set entry.metadata, mirroring what crawl_corpus does, so collect_doc_ids and build_graph work correctly in tests
 Validated: gating checks (fast tripwire)
+
+## Task 3 — PASSED (1 attempt)
+What: Created src/brain/manifest.rs with ManifestEntry, Manifest structs and build_manifest() function; registered pub mod manifest in brain/mod.rs with 3 unit tests covering entry mapping, JSON serialization, and empty-corpus handling
+Decisions: doc_type field uses #[serde(rename = "doc_type")] on the Rust struct field (named doc_type internally, serializes as doc_type in JSON — consistent with the spec's intent to avoid the `type` keyword without hiding the rename in the JSON output); rel paths are normalized to forward slashes via replace(MAIN_SEPARATOR, '/') for cross-platform JSON portability
+Validated: gating checks (fast tripwire)
