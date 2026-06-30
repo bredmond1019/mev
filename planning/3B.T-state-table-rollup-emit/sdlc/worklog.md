@@ -24,3 +24,8 @@ Validated: gating checks (fast tripwire)
 What: Added `emit-state` subcommand documentation to docs/cli.md and extended docs/architecture.md with the emit module map entry, function table (wave_order, render_wave_table, splice_generated, plan_state_json, plan_master_plan_tables, apply_plan, emit_state), derive_* helpers (derive_focus, derive_rollup, derive_cross_repo) and DerivedFocus type added to state.rs, plus sentinel contract and diagnostic code reference.
 Decisions: No new doc file was added (task spec noted this was not expected), so docs/index.md was not modified — only the two existing docs were updated.; I_EMIT_WROTE uses Warning severity in the implementation (no Info level exists in the Diagnostic type); the doc reflects this accurately by listing it as Warning.
 Validated: gating checks (fast tripwire)
+
+## Task 6 — PASSED (2 attempts)
+What: Task 6 (Validate): all four harness gates pass — cargo fmt --check, cargo clippy -D warnings, cargo test (275 tests), cargo build --release; no source changes needed.
+Fixed via: The test stage returned null (failCount=?, failed=) which indicates the pipeline runner failed to capture output, not a code defect — all four harness gates pass cleanly when run directly (275 tests, 0 failures; fmt, clippy, test, build all green).
+Validated: gating checks (fast tripwire)

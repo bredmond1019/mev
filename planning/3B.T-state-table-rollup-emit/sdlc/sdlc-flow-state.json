@@ -2,10 +2,10 @@
   "spec_slug": "3B.T-state-table-rollup-emit",
   "branch": "3B.T-state-table-rollup-emit-flow",
   "started_at": "2026-06-30T14:17:03Z",
-  "updated_at": "2026-06-30T14:42:35Z",
+  "updated_at": "2026-06-30T14:51:30Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.T-state-table-rollup-emit-flow",
   "status": "running",
-  "current_task": 5,
+  "current_task": 6,
   "tasks": {
     "1": {
       "status": "passed",
@@ -97,6 +97,19 @@
         "docs/cli.md",
         "docs/architecture.md"
       ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "6": {
+      "status": "passed",
+      "attempts": 2,
+      "summary": "Task 6 (Validate): all four harness gates pass — cargo fmt --check, cargo clippy -D warnings, cargo test (275 tests), cargo build --release; no source changes needed.",
+      "issues": [],
+      "fixes": [
+        "The test stage returned null (failCount=?, failed=) which indicates the pipeline runner failed to capture output, not a code defect — all four harness gates pass cleanly when run directly (275 tests, 0 failures; fmt, clippy, test, build all green)."
+      ],
+      "decisions": [],
+      "files_changed": [],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
     }
@@ -252,13 +265,61 @@
         "filesReadKb": null,
         "inTokEst": 588,
         "outTok": 2363
+      },
+      {
+        "label": "update-task-6",
+        "model": "haiku",
+        "promptTokEst": 263,
+        "filesReadKb": null,
+        "inTokEst": 263,
+        "outTok": 1122
+      },
+      {
+        "label": "implement-6-1",
+        "model": "sonnet",
+        "promptTokEst": 915,
+        "filesReadKb": null,
+        "inTokEst": 915,
+        "outTok": 2319
+      },
+      {
+        "label": "test-6-1",
+        "model": "haiku",
+        "promptTokEst": 588,
+        "filesReadKb": null,
+        "inTokEst": 588,
+        "outTok": 2216
+      },
+      {
+        "label": "triage:task 6 test:1",
+        "model": "sonnet",
+        "promptTokEst": 314,
+        "filesReadKb": null,
+        "inTokEst": 314,
+        "outTok": 1428
+      },
+      {
+        "label": "fix-6-2",
+        "model": "sonnet",
+        "promptTokEst": 950,
+        "filesReadKb": null,
+        "inTokEst": 950,
+        "outTok": 1960
+      },
+      {
+        "label": "test-6-2",
+        "model": "haiku",
+        "promptTokEst": 588,
+        "filesReadKb": null,
+        "inTokEst": 588,
+        "outTok": 2420
       }
     ],
     "total": {
-      "promptTokEst": 9853,
+      "promptTokEst": 13471,
       "filesReadKb": 0,
-      "inTokEst": 9853,
-      "outTok": 96341
+      "inTokEst": 13471,
+      "outTok": 107806
     }
   }
 }
