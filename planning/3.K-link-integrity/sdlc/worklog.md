@@ -24,3 +24,7 @@ Validated: gating checks (fast tripwire)
 What: Documented --links flag, four E_LINK_* diagnostic codes, and the links.rs module in docs/cli.md and docs/architecture.md
 Decisions: --links takes highest precedence in the dispatch chain (above --state), consistent with the 'else if' ladder pattern established by prior flags; docs/index.md left unchanged — no new doc file was created, existing rows already cover cli.md and architecture.md per task spec scope-shift rule
 Validated: gating checks (fast tripwire)
+
+## Task 6 — PASSED (1 attempt)
+What: Task 6 validation passed: all 4 harness gates green (fmt, clippy, 236 tests, release build)
+Validated: gating checks (fast tripwire)

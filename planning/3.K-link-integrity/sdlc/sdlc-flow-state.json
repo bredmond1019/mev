@@ -2,10 +2,10 @@
   "spec_slug": "3.K-link-integrity",
   "branch": "3.K-link-integrity-flow",
   "started_at": "2026-06-30T08:40:01Z",
-  "updated_at": "2026-06-30T09:01:17Z",
+  "updated_at": "2026-06-30T09:04:26Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.K-link-integrity-flow",
   "status": "running",
-  "current_task": 5,
+  "current_task": 6,
   "tasks": {
     "1": {
       "status": "passed",
@@ -91,6 +91,17 @@
         "docs/cli.md",
         "docs/architecture.md"
       ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "6": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Task 6 validation passed: all 4 harness gates green (fmt, clippy, 236 tests, release build)",
+      "issues": [],
+      "fixes": [],
+      "decisions": [],
+      "files_changed": [],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
     }
@@ -246,13 +257,37 @@
         "filesReadKb": null,
         "inTokEst": 568,
         "outTok": 1941
+      },
+      {
+        "label": "update-task-6",
+        "model": "haiku",
+        "promptTokEst": 253,
+        "filesReadKb": null,
+        "inTokEst": 253,
+        "outTok": 816
+      },
+      {
+        "label": "implement-6-1",
+        "model": "sonnet",
+        "promptTokEst": 880,
+        "filesReadKb": null,
+        "inTokEst": 880,
+        "outTok": 1648
+      },
+      {
+        "label": "test-6-1",
+        "model": "haiku",
+        "promptTokEst": 568,
+        "filesReadKb": null,
+        "inTokEst": 568,
+        "outTok": 2441
       }
     ],
     "total": {
-      "promptTokEst": 9498,
+      "promptTokEst": 11199,
       "filesReadKb": 0,
-      "inTokEst": 9498,
-      "outTok": 72729
+      "inTokEst": 11199,
+      "outTok": 77634
     }
   }
 }
