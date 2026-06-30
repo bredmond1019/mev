@@ -132,14 +132,14 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let result = if state {
+            let result = if links {
+                mev::validate_brain_links(&root)
+            } else if state {
                 mev::validate_brain_state(&root)
             } else if graph {
                 mev::validate_brain_graph(&root)
             } else if sync {
                 mev::validate_brain_sync(&root)
-            } else if links {
-                mev::validate_brain_links(&root)
             } else {
                 mev::validate_brain(&root)
             };
