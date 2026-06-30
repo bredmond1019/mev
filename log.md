@@ -8,12 +8,22 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-06-30T06:33:51-0300"
+timestamp: "2026-06-30T08:09:28-0300"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## 2026-06-30
+
+### MV.3.P2 merged via PR #7 — v2 state-graph validator (8 tasks, 275 tests, PASS)
+
+- **What:** Ran `/sdlc-flow 3.P2-state-graph-validation` to completion (8 tasks, PASS, 275 tests) and merged it via **PR #7** (merge commit `460d0cd`). MV.3.P2 migrates `src/brain/state.rs` to the v2 `state.json` schema: `depends_on` DAG on track blocks, `detect_cycles` (`E_STATE_CYCLE`), `ready_order`, `check_status_consistency` (`E_STATE_STATUS_INCONSISTENT`), `check_backlog_integrity` (`E_STATE_DANGLING_PROMOTION`), `check_focus_drift` (`W_STATE_FOCUS_DRIFT`), and `E_STATE_AUTHORED_BLOCKED` — all wired into `validate_brain_state`. Post-merge `/code-review low` found no code issues; a follow-up doc fix (commit `1edbd21`) corrected `docs/architecture.md`: the `check_focus_drift` signature (was missing the 4th `files` arg), backlog integrity wrongly attributed to `check_state_graph` (it is `check_backlog_integrity`), and two missing function-table rows (`check_status_consistency`, `check_backlog_integrity`). Local `main` fast-forwarded cleanly; worktree `trees/3.P2-state-graph-validation-flow` removed, branch deleted; `main == origin/main` at `460d0cd`.
+- **Why:** Completes the v2 state-graph validation layer — the work-block graph twin of the doc-graph corpus engine — and keeps the architecture docs accurate after review. **Gotcha:** live `mev validate-brain --state` will fail until the brain-side re-seed of the 5 live `state.json` files from v1→v2 lands — expected, not a regression.
+- **Refs:** PR #7 (merge `460d0cd`); doc fix `1edbd21`; `planning/3.P2-state-graph-validation/`; `core/planning/state-schema.md` (v2 contract).
 
 ---
 
