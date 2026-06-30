@@ -21,6 +21,7 @@ pub use brain::links::{
     LinkKind, LinkRef, check_links, check_moved_references, collect_doc_ids, extract_links,
     read_moves_pending,
 };
+pub use brain::manifest::{Manifest, ManifestEntry, build_manifest};
 pub use brain::okf::{OkfFrontmatter, validate_md_file};
 pub use learn_ai::LearnAiValidator;
 pub use learn_ai::crawl::{ContentFile, Corpus, FileKind, Locale, crawl};
@@ -492,6 +493,29 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     report.diagnostics.extend(mp_diags);
 
     Ok(report)
+}
+
+/// Crawl the company-brain repo rooted at `root` and emit a canonical JSON manifest.
+///
+/// Phase 3, Block Q: resolves `brain.toml` by walking up from `root`, calls
+/// [`brain::crawl::crawl_corpus`] once to obtain the full file list, and passes the
+/// result to [`brain::manifest::build_manifest`] to produce a [`Manifest`] value.
+///
+/// The returned [`Manifest`] is a pure value — nothing is written to disk.  The caller
+/// serialises it to stdout (or a file) as needed (consistent with the D4 pure-compiler model).
+///
+/// Returns an [`anyhow::Error`] only for hard configuration errors (e.g. `brain.toml` not
+/// found).  Crawl diagnostics are discarded here — the combined validate-and-manifest flow
+/// should use `validate_brain` first if diagnostic reporting is required.
+pub fn manifest_brain(root: &std::path::Path) -> anyhow::Result<Manifest> {
+    use brain::config::find_brain_config;
+    use brain::crawl::crawl_corpus;
+
+    let config = find_brain_config(root)
+        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
+
+    let (corpus, _crawl_diags) = crawl_corpus(root, &config);
+    Ok(build_manifest(root, &corpus))
 }
 
 /// Machine-readable envelope emitted by the `--json` flag for any `mev` subcommand.

@@ -66,6 +66,27 @@ enum Command {
         #[arg(long)]
         links: bool,
     },
+    /// Emit a JSON manifest of every file in the Brain corpus (Phase 3, Block Q).
+    ///
+    /// Crawls the Brain repo, resolves `brain.toml`, and prints a JSON document listing
+    /// every corpus file with its scope, relative path, and OKF metadata fields.  The
+    /// manifest is the single source of truth for `index_brain.py` — "what's validated ==
+    /// what's embedded" holds by construction.
+    ///
+    /// Output is compact JSON by default; pass --pretty for indented output.
+    ///
+    /// Exit codes:
+    ///   0 — manifest emitted successfully
+    ///   1 — configuration error (brain.toml not found or unreadable)
+    Manifest {
+        /// Path to search from when locating brain.toml (walks up to find it).
+        /// Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Emit pretty-printed (indented) JSON instead of compact JSON.
+        #[arg(long)]
+        pretty: bool,
+    },
     /// Generate derived views for the Bastion Brain repo (Phase 3, Block T).
     ///
     /// By default runs as a dry-run: prints the planned actions (W_EMIT_DRY_RUN) without
@@ -241,6 +262,38 @@ fn main() -> ExitCode {
                         ExitCode::FAILURE
                     } else {
                         ExitCode::SUCCESS
+                    }
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::Manifest { path, pretty } => {
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match mev::manifest_brain(&root) {
+                Ok(manifest) => {
+                    let json_result = if pretty {
+                        serde_json::to_string_pretty(&manifest)
+                    } else {
+                        serde_json::to_string(&manifest)
+                    };
+                    match json_result {
+                        Ok(s) => {
+                            println!("{s}");
+                            ExitCode::SUCCESS
+                        }
+                        Err(err) => {
+                            eprintln!("error serializing manifest: {err:#}");
+                            ExitCode::FAILURE
+                        }
                     }
                 }
                 Err(err) => {
