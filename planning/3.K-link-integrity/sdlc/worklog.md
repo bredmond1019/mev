@@ -19,3 +19,8 @@ Validated: gating checks (fast tripwire)
 What: Add validate_brain_links() public API + --links CLI flag + 9 integration tests; fix UTF-8 panic in extract_links() byte scanner
 Decisions: Fixed a UTF-8 boundary panic discovered during the live brain run: extract_links() used i += 1 which can advance into the middle of a multi-byte sequence, causing contents[i..].starts_with() to panic. Fix: guard the file:// check with bytes[i] == b'f' first, and replace i += 1 with a char-width advance derived from the leading byte.; The live brain run produces 2085 errors (real findings: dangling [[bin]]/[[test]] wikilinks in claude-sdk-rs status docs, dead file:// URIs with placeholder paths, dead markdown links in SECURITY.md). These are genuine corpus findings, not false positives.
 Validated: gating checks (fast tripwire)
+
+## Task 5 — PASSED (1 attempt)
+What: Documented --links flag, four E_LINK_* diagnostic codes, and the links.rs module in docs/cli.md and docs/architecture.md
+Decisions: --links takes highest precedence in the dispatch chain (above --state), consistent with the 'else if' ladder pattern established by prior flags; docs/index.md left unchanged — no new doc file was created, existing rows already cover cli.md and architecture.md per task spec scope-shift rule
+Validated: gating checks (fast tripwire)
