@@ -15,6 +15,7 @@ pub mod okf;
 pub mod scope;
 pub mod state;
 pub mod sync;
+pub mod visualize;
 
 pub use config::BrainConfig;
 

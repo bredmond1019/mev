@@ -23,6 +23,7 @@ pub use brain::links::{
 };
 pub use brain::manifest::{Manifest, ManifestEntry, build_manifest};
 pub use brain::okf::{OkfFrontmatter, validate_md_file};
+pub use brain::visualize::generate_graph_visual;
 pub use learn_ai::LearnAiValidator;
 pub use learn_ai::crawl::{ContentFile, Corpus, FileKind, Locale, crawl};
 pub use learn_ai::meta::validate_file;
@@ -516,6 +517,25 @@ pub fn manifest_brain(root: &std::path::Path) -> anyhow::Result<Manifest> {
 
     let (corpus, _crawl_diags) = crawl_corpus(root, &config);
     Ok(build_manifest(root, &corpus))
+}
+
+/// Generate an interactive HTML knowledge graph of the Brain corpus.
+///
+/// Discovers `brain.toml`, runs a crawl to build a manifest, and delegates to
+/// `generate_graph_visual` to write `graph.md` and `graph.html` to `out_dir`.
+/// If `out_dir` is `None`, defaults to `planning/doc-graph` under the brain root.
+pub fn visualize_brain(root: &std::path::Path, out_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    use brain::config::find_brain_config;
+    
+    let config = find_brain_config(root)
+        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
+    
+    // Use the actual found root for default output dir, not the search path
+    let actual_root = config.path.parent().unwrap();
+    let out = out_dir.unwrap_or_else(|| actual_root.join("planning").join("doc-graph"));
+    
+    let manifest = manifest_brain(root)?;
+    brain::visualize::generate_graph_visual(&manifest, &out)
 }
 
 /// Machine-readable envelope emitted by the `--json` flag for any `mev` subcommand.
