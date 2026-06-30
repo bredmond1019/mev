@@ -68,7 +68,7 @@ Extend `mev validate-brain --state` to guard the **v2 state schema** — the ful
 - Unit tests: a stored `focus` that disagrees with the derived view → one `W_STATE_FOCUS_DRIFT`; an in-sync `focus` → none; drift never raises exit code.
 - **Owns:** `src/brain/state.rs` (new `check_focus_drift`).
 
-### 6. Wire into the pipeline + integration tests
+### 6. Wire into the pipeline + integration tests (in progress)
 - `src/lib.rs` → `validate_brain_state`: after the existing schema/graph/rollup passes, append `detect_cycles`, the status-consistency check, the backlog-node checks, and `check_focus_drift` into the same `Report`. (No `--state` flag change; `src/main.rs` untouched.)
 - `tests/brain_state.rs`: migrate existing integration fixtures to v2 and add end-to-end cases — a cyclic `depends_on` → exit 1 with `E_STATE_CYCLE`; authored `status:"blocked"` → `E_STATE_AUTHORED_BLOCKED`; closed-depends-on-non-closed → `E_STATE_STATUS_INCONSISTENT`; dangling backlog dep + orphan promotion flagged; `focus` drift → warning (exit 0); a clean v2 corpus passes; `--json` envelope well-formed.
 - **Owns:** `src/lib.rs`, `tests/brain_state.rs`.

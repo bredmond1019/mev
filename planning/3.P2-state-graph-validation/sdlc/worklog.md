@@ -24,3 +24,8 @@ Validated: gating checks (fast tripwire)
 What: Add check_focus_drift to src/brain/state.rs — recomputes focus.now/next/blocked from tracks[] and emits W_STATE_FOCUS_DRIFT (warning, exit 0) on mismatch; 8 unit tests covering all cases.
 Decisions: Skips files with empty tracks[] (brain files whose focus comes from aggregated child repos would produce false positives); Signature takes (src, file, graph, files) so ready_order can be called cross-file for accurate next derivation; open blocks with any External dep or any unclosed Block dep go into derived blocked; ready_order output filtered by repo prefix gives derived next
 Validated: gating checks (fast tripwire)
+
+## Task 6 — PASSED (1 attempt)
+What: Wired detect_cycles, check_status_consistency, check_backlog_integrity, and check_focus_drift into validate_brain_state pipeline; migrated integration fixtures to v2 and added 6 new end-to-end tests (10 total).
+Decisions: Focus drift check runs on all loaded files (not just project kind), matching the spec intent that each file with tracks[] gets checked; Existing fixtures migrated to v2 by replacing 'block' JSON key with 'id' in focus entries and cross_repo endpoints (alias in serde model keeps v1 still deserializable but v2 is canonical); New pipeline steps appended in spec order: cycle detection (5), status consistency (6), backlog integrity (7), rollup drift (8), focus drift (9)
+Validated: gating checks (fast tripwire)
