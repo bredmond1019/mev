@@ -72,7 +72,9 @@ to the user.
 
 ### Step 5 — Report
 
-7. Confirm: output the local path created and (if applicable) the brain backlog entry.
+7. Shell out to `mev emit-state --write` to update the brain's focus derivation and state.
+
+8. Confirm: output the local path created and (if applicable) the brain backlog entry.
    Tell the user to open `planning/<slug>/notes.md` and paste their conversation content
    into the relevant sections.
 

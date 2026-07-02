@@ -135,6 +135,10 @@ checks as you go — do not batch them at the end. Each check must pass before c
  signature differs from what the spec implied, or a standing rule from CLAUDE.md applies>
 ```
 
+### State Refresh
+
+Run `mev emit-state --write` to update the brain's focus derivation and state based on the new planning files.
+
 ## Report
 
 Return only the path to the file created (e.g. `planning/<spec-slug>/breakdown.md`).

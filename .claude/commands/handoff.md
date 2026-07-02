@@ -27,13 +27,43 @@ Read these files (all relative to the project root):
 - `log.md` — the three most recent entries (for narrative context)
 - Any in-flight task spec visible from status.md (e.g. `planning/<current-block>/tasks.md`)
 - `planning/handoff.md` — if it exists, read it (you are updating it, not replacing blindly)
+- `planning/state.json` — the existing `carryover[]` (you are appending to it, not duplicating)
+- `planning/state-schema.md` — the `carryover[]` section, for the field shape
 
 Run:
 - `git log --oneline -10` — recent commits
 - `git diff --stat` — uncommitted changes
 - `git status` — untracked files and staged state
 
-### Step 2 — Write `planning/handoff.md`
+### Step 2 — Drain durable context into `state.json` `carryover[]`
+
+**This is what keeps `handoff.md` disposable.** Before writing the handoff, route anything that must
+outlive *this* handoff (so the next one can't overwrite it away) into the right durable home — do **not**
+leave it living only in the prose below:
+
+- **Committed, sequenced work** with real dependencies → a `tracks[].blocks[]` block in `planning/state.json`.
+- **Free-floating ideas/chores** not on this repo's critical path → the company brain's HQ `backlog[]`
+  (via `/backlog-ticket` at the brain).
+- **Durable caveats, known-issues, environmental notes, and not-yet-ticketed deferred follow-ons** →
+  append a `carryover[]` entry to `planning/state.json`. This is the in-between lane the other two miss:
+  - `kind: constraint` — a rule the next agent must honor.
+  - `kind: known_issue` — a don't-re-investigate fact.
+  - `kind: env` — a transient environmental caveat (e.g. "installed binary is stale, rebuild first").
+  - `kind: deferred` — a real follow-on you haven't ticketed yet; promote it to a block/backlog when ready.
+
+  Follow the `carryover[]` field shape in `planning/state-schema.md` (`slug`, `scope`, `kind`, `text`,
+  optional `related` + `clears_when`, `created`). Keep it valid JSON; append, don't duplicate an existing
+  slug. **Delete** any existing `carryover[]` entry whose `clears_when` resolved this session. If this repo
+  has no `planning/state.json` yet, skip this step.
+
+After making any changes to `planning/state.json`'s `carryover[]`, or after writing/updating a
+block's `tasks.json`, run `mev emit-state --write` to ensure the new state is tracked across
+brains. Never hand-edit a block's `tasks` field yourself — it's a derived pointer + status summary
+(see `core/planning/state-schema.md`), not something you inject entries into.
+
+The handoff prose in Step 3 then *points at* these slugs instead of being their only home.
+
+### Step 3 — Write `planning/handoff.md`
 
 Create or overwrite `planning/handoff.md` using the template below. Be specific and honest:
 the next agent has zero session memory and will rely entirely on this file + `/prime` to
@@ -63,14 +93,19 @@ all 3 engines (sdlc-block.js:473, sdlc-task.js:455, sdlc-run.js:326)" not "fixed
 <Bulleted list of what's left, in priority order. Mark blockers explicitly.
 If work is blocked on an answer to an open question, say so.>
 
+## Durable State Updates
+<List any items you added to `state.json`'s `carryover[]`, and any block whose `tasks.json` you
+created or changed this session. Note their slug / block ID so the next agent can find them easily
+without having to hunt.>
+
 ## Open questions / choices
 <Bulleted list of unresolved decisions or things to verify before proceeding. If none, write
 "None — clear to proceed.">
 
 ## Context the next agent needs
-<Any non-obvious constraints, gotchas, or background that would slow the next agent down if
-they had to re-derive it. Code sites (file:line), command sequences, known state of external
-systems, etc. Omit if everything is already covered above.>
+<Only ephemeral, this-session framing the next agent needs to read the above. Durable constraints,
+known-issues, and env caveats belong in `state.json` `carryover[]` (Step 2) — reference their slugs
+here, don't restate them. Omit this section if Step 2 captured everything.>
 
 ## First command after `/prime`
 `<exact command to run first>`
@@ -79,19 +114,19 @@ systems, etc. Omit if everything is already covered above.>
 Fill every section. Do not leave placeholder text. If a section is genuinely empty, say why
 (e.g. "No open questions — the approach is settled per D14.").
 
-### Step 3 — Invoke `/log-work`
+### Step 4 — Invoke `/log-work`
 
 Invoke the `/log-work` skill. Pass $ARGUMENTS as the argument if it was provided, so the
 log entry gets the same narrative. `/log-work` will ask for confirmation before writing — let
 that flow normally.
 
-### Step 4 — Invoke `/commit`
+### Step 5 — Invoke `/commit`
 
 After `/log-work` completes, invoke the `/commit` skill. This will pick up `planning/handoff.md`
-(just written) plus any other uncommitted changes. `/commit` will show staged files and ask for
-confirmation — let that flow normally.
+(just written), the `state.json` `carryover[]` edits, plus any other uncommitted changes. `/commit`
+will show staged files and ask for confirmation — let that flow normally.
 
-### Step 5 — Report
+### Step 6 — Report
 
 Tell the user:
 - `planning/handoff.md` was written (or updated)
@@ -108,3 +143,4 @@ Tell the user:
 - `log.md` (last 3 entries)
 - The current in-flight task spec (path from status.md, if any)
 - `planning/handoff.md` (if it already exists)
+- `planning/state.json` (existing `carryover[]`) + `planning/state-schema.md` (`carryover[]` field shape)

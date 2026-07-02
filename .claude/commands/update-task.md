@@ -36,7 +36,7 @@ Return the subagent's result to the user.
 
 3. Read the task spec.
 
-4. If a non-zero step number was given, mark that step heading done by prepending `✅` to the
+4. If a non-zero step number was given, mark that step heading done by prepending `[done]` to the
    matching `### <N>.` line. If the step is already marked done, report that and skip.
 
 5. If note text was provided, append it to the `## Notes` section of the spec, prefixed with

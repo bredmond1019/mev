@@ -36,8 +36,8 @@ Current focus: <value from status.md>
 |---|---|---|---|
 | phase1-block1 | Done | — | complete |
 | phase1-block2 | In progress | — | already running |
-| phase1-block3 | Not started | ✅ ready | all prerequisites done |
-| phase2-block1 | Not started | ⏰ blocked | phase1-block3 not done |
+| phase1-block3 | Not started | [ready] | all prerequisites done |
+| phase2-block1 | Not started | (blocked) | phase1-block3 not done |
 
 ## Next eligible block
 <block identifier and one-sentence description of what it covers>

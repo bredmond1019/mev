@@ -1,4 +1,4 @@
 template: base-template
-commit: 00ad2834e232d3243a3578132b02db01a7be40ab
+commit: c7c904a8618339ce560190adb78fb9c224dd3c86
 generated: 2026-06-18
-synced: 2026-06-26 — harness pull (Wave 5: redesign D37–D43, /ticket /review-PR /merge-train, docs/workflows/), base-template c408273
+synced: 2026-07-02 — D44-D47 tasks.json/state-pointer fix + skills cleanup

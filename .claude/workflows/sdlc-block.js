@@ -676,27 +676,29 @@ await writeBlockState('enumerated')
 // ----------------------------------------------------------------
 const badSet = new Set()   // escalated OR poisoned block indices
 
-// Ensure planning/<slug>/tasks.md exists & is committed on the train branch. If missing, an inline
-// agent mirrors /generate-tasks (the runtime cannot invoke a slash command) — reading the block's
-// section out of the plan file, so this works for master-plan.md AND a /plan output path alike.
+// Ensure planning/<slug>/tasks.md + tasks.json exist & are committed on the train branch. If
+// missing, an inline agent mirrors /generate-tasks (the runtime cannot invoke a slash command) —
+// reading the block's section out of the plan file, so this works for master-plan.md AND a /plan
+// output path alike.
 async function ensureTasks(slug, blk) {
   const blockTasks = `planning/${slug}/tasks.md`
+  const blockTasksJson = `planning/${slug}/tasks.json`
   const present = await agent(`
 You run from the MAIN repo root. Print whether a runnable spec already exists for this block:
-  ls ${blockTasks} 2>/dev/null && grep -c '^### [0-9]' ${blockTasks} 2>/dev/null || echo "MISSING"
-Return via StructuredOutput: exists=true iff the file exists AND printed a count >= 1, else false.
+  cat ${blockTasksJson} 2>/dev/null || echo "MISSING"
+Return via StructuredOutput: exists=true iff the output is valid JSON and is a non-empty array (a bare array — not wrapped in an object; matches orchestrator's SDLCTask schema), else false.
 `, { label: `tasks-check-${slug}`, schema: { type: 'object', required: ['exists'], properties: { exists: { type: 'boolean' } } }, model: 'haiku' })
-  if (present?.exists) { log(`Block ${slug}: tasks.md present — reusing.`); return { success: true, tasksFile: blockTasks } }
+  if (present?.exists) { log(`Block ${slug}: tasks.json present — reusing.`); return { success: true, tasksFile: blockTasks } }
 
-  log(`Block ${slug}: no tasks.md — generating from the plan's "### Block ${blk.block}" section...`)
+  log(`Block ${slug}: no tasks.json — generating from the plan's "### Block ${blk.block}" section...`)
   return tracedAgent(`
 You are the spec generator for one roadmap block (mirroring /generate-tasks). You run from the MAIN repo
 root, on the train branch. Read ONE block's definition out of the plan file and explode it into a
-runnable, decomposed tasks.md. Do NOT implement anything.
+runnable, decomposed tasks.md + tasks.json. Do NOT implement anything.
 
-Block:      ${slug}  (Phase ${blk.phase}, Block ${blk.block}${blk.title ? ' — ' + blk.title : ''})
-Plan file:  ${planFile}
-Write to:   ${blockTasks}
+Block:           ${slug}  (Phase ${blk.phase}, Block ${blk.block}${blk.title ? ' — ' + blk.title : ''})
+Plan file:       ${planFile}
+Write to:        ${blockTasks} (prose) and ${blockTasksJson} (task list)
 
 1. Read the project's standing rules and the block definition:
    - cat CLAUDE.md planning/context.md   (CLAUDE.md is the authority; assume no stack/locale/narrative/
@@ -705,21 +707,31 @@ Write to:   ${blockTasks}
    - cat ${planFile}   → find the "## Phase ${blk.phase}" → "### Block ${blk.block}" section. Read ONLY
      that block's What / Why / Files / Interfaces / Out of scope / Acceptance criteria. Carry its named
      Files (New vs Modified) through to per-task ownership and its Out-of-scope as a hard boundary.
-   - cat .claude/workflows/templates/spec-template.md   → the FORMAT reference.
+   - cat .claude/workflows/templates/spec-template.md   → the FORMAT reference (includes the tasks.json
+     schema).
 
 2. Write ${blockTasks} in the standard spec format: ## Goal, ## Context Pointers, ## Step-by-Step Tasks
-   (numbered "### 1.", "### 2.", … ; each task names the concrete file(s) it owns so tasks are disjoint
-   and merge-safe; the final task is always Validate), ## Acceptance Criteria (observable, true/false
-   against a diff), ## Validation Commands (mirror planning/harness.json validation.checks[].command in
-   order; if absent, use the project's documented build/test commands), and an empty "## Amendment Log"
-   with "_No amendments yet._". Record any deferral under ## Notes.
+   (a one-line pointer at tasks.json — the task list is NOT written here), ## Acceptance Criteria
+   (observable, true/false against a diff), ## Validation Commands (mirror
+   planning/harness.json validation.checks[].command in order; if absent, use the project's documented
+   build/test commands), and an empty "## Amendment Log" with "_No amendments yet._". Record any
+   deferral under ## Notes.
 
-3. Commit on the train branch (stage explicitly):
+3. Write ${blockTasksJson} as valid JSON: a BARE ARRAY (not wrapped in an object — matches
+   orchestrator's SDLCTask schema, app/schemas/sdlc_schema.py), each entry shaped
+   { task_id, title, description, acceptance_criteria, validation_commands, max_attempts, files,
+   dependsOn } — 1-indexed task_ids, dependency-ordered, no gaps; each task names the concrete
+   file(s) it owns in "files" so tasks are disjoint and merge-safe (final Validate task exempt, and
+   its "dependsOn" lists every other task_id); the final task is always titled "Validate".
+   acceptance_criteria/validation_commands can stay `[]` per task — the spec-level markdown
+   sections are authoritative; max_attempts defaults to 3.
+
+4. Commit on the train branch (stage explicitly):
    git add planning/${slug}
    git commit -m "chore: generate tasks for ${slug}"
    git log --oneline -1   (capture the short hash)
 
-Return via StructuredOutput: success (true iff tasks.md with "### N." headings was written and committed),
+Return via StructuredOutput: success (true iff tasks.md + tasks.json were written and committed),
 tasksFile="${blockTasks}", taskCount, commitHash, notes.
 `, { label: `generate-tasks-${slug}`, schema: GENTASKS_SCHEMA, phase: 'Enumerate', model: 'opus' })
 }
