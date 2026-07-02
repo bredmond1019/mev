@@ -526,7 +526,7 @@ pub fn manifest_brain(root: &std::path::Path) -> anyhow::Result<Manifest> {
 /// If `out_dir` is `None`, defaults to `planning/doc-graph` under the brain root.
 pub fn visualize_brain(root: &std::path::Path, out_dir: Option<PathBuf>) -> anyhow::Result<()> {
     let out = out_dir.unwrap_or_else(|| root.join("planning").join("doc-graph"));
-    
+
     let manifest = manifest_brain(root)?;
     brain::visualize::generate_graph_visual(&manifest, &out)
 }
