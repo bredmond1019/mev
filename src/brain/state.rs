@@ -1908,6 +1908,108 @@ pub fn derive_rollup(
         .collect()
 }
 
+/// Derive a brain file's `focus.now/next/blocked` as the repo-tagged union of
+/// its in-scope children's derived focus (MV.3B.U task 2).
+///
+/// Iterates the **in-scope** `config.repos[]` entries (filtered by `scope`, in
+/// config order); for each repo with a loadable `kind == "project"` child in
+/// `files`, calls [`derive_focus`] and appends its `now`/`next`/`blocked`
+/// blocks — each tagged with `repo: Some(<slug>)` — to the corresponding
+/// brain-level list, in the child's own within-focus order.
+///
+/// Repos with no loadable child contribute nothing (mirrors [`derive_rollup`]'s
+/// preserve/stub branches, which operate on the cached `repos[]` headline, not
+/// `focus`, since there is no live tracks[] to derive from).
+///
+/// Deduplicated by `(repo, id)` within each of `now`/`next`/`blocked`
+/// independently — the first occurrence wins.
+pub fn derive_brain_focus(
+    scope: &TierScope,
+    config: &BrainConfig,
+    graph: &StateGraph,
+    files: &[(StateSource, StateFile)],
+) -> Focus {
+    use std::collections::HashSet;
+
+    let in_scope = config.repos.iter().filter(|r| match scope {
+        TierScope::Tier(t) => &r.tier == t,
+        TierScope::All => true,
+    });
+
+    let mut now: Vec<Block> = Vec::new();
+    let mut next: Vec<Block> = Vec::new();
+    let mut blocked: Vec<Block> = Vec::new();
+    let mut seen_now: HashSet<(String, String)> = HashSet::new();
+    let mut seen_next: HashSet<(String, String)> = HashSet::new();
+    let mut seen_blocked: HashSet<(String, String)> = HashSet::new();
+
+    for entry in in_scope {
+        let child = files
+            .iter()
+            .find(|(src, f)| src.repo_slug == entry.slug && f.kind == "project");
+
+        let Some((src, file)) = child else {
+            continue;
+        };
+
+        let derived = derive_focus(src, file, graph, files);
+
+        // Build a title lookup from this child's tracks[].
+        let mut title_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for track in &file.tracks {
+            for block in &track.blocks {
+                title_map.insert(block.id.clone(), block.title.clone());
+            }
+        }
+        let title_of = |id: &str| title_map.get(id).cloned().unwrap_or_default();
+
+        for id in &derived.now {
+            let key = (entry.slug.clone(), id.clone());
+            if seen_now.insert(key) {
+                now.push(Block {
+                    id: id.clone(),
+                    title: title_of(id),
+                    status: Some("in_progress".to_string()),
+                    note: None,
+                    repo: Some(entry.slug.clone()),
+                    blocked_by: Vec::new(),
+                });
+            }
+        }
+
+        for id in &derived.next {
+            let key = (entry.slug.clone(), id.clone());
+            if seen_next.insert(key) {
+                next.push(Block {
+                    id: id.clone(),
+                    title: title_of(id),
+                    status: None,
+                    note: None,
+                    repo: Some(entry.slug.clone()),
+                    blocked_by: Vec::new(),
+                });
+            }
+        }
+
+        for (id, unmet) in &derived.blocked {
+            let key = (entry.slug.clone(), id.clone());
+            if seen_blocked.insert(key) {
+                blocked.push(Block {
+                    id: id.clone(),
+                    title: title_of(id),
+                    status: None,
+                    note: None,
+                    repo: Some(entry.slug.clone()),
+                    blocked_by: unmet.clone(),
+                });
+            }
+        }
+    }
+
+    Focus { now, next, blocked }
+}
+
 /// Return a deterministically sorted `Vec<&str>` from a `HashSet<&str>` for
 /// use in diagnostic messages (avoids non-deterministic output from Set debug).
 fn sorted_set<'a>(set: &std::collections::HashSet<&'a str>) -> Vec<&'a str> {
@@ -4867,6 +4969,124 @@ mod tests {
                 rollup.repo
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // derive_brain_focus — repo-tagged union of children's derived focus
+    // (MV.3B.U task 2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn derive_brain_focus_unions_two_children() {
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair_alpha = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let pair_beta = leaf_pair(dir.path(), "beta", "BE.1.A");
+        let files = vec![pair_alpha, pair_beta];
+
+        let focus = derive_brain_focus(&scope, &config, &StateGraph::default(), &files);
+
+        let now_ids: Vec<&str> = focus.now.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(
+            now_ids,
+            vec!["AL.1.A", "BE.1.A"],
+            "focus.now must union both children's now blocks, in config order"
+        );
+    }
+
+    #[test]
+    fn derive_brain_focus_tags_each_block_with_its_source_repo() {
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair_alpha = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let files = vec![pair_alpha];
+
+        let focus = derive_brain_focus(&scope, &config, &StateGraph::default(), &files);
+
+        assert_eq!(focus.now.len(), 1);
+        assert_eq!(focus.now[0].repo.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn derive_brain_focus_respects_tier_scope_exclusion() {
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let dir = tempfile::tempdir().expect("tempdir");
+        // gamma is portfolio-tier — out of scope for the core brain.
+        let pair_gamma = leaf_pair(dir.path(), "gamma", "GA.1.A");
+        let files = vec![pair_gamma];
+
+        let focus = derive_brain_focus(&scope, &config, &StateGraph::default(), &files);
+
+        assert!(
+            focus.now.is_empty(),
+            "gamma (portfolio tier) must not appear in a core-scoped brain focus"
+        );
+    }
+
+    #[test]
+    fn derive_brain_focus_dedups_by_repo_and_id_and_preserves_ordering() {
+        use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
+
+        // A config where "alpha" is (accidentally) listed twice — the second
+        // listing must not produce a duplicate (repo, id) block in focus.now.
+        let config = BrainConfig {
+            vocab: VocabConfig::default(),
+            crawl: CrawlConfig::default(),
+            repos: vec![
+                RepoEntry {
+                    slug: "alpha".to_string(),
+                    tier: "core".to_string(),
+                    repo_path: "core/alpha".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "beta".to_string(),
+                    tier: "core".to_string(),
+                    repo_path: "core/beta".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "alpha".to_string(),
+                    tier: "core".to_string(),
+                    repo_path: "core/alpha".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+            ],
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair_alpha = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let pair_beta = leaf_pair(dir.path(), "beta", "BE.1.A");
+        let files = vec![pair_alpha, pair_beta];
+
+        let focus = derive_brain_focus(
+            &TierScope::Tier("core".to_string()),
+            &config,
+            &StateGraph::default(),
+            &files,
+        );
+
+        let now_pairs: Vec<(String, String)> = focus
+            .now
+            .iter()
+            .map(|b| (b.repo.clone().unwrap_or_default(), b.id.clone()))
+            .collect();
+        assert_eq!(
+            now_pairs,
+            vec![
+                ("alpha".to_string(), "AL.1.A".to_string()),
+                ("beta".to_string(), "BE.1.A".to_string()),
+            ],
+            "duplicate (repo, id) entries must be deduped, config order preserved"
+        );
     }
 }
 
