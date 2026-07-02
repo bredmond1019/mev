@@ -76,7 +76,7 @@ cargo build --release
 ```
 
 ## Notes
-<filled in as work happens>
+Task 5 (Validate) — ran `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `cargo build --release`: all pass (0 warnings, 0 test failures). Sanity-ran `mev emit-graph ~/Dev/agentic-portfolio | jq '{nodes: (.nodes|length), edges: (.edges|length), leaves: (.leaves|length)}'` against the live brain: `nodes: 411, edges: 1062, leaves: 101`. No false-positive triage needed — pure emit.
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the spec. -->
