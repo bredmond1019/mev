@@ -8,8 +8,8 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-07-02T13:11:32Z"
-now: "MV.3B.R shipped — mev emit-graph subcommand emits the scope:doc_id knowledge graph (nodes/edges/leaves) as a canonical JSON envelope; all 4 harness gates green. Next: MV.3B.S (graph-aware RAG, orchestrator-side)."
+timestamp: "2026-07-02T13:26:59Z"
+now: "MV.3B.R shipped and merged (PR #12); worktree cleaned; state.json flipped to closed/done. Next: MV.3B.S (graph-aware RAG, orchestrator-side)."
 next: "MV.3B.S (graph-aware RAG, orchestrator-side); fix the 84 live E_STRUCT_ORPHAN_FILE findings in the brain (separate, non-mev task)"
 blocked: []
 ---

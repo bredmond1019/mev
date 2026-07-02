@@ -6,8 +6,8 @@
     "now": [],
     "next": [
       {
-        "id": "MV.3B.R",
-        "title": "Graph emit → Postgres edges table + structural query surface",
+        "id": "MV.3B.S",
+        "title": "Graph-aware RAG (orchestrator integration)",
         "status": null,
         "note": null,
         "repo": null,
@@ -22,23 +22,7 @@
         "blocked_by": []
       }
     ],
-    "blocked": [
-      {
-        "id": "MV.3B.S",
-        "title": "Graph-aware RAG (orchestrator integration)",
-        "status": null,
-        "note": null,
-        "repo": null,
-        "blocked_by": [
-          {
-            "type": "block",
-            "repo": "mev",
-            "id": "MV.3B.R",
-            "what": null
-          }
-        ]
-      }
-    ]
+    "blocked": []
   },
   "tracks": [
     {
@@ -107,7 +91,7 @@
         {
           "id": "MV.3B.R",
           "title": "Graph emit → Postgres edges table + structural query surface",
-          "status": "open",
+          "status": "closed",
           "depends_on": [
             {
               "type": "block",
@@ -117,76 +101,7 @@
             }
           ],
           "wave": 5,
-          "origin": null,
-          "tasks": [
-            {
-              "task_id": 1,
-              "title": "Graph-export module (src/brain/graph_emit.rs)",
-              "description": "Add GraphExport { version, root, nodes, edges, leaves } + build_graph_export(root, artifact) reusing build_graph's GraphArtifact; leaves sourced from leaf_keys, sorted for determinism. Register pub mod graph_emit in mod.rs. Unit tests for mapping, sorting, empty corpus, JSON round-trip.",
-              "acceptance_criteria": [
-                "GraphExport derives serde::Serialize with version/root/nodes/edges/leaves",
-                "leaves is sorted deterministically",
-                "unit tests cover mapping, empty corpus, and JSON key presence"
-              ],
-              "status": "pending",
-              "validation_commands": [],
-              "max_attempts": 3
-            },
-            {
-              "task_id": 2,
-              "title": "Library driver + emit-graph CLI subcommand",
-              "description": "Add graph_brain(root) -> anyhow::Result<GraphExport> to lib.rs mirroring manifest_brain (find_brain_config -> crawl_corpus -> build_graph -> build_graph_export); re-export GraphExport. Add Command::EmitGraph { path, pretty } to main.rs mirroring Command::Manifest (compact-by-default JSON to stdout, --pretty, exit 0/1).",
-              "acceptance_criteria": [
-                "graph_brain resolves brain.toml, crawls once, and returns GraphExport",
-                "mev emit-graph prints JSON to stdout; --pretty indents; exit 0 success / 1 on config error"
-              ],
-              "status": "pending",
-              "validation_commands": [],
-              "max_attempts": 3
-            },
-            {
-              "task_id": 3,
-              "title": "Integration tests (tests/brain_graph_emit.rs)",
-              "description": "New integration test file mirroring brain_manifest.rs (temp-dir + brain.toml + OKF-doc helpers): linked-nodes-plus-leaf case, JSON round-trip with version==1, related edge present, and error-without-brain.toml.",
-              "acceptance_criteria": [
-                "tests assert node/edge/leaf presence and correct scope:doc_id / scope:stem ids",
-                "round-trip parses back as serde_json::Value with version==1",
-                "missing brain.toml yields an error mentioning brain.toml"
-              ],
-              "status": "pending",
-              "validation_commands": [],
-              "max_attempts": 3
-            },
-            {
-              "task_id": 4,
-              "title": "Documentation (docs/cli.md, docs/architecture.md)",
-              "description": "Add an emit-graph subcommand section to cli.md (synopsis, output shape, sample JSON, exit codes, examples; note distinction from generate-graph). Add graph_emit.rs to the architecture module map, build_graph_export/GraphExport to the knowledge-graph section, and brain_graph_emit.rs to the integration-tests list. Update docs/index.md only if warranted.",
-              "acceptance_criteria": [
-                "cli.md documents mev emit-graph [--pretty] [path] with a sample envelope and exit codes",
-                "architecture.md reflects graph_emit.rs, build_graph_export/GraphExport, and the new test file"
-              ],
-              "status": "pending",
-              "validation_commands": [],
-              "max_attempts": 3
-            },
-            {
-              "task_id": 5,
-              "title": "Validate",
-              "description": "Run all four harness gates; sanity-run mev emit-graph against the live brain and record node/edge/leaf counts in Notes.",
-              "acceptance_criteria": [
-                "cargo fmt --check, cargo clippy -- -D warnings, cargo test, cargo build --release all pass",
-                "live-brain emit-graph produces a well-formed envelope; counts recorded"
-              ],
-              "status": "pending",
-              "validation_commands": [
-                "cargo fmt --check",
-                "cargo clippy -- -D warnings",
-                "cargo test",
-                "cargo build --release"
-              ],
-              "max_attempts": 3
-            }
-          ]
+          "origin": null
         },
         {
           "id": "MV.3B.T",
@@ -266,6 +181,26 @@
       "text": "mev validate-brain --structure (new MV.3.L check) found 84 genuine E_STRUCT_ORPHAN_FILE findings against the live company brain, 0 E_STRUCT_DANGLING_ROW. The orphans are files named in plain backtick text in index.md tables rather than as markdown links, so per this check's link-based coverage definition they are correctly flagged. Fixing them (converting to real markdown links, or adding missing rows) is a brain-content cleanup, not a mev validator task, and was explicitly out of scope for MV.3.L's acceptance criteria. Not yet ticketed.",
       "related": [],
       "clears_when": "mev validate-brain --structure against the live brain reports 0 E_STRUCT_ORPHAN_FILE findings, or the remaining count is triaged and explicitly accepted",
+      "created": "2026-07-02"
+    },
+    {
+      "slug": "sdlc-flow-worktree-sparse-checkout-cone-bug",
+      "scope": {
+        "repo": "mev",
+        "tier": null,
+        "cross_repo": null
+      },
+      "kind": "known_issue",
+      "text": "The /init-worktree skill's cone-mode sparse-checkout setup (git sparse-checkout init --cone; git sparse-checkout set <dirs>) can leave the underlying .git/worktrees/<name>/info/sparse-checkout file with non-cone patterns (/*, !*/) mixed in with the cone /<dir>/ entries. Git detects the invalid cone patterns, silently disables cone mode, and falls back to literal gitignore-style matching -- which does NOT recurse into subdirectories of the listed top-level dirs (e.g. planning/<spec-slug>/ vanishes even though planning/ itself is listed), so any file under a nested subdirectory (a new spec's tasks.md, in this case) is invisible in the worktree even though it's committed and tracked. Symptom: sdlc-flow errors with 'Missing spec' or 'No task headings' immediately after worktree creation, or a spec directory that git-ls-tree confirms exists on the branch is simply absent from `ls` in the worktree. Fix applied ad hoc this session: `git sparse-checkout init --cone` + `git sparse-checkout set $(git ls-tree HEAD --name-only -d | tr '\\n' ' ')` again inside the broken worktree re-derives clean cone patterns and repopulates it -- no data loss, this is a checkout-view bug not a data bug. Root cause in the skill itself (why the first sparse-checkout set call produces non-cone patterns) was not investigated -- worth a fix in .claude/commands/init-worktree.md so future worktrees don't hit this, or at minimum add a post-creation verification step (git sparse-checkout list should show only clean /<dir>/ entries, no /* or !*/ lines).",
+      "related": [
+        {
+          "type": "block",
+          "repo": "mev",
+          "id": "3B.R-graph-emit",
+          "what": null
+        }
+      ],
+      "clears_when": "init-worktree.md is patched to prevent or auto-detect this failure mode, or the pattern is confirmed not to recur across several subsequent /init-worktree runs",
       "created": "2026-07-02"
     }
   ]
