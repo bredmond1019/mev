@@ -24,3 +24,6 @@ Validated: gating checks (fast tripwire)
 What: Validated MV.3.L structural-coverage work: all four harness gates green (fmt, clippy -D warnings, cargo test incl. new structure.rs unit tests + brain_structure.rs integration tests, release build) and mev validate-brain --structure sanity-checked against the live company brain (84 genuine E_STRUCT_ORPHAN_FILE findings, 0 dangling rows, no false positives).
 Decisions: Fixing the brain's own orphaned index.md rows found by the live sanity check is out of scope for MV.3.L (a validator-behavior spec, not a brain-content cleanup task) — noted in tasks.md Notes rather than acted on.; Only edited Task 5's own checklist line (marked done) plus the Notes section, per instructions to touch only Task 5 scope; left Task 4's '(in progress)' marker untouched since it belongs to a different task.
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: none

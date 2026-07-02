@@ -2,9 +2,9 @@
   "spec_slug": "3.L-structural-coverage",
   "branch": "3.L-structural-coverage-flow",
   "started_at": "2026-07-02T08:57:00Z",
-  "updated_at": "2026-07-02T09:12:24Z",
+  "updated_at": "2026-07-02T09:15:45Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.L-structural-coverage-flow",
-  "status": "running",
+  "status": "docs",
   "current_task": 5,
   "tasks": {
     "1": {
@@ -94,9 +94,9 @@
     }
   },
   "review": {
-    "verdict": null,
+    "verdict": "PASS",
     "findings": [],
-    "attempts": 0
+    "attempts": 1
   },
   "docs": {
     "changed": [],
@@ -244,13 +244,29 @@
         "filesReadKb": null,
         "inTokEst": 578,
         "outTok": 2388
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 992,
+        "filesReadKb": null,
+        "inTokEst": 992,
+        "outTok": 3291
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 805,
+        "filesReadKb": null,
+        "inTokEst": 805,
+        "outTok": 1532
       }
     ],
     "total": {
-      "promptTokEst": 9673,
+      "promptTokEst": 11470,
       "filesReadKb": 0,
-      "inTokEst": 9673,
-      "outTok": 75685
+      "inTokEst": 11470,
+      "outTok": 80508
     }
   }
 }
