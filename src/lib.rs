@@ -415,7 +415,8 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
 /// planners:
 ///
 /// - [`brain::emit::plan_state_json`] — regenerates leaf `focus` (now/next/blocked)
-///   and brain `repos[]`/`cross_repo[]` from the authored `tracks[]` DAG.
+///   and brain `repos[]`/`cross_repo[]`/`focus` (tier-scoped, non-destructive rollup +
+///   repo-tagged focus union) from the authored `tracks[]` DAG.
 /// - [`brain::emit::plan_master_plan_tables`] — splices the wave/dependency table into
 ///   any `master-plan.md` that carries the `<!-- BEGIN generated:wave-table -->`
 ///   sentinels.
@@ -483,7 +484,7 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     let graph = build_state_graph(&loaded);
 
     // 4. Run both planners and merge their results.
-    let state_plan = plan_state_json(&loaded, &graph);
+    let state_plan = plan_state_json(&loaded, &graph, &config);
     let mp_plan = plan_master_plan_tables(&loaded, &graph);
 
     // 5. Apply both plans (write or dry-run).
