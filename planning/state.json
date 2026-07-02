@@ -12,14 +12,6 @@
         "note": null,
         "repo": null,
         "blocked_by": []
-      },
-      {
-        "id": "MV.3B.U",
-        "title": "Brain rollup tier-scoping + brain-focus aggregation (safe brain-kind emit-state)",
-        "status": null,
-        "note": null,
-        "repo": null,
-        "blocked_by": []
       }
     ],
     "blocked": []
@@ -136,7 +128,7 @@
         {
           "id": "MV.3B.U",
           "title": "Brain rollup tier-scoping + brain-focus aggregation (safe brain-kind emit-state)",
-          "status": "open",
+          "status": "closed",
           "depends_on": [
             {
               "type": "block",
