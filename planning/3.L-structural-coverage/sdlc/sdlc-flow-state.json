@@ -2,10 +2,10 @@
   "spec_slug": "3.L-structural-coverage",
   "branch": "3.L-structural-coverage-flow",
   "started_at": "2026-07-02T08:57:00Z",
-  "updated_at": "2026-07-02T09:08:59Z",
+  "updated_at": "2026-07-02T09:12:24Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.L-structural-coverage-flow",
   "status": "running",
-  "current_task": 4,
+  "current_task": 5,
   "tasks": {
     "1": {
       "status": "passed",
@@ -71,6 +71,22 @@
       "files_changed": [
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.L-structural-coverage-flow/docs/cli.md",
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.L-structural-coverage-flow/docs/architecture.md",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.L-structural-coverage-flow/planning/3.L-structural-coverage/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "5": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Validated MV.3.L structural-coverage work: all four harness gates green (fmt, clippy -D warnings, cargo test incl. new structure.rs unit tests + brain_structure.rs integration tests, release build) and mev validate-brain --structure sanity-checked against the live company brain (84 genuine E_STRUCT_ORPHAN_FILE findings, 0 dangling rows, no false positives).",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Fixing the brain's own orphaned index.md rows found by the live sanity check is out of scope for MV.3.L (a validator-behavior spec, not a brain-content cleanup task) — noted in tasks.md Notes rather than acted on.",
+        "Only edited Task 5's own checklist line (marked done) plus the Notes section, per instructions to touch only Task 5 scope; left Task 4's '(in progress)' marker untouched since it belongs to a different task."
+      ],
+      "files_changed": [
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.L-structural-coverage-flow/planning/3.L-structural-coverage/tasks.md"
       ],
       "commit": "",
@@ -204,13 +220,37 @@
         "filesReadKb": null,
         "inTokEst": 578,
         "outTok": 2659
+      },
+      {
+        "label": "update-task-5",
+        "model": "haiku",
+        "promptTokEst": 258,
+        "filesReadKb": null,
+        "inTokEst": 258,
+        "outTok": 1049
+      },
+      {
+        "label": "implement-5-1",
+        "model": "sonnet",
+        "promptTokEst": 897,
+        "filesReadKb": null,
+        "inTokEst": 897,
+        "outTok": 4532
+      },
+      {
+        "label": "test-5-1",
+        "model": "haiku",
+        "promptTokEst": 578,
+        "filesReadKb": null,
+        "inTokEst": 578,
+        "outTok": 2388
       }
     ],
     "total": {
-      "promptTokEst": 7940,
+      "promptTokEst": 9673,
       "filesReadKb": 0,
-      "inTokEst": 7940,
-      "outTok": 67716
+      "inTokEst": 9673,
+      "outTok": 75685
     }
   }
 }
