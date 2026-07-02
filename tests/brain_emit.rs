@@ -975,6 +975,38 @@ mod task3_planners {
     }
 
     #[test]
+    fn portfolio_kind_with_no_master_plan_is_skipped_without_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("state.json");
+        // No master-plan.md created — portfolio repos never have one.
+
+        let mut file = make_leaf_file("re-rs", vec![], Focus::default());
+        file.kind = "portfolio".to_string();
+        file.note = Some("Completed — live on GitHub".to_string());
+        let src = StateSource {
+            repo_slug: "re-rs".to_string(),
+            abs_path: state_path,
+            expected_kind: "portfolio",
+        };
+
+        let files = vec![(src, file)];
+        let graph = build_state_graph(&files);
+        let plan = plan_master_plan_tables(&files, &graph);
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "no action expected for a portfolio-kind file; got {}",
+            plan.actions.len()
+        );
+        assert!(
+            plan.diagnostics.is_empty(),
+            "portfolio-kind file should never produce W_EMIT_NO_SENTINEL; got: {:?}",
+            plan.diagnostics
+        );
+    }
+
+    #[test]
     fn master_plan_splice_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
         let mp_path = tmp.path().join("master-plan.md");

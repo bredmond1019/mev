@@ -12,7 +12,7 @@
 //! Diagnostic locator codes emitted by later tasks that build on this foundation:
 //! - `E_STATE_MALFORMED_JSON` — file is not parseable JSON.
 //! - `E_STATE_SCHEMA_MISSING_FIELD` — a required key is absent.
-//! - `E_STATE_SCHEMA_BAD_KIND` — `kind` ∉ `{project, brain}`.
+//! - `E_STATE_SCHEMA_BAD_KIND` — `kind` ∉ `{project, brain, portfolio}`.
 //! - `E_STATE_SCHEMA_BAD_STATUS` — a `status` value ∉ the enum.
 //! - `E_STATE_SCHEMA_BAD_BLOCKED_BY` — a `blocked_by[]` entry has an unknown `type`.
 //! - `E_STATE_DUPLICATE_BLOCK_ID` — two `tracks[]` blocks in one repo share an `id`.
@@ -403,7 +403,7 @@ pub struct StateSource {
     pub repo_slug: String,
     /// Absolute path to the `planning/state.json` file.
     pub abs_path: PathBuf,
-    /// Expected `kind` field value: `"brain"` or `"project"`.
+    /// Expected `kind` field value: `"brain"`, `"project"`, or `"portfolio"`.
     pub expected_kind: &'static str,
 }
 
@@ -426,7 +426,8 @@ pub struct StateSource {
 ///    non-null is expected as a brain-kind file.
 /// 3. Leaf repos: each `[[repos]]` entry in `config` whose `repo_path` is not
 ///    `"."` (the HQ root itself) → `root/{repo_path}/planning/state.json`
-///    (`kind:"project"`).
+///    (`kind:"project"`, or `kind:"portfolio"` when `tier == "portfolio"` —
+///    terminal repos published to GitHub with no further planning state).
 pub fn discover_state_files(
     root: &Path,
     config: &BrainConfig,
@@ -497,10 +498,15 @@ pub fn discover_state_files(
             .join("planning")
             .join("state.json");
         if state_path.exists() {
+            let expected_kind = if repo.tier == "portfolio" {
+                "portfolio"
+            } else {
+                "project"
+            };
             sources.push(StateSource {
                 repo_slug: repo.slug.clone(),
                 abs_path: state_path,
-                expected_kind: "project",
+                expected_kind,
             });
         } else {
             diags.push(Diagnostic::warning(
@@ -544,8 +550,8 @@ const VALID_CARRYOVER_KINDS: &[&str] = &["constraint", "known_issue", "env", "de
 /// function is called):
 ///
 /// 1. **`kind` membership** (`E_STATE_SCHEMA_BAD_KIND`) — `kind` must be
-///    `"project"` or `"brain"`.  Also flags if `kind` disagrees with the
-///    source's `expected_kind`.
+///    `"project"`, `"brain"`, or `"portfolio"`.  Also flags if `kind`
+///    disagrees with the source's `expected_kind`.
 /// 2. **`updated` non-empty** (`E_STATE_SCHEMA_MISSING_FIELD`) — the
 ///    `updated` string must not be blank (format checked by `MV.3.M`).
 /// 3. **`status` enum** (`E_STATE_SCHEMA_BAD_STATUS`) — every `focus.now`
@@ -555,7 +561,9 @@ const VALID_CARRYOVER_KINDS: &[&str] = &["constraint", "known_issue", "env", "de
 ///    a `{type:"block"}` entry must have non-empty `repo` and `id`.
 /// 5. **Kind-appropriate sections** (`E_STATE_SCHEMA_MISSING_FIELD`, warning)
 ///    — a `project` file is expected to carry `tracks[]`; a `brain` file is
-///    expected to carry `repos[]`.
+///    expected to carry `repos[]`; a `portfolio` file is expected to carry a
+///    non-empty `note` (terminal-state summary — it will never have `tracks[]`
+///    or a sibling `master-plan.md`).
 /// 6. **Authored `tracks[].blocks[].status` not `"blocked"`**
 ///    (`E_STATE_AUTHORED_BLOCKED`) — `"blocked"` is a derived property; an
 ///    authored track-block must use `{open, in_progress, closed}` only.
@@ -570,7 +578,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
 
     // --- 1. kind membership ---
     match file.kind.as_str() {
-        "project" | "brain" => {
+        "project" | "brain" | "portfolio" => {
             // Valid — also check it matches the source's expected kind.
             if file.kind != src.expected_kind {
                 diags.push(Diagnostic::error(
@@ -587,7 +595,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
             diags.push(Diagnostic::error(
                 path,
                 "E_STATE_SCHEMA_BAD_KIND",
-                format!("kind '{other}' is not valid; expected 'project' or 'brain'"),
+                format!("kind '{other}' is not valid; expected 'project', 'brain', or 'portfolio'"),
             ));
         }
     }
@@ -658,6 +666,15 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
             path,
             "E_STATE_SCHEMA_MISSING_FIELD",
             "brain state.json is missing 'repos[]'; expected a child-repo rollup".to_string(),
+        ));
+    }
+    if file.kind == "portfolio" && file.note.as_deref().unwrap_or("").trim().is_empty() {
+        diags.push(Diagnostic::warning(
+            path,
+            "E_STATE_SCHEMA_MISSING_FIELD",
+            "portfolio state.json is missing 'note'; expected a terminal-state summary \
+             (e.g. \"Completed — live on GitHub\")"
+                .to_string(),
         ));
     }
 
@@ -2470,6 +2487,62 @@ mod tests {
     }
 
     #[test]
+    fn discover_assigns_portfolio_expected_kind_for_portfolio_tier() {
+        use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        build_hq_fixture(dir.path());
+
+        // A leaf repo tagged tier:"portfolio" — terminal, no tracks[] expected.
+        let re_planning = dir.path().join("portfolio").join("re-rs").join("planning");
+        std::fs::create_dir_all(&re_planning).unwrap();
+        let re_state = serde_json::json!({
+            "repo": "re-rs",
+            "kind": "portfolio",
+            "updated": "2026-07-02",
+            "note": "Completed — live on GitHub",
+            "focus": { "now": [], "next": [], "blocked": [] }
+        });
+        std::fs::write(
+            re_planning.join("state.json"),
+            serde_json::to_string_pretty(&re_state).unwrap(),
+        )
+        .unwrap();
+
+        let config = BrainConfig {
+            vocab: VocabConfig::default(),
+            crawl: CrawlConfig::default(),
+            repos: vec![
+                RepoEntry {
+                    slug: "brain".to_string(),
+                    tier: "_root".to_string(),
+                    repo_path: ".".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "re-rs".to_string(),
+                    tier: "portfolio".to_string(),
+                    repo_path: "portfolio/re-rs".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+            ],
+        };
+
+        let (sources, diags) = discover_state_files(dir.path(), &config);
+        assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
+
+        let re_src = sources
+            .iter()
+            .find(|s| s.repo_slug == "re-rs")
+            .expect("re-rs source should be discovered");
+        assert_eq!(re_src.expected_kind, "portfolio");
+    }
+
+    #[test]
     fn discover_emits_missing_warning_for_absent_leaf() {
         let dir = tempfile::tempdir().expect("tempdir");
         build_hq_fixture(dir.path());
@@ -2623,6 +2696,83 @@ mod tests {
             bad_kind.len(),
             1,
             "expected exactly one E_STATE_SCHEMA_BAD_KIND, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_schema_portfolio_kind_with_note_emits_no_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "portfolio");
+
+        let json = r#"{
+  "repo": "rag-engine-rs",
+  "kind": "portfolio",
+  "updated": "2026-07-02",
+  "note": "Completed — live on GitHub",
+  "focus": { "now": [], "next": [], "blocked": [] }
+}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+
+        assert!(
+            diags.is_empty(),
+            "clean portfolio file should produce no diagnostics, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_schema_portfolio_kind_missing_note_warns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "portfolio");
+
+        let json = r#"{
+  "repo": "rag-engine-rs",
+  "kind": "portfolio",
+  "updated": "2026-07-02",
+  "focus": { "now": [], "next": [], "blocked": [] }
+}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+
+        let missing_note: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_SCHEMA_MISSING_FIELD" && d.message.contains("note"))
+            .collect();
+        assert_eq!(
+            missing_note.len(),
+            1,
+            "expected exactly one missing-note warning, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_schema_portfolio_kind_mismatched_expected_kind_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        // Source expects "project" (e.g. tier misconfigured in brain.toml) but the
+        // file declares "portfolio" — must be flagged, not silently accepted.
+        let src = make_source(&path, "project");
+
+        let json = r#"{
+  "repo": "rag-engine-rs",
+  "kind": "portfolio",
+  "updated": "2026-07-02",
+  "note": "Completed — live on GitHub",
+  "focus": { "now": [], "next": [], "blocked": [] }
+}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+
+        let bad_kind: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_KIND")
+            .collect();
+        assert_eq!(
+            bad_kind.len(),
+            1,
+            "expected exactly one E_STATE_SCHEMA_BAD_KIND for mismatched expected kind, got: {diags:?}"
         );
     }
 

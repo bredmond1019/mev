@@ -43,6 +43,10 @@ file**, append-only — never edit a settled decision; supersede it with a new o
   child `state.json` is preserved verbatim instead of silently dropped (fixes the live
   `core`/HQ rollup corruption incident); `RepoRollup.tier` is always populated; brain `focus` is
   derived as a repo-tagged union of in-scope children's focus.
+- [D8: portfolio kind — terminal repos with no planning state](./D8-portfolio-kind-terminal-repos.md) —
+  New `state.json` `kind:"portfolio"` for repos published to GitHub with no further planning
+  state (`rag-engine-rs`, `workflow-engine-rs`, `claude-sdk-rs`); requires a `note` instead of
+  `tracks[]`; exempt from the `master-plan.md` sentinel warning in `emit-state`.
 
 <!-- Add a row per decision as they are made. Record new ones with /log-decision-style atomic
-     files (D8, D9, …). -->
+     files (D9, D10, …). -->
