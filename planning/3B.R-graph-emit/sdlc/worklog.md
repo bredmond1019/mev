@@ -26,3 +26,6 @@ Validated: gating checks (fast tripwire)
 
 ## Docs
 Patched: none
+
+## Wrap-up — PASS
+Next: MV.3B.S (graph-aware RAG, orchestrator-side); also the deferred brain-content cleanup of 84 live E_STRUCT_ORPHAN_FILE findings
