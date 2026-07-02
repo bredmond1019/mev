@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-07-02T09:15:45Z"
+timestamp: "2026-07-02T09:52:18Z"
 now: "MV.3.L shipped — index.md ↔ directory structural coverage (E_STRUCT_ORPHAN_FILE / E_STRUCT_DANGLING_ROW) via mev validate-brain --structure; all 4 harness gates green. Next: MV.3B.R (graph emit / Phase 3B)."
 next: "MV.3B.R (graph emit / Phase 3B); fix the 84 live E_STRUCT_ORPHAN_FILE findings in the brain (separate, non-mev task)"
 blocked: []

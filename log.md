@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-02T09:15:45Z"
+timestamp: "2026-07-02T09:52:18Z"
 ---
 
 # Log — mev
@@ -35,6 +35,14 @@ f362c31 chore: flow state — task 2 passed
 ---
 
 ## 2026-07-02
+
+### MV.3.L merged (PR #11) — squash-merge reconciliation, MV.3B.R now next
+
+- **What:** `MV.3.L` (structural coverage) shipped, reviewed, and merged via PR #11 (squash-merged on GitHub); the SDLC worktree was cleaned up afterward. Because the PR was squash-merged remotely while local `main` still carried its own unpushed commits from the earlier same-day carryover-resolution session (the `state.json` kind:"portfolio" / block-ID naming-convention work), reconciling local `main` with `origin/main` required an explicit merge step rather than a fast-forward: a conflict surfaced in `log.md`/`planning/status.md` frontmatter, resolved in favor of the newer, post-3.L values (the squash commit's content superseded the pre-merge state). Re-ran the full test suite after reconciliation — green — then pushed the reconciled `main` to origin. `MV.3.L` is now closed; `MV.3B.R` (graph emit + structural query surface, Phase 3B) is the only remaining unstarted mev feature block and is next up.
+- **Why:** GitHub's squash-merge collapses the PR's branch history into a single commit on `main`, which diverges from a local `main` that already has unpushed commits of its own — a normal merge/rebase was needed to reconcile the two histories cleanly rather than assuming a fast-forward would apply.
+- **Refs:** PR #11; `planning/master-plan.md` (Phase 3 / 3B); carryover entry below.
+
+**Carryover (deferred, non-mev):** `MV.3.L`'s sanity run of `mev validate-brain --structure` against the live company brain surfaced 84 genuine `E_STRUCT_ORPHAN_FILE` findings — files referenced only as plain backtick text (not markdown links) in various `index.md` tables across the brain. These are real findings, correctly flagged, but fixing them is brain-content cleanup, not a mev validator-behavior task; deferred to a separate future session/repo (the company-brain root), out of scope for this repo's log.
 
 ### Cross-repo: state.json portfolio kind, block-ID naming convention, /update-state command
 
