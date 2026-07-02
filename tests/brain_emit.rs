@@ -490,12 +490,33 @@ fn splice_generated_empty_generated_clears_between_sentinels() {
 // ---------------------------------------------------------------------------
 
 mod task3_planners {
+    use mev::brain::config::{BrainConfig, RepoEntry};
     use mev::brain::emit::{apply_plan, plan_master_plan_tables, plan_state_json};
     use mev::brain::state::{
         Block, BlockedBy, Focus, RepoRollup, StateFile, StateSource, Track, TrackBlock,
         build_state_graph,
     };
     use std::path::PathBuf;
+
+    /// Build a minimal [`BrainConfig`] with one `[[repos]]` entry per given
+    /// `(slug, tier)` pair — enough to drive [`tier_scope_for`]/[`derive_rollup`]/
+    /// [`derive_brain_focus`] in these tests.
+    fn config_with_repos(entries: &[(&str, &str)]) -> BrainConfig {
+        BrainConfig {
+            repos: entries
+                .iter()
+                .map(|(slug, tier)| RepoEntry {
+                    slug: slug.to_string(),
+                    tier: tier.to_string(),
+                    repo_path: String::new(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                })
+                .collect(),
+            ..BrainConfig::default()
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Fixture helpers
@@ -592,8 +613,9 @@ mod task3_planners {
         };
         let files = vec![(src.clone(), file)];
         let graph = build_state_graph(&files);
+        let config = config_with_repos(&[("myrepo", "core")]);
 
-        let plan = plan_state_json(&files, &graph);
+        let plan = plan_state_json(&files, &graph, &config);
 
         // Exactly one action for this file.
         assert_eq!(
@@ -655,8 +677,9 @@ mod task3_planners {
         };
         let files = vec![(src, file)];
         let graph = build_state_graph(&files);
+        let config = config_with_repos(&[("myrepo", "core")]);
 
-        let plan = plan_state_json(&files, &graph);
+        let plan = plan_state_json(&files, &graph, &config);
 
         assert_eq!(
             plan.actions.len(),
@@ -718,8 +741,9 @@ mod task3_planners {
             (brain_src.clone(), brain_file),
         ];
         let graph = build_state_graph(&files);
+        let config = config_with_repos(&[("myrepo", "core")]);
 
-        let plan = plan_state_json(&files, &graph);
+        let plan = plan_state_json(&files, &graph, &config);
 
         // Brain file should have an action (its repos[] was stale).
         let brain_action = plan
@@ -748,37 +772,58 @@ mod task3_planners {
     }
 
     #[test]
-    fn brain_focus_untouched() {
-        // Brain file has a non-empty authored focus — it must not be touched.
-        let authored_focus = focus_with_now("special-block", "Special");
-        let brain_file = make_brain_file(vec![], vec![], authored_focus);
+    fn brain_focus_regenerated_as_repo_tagged_union() {
+        // Brain file has a stale authored focus that must be replaced by the
+        // repo-tagged union of in-scope children's derived focus (MV.3B.U task 2/3).
+        let leaf_tracks = vec![Track {
+            title: "P".to_string(),
+            blocks: vec![track_block(
+                "BA.1",
+                "My block",
+                Some("in_progress"),
+                Some(1),
+                vec![],
+            )],
+        }];
+        let leaf_file = make_leaf_file("myrepo", leaf_tracks, Focus::default());
+        let leaf_src = StateSource {
+            repo_slug: "myrepo".to_string(),
+            abs_path: PathBuf::from("/fake/myrepo/planning/state.json"),
+            expected_kind: "project",
+        };
+
+        let stale_focus = focus_with_now("special-block", "Special");
+        let brain_file = make_brain_file(vec![], vec![], stale_focus);
         let brain_src = StateSource {
             repo_slug: "brain".to_string(),
             abs_path: PathBuf::from("/fake/brain/planning/state.json"),
             expected_kind: "brain",
         };
 
-        let files = vec![(brain_src.clone(), brain_file.clone())];
+        let files = vec![(leaf_src, leaf_file), (brain_src.clone(), brain_file)];
         let graph = build_state_graph(&files);
+        let config = config_with_repos(&[("myrepo", "core")]);
 
-        let plan = plan_state_json(&files, &graph);
+        let plan = plan_state_json(&files, &graph, &config);
 
-        // If there's an action, parse it and check the brain focus is identical.
-        if let Some(action) = plan.actions.iter().find(|a| a.path == brain_src.abs_path) {
-            let derived: StateFile = serde_json::from_str(&action.new_content).expect("valid JSON");
-            assert_eq!(
-                derived.focus.now.len(),
-                brain_file.focus.now.len(),
-                "brain focus.now length changed"
-            );
-            if !derived.focus.now.is_empty() {
-                assert_eq!(
-                    derived.focus.now[0].id, "special-block",
-                    "brain focus.now id changed"
-                );
-            }
-        }
-        // (No action is also acceptable if repos[]/cross_repo[] are already empty/correct.)
+        let brain_action = plan
+            .actions
+            .iter()
+            .find(|a| a.path == brain_src.abs_path)
+            .expect("expected an action for the brain state.json");
+
+        let derived: StateFile =
+            serde_json::from_str(&brain_action.new_content).expect("valid JSON");
+
+        // focus.now must be the repo-tagged union of myrepo's derived focus, not
+        // the stale authored "special-block".
+        assert_eq!(derived.focus.now.len(), 1);
+        assert_eq!(derived.focus.now[0].id, "BA.1");
+        assert_eq!(derived.focus.now[0].repo.as_deref(), Some("myrepo"));
+        assert!(
+            derived.focus.now.iter().all(|b| b.id != "special-block"),
+            "stale authored focus block must not survive"
+        );
     }
 
     // -----------------------------------------------------------------------
