@@ -293,6 +293,52 @@ pub fn validate_brain_links(root: &std::path::Path) -> anyhow::Result<Report> {
 }
 
 /// Validate the company-brain repo for OKF frontmatter compliance **plus** the
+/// bidirectional `index.md` ↔ directory structural coverage check (D17 / CLAUDE.md
+/// Standing Rule 7).
+///
+/// Phase 3, Block L: runs the full schema pass (identical to [`validate_brain`]) and
+/// then crawls the corpus once, calling [`brain::structure::check_structure`] to flag
+/// orphan files not listed in their directory's `index.md`
+/// (`E_STRUCT_ORPHAN_FILE`) and `index.md` rows pointing at nonexistent targets
+/// (`E_STRUCT_DANGLING_ROW`).
+///
+/// Both diagnostic codes are error-severity, so any finding causes
+/// `report.is_failure()` → `true` (exit 1).
+///
+/// Resolves `brain.toml` the same way as [`validate_brain`] — see that function's
+/// doc for the `E_CONFIG_NOT_FOUND` fallback behaviour.
+pub fn validate_brain_structure(root: &std::path::Path) -> anyhow::Result<Report> {
+    use brain::config::find_brain_config;
+    use brain::crawl::crawl_corpus;
+    use brain::structure::check_structure;
+
+    let config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            let mut report = Report::default();
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    // Schema pass (OKF frontmatter) — reuse BrainValidator.
+    let mut report = BrainValidator::new(config.clone()).run(root);
+
+    // Structural coverage pass — crawl corpus once, then check bidirectional coverage.
+    let (corpus, crawl_diags) = crawl_corpus(root, &config);
+    report.diagnostics.extend(crawl_diags);
+
+    let structure_diags = check_structure(&corpus, root);
+    report.diagnostics.extend(structure_diags);
+
+    Ok(report)
+}
+
+/// Validate the company-brain repo for OKF frontmatter compliance **plus** the
 /// `state.json` schema and cross-repo block-dependency graph integrity checks.
 ///
 /// Phase 3, Block P: runs the full schema pass (identical to [`validate_brain`]) and

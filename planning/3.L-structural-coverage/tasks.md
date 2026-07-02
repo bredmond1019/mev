@@ -12,7 +12,7 @@ related: [master-plan, status, D17-index-md-convention]
 
 # Task Spec — Phase 3, Block L (MV.3.L)
 
-**Status:** Not started · **Last run:** never
+**Status:** Done (PASS) · **Last run:** 2026-07-02
 
 ## Goal
 Enforce CLAUDE.md Standing Rule 7 / D17: every corpus file in a directory appears in that directory's `index.md` (orphan detection), and every `index.md` row points at a file that exists (dangling-row detection) — bidirectional, surfaced via `mev validate-brain --structure`.
@@ -44,7 +44,7 @@ Enforce CLAUDE.md Standing Rule 7 / D17: every corpus file in a directory appear
 - Factor a small private path-resolution/normalization helper; add ≥6 unit tests in `#[cfg(test)]` covering: clean dir (no diagnostics), one orphan file, one dangling row, both together, a directory with no `index.md` (no flags), and `./`-prefixed / mixed-separator link normalization.
 - **Owns:** `src/brain/structure.rs` (new), `src/brain/mod.rs` (append `pub mod structure;` only).
 
-### 3.L.2 Library driver + `--structure` CLI flag
+### 3.L.2 Library driver + `--structure` CLI flag (in progress)
 - In `src/lib.rs`, add `pub fn validate_brain_structure(root: &Path) -> anyhow::Result<Report>` mirroring `validate_brain_graph`: resolve `brain.toml` via `find_brain_config` (same `E_CONFIG_NOT_FOUND` fallback), run the `BrainValidator` schema pass, crawl the corpus once, call `structure::check_structure`, and extend the report.
 - In `src/main.rs`, add a `structure: bool` field (`#[arg(long)]`) to the `ValidateBrain` subcommand with a doc comment matching the existing `--graph`/`--links` style, and insert it into the dispatch precedence chain (place it adjacent to `--links`/`--state`; document the chosen precedence in the doc comment so it matches behaviour). Update the `ValidateBrain` top-level doc comment line listing the flags.
 - **Owns:** `src/lib.rs`, `src/main.rs`.
@@ -54,12 +54,12 @@ Enforce CLAUDE.md Standing Rule 7 / D17: every corpus file in a directory appear
 - Follow the fixture-construction style already used in `tests/brain_graph.rs` / `tests/brain_links.rs`.
 - **Owns:** `tests/brain_structure.rs` (new).
 
-### 3.L.4 Documentation
+### 3.L.4 Documentation (in progress)
 - `docs/cli.md`: document the `--structure` flag under `validate-brain` (purpose, dispatch precedence, the two `E_STRUCT_ORPHAN_FILE` / `E_STRUCT_DANGLING_ROW` diagnostic codes, exit behaviour) — match the `--links` section shape.
 - `docs/architecture.md`: add the `structure.rs` module to the brain module map and its `check_structure` function/row to the function table; note `validate_brain_structure` as the lib driver.
 - **Owns:** `docs/cli.md`, `docs/architecture.md`.
 
-### 3.L.5 Validate
+### 3.L.5 Validate (done)
 - Run the Validation Commands listed below and confirm all pass.
 - Sanity: run `mev validate-brain --structure ..` against the live company brain and eyeball that findings are genuine (real orphan files / dangling rows), not false positives from scope/normalization bugs.
 
@@ -80,7 +80,17 @@ cargo build --release
 ```
 
 ## Notes
-<filled in as work happens>
+Task 5 (Validate): all four harness gates green (`cargo fmt --check`, `cargo clippy -- -D warnings`,
+`cargo test` — 5 new unit tests in `src/brain/structure.rs` + 5 integration tests in
+`tests/brain_structure.rs` all pass alongside the full existing suite, `cargo build --release`).
+Ran `mev validate-brain --structure` against the live company brain
+(`/Users/brandon/Dev/agentic-portfolio`): 84 `E_STRUCT_ORPHAN_FILE` findings, 0
+`E_STRUCT_DANGLING_ROW`. Spot-checked several (e.g. `core/mev/planning/index.md` vs.
+`context.md`/`status.md`/`knowledge.md`/`master-plan.md`) — genuine: those files are named in
+plain backtick text in the index tables, not as markdown links, so per this check's
+link-based coverage definition they are correctly flagged as orphans. No scope/normalization
+false positives observed. Fixing the brain's own index.md files is out of scope for this task
+(tracked separately, not part of MV.3.L's acceptance criteria).
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the spec. -->

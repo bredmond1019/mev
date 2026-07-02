@@ -35,6 +35,7 @@ enum Command {
     /// With --graph, also checks the global scope:doc_id knowledge-graph integrity (Phase 3, Block J).
     /// With --state, also checks each repo's planning/state.json schema and cross-repo block graph (Phase 3, Block P).
     /// With --links, also checks markdown, file://, and [[wikilink]] references for dead or moved targets (Phase 3, Block K).
+    /// With --structure, also checks bidirectional index.md <-> directory coverage: orphan files and dangling rows (Phase 3, Block L).
     ValidateBrain {
         /// Path to search from when locating brain.toml (walks up to find it).
         /// Defaults to the current directory.
@@ -65,6 +66,15 @@ enum Command {
         /// Link errors cause exit 1.
         #[arg(long)]
         links: bool,
+        /// Also run the bidirectional index.md <-> directory structural coverage check:
+        /// flags a corpus file not referenced by its directory's index.md
+        /// (E_STRUCT_ORPHAN_FILE), and an index.md row (markdown or file:// link) pointing
+        /// at a nonexistent target (E_STRUCT_DANGLING_ROW). Structural errors cause exit 1.
+        /// Dispatch precedence: --links takes priority over --structure, which takes
+        /// priority over --state, --graph, and --sync (checked in that order; first
+        /// matching flag wins; no flags falls back to the base OKF schema pass).
+        #[arg(long)]
+        structure: bool,
     },
     /// Emit a JSON manifest of every file in the Brain corpus (Phase 3, Block Q).
     ///
@@ -182,6 +192,7 @@ fn main() -> ExitCode {
             graph,
             state,
             links,
+            structure,
         } => {
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,
@@ -192,6 +203,8 @@ fn main() -> ExitCode {
             };
             let result = if links {
                 mev::validate_brain_links(&root)
+            } else if structure {
+                mev::validate_brain_structure(&root)
             } else if state {
                 mev::validate_brain_state(&root)
             } else if graph {
