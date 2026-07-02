@@ -69,23 +69,42 @@ the cheapest. **Never move anything before Step 2's distillation is written.**
 
 ### Step 3 — Move and mark archived
 
-8. `git mv` the target into `ARCHIVE_DIR/<name>/` (preserve history; plain `mv` only if not git-tracked).
-9. Set `status: archived` in the moved content's OKF frontmatter — the top-level file and any nested `.md`
-   that carried `status: active`. Leave a one-line "Archived <date> — residue distilled into
-   `knowledge.md`/`memory.md`" note at the top of its index/README if it has one.
+8. **Capture the graph baseline (brain only, before moving).** If a `BRAIN_ROOT` was found in Step 0 **and**
+   `mev` is available (a `mev` on `PATH`, the brain's `core/mev/target/release/mev`, or `cargo run -q --` in
+   the mev checkout), run `mev validate-brain --graph <BRAIN_ROOT>` **now, before the move**, and save the
+   full diagnostic set (the `[E_GRAPH_*]`/`[W_GRAPH_*]` lines) as the BEFORE baseline. Skip silently if
+   standalone or `mev` isn't available.
+9. `git mv` the target into `ARCHIVE_DIR/<name>/` (preserve history; plain `mv` only if not git-tracked).
+10. Set `status: archived` in the moved content's OKF frontmatter — the top-level file and any nested `.md`
+    that carried `status: active`. Leave a one-line "Archived <date> — residue distilled into
+    `knowledge.md`/`memory.md`" note at the top of its index/README if it has one.
 
 ### Step 4 — Index propagation
 
-10. Add a registry row to `ARCHIVE_DIR/index.md`: `| <name>/ | <what it was — from $ARGUMENTS or inferred> |
+11. Add a registry row to `ARCHIVE_DIR/index.md`: `| <name>/ | <what it was — from $ARGUMENTS or inferred> |
     <Status — e.g. "Complete — residue distilled <date>"> |`.
-11. Update the **parent** `planning/index.md` (and any chain doc) that listed the now-moved folder — remove
+12. Update the **parent** `planning/index.md` (and any chain doc) that listed the now-moved folder — remove
     or repoint its row. Propagate up as scope changes.
+
+### Step 4.5 — Verify graph integrity (brain only)
+
+13. **Re-run the graph check and diff against the baseline.** If Step 3 captured a BEFORE baseline, re-run
+    `mev validate-brain --graph <BRAIN_ROOT>` and compute the **net-new** diagnostics (present in AFTER but
+    not BEFORE). Archiving can only introduce a graph error when a doc **still in the corpus** carries a
+    `related:` / `[[wikilink]]` / index link pointing at a `doc_id` that just left the corpus.
+    - **Net-new = 0** → report "graph clean, 0 new errors" (pre-existing diagnostics are **not** archive
+      failures — do not attribute them to this archive).
+    - **Net-new > 0** → surface each loudly. For each, the referrer must be repointed (fix its `related:`/link)
+      or the archive of that node reconsidered. Offer to fix the dangling referrers; do not silently leave a
+      newly-broken graph.
+    - If `mev`/brain was unavailable, state "graph check skipped (no brain graph available)".
 
 ### Step 5 — Report
 
-12. Show: the entries promoted and to which warm file (with their provenance lines); the move
-    (`<old> → <archive path>`); frontmatter set to `archived`; both index files updated. If standalone, note
-    no cross-repo sync was needed. If you judged the residue empty, say so and why.
+14. Show: the entries promoted and to which warm file (with their provenance lines); the move
+    (`<old> → <archive path>`); frontmatter set to `archived`; both index files updated; and the **graph
+    verdict** from Step 4.5 (net-new error count, or "skipped"). If standalone, note no cross-repo sync was
+    needed. If you judged the residue empty, say so and why.
 
 ## Notes
 
@@ -93,6 +112,10 @@ the cheapest. **Never move anything before Step 2's distillation is written.**
   is allowed; a skipped pass is not.
 - This command does **not** embed or re-index anything — archives stay out of the corpus (`brain.toml`
   `[crawl].skip_dirs`); the promoted warm entries are what restores retrievability.
+- **The post-archive graph check (Step 4.5) is a diff, not an absolute pass.** A brain with pre-existing
+  dangling `related:` edges will still show errors after a clean archive — that's fine. The command only
+  fails the archive on **net-new** diagnostics it introduced. Pre-existing brain-content issues are a
+  separate cleanup, not an archive blocker.
 - Governed by D35 (the memory-distillation loop) and D30 (the `knowledge.md`/`memory.md` file pack it
   promotes into) — see `agentic-portfolio/docs/decisions/` in the company brain.
 
@@ -102,3 +125,4 @@ the cheapest. **Never move anything before Step 2's distillation is written.**
 - the archive target (read in full — it is the cold source)
 - the owning `planning/{knowledge,memory}.md` + `planning/decisions/` (promotion destinations)
 - `ARCHIVE_DIR/index.md` and the parent `planning/index.md` (index propagation)
+- `mev validate-brain --graph <BRAIN_ROOT>` (Step 3 baseline + Step 4.5 verify — brain only, if `mev` is available)
