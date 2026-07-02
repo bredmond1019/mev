@@ -2,10 +2,10 @@
   "spec_slug": "3B.U-brain-rollup-tier-scoping",
   "branch": "3B.U-brain-rollup-tier-scoping-flow",
   "started_at": "2026-07-02T02:55:17Z",
-  "updated_at": "2026-07-02T03:09:45Z",
+  "updated_at": "2026-07-02T03:15:40Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.U-brain-rollup-tier-scoping-flow",
   "status": "running",
-  "current_task": 4,
+  "current_task": 5,
   "tasks": {
     "1": {
       "status": "passed",
@@ -84,6 +84,29 @@
       ],
       "files_changed": [
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.U-brain-rollup-tier-scoping-flow/tests/brain_emit.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "5": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Documented the tier-scoped/non-destructive brain rollup and repo-tagged brain-focus union in state-schema.md, docs/cli.md, docs/architecture.md, and a new append-only decision D7, with index updates.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "core/planning/state-schema.md lives in a separate git repo (core) from the mev worktree, so it was committed there separately (commit aacf3e9) rather than in the mev branch commit.",
+        "New decision file is D7 (next sequential slot after D6) — planning/decisions/D7-brain-rollup-tier-scoping-and-preserve.md.",
+        "Updated planning/index.md's Active Concept Folders status for 3B.U from 'Spec drafted' to 'In progress (5/6 tasks)' since this task-5 pass completes docs/schema/decision but task 6 (validation gates + carryover clear) is still pending."
+      ],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/planning/state-schema.md",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.U-brain-rollup-tier-scoping-flow/docs/cli.md",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.U-brain-rollup-tier-scoping-flow/docs/architecture.md",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.U-brain-rollup-tier-scoping-flow/planning/decisions/D7-brain-rollup-tier-scoping-and-preserve.md",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.U-brain-rollup-tier-scoping-flow/planning/decisions/index.md",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.U-brain-rollup-tier-scoping-flow/planning/index.md",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.U-brain-rollup-tier-scoping-flow/planning/3B.U-brain-rollup-tier-scoping/tasks.md"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -240,13 +263,37 @@
         "filesReadKb": null,
         "inTokEst": 592,
         "outTok": 2327
+      },
+      {
+        "label": "update-task-5",
+        "model": "haiku",
+        "promptTokEst": 265,
+        "filesReadKb": null,
+        "inTokEst": 265,
+        "outTok": 1049
+      },
+      {
+        "label": "implement-5-1",
+        "model": "sonnet",
+        "promptTokEst": 922,
+        "filesReadKb": null,
+        "inTokEst": 922,
+        "outTok": 17490
+      },
+      {
+        "label": "test-5-1",
+        "model": "haiku",
+        "promptTokEst": 592,
+        "filesReadKb": null,
+        "inTokEst": 592,
+        "outTok": 1953
       }
     ],
     "total": {
-      "promptTokEst": 10132,
+      "promptTokEst": 11911,
       "filesReadKb": 0,
-      "inTokEst": 10132,
-      "outTok": 101995
+      "inTokEst": 11911,
+      "outTok": 122487
     }
   }
 }
