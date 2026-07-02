@@ -115,7 +115,7 @@ Same pure-compiler model as `MV.3B.T` (files in → files out; no DB, no network
   - Fixed-point: a second `emit-state --write` is a no-op.
 - **Acceptance:** all new integration tests pass under `cargo test`.
 
-### 5. Docs + schema + decision note
+### 5. [~] Docs + schema + decision note
 - `../planning/state-schema.md` (the `core` repo): extend the brain-rollup derivation rules (tier-scoping + preserve
   rule) and add the brain-focus derivation rule (repo-tagged union, dedup, ordering). Note HQ = full set.
 - mev `docs/cli.md`: update the `emit-state` section to state that brain-kind files now get tier-scoped `repos[]`
