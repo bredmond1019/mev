@@ -1426,3 +1426,536 @@ heading = "Beta"
         let _ = fs::remove_dir_all(&dir);
     }
 }
+
+// ---------------------------------------------------------------------------
+// MV.3B.U Task 4 — end-to-end `emit_state` tier-scoping + brain-focus
+// integration tests.
+//
+// Covers: tier-scoped `repos[]` rollup (derived + preserved + stub branches,
+// none dropped), the malformed-child preserve regression (reproduces the live
+// bastion-drop incident), repo-tagged brain-focus union, an HQ-shaped fixture
+// aggregating across all tiers, and the write/write fixed-point property.
+// ---------------------------------------------------------------------------
+
+mod task4_tier_scoping_integration {
+    use std::fs;
+    use std::path::Path;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("mev-tier-scoping-{tag}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_file(root: &Path, rel: &str, content: &str) {
+        let target = root.join(rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&target, content.as_bytes()).unwrap();
+    }
+
+    fn write_json(root: &Path, rel: &str, value: &serde_json::Value) {
+        write_file(root, rel, &serde_json::to_string_pretty(value).unwrap());
+    }
+
+    /// `brain.toml` declaring 5 core-tier repos (repo-a..repo-e) and 1
+    /// portfolio-tier repo (repo-p) — the "≥5 core-tier repos where only 2 have
+    /// a state.json" fixture shape required by the spec.
+    fn write_brain_toml(root: &Path) {
+        let toml = r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "repo-a"
+tier = "core"
+repo_path = "repos/repo-a"
+status_file = "repos/repo-a/planning/status.md"
+cache_doc = "docs/projects/repo-a.md"
+heading = "Repo A"
+
+[[repos]]
+slug = "repo-b"
+tier = "core"
+repo_path = "repos/repo-b"
+status_file = "repos/repo-b/planning/status.md"
+cache_doc = "docs/projects/repo-b.md"
+heading = "Repo B"
+
+[[repos]]
+slug = "repo-c"
+tier = "core"
+repo_path = "repos/repo-c"
+status_file = "repos/repo-c/planning/status.md"
+cache_doc = "docs/projects/repo-c.md"
+heading = "Repo C"
+
+[[repos]]
+slug = "repo-d"
+tier = "core"
+repo_path = "repos/repo-d"
+status_file = "repos/repo-d/planning/status.md"
+cache_doc = "docs/projects/repo-d.md"
+heading = "Repo D"
+
+[[repos]]
+slug = "repo-e"
+tier = "core"
+repo_path = "repos/repo-e"
+status_file = "repos/repo-e/planning/status.md"
+cache_doc = "docs/projects/repo-e.md"
+heading = "Repo E"
+
+[[repos]]
+slug = "repo-p"
+tier = "portfolio"
+repo_path = "repos/repo-p"
+status_file = "repos/repo-p/planning/status.md"
+cache_doc = "docs/projects/repo-p.md"
+heading = "Repo P"
+"#;
+        fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
+    }
+
+    /// The core-tier brain's own `planning/state.json`. `repo: "core"` matches
+    /// the `tier = "core"` value in `brain.toml`, so `tier_scope_for` scopes it
+    /// to just the core-tier repos. Carries pre-existing `repos[]` entries for
+    /// repo-c (no state.json at all) and repo-d (state.json present but
+    /// malformed) so the preserve branch has something to preserve.
+    fn write_core_brain_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "core",
+            "kind": "brain",
+            "updated": "2026-06-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "repos": [
+                {
+                    "repo": "repo-c",
+                    "now": [{ "id": "RC.1.A", "title": "Repo C cached now", "status": "in_progress" }],
+                    "next": [],
+                    "blocked": []
+                },
+                {
+                    "repo": "repo-d",
+                    "now": [],
+                    "next": [{ "id": "RD.1.A", "title": "Repo D cached next", "status": null }],
+                    "blocked": []
+                }
+            ],
+            "cross_repo": []
+        });
+        write_json(root, "planning/state.json", &state);
+    }
+
+    fn write_leaf_state(root: &Path, rel: &str, repo: &str, block_id: &str, title: &str) {
+        let state = serde_json::json!({
+            "repo": repo,
+            "kind": "project",
+            "updated": "2026-06-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "tracks": [
+                {
+                    "title": "Phase 1",
+                    "blocks": [
+                        { "id": block_id, "title": title, "status": "in_progress" }
+                    ]
+                }
+            ]
+        });
+        write_json(root, rel, &state);
+    }
+
+    /// Full core-tier fixture: brain.toml + core brain state + repo-a/repo-b
+    /// (loadable) + repo-d (malformed) + repo-p (portfolio-tier control,
+    /// loadable but must be excluded from the core rollup). repo-c and repo-e
+    /// intentionally have no `planning/state.json` on disk at all.
+    fn write_core_fixture(root: &Path) {
+        write_brain_toml(root);
+        write_core_brain_state(root);
+        write_leaf_state(
+            root,
+            "repos/repo-a/planning/state.json",
+            "repo-a",
+            "RA.1.A",
+            "Repo A block A",
+        );
+        write_leaf_state(
+            root,
+            "repos/repo-b/planning/state.json",
+            "repo-b",
+            "RB.1.A",
+            "Repo B block A",
+        );
+        // repo-d: state.json exists but is not valid JSON (E_STATE_MALFORMED_JSON).
+        write_file(
+            root,
+            "repos/repo-d/planning/state.json",
+            "{ this is not valid json ",
+        );
+        write_leaf_state(
+            root,
+            "repos/repo-p/planning/state.json",
+            "repo-p",
+            "RP.1.A",
+            "Repo P block A",
+        );
+    }
+
+    fn repos_by_slug(
+        state: &serde_json::Value,
+    ) -> std::collections::HashMap<String, serde_json::Value> {
+        state["repos"]
+            .as_array()
+            .expect("repos[] must be an array")
+            .iter()
+            .map(|r| (r["repo"].as_str().unwrap().to_string(), r.clone()))
+            .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1 — tier-scoped rollup: all 5 core-tier repos present, none dropped,
+    // portfolio-tier repo excluded, tier populated on every entry.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn core_tier_rollup_contains_all_in_scope_repos_and_excludes_other_tiers() {
+        let dir = temp_dir("core-rollup");
+        write_core_fixture(&dir);
+
+        let report = mev::emit_state(&dir, true).expect("emit_state should not error (panic)");
+        // The only expected error is E_STATE_MALFORMED_JSON for repo-d (see the
+        // dedicated regression test below) — it must not abort the rollup.
+        let non_malformed_errors: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == mev::Severity::Error && d.locator != "E_STATE_MALFORMED_JSON")
+            .collect();
+        assert!(
+            non_malformed_errors.is_empty(),
+            "core fixture emit should have no unexpected errors; got: {non_malformed_errors:#?}"
+        );
+
+        let brain_after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("planning/state.json")).unwrap())
+                .unwrap();
+        let repos = repos_by_slug(&brain_after);
+
+        // All 5 in-scope core-tier repos present, none dropped.
+        for slug in ["repo-a", "repo-b", "repo-c", "repo-d", "repo-e"] {
+            assert!(
+                repos.contains_key(slug),
+                "repos[] must contain '{slug}'; got slugs: {:?}",
+                repos.keys().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                repos[slug]["tier"].as_str(),
+                Some("core"),
+                "'{slug}' must have tier populated as 'core'"
+            );
+        }
+
+        // Portfolio-tier repo must NOT appear in the core brain's rollup.
+        assert!(
+            !repos.contains_key("repo-p"),
+            "portfolio-tier repo-p must be excluded from the core-tier rollup"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2 — derived branch: repo-a/repo-b get freshly derived headlines.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn derived_repos_get_fresh_headline_from_child_tracks() {
+        let dir = temp_dir("derived-branch");
+        write_core_fixture(&dir);
+
+        mev::emit_state(&dir, true).expect("emit_state should not error");
+
+        let brain_after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("planning/state.json")).unwrap())
+                .unwrap();
+        let repos = repos_by_slug(&brain_after);
+
+        let repo_a_now = repos["repo-a"]["now"].as_array().unwrap();
+        assert!(
+            repo_a_now
+                .iter()
+                .any(|b| b["id"].as_str() == Some("RA.1.A")),
+            "repo-a's derived now[] must include its in_progress block RA.1.A; got: {repo_a_now:?}"
+        );
+
+        let repo_b_now = repos["repo-b"]["now"].as_array().unwrap();
+        assert!(
+            repo_b_now
+                .iter()
+                .any(|b| b["id"].as_str() == Some("RB.1.A")),
+            "repo-b's derived now[] must include its in_progress block RB.1.A; got: {repo_b_now:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3 — preserve branch: repo-c (no state.json at all) keeps its
+    // existing cached entry verbatim, just with tier backfilled.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sourceless_repo_preserves_existing_cached_entry() {
+        let dir = temp_dir("preserve-branch");
+        write_core_fixture(&dir);
+
+        mev::emit_state(&dir, true).expect("emit_state should not error");
+
+        let brain_after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("planning/state.json")).unwrap())
+                .unwrap();
+        let repos = repos_by_slug(&brain_after);
+
+        let repo_c = &repos["repo-c"];
+        assert_eq!(repo_c["tier"].as_str(), Some("core"));
+        let now = repo_c["now"].as_array().unwrap();
+        assert!(
+            now.iter().any(|b| b["id"].as_str() == Some("RC.1.A")),
+            "repo-c's cached now[] entry (RC.1.A) must be preserved verbatim; got: {now:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4 — REGRESSION: a malformed child state.json must NOT truncate the
+    // brain repos[] — its existing entry is preserved (reproduces the live
+    // bastion-drop incident this block fixes).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn malformed_child_state_json_does_not_truncate_rollup() {
+        let dir = temp_dir("malformed-regression");
+        write_core_fixture(&dir);
+
+        let report = mev::emit_state(&dir, true).expect("emit_state should not error");
+
+        // The malformed repo-d state.json should surface as a load error, but
+        // must not be a hard failure that aborts the whole rollup.
+        let malformed_diag = report
+            .diagnostics
+            .iter()
+            .find(|d| d.locator == "E_STATE_MALFORMED_JSON");
+        assert!(
+            malformed_diag.is_some(),
+            "expected E_STATE_MALFORMED_JSON for repo-d; got: {:#?}",
+            report.diagnostics
+        );
+
+        let brain_after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("planning/state.json")).unwrap())
+                .unwrap();
+        let repos = repos_by_slug(&brain_after);
+
+        // repo-d must still be present (preserved), not dropped.
+        assert!(
+            repos.contains_key("repo-d"),
+            "repo-d must be preserved despite malformed state.json; got slugs: {:?}",
+            repos.keys().collect::<Vec<_>>()
+        );
+        let repo_d = &repos["repo-d"];
+        assert_eq!(repo_d["tier"].as_str(), Some("core"));
+        let next = repo_d["next"].as_array().unwrap();
+        assert!(
+            next.iter().any(|b| b["id"].as_str() == Some("RD.1.A")),
+            "repo-d's cached next[] entry (RD.1.A) must be preserved verbatim; got: {next:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 5 — stub branch: repo-e (no state.json, no existing entry) gets a
+    // tier-tagged empty stub.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn repo_with_no_source_and_no_existing_entry_gets_empty_stub() {
+        let dir = temp_dir("stub-branch");
+        write_core_fixture(&dir);
+
+        mev::emit_state(&dir, true).expect("emit_state should not error");
+
+        let brain_after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("planning/state.json")).unwrap())
+                .unwrap();
+        let repos = repos_by_slug(&brain_after);
+
+        let repo_e = &repos["repo-e"];
+        assert_eq!(repo_e["tier"].as_str(), Some("core"));
+        assert!(repo_e["now"].as_array().unwrap().is_empty());
+        assert!(repo_e["next"].as_array().unwrap().is_empty());
+        assert!(repo_e["blocked"].as_array().unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6 — brain focus is the repo-tagged union of loadable children's
+    // derived focus (repo-c/d/e contribute nothing — no live tracks).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn brain_focus_is_repo_tagged_union_of_loadable_children() {
+        let dir = temp_dir("focus-union");
+        write_core_fixture(&dir);
+
+        mev::emit_state(&dir, true).expect("emit_state should not error");
+
+        let brain_after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("planning/state.json")).unwrap())
+                .unwrap();
+        let now = brain_after["focus"]["now"].as_array().unwrap();
+
+        let has = |repo: &str, id: &str| {
+            now.iter()
+                .any(|b| b["repo"].as_str() == Some(repo) && b["id"].as_str() == Some(id))
+        };
+        assert!(
+            has("repo-a", "RA.1.A"),
+            "brain focus.now must include repo-a's RA.1.A tagged with repo: repo-a; got: {now:?}"
+        );
+        assert!(
+            has("repo-b", "RB.1.A"),
+            "brain focus.now must include repo-b's RB.1.A tagged with repo: repo-b; got: {now:?}"
+        );
+
+        // Portfolio-tier repo-p must not leak into the core brain's focus union.
+        assert!(
+            !now.iter().any(|b| b["repo"].as_str() == Some("repo-p")),
+            "portfolio-tier repo-p must not appear in the core brain's focus union; got: {now:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7 — HQ-shaped fixture (repo not a tier name) aggregates across ALL
+    // tiers (core + portfolio).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hq_shaped_brain_aggregates_across_all_tiers() {
+        let dir = temp_dir("hq-all-tiers");
+        write_brain_toml(&dir);
+
+        // HQ brain: repo "hq" matches no tier value in brain.toml -> TierScope::All.
+        let state = serde_json::json!({
+            "repo": "hq",
+            "kind": "brain",
+            "updated": "2026-06-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "repos": [],
+            "cross_repo": []
+        });
+        write_json(&dir, "planning/state.json", &state);
+
+        write_leaf_state(
+            &dir,
+            "repos/repo-a/planning/state.json",
+            "repo-a",
+            "RA.1.A",
+            "Repo A block A",
+        );
+        write_leaf_state(
+            &dir,
+            "repos/repo-p/planning/state.json",
+            "repo-p",
+            "RP.1.A",
+            "Repo P block A",
+        );
+
+        mev::emit_state(&dir, true).expect("emit_state should not error");
+
+        let brain_after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("planning/state.json")).unwrap())
+                .unwrap();
+        let repos = repos_by_slug(&brain_after);
+
+        // HQ scope is "All" -> every configured repo appears, core and portfolio alike.
+        for slug in ["repo-a", "repo-b", "repo-c", "repo-d", "repo-e", "repo-p"] {
+            assert!(
+                repos.contains_key(slug),
+                "HQ rollup (TierScope::All) must include '{slug}'; got slugs: {:?}",
+                repos.keys().collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(repos["repo-a"]["tier"].as_str(), Some("core"));
+        assert_eq!(repos["repo-p"]["tier"].as_str(), Some("portfolio"));
+
+        let now = brain_after["focus"]["now"].as_array().unwrap();
+        assert!(
+            now.iter()
+                .any(|b| b["repo"].as_str() == Some("repo-a") && b["id"].as_str() == Some("RA.1.A")),
+            "HQ focus.now must include repo-a's block; got: {now:?}"
+        );
+        assert!(
+            now.iter()
+                .any(|b| b["repo"].as_str() == Some("repo-p") && b["id"].as_str() == Some("RP.1.A")),
+            "HQ focus.now must include repo-p's block (all-tiers union); got: {now:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8 — fixed point: a second `emit_state --write` over the core
+    // fixture is a no-op (no I_EMIT_WROTE diagnostics, files unchanged).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn second_write_over_core_fixture_is_a_no_op() {
+        let dir = temp_dir("fixed-point");
+        write_core_fixture(&dir);
+
+        mev::emit_state(&dir, true).expect("first emit should not error");
+
+        let brain_after1 = fs::read(dir.join("planning/state.json")).unwrap();
+        let repo_a_after1 = fs::read(dir.join("repos/repo-a/planning/state.json")).unwrap();
+        let repo_b_after1 = fs::read(dir.join("repos/repo-b/planning/state.json")).unwrap();
+
+        let report2 = mev::emit_state(&dir, true).expect("second emit should not error");
+
+        let wrote2: Vec<_> = report2
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "I_EMIT_WROTE")
+            .collect();
+        assert!(
+            wrote2.is_empty(),
+            "second write over already-derived core fixture must be a no-op; got: {wrote2:#?}"
+        );
+
+        assert_eq!(
+            fs::read(dir.join("planning/state.json")).unwrap(),
+            brain_after1,
+            "brain state.json must be stable after second write"
+        );
+        assert_eq!(
+            fs::read(dir.join("repos/repo-a/planning/state.json")).unwrap(),
+            repo_a_after1,
+            "repo-a state.json must be stable after second write"
+        );
+        assert_eq!(
+            fs::read(dir.join("repos/repo-b/planning/state.json")).unwrap(),
+            repo_b_after1,
+            "repo-b state.json must be stable after second write"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
