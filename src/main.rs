@@ -48,8 +48,9 @@ enum Command {
         sync: bool,
         /// Also run the global scope:doc_id knowledge-graph integrity check: flags duplicate
         /// canonical ids (E_GRAPH_DUPLICATE_DOC_ID), dangling related: edges
-        /// (E_GRAPH_DANGLING_RELATED), and related: entries pointing at leaf files
-        /// (W_GRAPH_LEAF_TARGET). Graph errors cause exit 1; the leaf warning alone does not.
+        /// (E_GRAPH_DANGLING_RELATED), related: entries pointing at leaf files
+        /// (W_GRAPH_LEAF_TARGET), and nodes with zero outbound related: edges
+        /// (W_GRAPH_ISOLATED_NODE). Graph errors cause exit 1; the warnings alone do not.
         #[arg(long)]
         graph: bool,
         /// Also run the state.json schema and block-dependency graph integrity check: validates

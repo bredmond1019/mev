@@ -206,7 +206,8 @@ pub fn validate_brain_sync(root: &std::path::Path) -> anyhow::Result<Report> {
 ///
 /// Graph errors (`E_GRAPH_DUPLICATE_DOC_ID`, `E_GRAPH_DANGLING_RELATED`) cause
 /// `report.is_failure()` → `true` (exit 1).  The leaf warning (`W_GRAPH_LEAF_TARGET`)
-/// is reported but does not fail the run on its own.
+/// and the isolated-node warning (`W_GRAPH_ISOLATED_NODE`) are reported but do not
+/// fail the run on their own.
 ///
 /// Resolves `brain.toml` the same way as [`validate_brain`] — see that function's
 /// doc for the `E_CONFIG_NOT_FOUND` fallback behaviour.
