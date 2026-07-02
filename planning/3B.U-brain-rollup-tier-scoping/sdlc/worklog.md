@@ -11,3 +11,8 @@ Validated: gating checks (fast tripwire)
 What: Added derive_brain_focus(scope, config, graph, files) -> Focus in src/brain/state.rs, computing brain-kind focus.now/next/blocked as the repo-tagged, deduped, config-ordered union of in-scope children's derive_focus output, with 4 new unit tests.
 Decisions: Repos with no loadable project-kind child contribute nothing to derive_brain_focus (mirrors derive_rollup's preserve/stub branches operating only on cached repos[] headline, not live focus — there's no tracks[] to derive from for a sourceless repo).; Dedup by (repo, id) is applied independently within each of now/next/blocked (not globally across all three), since the acceptance criteria phrase 'dedup by (repo, id), keep first' per list.; planning/3B.U-brain-rollup-tier-scoping/tasks.md already showed task 2 marked '[~]' before this attempt started (set externally by the flow orchestrator) — left untouched rather than editing to '[x]', matching task 1's commit convention of not touching tasks.md.
 Validated: gating checks (fast tripwire)
+
+## Task 3 — PASSED (1 attempt)
+What: plan_state_json now takes &BrainConfig and wires the brain arm to tier_scope_for/derive_rollup/derive_brain_focus, replacing the transitional All-scope stub; lib.rs::emit_state passes its resolved BrainConfig through.
+Decisions: Replaced the old brain_focus_untouched test with brain_focus_regenerated_as_repo_tagged_union, since brain focus is now actively derived (union) instead of left untouched — the old test's premise no longer holds.; Added a small config_with_repos test helper in tests/brain_emit.rs to build minimal BrainConfig fixtures for the four plan_state_json call sites that now require a &BrainConfig argument.
+Validated: gating checks (fast tripwire)

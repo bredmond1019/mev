@@ -83,7 +83,7 @@ Same pure-compiler model as `MV.3B.T` (files in → files out; no DB, no network
   - `src/brain/state.rs` carries ≥6 new unit tests: core scoping, HQ all-scope, derive-branch, preserve-branch,
     stub-branch, tier populated.
 
-### 2. `derive_brain_focus` — repo-tagged union (`state.rs`)
+### 2. [~] `derive_brain_focus` — repo-tagged union (`state.rs`)
 - Add `pub fn derive_brain_focus(scope, children, graph, files) -> Focus` computing brain `focus.now/next/blocked` as
   the **union of the in-scope children's derived focus** (reusing `derive_focus`), each `Block` tagged with its source
   `repo`. Ordering: config repo order, then the child's within-focus order. Dedup by `(repo, id)`, keep first.
@@ -93,7 +93,7 @@ Same pure-compiler model as `MV.3B.T` (files in → files out; no DB, no network
   - Deterministic ordering (config-repo order then within-child) and `(repo, id)` dedup.
   - ≥4 new unit tests: two-child union, repo-tagging, tier-scope exclusion, dedup + ordering.
 
-### 3. Thread `BrainConfig` into `plan_state_json` + wire the brain branch (`emit.rs`, `lib.rs`)
+### 3. [~] Thread `BrainConfig` into `plan_state_json` + wire the brain branch (`emit.rs`, `lib.rs`)
 - Change `plan_state_json(files, graph)` → `plan_state_json(files, graph, config: &BrainConfig)`. In the
   `kind == "brain"` arm: compute `tier_scope_for(file, config)`, call the tier-scoped `derive_rollup` (passing
   `file.repos` for preservation) and set `derived.focus = derive_brain_focus(...)`. Leaf (`"project"`) arm unchanged.
