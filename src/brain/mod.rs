@@ -9,6 +9,7 @@ pub mod config;
 pub mod crawl;
 pub mod emit;
 pub mod graph;
+pub mod graph_emit;
 pub mod links;
 pub mod manifest;
 pub mod okf;
