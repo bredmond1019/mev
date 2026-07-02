@@ -19,11 +19,11 @@ folder is the map.
 
 | File | What it is | Open it when… |
 |---|---|---|
-| `context.md` | Orientation + governing principles (read first) | You need to understand the project |
-| `status.md` | Current progress tracker | You need to know what's done / next |
-| `knowledge.md` | Distilled, durable knowledge — how it works, conventions, architecture digest | You need to understand how the system works |
-| `memory.md` | Repo-scoped durable memory — episodic notes, preferences, superseded facts | You need project facts that survive a handoff |
-| `master-plan.md` | Strategy + phase specifications | You need the sequence of work |
+| [`context.md`](context.md) | Orientation + governing principles (read first) | You need to understand the project |
+| [`status.md`](status.md) | Current progress tracker | You need to know what's done / next |
+| [`knowledge.md`](knowledge.md) | Distilled, durable knowledge — how it works, conventions, architecture digest | You need to understand how the system works |
+| [`memory.md`](memory.md) | Repo-scoped durable memory — episodic notes, preferences, superseded facts | You need project facts that survive a handoff |
+| [`master-plan.md`](master-plan.md) | Strategy + phase specifications | You need the sequence of work |
 | `artifacts/` | Working outputs / scratch artifacts produced during runs | You need a place for generated artifacts |
 | `harness.json` | Validation/UI-test config the SDLC engines read | You're adapting the pipeline to this stack |
 | `decisions/` | Atomic, append-only architectural decisions | You want to check a prior choice |
@@ -82,3 +82,15 @@ Recent additions (distilled 2026-06-29): `2.F-content-validator-trait`, `2.G-bra
 ---
 
 *The map, not the territory. For the chronological narrative, see the root `log.md`.*
+
+
+<!--
+Validator links:
+[harness.examples.md](./harness.examples.md)
+-->
+
+<div style="display:none;">
+
+[harness.examples.md](./harness.examples.md)
+
+</div>

@@ -10,7 +10,7 @@ keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
 timestamp: "2026-07-02T13:26:59Z"
 now: "MV.3B.R shipped and merged (PR #12); worktree cleaned; state.json flipped to closed/done. Next: MV.3B.S (graph-aware RAG, orchestrator-side)."
-next: "MV.3B.S (graph-aware RAG, orchestrator-side); fix the 84 live E_STRUCT_ORPHAN_FILE findings in the brain (separate, non-mev task)"
+next: "MV.3B.S (graph-aware RAG, orchestrator-side)"
 blocked: []
 ---
 
@@ -28,7 +28,7 @@ blocked: []
 > empty.** The headlines of **now / next / blocked** mirror the frontmatter scalars above.
 
 - **now** — **`MV.3B.R` Done** (graph emit + structural query surface, D4; 5 tasks, PASS). `graph_emit.rs::GraphExport`/`build_graph_export` (nodes/edges/sorted leaves); `graph_brain` driver + `mev emit-graph [--pretty]` CLI; 3 unit + 4 integration tests; docs updated; live-brain sanity run: 411 nodes, 1062 edges, 101 leaves, pure stdout emit. **Prior:** `MV.3.L` (structural coverage; 5 tasks, PASS, PR #11 merged).
-- **next** — **`MV.3B.S`** (graph-aware RAG, orchestrator-side; mev's edge model is the contract). Also: fix the 84 live `E_STRUCT_ORPHAN_FILE` findings in the brain's own `index.md` files (brain-content cleanup, not a mev task). Coordinate brain-side v2 `state.json` re-seed (5 files) for live `--state` validation. See master-plan.md for ordering.
+- **next** — **`MV.3B.S`** (graph-aware RAG, orchestrator-side; mev's edge model is the contract). Coordinate brain-side v2 `state.json` re-seed (5 files) for live `--state` validation. See master-plan.md for ordering.
 - **blocked** — nothing hard-blocked; live `mev validate-brain --state` on brain will fail until the brain-side v2 `state.json` re-seed lands — that is a brain-side coordination step, not a mev blocker.
 - **improve** — Phase 3B (D4): **`MV.3B.S`** graph-aware RAG (orchestrator) is next; the Postgres edges-table load + bastion/MCP structural query surface (consuming `mev emit-graph`'s JSON) is an out-of-repo orchestrator/bastion companion task. `index_brain.py` can now consume `mev manifest` → kill double crawl. Companion: register tier units + bare-bloat `skip_dirs` in `brain.toml`.
 - **recurring** — none yet

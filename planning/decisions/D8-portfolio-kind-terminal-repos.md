@@ -7,7 +7,7 @@ layer: [factory]
 project: mev
 status: active
 keywords: [portfolio, state.json, kind, terminal repo, emit-state, validate-brain, tracks]
-related: [D7-brain-rollup-tier-scoping-and-preserve, state-json-schema]
+related: [D7-brain-rollup-tier-scoping-and-preserve, core:state-json-schema]
 ---
 
 # D8: portfolio kind — terminal repos with no planning state

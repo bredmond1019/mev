@@ -6,8 +6,8 @@ doc_id: D7-brain-rollup-tier-scoping-and-preserve
 layer: [factory]
 project: mev
 status: active
-keywords: [emit-state, rollup, tier-scoping, preserve, brain focus, state.json, derive_rollup, derive_brain_focus]
-related: [3B.U-brain-rollup-tier-scoping-tasks, 3B.T-state-table-rollup-emit-tasks, state-json-schema, D6-scope-doc-id-namespacing]
+keywords: [emit-state, rollup, tier-scoping, preserve, brain focus, state.json, derive_rollup]
+related: [core:state-json-schema, D6-scope-doc-id-namespacing]
 ---
 
 # D7: Brain rollup tier-scoping, preserve rule, and brain-focus union
