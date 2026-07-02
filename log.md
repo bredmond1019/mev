@@ -8,12 +8,29 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-02T09:15:45Z"
+timestamp: "2026-07-02T09:52:18Z"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## [run: 2026-07-02]
+
+MV.3B.R (graph emit + structural query surface, D4) complete across 5 tasks, final verdict PASS. Task 1 added `src/brain/graph_emit.rs::GraphExport { version, root, nodes, edges, leaves }` (deriving `serde::Serialize`, reusing `Node`/`Edge` from `graph.rs`) and `build_graph_export(root, &GraphArtifact) -> GraphExport`, cloning `artifact.graph.nodes`/`edges` directly and building `leaves` from `artifact.leaf_keys` sorted for deterministic output, per the spec's "pure compiler" (D4) guidance; 3 unit tests (node/edge/leaf mapping, empty corpus, JSON round-trip); registered `pub mod graph_emit` in `src/brain/mod.rs`. Task 2 added `graph_brain(root)` to `src/lib.rs`, mirroring `manifest_brain` exactly (`find_brain_config` → `crawl_corpus` → `build_graph` → `build_graph_export`), re-exported `GraphExport`/`build_graph_export` from the crate root alongside `Manifest`, and wired a new `mev emit-graph [--pretty] [path]` CLI subcommand (placed beside `GenerateGraph` with a doc comment distinguishing JSON emit from the existing HTML visual) that crawls the corpus, builds the graph, and prints the envelope to stdout. Task 3 added `tests/brain_graph_emit.rs`, mirroring `tests/brain_manifest.rs` conventions, covering node/edge/leaf counts, JSON round-trip, `related:`-edge resolution, and the missing-`brain.toml` error path. Task 4 documented the `emit-graph` subcommand (synopsis, sample envelope, exit codes, distinction from `generate-graph`) in `docs/cli.md`, placed between `manifest` and `emit-state` as the closer sibling grouping, and added `graph_emit.rs`/`GraphExport`/`brain_graph_emit.rs` to `docs/architecture.md`'s module map and knowledge-graph section; `docs/index.md` left unchanged as anticipated (no new top-level doc file). Task 5 confirmed all four harness gates green (fmt, clippy `-D warnings`, `cargo test`, release build) and sanity-ran `mev emit-graph` against the live company brain: 411 nodes, 1062 edges, 101 leaves, confirming pure stdout emit with no DB/file writes. No deviations from the spec surfaced across any task — all five passed on the first attempt. Next: `MV.3B.S` (graph-aware RAG, orchestrator-side; mev's edge model is the contract) or the deferred brain-content cleanup (84 live `E_STRUCT_ORPHAN_FILE` findings).
+
+```
+48eef75 chore: flow state — docs
+b8f50c3 chore: flow state — task 5 passed
+c8d99dd feat: implement 3B.R-graph-emit-task5
+f5bfd0f chore: flow state — task 4 passed
+3af8c27 feat: implement 3B.R-graph-emit-task4
+3183410 chore: flow state — task 3 passed
+e7a98de feat: implement 3B.R-graph-emit-task3
+396e209 chore: flow state — task 2 passed
+```
 
 ---
 
@@ -35,6 +52,14 @@ f362c31 chore: flow state — task 2 passed
 ---
 
 ## 2026-07-02
+
+### MV.3.L merged (PR #11) — squash-merge reconciliation, MV.3B.R now next
+
+- **What:** `MV.3.L` (structural coverage) shipped, reviewed, and merged via PR #11 (squash-merged on GitHub); the SDLC worktree was cleaned up afterward. Because the PR was squash-merged remotely while local `main` still carried its own unpushed commits from the earlier same-day carryover-resolution session (the `state.json` kind:"portfolio" / block-ID naming-convention work), reconciling local `main` with `origin/main` required an explicit merge step rather than a fast-forward: a conflict surfaced in `log.md`/`planning/status.md` frontmatter, resolved in favor of the newer, post-3.L values (the squash commit's content superseded the pre-merge state). Re-ran the full test suite after reconciliation — green — then pushed the reconciled `main` to origin. `MV.3.L` is now closed; `MV.3B.R` (graph emit + structural query surface, Phase 3B) is the only remaining unstarted mev feature block and is next up.
+- **Why:** GitHub's squash-merge collapses the PR's branch history into a single commit on `main`, which diverges from a local `main` that already has unpushed commits of its own — a normal merge/rebase was needed to reconcile the two histories cleanly rather than assuming a fast-forward would apply.
+- **Refs:** PR #11; `planning/master-plan.md` (Phase 3 / 3B); carryover entry below.
+
+**Carryover (deferred, non-mev):** `MV.3.L`'s sanity run of `mev validate-brain --structure` against the live company brain surfaced 84 genuine `E_STRUCT_ORPHAN_FILE` findings — files referenced only as plain backtick text (not markdown links) in various `index.md` tables across the brain. These are real findings, correctly flagged, but fixing them is brain-content cleanup, not a mev validator-behavior task; deferred to a separate future session/repo (the company-brain root), out of scope for this repo's log.
 
 ### Cross-repo: state.json portfolio kind, block-ID naming convention, /update-state command
 

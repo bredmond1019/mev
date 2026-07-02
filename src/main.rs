@@ -125,6 +125,28 @@ enum Command {
         #[arg(long)]
         write: bool,
     },
+    /// Emit the `scope:doc_id` knowledge graph as a JSON artifact (Phase 3B, Block R).
+    ///
+    /// Crawls the Brain repo, resolves `brain.toml`, builds the knowledge graph (nodes,
+    /// `related:` edges, and leaves — no-`doc_id` corpus files), and prints a JSON envelope
+    /// to stdout. Distinct from `generate-graph`, which writes an interactive HTML visual
+    /// rather than a JSON artifact; this is the JSON companion for the orchestrator's
+    /// Postgres edges table (D4). A pure emit — nothing is written to disk or a DB.
+    ///
+    /// Output is compact JSON by default; pass --pretty for indented output.
+    ///
+    /// Exit codes:
+    ///   0 — graph emitted successfully
+    ///   1 — configuration error (brain.toml not found or unreadable) or serialization error
+    EmitGraph {
+        /// Path to search from when locating brain.toml (walks up to find it).
+        /// Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Emit pretty-printed (indented) JSON instead of compact JSON.
+        #[arg(long)]
+        pretty: bool,
+    },
     /// Generate an interactive HTML visualization of the knowledge graph (graph.html)
     GenerateGraph {
         /// Path to search from when locating brain.toml. Defaults to the current directory.
@@ -314,6 +336,38 @@ fn main() -> ExitCode {
                         }
                         Err(err) => {
                             eprintln!("error serializing manifest: {err:#}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::EmitGraph { path, pretty } => {
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match mev::graph_brain(&root) {
+                Ok(export) => {
+                    let json_result = if pretty {
+                        serde_json::to_string_pretty(&export)
+                    } else {
+                        serde_json::to_string(&export)
+                    };
+                    match json_result {
+                        Ok(s) => {
+                            println!("{s}");
+                            ExitCode::SUCCESS
+                        }
+                        Err(err) => {
+                            eprintln!("error serializing graph: {err:#}");
                             ExitCode::FAILURE
                         }
                     }
