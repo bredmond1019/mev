@@ -365,6 +365,21 @@ JSON; never touches a DB); persistence and the AI layer are the orchestrator's. 
 - **Note:** this is the block that lets `MV.3.P2` flip derivation drift from warning → error — once the
   tables and rollup are generated, drift becomes fixable and therefore enforceable.
 
+### MV.3B.U — Brain rollup tier-scoping + brain-focus aggregation (safe brain-kind emit)
+- **What:** Make `mev emit-state --write` **safe and correct for brain-kind `state.json`** (it is not today).
+  `MV.3B.T`'s `derive_rollup` rebuilds `repos[]` from a **global** scan of loadable `kind:"project"` files, so the
+  rollup is not tier-scoped and any tier repo without a loadable `state.json` (unauthored, or a parse failure) is
+  **silently dropped**. This corrupted `core/planning/state.json` + the HQ root file live (the `bastion` entry
+  vanished on `E_STATE_MALFORMED_JSON`). Fix: **tier-scope** the rollup via `brain.toml` (HQ = full set),
+  **preserve** the existing hand-authored entry for any sourceless in-scope repo (non-destructive), **populate**
+  `RepoRollup.tier`, and **derive** brain `focus` as the repo-tagged union of in-scope children's focus.
+- **Acceptance:** each brain file's `repos[]` reflects only its tier (HQ all); no in-scope repo dropped (derive /
+  preserve / tier-tagged stub); `tier` populated; brain `focus` is the repo-tagged union; fixed point preserved
+  (emit then re-emit is a no-op); a live dry-run against the brain shows zero dropped repos.
+- **Note:** follow-up to `MV.3B.T` (append-only decision; do not edit MV.3B.T). Until it lands, `emit-state --write`
+  must not be run against any brain-kind `state.json`. Spec: `planning/3B.U-brain-rollup-tier-scoping/tasks.md`.
+  Carryover: `mev-brain-rollup-tier-scoping` (in `core/planning/state.json`).
+
 ---
 
 ## Phase 4 — Depth / Hardening: blog + linting
@@ -406,6 +421,7 @@ existence — applied across content types.
 | 3B | MV.3B.R | Graph emit + structural query surface | Free/exact "where/what's connected" answers | Knowledge graph as product (D4) |
 | 3B | MV.3B.S | Graph-aware RAG *(orchestrator)* | Fuse semantic + structural retrieval | The two-mode endgame (D4) |
 | 3B | MV.3B.T | State-graph derived-view emit (`emit-state`) | Generate leaf `focus` + master-plan tables + brain rollup (single engine `/log-work` calls) | Corpus engine output (D3/D4) |
+| 3B | MV.3B.U | Brain rollup tier-scoping + brain-focus aggregation | Make `emit-state --write` safe for brain-kind state.json (no rollup truncation) | Corpus engine output (D3/D4) |
 | 4 | — | Blog validation + code-block/link linting | Cover a fourth content type | Whole-tree coverage |
 | 5+ | — | `watch` (hot-reload) + `compile` (manifest.json) | Speed + precompiled index | Differentiating build |
 

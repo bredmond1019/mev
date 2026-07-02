@@ -218,6 +218,21 @@
           ],
           "wave": 6,
           "origin": null
+        },
+        {
+          "id": "MV.3B.U",
+          "title": "Brain rollup tier-scoping + brain-focus aggregation (safe brain-kind emit-state)",
+          "status": "open",
+          "depends_on": [
+            {
+              "type": "block",
+              "repo": "mev",
+              "id": "MV.3B.T",
+              "what": "fixes destructive repos[] truncation in the emit engine MV.3B.T shipped"
+            }
+          ],
+          "wave": 6,
+          "origin": null
         }
       ]
     }

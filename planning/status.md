@@ -95,6 +95,7 @@ blocked: []
 | MV.3B.R | Graph emit + structural query surface | Not started | mev emits graph JSON; orchestrator loads Postgres edges table beside `brain_documents`; bastion/MCP structural queries (free/exact). Depends on `MV.3.J`. |
 | MV.3B.S | Graph-aware RAG (orchestrator) | Not started | Retrieval traverses edges to expand/rerank semantic hits + query router. Orchestrator-side; mev's edge model is the contract. |
 | MV.3B.T | Table/rollup emit (from v2 state graph) | Done | 6 tasks, PASS, 275 tests. `derive_focus`/`derive_rollup`/`derive_cross_repo` single-sourced; `emit.rs` (`wave_order`, `render_wave_table`, `splice_generated`); `plan_state_json`/`plan_master_plan_tables`/`apply_plan`; `emit_state` driver + `emit-state` CLI (`--write`). |
+| MV.3B.U | Brain rollup tier-scoping + brain-focus aggregation | Not started | Follow-up to MV.3B.T: `emit-state --write` corrupts brain-kind `repos[]` (global scan → not tier-scoped; sourceless tier repos silently dropped). Fix: tier-scope via `brain.toml`, preserve sourceless entries, populate `RepoRollup.tier`, derive brain `focus` as repo-tagged union. Spec drafted (`3B.U-brain-rollup-tier-scoping/`). **Do not run `emit-state --write` on brain files until this lands.** |
 
 ---
 
