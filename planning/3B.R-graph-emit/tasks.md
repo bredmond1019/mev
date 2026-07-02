@@ -32,29 +32,29 @@ Emit the `scope:doc_id` knowledge graph — authored nodes, `related:` edges, an
 
 ## Step-by-Step Tasks
 
-### 3B.R.1 Graph-export module (`src/brain/graph_emit.rs`)
+### 1. Graph-export module (`src/brain/graph_emit.rs`)
 - Create `src/brain/graph_emit.rs`. Define `GraphExport { version, root, nodes, edges, leaves }` deriving `serde::Serialize` (reuse `Node`/`Edge` from `crate::brain::graph`).
 - Add `build_graph_export(root: &Path, artifact: &GraphArtifact) -> GraphExport`: `version = "1"`; `root = root.display().to_string()`; clone `artifact.graph.nodes` / `artifact.graph.edges`; `leaves` = `artifact.leaf_keys` collected into a `Vec<String>` and **sorted** for determinism.
 - Register `pub mod graph_emit;` in `src/brain/mod.rs` (append to the module list).
 - Unit tests in the module: node/edge/leaf mapping from a small hand-built `GraphArtifact` (or via `build_graph` over a temp-dir corpus, mirroring the `graph.rs` test helper), leaves sorted, empty-corpus → empty vecs, and a `serde_json::to_string` round-trip asserting `version`/`root`/`nodes`/`edges`/`leaves` keys are present.
 - **Files:** `src/brain/graph_emit.rs` (new), `src/brain/mod.rs` (append one `pub mod` line).
 
-### 3B.R.2 Library driver + `emit-graph` CLI subcommand
+### 2. Library driver + `emit-graph` CLI subcommand
 - Add `graph_brain(root: &Path) -> anyhow::Result<GraphExport>` to `src/lib.rs`, mirroring `manifest_brain`: `find_brain_config(root)` (map error to `anyhow` mentioning `brain.toml`) → `crawl_corpus(root, &config)` → `build_graph(&corpus, &config)` → `build_graph_export(root, &artifact)`. Re-export `GraphExport` from the crate root alongside `Manifest`.
 - Add `Command::EmitGraph { path: PathBuf (default "."), pretty: bool }` to `src/main.rs` with a doc-comment block (purpose, `--pretty`, exit codes 0/1) matching the `Manifest`/`EmitState` style, and a handler mirroring `Command::Manifest`: resolve root via `find_brain_root`, call `mev::graph_brain`, serialise compact (or `to_string_pretty` with `--pretty`) to stdout, exit `SUCCESS`; config/serialisation errors → `eprintln!` + `FAILURE`.
 - **Files:** `src/lib.rs`, `src/main.rs`.
 
-### 3B.R.3 Integration tests (`tests/brain_graph_emit.rs`)
+### 3. Integration tests (`tests/brain_graph_emit.rs`)
 - New `tests/brain_graph_emit.rs` mirroring `tests/brain_manifest.rs` (temp-dir helper + `write_brain_toml` + OKF-doc helper). Cover: (a) a small corpus with two linked nodes + one leaf → `graph_brain` returns the expected node count, an edge from → to_ref, and the leaf present in `leaves`; (b) round-trip — `serde_json::to_string` parses back as a `serde_json::Value` with `version == "1"` and `nodes`/`edges`/`leaves` arrays; (c) a `related:` edge to a `doc_id` node is present in `edges`; (d) `graph_brain` errors (mentioning `brain.toml`) when no `brain.toml` is present.
 - **Files:** `tests/brain_graph_emit.rs` (new).
 
-### 3B.R.4 Documentation (`docs/cli.md`, `docs/architecture.md`)
+### 4. Documentation (`docs/cli.md`, `docs/architecture.md`)
 - `docs/cli.md`: add an `### emit-graph [--pretty] [path]` subcommand section (synopsis, output shape with a sample JSON envelope, exit codes, examples) modelled on the existing `manifest` section; note the distinction from `generate-graph`.
 - `docs/architecture.md`: add `graph_emit.rs` to the module map, an entry for `build_graph_export` / `GraphExport` under the knowledge-graph section, and `brain_graph_emit.rs` to the integration-tests list.
 - Update `docs/index.md` only if a new file row is warranted (no new top-level doc is added here, so likely unchanged — confirm).
 - **Files:** `docs/cli.md`, `docs/architecture.md` (and `docs/index.md` if needed).
 
-### 3B.R.5 Validate
+### 5. Validate
 - Run the Validation Commands listed below and confirm all pass.
 - Sanity-run `mev emit-graph ~/Dev/agentic-portfolio | jq '{nodes: (.nodes|length), edges: (.edges|length), leaves: (.leaves|length)}'` against the live brain and record the counts in Notes (no false-positive triage expected — this is a pure emit, not a check).
 
