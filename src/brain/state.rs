@@ -497,6 +497,13 @@ pub fn discover_state_files(
             .join(&repo.repo_path)
             .join("planning")
             .join("state.json");
+        // Skip entries already discovered as a tier sub-brain rollup (e.g. a
+        // `[[repos]]` entry for the tier's own repo, like `core`, alongside
+        // HQ's `tiers[].rollup` pointing at the same file) — otherwise the
+        // same file is registered twice with conflicting `expected_kind`.
+        if sources.iter().any(|s| s.abs_path == state_path) {
+            continue;
+        }
         if state_path.exists() {
             let expected_kind = if repo.tier == "portfolio" {
                 "portfolio"
@@ -2484,6 +2491,71 @@ mod tests {
                 _ => panic!("unexpected slug: {}", src.repo_slug),
             }
         }
+    }
+
+    /// Mirrors the real HQ `brain.toml`, which carries a `[[repos]]` entry for
+    /// `core` itself (`tier = "_root"`, `repo_path = "core"`) *in addition to*
+    /// HQ's `tiers[].rollup` pointing at the same `core/planning/state.json`.
+    /// Without dedup, `core` was discovered twice with conflicting
+    /// `expected_kind` ("brain" via the tier rollup, "project" via the
+    /// `[[repos]]` loop), producing a false `E_STATE_SCHEMA_BAD_KIND`.
+    #[test]
+    fn discover_dedupes_repo_entry_that_shadows_a_tier_rollup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        build_hq_fixture(dir.path());
+
+        use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
+        let config = BrainConfig {
+            vocab: VocabConfig::default(),
+            crawl: CrawlConfig::default(),
+            repos: vec![
+                RepoEntry {
+                    slug: "brain".to_string(),
+                    tier: "_root".to_string(),
+                    repo_path: ".".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "core".to_string(),
+                    tier: "_root".to_string(),
+                    repo_path: "core".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "alpha".to_string(),
+                    tier: "core".to_string(),
+                    repo_path: "core/alpha".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+            ],
+        };
+
+        let (sources, diags) = discover_state_files(dir.path(), &config);
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for complete fixture, got: {diags:?}"
+        );
+
+        // Still exactly 3 sources — the `core` [[repos]] entry must not add a
+        // second, conflicting registration of the same file.
+        assert_eq!(
+            sources.len(),
+            3,
+            "expected core/planning/state.json to be registered once, got: {sources:?}"
+        );
+        let core_sources: Vec<_> = sources.iter().filter(|s| s.repo_slug == "core").collect();
+        assert_eq!(
+            core_sources.len(),
+            1,
+            "expected exactly one 'core' source, got: {core_sources:?}"
+        );
+        assert_eq!(core_sources[0].expected_kind, "brain");
     }
 
     #[test]
