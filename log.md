@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-02T13:25:54Z"
+timestamp: "2026-07-02T21:30:16Z"
 ---
 
 # Log — mev
@@ -18,6 +18,11 @@ timestamp: "2026-07-02T13:25:54Z"
 ---
 
 ## [2026-07-02]
+
+### Archive 9 completed Phase 3/3B block folders; add graph-integrity check to /archive
+- **What:** Retired 9 cold block folders into `planning/archive/` via `/archive` with history-preserving `git mv`: `3.K-link-integrity`, `3.L-structural-coverage`, `3.P-state-integrity`, `3.P2-state-graph-validation`, `3B.Q-manifest-emit`, `3B.R-graph-emit`, `3B.T-state-table-rollup-emit`, `3B.U-brain-rollup-tier-scoping`, and the never-executed `ticket-review-frontmatter` ticket. Ran the D35 distillation ratchet BEFORE moving: promoted ~11 entries into `knowledge.md` (D5 extract-once supersession of the removed `read_doc_metadata` seam — old entry marked SUPERSEDED; manifest/graph emit module facts; lexical link path resolution; FileUri-vs-Markdown resolution; state-file discovery off HQ root; v2 state schema DAG + `ready_order`/`detect_cycles`; single-sourced `derive_focus`; `validate-brain` flag dispatch precedence; wikilink scope semantics; ManifestEntry naming; sentinel-splice markers; no-info-severity Diagnostic; v2 diagnostic-code table; `state-schema.md` cross-repo commit split) and ~8 entries into `memory.md` (UTF-8 char-width byte scanning fix; `--structure` orphan detection is link-based → the 84 E_STRUCT_ORPHAN_FILE; `#[serde(alias="block")]` v2-migration linchpin; two v2 dedup guards; `emit-state --write` drops unmodeled fields + trailing-newline normalization; brain state.json concurrent-edit clobber; ~20 files carrying filler OKF frontmatter with the ticket never executed; post-P2 in-flight state). Set `status: archived` on the 5 moved files that carried `status: active`. Updated `planning/index.md` (Active Concept Folders now just `herdr-mev-patterns/`) and `planning/archive/index.md` (9 new registry rows). Then hardened `/archive` itself: added a Step 3 `mev validate-brain --graph` baseline capture before the move and a new Step 4.5 that diffs after and fails only on net-new dangling edges — applied to mev's `.claude/commands/archive.md` AND the canonical base-template sources (`.claude/commands/archive.md` + `.claude/commands/brain/archive.md`) so it survives `/sync-downstream-harness`. Re-validated post-archive: `mev validate-brain --graph ~/Dev/agentic-portfolio` → 7 errors + 1 warning but 0 net-new from the archive (all 7 dangling `related:` edges are pre-existing brain-content issues in bastion/orchestrator/core-planning, unrelated to mev). Commits: mev `4ff79ac`, base-template `7f2cbad`.
+- **Why:** Nine completed block specs had accumulated in `planning/` as clutter; retiring them keeps the live planning surface clean while the D35 ratchet preserves their durable residue. The graph-check addition turns the manual verification done this session into a permanent guardrail so future archives can't silently introduce dangling `related:` edges. Housekeeping only — no block landed; focus is unchanged (`MV.3B.S` remains next).
+- **Refs:** commits mev `4ff79ac`, base-template `7f2cbad`; D35 (memory-distillation loop); decisions D4–D8; `.claude/commands/archive.md`; `planning/archive/index.md`
 
 ### MV.3B.R wrap-up: PR merge, worktree cleanup, state.json update, handoff
 - **What:** Ran `/sdlc-flow` for MV.3B.R to completion, merged PR #12 (squash), reconciled local `main` via `git reset --hard origin/main` (verified content-identical first), ran `/clean-worktree 3B.R-graph-emit-flow` to remove the worktree/branch, flipped `MV.3B.R` to closed/done in `planning/state.json`'s `tracks[]`, ran `mev emit-state --write` to regenerate focus (promoting `MV.3B.S` to next), and wrote `planning/handoff.md` for the next agent.
