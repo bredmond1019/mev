@@ -54,7 +54,7 @@ Enforce CLAUDE.md Standing Rule 7 / D17: every corpus file in a directory appear
 - Follow the fixture-construction style already used in `tests/brain_graph.rs` / `tests/brain_links.rs`.
 - **Owns:** `tests/brain_structure.rs` (new).
 
-### 3.L.4 Documentation
+### 3.L.4 Documentation (in progress)
 - `docs/cli.md`: document the `--structure` flag under `validate-brain` (purpose, dispatch precedence, the two `E_STRUCT_ORPHAN_FILE` / `E_STRUCT_DANGLING_ROW` diagnostic codes, exit behaviour) — match the `--links` section shape.
 - `docs/architecture.md`: add the `structure.rs` module to the brain module map and its `check_structure` function/row to the function table; note `validate_brain_structure` as the lib driver.
 - **Owns:** `docs/cli.md`, `docs/architecture.md`.
