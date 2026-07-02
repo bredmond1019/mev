@@ -8,12 +8,21 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-02T09:52:18Z"
+timestamp: "2026-07-02T13:25:54Z"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## [2026-07-02]
+
+### MV.3B.R wrap-up: PR merge, worktree cleanup, state.json update, handoff
+- **What:** Ran `/sdlc-flow` for MV.3B.R to completion, merged PR #12 (squash), reconciled local `main` via `git reset --hard origin/main` (verified content-identical first), ran `/clean-worktree 3B.R-graph-emit-flow` to remove the worktree/branch, flipped `MV.3B.R` to closed/done in `planning/state.json`'s `tracks[]`, ran `mev emit-state --write` to regenerate focus (promoting `MV.3B.S` to next), and wrote `planning/handoff.md` for the next agent.
+- **Why:** The initial `/sdlc-flow` invocation failed twice before starting: once because extra free-text instructions were mistakenly passed as a task-range argument, and once because `planning/3B.R-graph-emit/tasks.md` used non-standard `### 3B.R.N Title` task headings instead of the project's `### N. Title` convention (confirmed against 6+ other specs), which sdlc-flow's D16 task-heading parser rejected with "No task headings". Fixed by renumbering the 5 headings to plain `N.` form (commit `2635d93` on `main`, merged into the worktree branch). Separately, discovered the worktree (created by `/init-worktree`) had a corrupted sparse-checkout: `.git/worktrees/<name>/info/sparse-checkout` mixed non-cone patterns (`/*`, `!*/`) with cone-mode `/<dir>/` entries, silently disabling cone mode and dropping nested subdirectories (including the newly added spec file) from the checkout. Fixed by re-running `git sparse-checkout init --cone` + `git sparse-checkout set $(git ls-tree HEAD --name-only -d | tr '\n' ' ')` inside the worktree; root cause in `/init-worktree` itself was not investigated — logged as a `known_issue` carryover in `state.json` (`sdlc-flow-worktree-sparse-checkout-cone-bug`). After these fixes, `/sdlc-flow` completed cleanly (5/5 tasks PASS, review PASS, docs already current) and opened PR #12; `/code-review low` on the diff found 0 findings. While hand-editing the `state.json` carryover, hit and fixed two schema mistakes caught by `mev validate-brain --state`: `related[]` must be `Vec<BlockedBy>` objects (`{"type":"block","repo":...,"id":...,"what":null}`), not bare strings; `scope` requires exactly one of `repo`/`tier`/`cross_repo` set, not zero or multiple.
+- **Refs:** PR #12; `planning/3B.R-graph-emit/tasks.md`; `planning/state.json`; `planning/handoff.md`; carryover `sdlc-flow-worktree-sparse-checkout-cone-bug`
 
 ---
 
