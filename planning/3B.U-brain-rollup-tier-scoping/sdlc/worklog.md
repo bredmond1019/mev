@@ -31,3 +31,6 @@ Validated: gating checks (fast tripwire)
 What: Ran all four harness gates (fmt/clippy/test/build) clean, confirmed a non-destructive tier-scoped dry-run of `mev emit-state` against the live company brain (only pre-existing malformed-JSON warnings for orchestrator/bastion, no repo drops), and resolved the `mev-brain-rollup-tier-scoping` carryover in core/planning/state.json.
 Decisions: Task 6 required no mev source changes — it's a pure validate+resolve task; only tasks.md marker and the brain-side state.json carryover were touched.; Initial edit to core/planning/state.json accidentally clobbered concurrent legitimate external edits to that shared file (other repos' focus/rollup entries); recovered via `git checkout` to restore the already-correct committed content (commit a081aee) rather than re-overwriting it, per an explicit system note that the external changes were intentional and should not be reverted.; Did not run `mev emit-state --write` against the live brain — task 6 only calls for a dry-run verification plus the manual carryover resolution; an actual --write pass is left for a separate deliberate step.
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: none

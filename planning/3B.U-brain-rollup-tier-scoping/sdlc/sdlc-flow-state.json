@@ -2,9 +2,9 @@
   "spec_slug": "3B.U-brain-rollup-tier-scoping",
   "branch": "3B.U-brain-rollup-tier-scoping-flow",
   "started_at": "2026-07-02T02:55:17Z",
-  "updated_at": "2026-07-02T03:21:31Z",
+  "updated_at": "2026-07-02T03:25:24Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.U-brain-rollup-tier-scoping-flow",
-  "status": "running",
+  "status": "docs",
   "current_task": 6,
   "tasks": {
     "1": {
@@ -131,9 +131,9 @@
     }
   },
   "review": {
-    "verdict": null,
+    "verdict": "PASS",
     "findings": [],
-    "attempts": 0
+    "attempts": 1
   },
   "docs": {
     "changed": [],
@@ -329,13 +329,29 @@
         "filesReadKb": null,
         "inTokEst": 592,
         "outTok": 2863
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 1017,
+        "filesReadKb": null,
+        "inTokEst": 1017,
+        "outTok": 6031
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 824,
+        "filesReadKb": null,
+        "inTokEst": 824,
+        "outTok": 1527
       }
     ],
     "total": {
-      "promptTokEst": 13690,
+      "promptTokEst": 15531,
       "filesReadKb": 0,
-      "inTokEst": 13690,
-      "outTok": 139753
+      "inTokEst": 15531,
+      "outTok": 147311
     }
   }
 }
