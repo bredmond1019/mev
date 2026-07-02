@@ -12,7 +12,7 @@ related: [master-plan, status, 3B.T-state-table-rollup-emit-tasks, state-schema]
 
 # Task Spec — Phase 3B, Block MV.3B.U — Brain rollup tier-scoping + brain-focus aggregation
 
-**Status:** Draft (4 tasks passed) · **Last run:** 2026-07-02 03:09:45Z
+**Status:** Done (6/6 tasks passed, PASS) · **Last run:** 2026-07-02 03:25:24Z
 
 ## Goal
 Make `mev emit-state --write` **safe and correct for brain-kind `state.json` files** (`core/planning/state.json`,
@@ -148,3 +148,11 @@ cargo build --release
   destructively truncate the rollup (this is the carryover `mev-brain-rollup-tier-scoping`).
 - Preserve rule chosen over empty-stub/abort-on-gap (user decision, this session). Brain-focus aggregation defined
   now (union) rather than punted (user decision, this session).
+
+## Amendment Log
+- 2026-07-02 [task 5] `state-schema.md` lives in the `core` repo (separate git repo from `mev`), so it was
+  committed there separately (commit `aacf3e9`) rather than in this branch's commit — task 5's spec scope
+  (schema/docs/decision) is unchanged, only the commit boundary differs from a single-repo assumption.
+- 2026-07-02 [task 6] Task 6 was defined as a dry-run + carryover-resolution step; no `mev emit-state --write`
+  was run against the live brain, matching the spec's explicit "do not run --write" note — an actual `--write`
+  pass against brain files is deferred to a separate deliberate step, not part of this block's scope.
