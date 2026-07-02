@@ -27,3 +27,6 @@ Validated: gating checks (fast tripwire)
 
 ## Docs
 Patched: none
+
+## Wrap-up — PASS
+Next: MV.3B.R (graph emit + structural query surface / Phase 3B); separately, fix the 84 live E_STRUCT_ORPHAN_FILE findings in the brain's own index.md files (brain-content cleanup, not a mev task)
