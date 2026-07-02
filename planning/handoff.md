@@ -3,104 +3,78 @@ type: Handoff
 created: 2026-07-02
 ---
 
-# Handoff — state.json warnings resolved, naming convention adopted, /update-state shipped
+# Handoff — MV.3.L shipped/merged; MV.3B.R is next
 
 > **For the next agent:** Read this immediately after `/prime`. Delete this file once consumed.
 
 ## What we're doing and why
 
-The user ran `mev emit-state` / `mev validate-brain --state` against the live company brain and found
-two classes of noise: (1) `W_EMIT_NO_SENTINEL` warnings on every repo's `master-plan.md`, and (2)
-`E_STATE_SCHEMA_MISSING_FIELD` warnings on repos with empty `tracks[]`. Investigation split this into
-real gaps, not mev bugs: some repos (`portfolio/` tier) are *terminal* — published to GitHub, never
-going to have a roadmap — and were being treated as incomplete `project`-kind repos instead of a
-distinct done state. Separately, the user asked to adopt a `<Prefix>.<Phase>.<Letter>` block-ID
-convention (already used by mev itself, e.g. `MV.3B.U`) across `brazilianportugui` (BP), `amistad`
-(AM), and `price-scout` (PS), and to wire that convention into `/generate-master-plan` +
-`/new-project` so new projects get it automatically. Mid-session the user separately asked for a
-command/skill so future agents know how to safely edit `state.json` — that shipped as `/update-state`.
+mev's Phase 3 roadmap (Brain integrity checks) is being built out one `validate-brain` flag at a
+time. `MV.3.L` (structural coverage: bidirectional `index.md` ↔ directory consistency, per decision
+D17 / CLAUDE.md Standing Rule 7) was the next unstarted block and has now shipped end-to-end via
+`/sdlc-flow`, been reviewed, merged, and cleaned up. This closes out Phase 3 entirely — every
+remaining unstarted mev feature block now lives in Phase 3B (the "Brain as queryable product" work),
+starting with `MV.3B.R` (graph emit).
 
 ## Completed this session
 
-- **mev: `kind:"portfolio"` schema support** (`f5a0205`) — `discover_state_files` assigns
-  `expected_kind:"portfolio"` when `brain.toml` `tier == "portfolio"`; `check_schema` accepts the new
-  kind and requires a `note` instead of `tracks[]`; `plan_master_plan_tables` skips portfolio-kind
-  files entirely (no `master-plan.md` expected). New unit/integration tests
-  (`src/brain/state.rs`, `tests/brain_emit.rs`); `docs/cli.md` updated;
-  `planning/decisions/D8-portfolio-kind-terminal-repos.md` written; `core/planning/state-schema.md`
-  got the portfolio template section. All 4 harness gates green.
-- Rewrote `portfolio/{rag-engine-rs,workflow-engine-rs,claude-sdk-rs}/planning/state.json` to
-  `kind:"portfolio"` + a `note` — confirmed both warning classes gone for these three
-  (`planning/` is gitignored there, so nothing to commit — the local files are sufficient for mev).
-- **Naming convention rename**, `<Prefix>.<Phase>.<Letter>` (e.g. `BP.1.A`, task ids `BP.1.A.3`):
-  - `amistad` (AM) — `master-plan.md` + `status.md` renamed, committed (`7eb9348` in that repo).
-    `state.json` tracks[] was empty, nothing to remap there.
-  - `price-scout` (PS) — same, committed (`bd19691` in that repo); historical log entries under
-    `## Decisions & Deviations Log` were deliberately left in the old `Block X` phrasing (git history,
-    not rewritten).
-  - `brazilianportugui` (BP) — **NOT done**, see Remaining work below.
-- **Command fixes** — `/generate-master-plan` (both the plain per-repo variant and the brain-flavored
-  cross-repo variant) and `/new-project` updated so block headings read `### BA.0.A — <name>` (no
-  redundant "Block" word) and `/new-project` now derives + registers a unique `prefix` in
-  `brain.toml` instead of leaving it out. Distributed to all repos with a tracked `.claude/commands/`.
-  - **Self-caught mistake, since fixed:** mid-session I overwrote the tier-level (root/core/side/
-    client/portfolio) `.claude/commands/generate-master-plan.md` with the wrong (plain, not
-    brain-flavored) variant. Caught via the `run_syncs.sh` topology check, reverted, and re-applied
-    the heading fix to the correct `base-template/.claude/commands/brain/generate-master-plan.md`
-    source (`9d9c135` root repo, `12868b5` base-template).
-- **New `/update-state` command** — canonical workflow for editing any repo's `planning/state.json`
-  (authored-vs-derived boundary, the `kind` decision table including the new `portfolio` kind, the
-  block-ID rename checklist, edit → validate → `emit-state --write` → `validate-brain --state`
-  procedure). Added in both plain and brain-flavored variants, registered in `run_syncs.sh`'s
-  `sync-brain-commands` include list, distributed to all 12 repos' `.claude/commands/`.
+- Ran `/sdlc-flow 3.L-structural-coverage` (5 tasks, all PASS, final review PASS, no findings) —
+  added `src/brain/structure.rs::check_structure(corpus, root)` (bidirectional `index.md` coverage:
+  `E_STRUCT_ORPHAN_FILE` for uncovered direct-child files, `E_STRUCT_DANGLING_ROW` for `index.md`
+  rows pointing at nonexistent targets), `validate_brain_structure(root)` library driver, and a
+  `--structure` CLI flag on `validate-brain` (dispatch precedence: `--links` > `--structure` >
+  `--state` > `--graph` > `--sync`). 7 new unit tests + `tests/brain_structure.rs` integration
+  tests. Docs (`docs/cli.md`, `docs/architecture.md`) updated as part of the flow.
+- Ran `/code-review low` against the diff — 0 findings, clean.
+- Merged PR #11 (`gh pr merge 11 --squash`). Because the PR was squash-merged on GitHub while local
+  `main` still had 5 unpushed commits from the earlier carryover-resolution session (the
+  `agents-skills-generate-master-plan-mirror-drift` fix), local and `origin/main` had diverged.
+  Resolved by `git merge origin/main`, which conflicted only in `log.md`/`status.md` frontmatter
+  (timestamp/now/next scalars) — resolved in favor of the newer post-MV.3.L values, since the log
+  bodies had already auto-merged cleanly. Verified `cargo test` green post-merge, then pushed
+  (`8ce244f`, fast-forward, `b53c752..8ce244f`).
+- Ran `/clean-worktree 3.L-structural-coverage-flow` — worktree removed, branch deleted (all its
+  commits were already incorporated via the squash + merge).
+- Flipped `MV.3.L`'s `tracks[].blocks[].status` to `"closed"` in `planning/state.json`, added the
+  `brain-index-md-orphan-files-cleanup` carryover entry (see Durable State Updates), ran
+  `mev emit-state --write` (regenerated `focus.next[]` to drop `MV.3.L`, normalized carryover
+  `scope` shape), and confirmed `mev validate-brain --state` is clean (0 errors, only pre-existing
+  unrelated warnings).
 
 ## Remaining work
 
-1. **`brazilianportugui` (BP) block-ID rename — still blocked, not started.** Re-checked
-   2026-07-02: that repo now has a *different* live worktree (`1.F-contact-testimonial-...`) plus an
-   actively running Claude Code process (PID observed, computer-use session) — still not safe to
-   touch. Wait for that flow to settle (`git worktree list` there is clean, `git status` shows no
-   surprise commits, and no live process), then reapply the same pattern used for `amistad`/
-   `price-scout` (rename `Block X` headings in `master-plan.md`/`status.md` to `BP.<phase>.<letter>`,
-   remap `state.json` `tracks[].blocks[].id` + `depends_on[].id` + `focus.next[].id`), and **commit
-   immediately** once done. See the `brazilianportugui-block-id-rename-pending` carryover entry in
-   this file's own `planning/state.json` (still open).
-2. ~~`.agents/skills/generate-master-plan/` mirror drift~~ — **fixed 2026-07-02.** Regenerated
-   `base-template/.agents/skills/generate-master-plan/SKILL.md` from the correct brain-flavored source
-   (`base-template/.claude/commands/brain/generate-master-plan.md`, prefixed with the SKILL.md
-   frontmatter) instead of the wrong plain per-repo command it had been copied from, and propagated the
-   identical content to the root `.agents/skills/`, `core/`, `portfolio/`, `side/`, and `client/`
-   mirrors (root's copy also predated the "no literal Block word" heading fix, so it needed the same
-   update). Verified all six copies are byte-identical. `mev emit-state --write` +
-   `mev validate-brain --state` re-run clean (0 errors, only pre-existing unrelated warnings). The
-   `agents-skills-generate-master-plan-mirror-drift` carryover entry has been removed from
-   `planning/state.json`.
-3. Original mev roadmap is unaffected by any of this — `MV.3.L` (structural coverage, `index.md` ↔
-   dir, D17) and `MV.3B.R` (graph emit / Phase 3B) are still the next actual mev feature blocks,
-   per `planning/status.md`. Nothing this session touched mev's own feature roadmap.
+1. **`MV.3B.R`** (graph emit → Postgres edges table + structural query surface) is now the only
+   remaining unstarted mev feature block — depends on `MV.3B.Q` (already closed). Next natural
+   `/sdlc-flow` target. `MV.3B.S` (graph-aware RAG) is blocked on it.
+2. Non-mev, deferred: 84 genuine `E_STRUCT_ORPHAN_FILE` findings against the live company brain
+   (files named in plain backtick text in `index.md` tables instead of markdown links). Tracked as
+   the `brain-index-md-orphan-files-cleanup` carryover — brain-content hygiene, not a mev task.
+3. Still open from the prior session: `brazilianportugui-block-id-rename-pending` carryover — the
+   BP block-ID naming-convention rename remains blocked on a concurrent live session/worktree in
+   that repo (re-confirmed active this session too, via a live process check).
 
 ## Durable State Updates
 
-Two `carryover[]` entries added to `core/mev/planning/state.json` this session:
-- `brazilianportugui-block-id-rename-pending` (`kind: deferred`, `scope: cross_repo`) — item 1 above.
-- `agents-skills-generate-master-plan-mirror-drift` (`kind: known_issue`, `scope: cross_repo`) — item 2
+`planning/state.json` `carryover[]`:
+- Added `brain-index-md-orphan-files-cleanup` (`kind: deferred`, `scope.cross_repo: true`) — item 2
   above.
+- `brazilianportugui-block-id-rename-pending` unchanged (still open) — item 3 above.
 
-No new `tracks[].blocks[]` entries — none of this session's work is a mev feature block; it's
-cross-repo data/tooling work that happened to be done from inside mev.
+`planning/state.json` `tracks[]`: `MV.3.L` flipped from `"open"` to `"closed"` (authored). `focus`
+was regenerated via `mev emit-state --write`, not hand-edited.
 
 ## Open questions / choices
 
-None — the approach for `brazilianportugui` is settled (same rename pattern as its siblings, just
-deferred on timing); the `.agents/skills` drift fix, if picked up, should be scoped and decided fresh
-by whoever tackles it (it may need its own investigation into whatever generates those mirrors).
+None — `MV.3B.R` is the settled next block per `master-plan.md`/`status.md`; no ambiguity to
+resolve before starting it.
 
 ## Context the next agent needs
 
-Both open items are fully captured in `state.json` `carryover[]` (see Durable State Updates above) —
-no additional session-only framing needed beyond what's there.
+No additional session-only framing beyond what's above — the merge-reconciliation detail (squash
+vs. local-unpushed-commits divergence) is documented above in case a similar situation recurs with
+a future PR; it isn't a durable constraint so it isn't in `carryover[]`.
 
 ## First command after `/prime`
 
-`git -C /Users/brandon/Dev/agentic-portfolio/client/brazilianportugui worktree list` — confirm the
-concurrent SDLC flow has settled before resuming the `brazilianportugui` rename.
+`/generate-tasks MV.3B.R` (or `/sdlc-flow` directly if a task spec already exists at
+`planning/3B.R-graph-emit/tasks.md` — check first).

@@ -1,0 +1,284 @@
+{
+  "spec_slug": "3B.R-graph-emit",
+  "branch": "3B.R-graph-emit-flow",
+  "started_at": "2026-07-02T12:55:05Z",
+  "updated_at": "2026-07-02T13:15:23Z",
+  "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.R-graph-emit-flow",
+  "status": "done",
+  "current_task": 5,
+  "tasks": {
+    "1": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added src/brain/graph_emit.rs with GraphExport {version, root, nodes, edges, leaves} and build_graph_export(root, &GraphArtifact) -> GraphExport, reusing Node/Edge from graph.rs, sorting leaves for determinism, with 3 unit tests (node/edge/leaf mapping, empty corpus, JSON round-trip); registered pub mod graph_emit in src/brain/mod.rs.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Cloned artifact.graph.nodes/edges directly rather than re-deriving, per the spec's 'pure compiler' guidance",
+        "leaves built via HashSet -> Vec then .sort() for deterministic output as required by AC"
+      ],
+      "files_changed": [
+        "src/brain/graph_emit.rs",
+        "src/brain/mod.rs",
+        "planning/3B.R-graph-emit/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added graph_brain() library driver and mev emit-graph CLI subcommand (with --pretty) that crawls the corpus, builds the graph, and prints the GraphExport JSON envelope to stdout.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Mirrored manifest_brain exactly for graph_brain (find_brain_config -> crawl_corpus -> build_graph -> build_graph_export), re-exported GraphExport and build_graph_export from crate root alongside Manifest",
+        "EmitGraph CLI variant placed right before GenerateGraph in the enum, with a doc comment clarifying it emits JSON (vs generate-graph's HTML)"
+      ],
+      "files_changed": [
+        "src/lib.rs",
+        "src/main.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "3": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added tests/brain_graph_emit.rs integration test suite covering graph_brain nodes/edges/leaves, JSON round-trip, related-edge resolution, and missing-brain.toml error path.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Mirrored tests/brain_manifest.rs conventions (temp_dir/write_file/write_brain_toml helpers) for consistency with the existing manifest test suite.",
+        "Added a related-entries parameter to the local okf_doc() helper (not present in the manifest test's version) to construct related: edges in fixtures."
+      ],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.R-graph-emit-flow/tests/brain_graph_emit.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Documented the new `mev emit-graph` subcommand (cli.md) and the graph_emit.rs module/GraphExport type + tests/brain_graph_emit.rs (architecture.md), distinguishing it from generate-graph.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Placed the emit-graph CLI section between manifest and emit-state (its closest sibling emit commands) rather than immediately after generate-graph, since it groups better with the other pure-JSON emit subcommands.",
+        "Left docs/index.md unchanged as the spec anticipated — no new top-level doc file was added, only existing reference docs were extended."
+      ],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.R-graph-emit-flow/docs/cli.md",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.R-graph-emit-flow/docs/architecture.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "5": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Validated the emit-graph implementation: fmt, clippy, cargo test, and release build all pass, and a live sanity-run against the agentic-portfolio brain confirmed 411 nodes, 1062 edges, 101 leaves.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [],
+      "files_changed": [
+        "planning/3B.R-graph-emit/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    }
+  },
+  "review": {
+    "verdict": "PASS",
+    "findings": [],
+    "attempts": 1
+  },
+  "docs": {
+    "changed": [],
+    "created": []
+  },
+  "bail_reason": null,
+  "pr": {
+    "url": null,
+    "number": null
+  },
+  "tokens": {
+    "stages": [
+      {
+        "label": "worktree-setup",
+        "model": "haiku",
+        "promptTokEst": 1048,
+        "filesReadKb": null,
+        "inTokEst": 1048,
+        "outTok": 2608
+      },
+      {
+        "label": "enumerate",
+        "model": "haiku",
+        "promptTokEst": 222,
+        "filesReadKb": null,
+        "inTokEst": 222,
+        "outTok": 479
+      },
+      {
+        "label": "state-load",
+        "model": "haiku",
+        "promptTokEst": 215,
+        "filesReadKb": null,
+        "inTokEst": 215,
+        "outTok": 1088
+      },
+      {
+        "label": "update-task-1",
+        "model": "haiku",
+        "promptTokEst": 250,
+        "filesReadKb": null,
+        "inTokEst": 250,
+        "outTok": 911
+      },
+      {
+        "label": "implement-1-1",
+        "model": "sonnet",
+        "promptTokEst": 869,
+        "filesReadKb": null,
+        "inTokEst": 869,
+        "outTok": 5470
+      },
+      {
+        "label": "test-1-1",
+        "model": "haiku",
+        "promptTokEst": 562,
+        "filesReadKb": null,
+        "inTokEst": 562,
+        "outTok": 2377
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 250,
+        "filesReadKb": null,
+        "inTokEst": 250,
+        "outTok": 969
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 869,
+        "filesReadKb": null,
+        "inTokEst": 869,
+        "outTok": 4467
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 562,
+        "filesReadKb": null,
+        "inTokEst": 562,
+        "outTok": 3308
+      },
+      {
+        "label": "update-task-3",
+        "model": "haiku",
+        "promptTokEst": 250,
+        "filesReadKb": null,
+        "inTokEst": 250,
+        "outTok": 992
+      },
+      {
+        "label": "implement-3-1",
+        "model": "sonnet",
+        "promptTokEst": 869,
+        "filesReadKb": null,
+        "inTokEst": 869,
+        "outTok": 5017
+      },
+      {
+        "label": "test-3-1",
+        "model": "haiku",
+        "promptTokEst": 562,
+        "filesReadKb": null,
+        "inTokEst": 562,
+        "outTok": 1692
+      },
+      {
+        "label": "update-task-4",
+        "model": "haiku",
+        "promptTokEst": 250,
+        "filesReadKb": null,
+        "inTokEst": 250,
+        "outTok": 975
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 869,
+        "filesReadKb": null,
+        "inTokEst": 869,
+        "outTok": 6722
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 562,
+        "filesReadKb": null,
+        "inTokEst": 562,
+        "outTok": 2049
+      },
+      {
+        "label": "update-task-5",
+        "model": "haiku",
+        "promptTokEst": 250,
+        "filesReadKb": null,
+        "inTokEst": 250,
+        "outTok": 899
+      },
+      {
+        "label": "implement-5-1",
+        "model": "sonnet",
+        "promptTokEst": 869,
+        "filesReadKb": null,
+        "inTokEst": 869,
+        "outTok": 1744
+      },
+      {
+        "label": "test-5-1",
+        "model": "haiku",
+        "promptTokEst": 562,
+        "filesReadKb": null,
+        "inTokEst": 562,
+        "outTok": 2327
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 964,
+        "filesReadKb": null,
+        "inTokEst": 964,
+        "outTok": 2482
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 783,
+        "filesReadKb": null,
+        "inTokEst": 783,
+        "outTok": 1118
+      },
+      {
+        "label": "wrap-up",
+        "model": "sonnet",
+        "promptTokEst": 792,
+        "filesReadKb": null,
+        "inTokEst": 792,
+        "outTok": 8945
+      }
+    ],
+    "total": {
+      "promptTokEst": 12429,
+      "filesReadKb": 0,
+      "inTokEst": 12429,
+      "outTok": 56639
+    }
+  }
+}

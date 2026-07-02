@@ -379,6 +379,99 @@ mev manifest | jq '.entries | length'
 
 ---
 
+### `emit-graph [--pretty] [path]`
+
+Emit the `scope:doc_id` knowledge graph — authored nodes, `related:` edges, and marked leaves — as a canonical JSON artifact.
+
+```bash
+mev emit-graph [--pretty] [path]
+```
+
+| Argument / Flag | Default | Description |
+|---|---|---|
+| `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
+| `--pretty` | off | Emit pretty-printed (indented) JSON instead of compact JSON |
+
+Resolves `brain.toml` by walking up from `path`. If no `brain.toml` is found, the process
+exits 1 with an error message on stderr (mentioning `brain.toml`).
+
+The output is the graph-export JSON written directly to stdout — there is no `--json` envelope
+wrapper; the output *is* JSON. `mev emit-graph` is a **pure emit**: it does not write to any
+file or database, and it does not re-derive or re-walk the graph — it reuses the same
+`build_graph` pass that backs `mev validate-brain --graph`.
+
+This is distinct from `generate-graph` (above), which renders an interactive HTML/`vis.js`
+visualization for humans. `emit-graph` produces a machine-readable JSON artifact intended for
+the orchestrator to load into a Postgres edges table beside `brain_documents` (D4).
+
+#### Output shape
+
+```json
+{
+  "version": "1",
+  "root": "/path/to/brain",
+  "nodes": [
+    {
+      "id": "brain:alpha",
+      "scope": "brain",
+      "doc_id": "alpha",
+      "rel": "docs/alpha.md"
+    }
+  ],
+  "edges": [
+    {
+      "from": "brain:alpha",
+      "to_ref": "beta",
+      "kind": "related"
+    }
+  ],
+  "leaves": ["brain:a-leaf", "brain:z-leaf"]
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `version` | string | Schema version — currently `"1"` |
+| `root` | string | Display path of the HQ root used for the crawl |
+| `nodes` | array | Every corpus file with an authored `doc_id`, in walk order — one node per `scope:doc_id` |
+| `nodes[].id` | string | Canonical node id: `scope:doc_id` |
+| `nodes[].scope` | string | Owning scope slug (from the corpus registry) |
+| `nodes[].doc_id` | string | Authored `doc_id` (location-independent frontmatter field) |
+| `nodes[].rel` | string | Path of the file relative to the HQ crawl root |
+| `edges` | array | Every authored `related:` entry, in walk order |
+| `edges[].from` | string | Canonical id of the source node (`scope:doc_id`) |
+| `edges[].to_ref` | string | The raw `related:` entry as authored (bare or `scope:doc_id`) — not yet resolved/normalized |
+| `edges[].kind` | string | Edge type; currently only `"related"` |
+| `leaves` | array | `scope:stem` for every corpus file with **no** authored `doc_id`, sorted for deterministic output |
+
+`leaves` is always sorted, so repeated runs over an unchanged corpus emit byte-identical
+output.
+
+#### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Graph emitted successfully |
+| `1` | `brain.toml` not found, or a runtime error prevented crawl completion |
+
+**Examples:**
+
+```bash
+# Compact JSON from the current directory
+mev emit-graph
+
+# Compact JSON from an explicit brain root
+mev emit-graph ~/Dev/agentic-portfolio
+
+# Pretty-printed JSON
+mev emit-graph --pretty
+
+# Pipe compact JSON into jq for summary counts
+mev emit-graph | jq '{nodes: (.nodes|length), edges: (.edges|length), leaves: (.leaves|length)}'
+```
+
+---
+
 ### `emit-state [--write] [path]`
 
 Regenerate all derived views in the Brain corpus from the authored `tracks[]` DAG and write them in place (with `--write`) or report what would change (dry-run, without `--write`).

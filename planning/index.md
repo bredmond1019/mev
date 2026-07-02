@@ -65,6 +65,7 @@ at the top; only pipeline state lives under `sdlc/`.
 | `3B.T-state-table-rollup-emit/` | Task spec for `MV.3B.T` — `mev emit-state`: emit master-plan wave/dependency tables (sentinel splice) + brain `repos[]`/`cross_repo[]` rollup from the authored `tracks[]` DAG | Spec drafted |
 | `3.L-structural-coverage/` | Task spec for `MV.3.L` — `mev validate-brain --structure`: bidirectional `index.md` ↔ directory coverage (orphan files + dangling rows, D17 / Standing Rule 7) | Spec drafted |
 | `3B.U-brain-rollup-tier-scoping/` | Task spec for `MV.3B.U` — make `emit-state --write` safe for brain-kind `state.json`: tier-scope the `repos[]` rollup, preserve sourceless entries, populate `tier`, derive brain `focus` as a repo-tagged union | In progress (5/6 tasks) |
+| `3B.R-graph-emit/` | Task spec for `MV.3B.R` — `mev emit-graph`: emit the `scope:doc_id` knowledge graph (nodes + `related:` edges + marked leaves) as JSON for the orchestrator's Postgres edges table (D4) | Spec drafted |
 
 ## Archived Concept Folders
 
