@@ -44,7 +44,7 @@ Enforce CLAUDE.md Standing Rule 7 / D17: every corpus file in a directory appear
 - Factor a small private path-resolution/normalization helper; add ≥6 unit tests in `#[cfg(test)]` covering: clean dir (no diagnostics), one orphan file, one dangling row, both together, a directory with no `index.md` (no flags), and `./`-prefixed / mixed-separator link normalization.
 - **Owns:** `src/brain/structure.rs` (new), `src/brain/mod.rs` (append `pub mod structure;` only).
 
-### 3.L.2 Library driver + `--structure` CLI flag
+### 3.L.2 Library driver + `--structure` CLI flag (in progress)
 - In `src/lib.rs`, add `pub fn validate_brain_structure(root: &Path) -> anyhow::Result<Report>` mirroring `validate_brain_graph`: resolve `brain.toml` via `find_brain_config` (same `E_CONFIG_NOT_FOUND` fallback), run the `BrainValidator` schema pass, crawl the corpus once, call `structure::check_structure`, and extend the report.
 - In `src/main.rs`, add a `structure: bool` field (`#[arg(long)]`) to the `ValidateBrain` subcommand with a doc comment matching the existing `--graph`/`--links` style, and insert it into the dispatch precedence chain (place it adjacent to `--links`/`--state`; document the chosen precedence in the doc comment so it matches behaviour). Update the `ValidateBrain` top-level doc comment line listing the flags.
 - **Owns:** `src/lib.rs`, `src/main.rs`.

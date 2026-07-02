@@ -2,10 +2,10 @@
   "spec_slug": "3.L-structural-coverage",
   "branch": "3.L-structural-coverage-flow",
   "started_at": "2026-07-02T08:57:00Z",
-  "updated_at": "2026-07-02T08:57:00Z",
+  "updated_at": "2026-07-02T09:00:19Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.L-structural-coverage-flow",
   "status": "running",
-  "current_task": 1,
+  "current_task": 2,
   "tasks": {
     "1": {
       "status": "passed",
@@ -21,6 +21,23 @@
       "files_changed": [
         "src/brain/structure.rs",
         "src/brain/mod.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added validate_brain_structure library driver (schema pass + crawl + check_structure) and wired a --structure CLI flag into ValidateBrain, dispatched ahead of --state/--graph/--sync but after --links.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Dispatch precedence chosen as: --links > --structure > --state > --graph > --sync > default, documented in the --structure flag's doc comment on the ValidateBrain subcommand.",
+        "Left the pre-existing '(in progress)' marker on tasks.md ### 3.L.2 heading untouched/unstaged since it predates this task and updating task-spec prose is outside this task's file ownership (src/lib.rs, src/main.rs only)."
+      ],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.L-structural-coverage-flow/src/lib.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3.L-structural-coverage-flow/src/main.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -81,13 +98,37 @@
         "filesReadKb": null,
         "inTokEst": 578,
         "outTok": 2389
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 258,
+        "filesReadKb": null,
+        "inTokEst": 258,
+        "outTok": 1752
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 897,
+        "filesReadKb": null,
+        "inTokEst": 897,
+        "outTok": 6132
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 578,
+        "filesReadKb": null,
+        "inTokEst": 578,
+        "outTok": 2533
       }
     ],
     "total": {
-      "promptTokEst": 2741,
+      "promptTokEst": 4474,
       "filesReadKb": 0,
-      "inTokEst": 2741,
-      "outTok": 27019
+      "inTokEst": 4474,
+      "outTok": 37436
     }
   }
 }
