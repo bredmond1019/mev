@@ -7,7 +7,7 @@ layer: [factory, brain, engine]
 project: mev
 status: draft
 keywords: [ingest, file formats, extractor seam, sidecar metadata, discovery, enrichment, client corpus]
-related: [D4-corpus-engine-and-knowledge-graph, block-j-namespacing-decision, 2j-corpus-crawl-tasks, 2j-graph-integrity-tasks]
+related: [D4-corpus-engine-and-knowledge-graph]
 ---
 
 # D5 — Heterogeneous-format ingest (extractor seam + discovery/enrichment)

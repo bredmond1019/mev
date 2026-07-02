@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-06-30T21:10:46Z"
+timestamp: "2026-07-02T08:23:55Z"
 ---
 
 # Log — mev
@@ -18,6 +18,12 @@ timestamp: "2026-06-30T21:10:46Z"
 ---
 
 ## 2026-07-02
+
+### Cross-repo: state.json portfolio kind, block-ID naming convention, /update-state command
+
+- **What:** Resolved `mev emit-state` / `mev validate-brain --state` warnings surfaced against the live brain. Added a new `kind:"portfolio"` to mev's state.json schema (`discover_state_files`, `check_schema`, `plan_master_plan_tables`), with new tests, `docs/cli.md` updates, and decision `D8-portfolio-kind-terminal-repos.md` (already recorded earlier this session). Applied `kind:"portfolio"` to the three live portfolio-tier repos (rag-engine-rs, workflow-engine-rs, claude-sdk-rs), which are terminal (published to GitHub, no roadmap) and were being wrongly flagged as incomplete `kind:"project"` repos (`E_STATE_SCHEMA_MISSING_FIELD` on empty `tracks[]`). Separately, adopted the `<Prefix>.<Phase>.<Letter>` block-ID naming convention (already used by mev, e.g. `MV.3B.U`) across amistad (`AM`) and price-scout (`PS`) — renamed master-plan.md/status.md headings and cross-references; the brazilianportugui (`BP`) rename is deferred (blocked by a concurrent SDLC flow in that repo — tracked as a carryover in `planning/state.json`). Updated `/generate-master-plan` (plain + brain-flavored variants) and `/new-project` to use the bare-ID heading convention and auto-derive+register a unique prefix. Shipped a new `/update-state` command (plain + brain-flavored variants) documenting the safe procedure for editing any repo's `state.json` — the authored-vs-derived field boundary, the `kind` decision table, the block-ID rename checklist, and the edit → validate → `emit-state --write` → `validate-brain --state` loop — distributed to all repos and registered in `run_syncs.sh`.
+- **Why:** Investigating the two warning classes (`W_EMIT_NO_SENTINEL`, `E_STATE_SCHEMA_MISSING_FIELD`) revealed the schema had no way to represent a terminal, roadmap-less repo, and that block-ID conventions had drifted inconsistently across sub-repos, risking ambiguity in cross-repo tooling and this command's own `PREFIX.PHASE.BLOCK` lookups.
+- **Refs:** `planning/decisions/D8-portfolio-kind-terminal-repos.md`; `planning/state.json` carryover entries `brazilianportugui-block-id-rename-pending`, `agents-skills-generate-master-plan-mirror-drift`.
 
 ### MV.3B.U complete: brain rollup tier-scoping + brain-focus aggregation (6 tasks, PASS)
 

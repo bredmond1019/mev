@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-07-02T03:25:24Z"
+timestamp: "2026-07-02T08:23:55Z"
 now: "MV.3B.U shipped — tier-scoped, non-destructive brain rollup + brain-focus union derived; all 4 harness gates green. Next: MV.3.L (structural coverage) or MV.3B.R (graph emit / Phase 3B)."
 next: "MV.3.L (structural coverage: index.md ↔ dir, D17); MV.3B.R (graph emit / Phase 3B)"
 blocked: []
