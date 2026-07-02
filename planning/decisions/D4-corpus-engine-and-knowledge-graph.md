@@ -7,7 +7,7 @@ layer: [factory, brain, engine]
 project: mev
 status: active
 keywords: [knowledge graph, corpus engine, RAG, pgvector, scope:doc_id, retrieval, manifest]
-related: [block-j-namespacing-decision, master-plan, D3-corpus-config-system, context]
+related: [master-plan, D3-corpus-config-system, context]
 ---
 
 # D4 — mev as the corpus engine; the brain knowledge graph as an emitted product

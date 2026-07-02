@@ -35,6 +35,7 @@ src/
     ├── state.rs    ← StateFile, TrackBlock, Backlog, Origin, StateGraph, StateNode, StateEdge, StateSource, TierScope; discover_state_files(), load_state(), check_schema(), build_state_graph(), check_state_graph(), check_rollup(), detect_cycles(), ready_order(), check_focus_drift(), derive_focus(), derive_rollup(), derive_cross_repo(), tier_scope_for(), derive_brain_focus() — Phase 3 Block P / P2 / T / MV.3B.U (v2: depends_on DAG, cycle detection, derived-blocked enforcement, backlog nodes, focus-drift warnings, single-source derivation helpers; MV.3B.U: tier-scoped non-destructive rollup + brain-focus union)
     ├── emit.rs     ← EmitError, EmitAction, EmitPlan; wave_order(), render_wave_table(), splice_generated(), plan_state_json(), plan_master_plan_tables(), apply_plan() — Phase 3 Block T (derived-view generation: wave tables, focus regen, brain rollup)
     ├── links.rs    ← LinkKind, LinkRef; extract_links(), check_links(), collect_doc_ids(), read_moves_pending(), check_moved_references() — Phase 3 Block K
+    ├── structure.rs ← check_structure() — Phase 3 Block L (bidirectional index.md <-> directory structural coverage: orphan files, dangling rows)
     └── manifest.rs ← ManifestEntry, Manifest, build_manifest() — Phase 3 Block Q (canonical corpus manifest for RAG indexer)
 
 tests/
@@ -46,6 +47,7 @@ tests/
 ├── brain_manifest.rs  ← integration tests for manifest_brain() end-to-end — Phase 3 Block Q
 ├── brain_okf.rs       ← integration tests for validate_md_file()
 ├── brain_state.rs     ← integration tests for validate_brain_state() end-to-end — Phase 3 Block P
+├── brain_structure.rs ← integration tests for validate_brain_structure() end-to-end — Phase 3 Block L
 ├── brain_validate.rs  ← integration tests for BrainValidator end-to-end
 ├── smoke.rs           ← integration tests for the learn-ai validate() public API
 └── fixtures/
@@ -354,6 +356,35 @@ The links module extracts and validates all local references (markdown links, `f
 #### Public library entry point
 
 `validate_brain_links(root: &Path) -> anyhow::Result<Report>` (in `src/lib.rs`) runs the full OKF schema pass, then crawls the corpus once, collects `doc_id`s, runs `check_links`, reads `.brain-moves-pending`, runs `check_moved_references`, and appends all link diagnostics to the same `Report`. Invoked by `mev validate-brain --links`.
+
+---
+
+### Structural coverage (`src/brain/structure.rs`) — Phase 3 Block L
+
+The structure module enforces D17 / CLAUDE.md Standing Rule 7: every corpus file in a directory must appear in that directory's `index.md`, and every `index.md` row must point at a file that exists on disk. Both directions are per-directory, direct children only — subdirectories are covered by their own `index.md`, so this check does not recurse into them.
+
+Reuses `links::extract_links` for parsing `index.md` rows (index rows are ordinary markdown `[text](path)` links / `file://` URIs — no separate parser) and `crawl::Corpus` / `CorpusEntry` as the authoritative, already skip-pruned and ephemeral-filtered set of "files in scope".
+
+#### Public functions
+
+| Function | Signature | Description |
+|---|---|---|
+| `check_structure` | `(&Corpus, &Path) -> Vec<Diagnostic>` | Groups corpus entries by parent directory, matches each directory's `index.md` member, extracts and resolves its markdown/`file://` links, and emits `E_STRUCT_*` diagnostics for orphaned direct-child files and dangling `index.md` rows. `root` bounds the "in corpus" test for dangling-row detection — a resolved target outside `root` is ignored. |
+
+A private path-normalization helper lexically resolves `.` / `..` components (no `canonicalize`, since dangling targets may not exist on disk) so `./foo.md`, `foo.md`, and mixed-separator variants of the same target compare equal via `PathBuf` component comparison rather than raw string equality.
+
+#### Diagnostic locators emitted by `check_structure`
+
+| Locator | Severity | Condition |
+|---|---|---|
+| `E_STRUCT_ORPHAN_FILE` | Error | A corpus file is a direct child of a directory that has an `index.md`, but no markdown/`file://` link in that `index.md` resolves to it. Located at the orphan file. |
+| `E_STRUCT_DANGLING_ROW` | Error | A markdown/`file://` link in an `index.md`, resolved against the `index.md`'s directory, lands inside `root` but does not exist on disk. Located at the `index.md`. |
+
+Directories with no `index.md` corpus member are skipped entirely (no coverage obligation, so no orphan diagnostics). `[[wikilink]]` targets, external links, and out-of-corpus-root resolved targets are ignored (owned elsewhere / out of scope for this check).
+
+#### Public library entry point
+
+`validate_brain_structure(root: &Path) -> anyhow::Result<Report>` (in `src/lib.rs`) resolves `brain.toml` (same `E_CONFIG_NOT_FOUND` fallback as the other `validate_brain_*` drivers), runs the full OKF schema pass via `BrainValidator`, crawls the corpus once, calls `structure::check_structure`, and appends the resulting diagnostics to the same `Report`. Invoked by `mev validate-brain --structure`.
 
 ---
 
