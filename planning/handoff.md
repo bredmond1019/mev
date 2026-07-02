@@ -56,18 +56,25 @@ command/skill so future agents know how to safely edit `state.json` — that shi
 
 ## Remaining work
 
-1. **`brazilianportugui` (BP) block-ID rename — blocked, not started.** That repo has (or had) a live
-   `/sdlc-flow` running (worktrees `1.E-class-page-and-booking-flow-2`/`-3`); a first rename attempt
-   was silently clobbered by a concurrent commit mid-edit. Wait for that flow to settle (check
-   `git worktree list` there is clean and `git status` shows no surprise commits since you started),
-   then reapply the same pattern used for `amistad`/`price-scout` (rename `Block X` headings in
-   `master-plan.md`/`status.md` to `BP.<phase>.<letter>`, remap `state.json` `tracks[].blocks[].id` +
-   `depends_on[].id` + `focus.next[].id`), and **commit immediately** once done — don't leave it
-   sitting uncommitted. See the full carryover entry (`brazilianportugui-block-id-rename-pending`) in
-   this file's own `planning/state.json`.
-2. **`.agents/skills/generate-master-plan/` mirror drift** — pre-existing, unrelated to this
-   session's work, not fixed. See the `agents-skills-generate-master-plan-mirror-drift` carryover
-   entry for details; low priority, flagged for whenever someone's touching that sync path anyway.
+1. **`brazilianportugui` (BP) block-ID rename — still blocked, not started.** Re-checked
+   2026-07-02: that repo now has a *different* live worktree (`1.F-contact-testimonial-...`) plus an
+   actively running Claude Code process (PID observed, computer-use session) — still not safe to
+   touch. Wait for that flow to settle (`git worktree list` there is clean, `git status` shows no
+   surprise commits, and no live process), then reapply the same pattern used for `amistad`/
+   `price-scout` (rename `Block X` headings in `master-plan.md`/`status.md` to `BP.<phase>.<letter>`,
+   remap `state.json` `tracks[].blocks[].id` + `depends_on[].id` + `focus.next[].id`), and **commit
+   immediately** once done. See the `brazilianportugui-block-id-rename-pending` carryover entry in
+   this file's own `planning/state.json` (still open).
+2. ~~`.agents/skills/generate-master-plan/` mirror drift~~ — **fixed 2026-07-02.** Regenerated
+   `base-template/.agents/skills/generate-master-plan/SKILL.md` from the correct brain-flavored source
+   (`base-template/.claude/commands/brain/generate-master-plan.md`, prefixed with the SKILL.md
+   frontmatter) instead of the wrong plain per-repo command it had been copied from, and propagated the
+   identical content to the root `.agents/skills/`, `core/`, `portfolio/`, `side/`, and `client/`
+   mirrors (root's copy also predated the "no literal Block word" heading fix, so it needed the same
+   update). Verified all six copies are byte-identical. `mev emit-state --write` +
+   `mev validate-brain --state` re-run clean (0 errors, only pre-existing unrelated warnings). The
+   `agents-skills-generate-master-plan-mirror-drift` carryover entry has been removed from
+   `planning/state.json`.
 3. Original mev roadmap is unaffected by any of this — `MV.3.L` (structural coverage, `index.md` ↔
    dir, D17) and `MV.3B.R` (graph emit / Phase 3B) are still the next actual mev feature blocks,
    per `planning/status.md`. Nothing this session touched mev's own feature roadmap.

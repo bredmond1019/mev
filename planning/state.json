@@ -188,14 +188,6 @@
       "text": "client/brazilianportugui still uses bare 'Block A'-style master-plan.md/status.md headings instead of the BP.<phase>.<letter> convention already applied to amistad (AM) and price-scout (PS). A prior rename attempt was silently clobbered by that repo's own concurrent SDLC flow (worktrees for 1.E-class-page-and-booking-flow-2/-3 were live, and a competing commit landed mid-edit). Wait until that flow settles (no live worktrees, clean git status) before retrying the rename, and commit immediately once done to avoid the same race. See core/mev/planning/decisions/D8-portfolio-kind-terminal-repos.md for the sibling repos' completed rename pattern to replicate.",
       "clears_when": "brazilianportugui's master-plan.md/status.md/state.json block ids are renamed to BP.<phase>.<letter> and committed",
       "created": "2026-07-02"
-    },
-    {
-      "slug": "agents-skills-generate-master-plan-mirror-drift",
-      "scope": { "cross_repo": true },
-      "kind": "known_issue",
-      "text": "base-template/.agents/skills/generate-master-plan/SKILL.md (and its tier mirrors under core/side/client/portfolio/.agents/skills/generate-master-plan/) mirror the WRONG variant — plain per-repo content instead of the brain-flavored cross-repo program variant that base-template/.claude/commands/brain/generate-master-plan.md carries and that run_syncs.sh's sync-brain-skills step is supposed to distribute. Pre-existing drift, not caused by the 2026-07-02 naming-convention session; not yet fixed. Also affects the new /update-state command if a .agents/skills mirror is later added for it.",
-      "clears_when": "the .agents/skills/generate-master-plan mirrors are regenerated from the correct brain-flavored source and verified to match",
-      "created": "2026-07-02"
     }
   ]
 }
