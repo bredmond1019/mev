@@ -14,6 +14,7 @@ pub mod manifest;
 pub mod okf;
 pub mod scope;
 pub mod state;
+pub mod structure;
 pub mod sync;
 pub mod visualize;
 
