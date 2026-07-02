@@ -59,7 +59,7 @@ Enforce CLAUDE.md Standing Rule 7 / D17: every corpus file in a directory appear
 - `docs/architecture.md`: add the `structure.rs` module to the brain module map and its `check_structure` function/row to the function table; note `validate_brain_structure` as the lib driver.
 - **Owns:** `docs/cli.md`, `docs/architecture.md`.
 
-### 3.L.5 Validate
+### 3.L.5 Validate (done)
 - Run the Validation Commands listed below and confirm all pass.
 - Sanity: run `mev validate-brain --structure ..` against the live company brain and eyeball that findings are genuine (real orphan files / dangling rows), not false positives from scope/normalization bugs.
 
@@ -80,7 +80,17 @@ cargo build --release
 ```
 
 ## Notes
-<filled in as work happens>
+Task 5 (Validate): all four harness gates green (`cargo fmt --check`, `cargo clippy -- -D warnings`,
+`cargo test` — 5 new unit tests in `src/brain/structure.rs` + 5 integration tests in
+`tests/brain_structure.rs` all pass alongside the full existing suite, `cargo build --release`).
+Ran `mev validate-brain --structure` against the live company brain
+(`/Users/brandon/Dev/agentic-portfolio`): 84 `E_STRUCT_ORPHAN_FILE` findings, 0
+`E_STRUCT_DANGLING_ROW`. Spot-checked several (e.g. `core/mev/planning/index.md` vs.
+`context.md`/`status.md`/`knowledge.md`/`master-plan.md`) — genuine: those files are named in
+plain backtick text in the index tables, not as markdown links, so per this check's
+link-based coverage definition they are correctly flagged as orphans. No scope/normalization
+false positives observed. Fixing the brain's own index.md files is out of scope for this task
+(tracked separately, not part of MV.3.L's acceptance criteria).
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the spec. -->
