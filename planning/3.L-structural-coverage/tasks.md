@@ -12,7 +12,7 @@ related: [master-plan, status, D17-index-md-convention]
 
 # Task Spec — Phase 3, Block L (MV.3.L)
 
-**Status:** Not started · **Last run:** never
+**Status:** Done (PASS) · **Last run:** 2026-07-02
 
 ## Goal
 Enforce CLAUDE.md Standing Rule 7 / D17: every corpus file in a directory appears in that directory's `index.md` (orphan detection), and every `index.md` row points at a file that exists (dangling-row detection) — bidirectional, surfaced via `mev validate-brain --structure`.
