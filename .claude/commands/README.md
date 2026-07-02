@@ -1,7 +1,7 @@
 # Slash Commands
 
-Custom Claude Code commands for projects scaffolded from `base-template/`. Invoke with
-`/command-name` in the prompt.
+Custom Claude Code commands for projects scaffolded from `base-template/`. All commands are flat
+— invoke with `/<name>` directly (e.g. `/prime`, `/plan`, `/implement`, `/commit`).
 
 These drive **structured spec work**: a spec lives at `planning/<name>/tasks.md`, and
 the pipeline takes it through implement → test → review → document → wrap-up, writing
@@ -12,6 +12,66 @@ predictably-named reports alongside it.
 > each project's `planning/harness.json` — the engines carry no stack defaults. Copy a profile
 > from `planning/harness.examples.md` to configure your project's stack.
 > See `planning/decisions/D5-okf-phase-2-adopted.md` for the adoption record.
+
+---
+
+## Directory Layout
+
+All commands live directly in `.claude/commands/` — no subdirectories (except `brain/`).
+`sync-global-commands` installs all non-brain commands into `~/.claude/commands/`.
+
+```
+.claude/commands/
+  README.md                        ← this file
+  sync-global-commands.md          ← syncs all non-brain commands to ~/.claude/commands/
+  e2e-templates-README.md          ← usage guide for the e2e test templates
+
+  archive.md        capture.md       commit.md        handoff.md
+  log-work.md       prime.md         session-recap.md status.md
+  wrap-up.md        update-state.md
+
+  breakdown.md      chore.md         generate-master-plan.md  generate-tasks.md
+  plan.md           ticket.md
+
+  close-out.md      conditional_docs.md  document.md      fix.md
+  implement.md      patch.md             process-tasks.md review-PR.md
+  review-task.md    review-workflow.md   test.md          update-docs.md
+  update-task.md
+
+  clean-worktree.md  init-worktree.md  merge-train.md  start-block.md
+
+  test_auth_gate.md  test_crud_api.md  test_error_handling.md  test_ui_form.md
+
+  brain/                           ← reference only; NEVER synced to ~/.claude/commands/
+    (flat — same filenames as brain's own .claude/commands/)
+```
+
+### Command Summary
+
+| Group | Commands |
+|---|---|
+| Session | `/prime`, `/session-recap`, `/status`, `/handoff`, `/wrap-up`, `/log-work`, `/archive`, `/capture` |
+| State | `/update-state` — how to safely edit `planning/state.json` per `state-schema.md` |
+| Planning | `/generate-master-plan`, `/generate-tasks`, `/plan`, `/ticket`, `/chore`, `/breakdown` |
+| SDLC | `/implement`, `/test`, `/fix`, `/patch`, `/document`, `/update-docs`, `/conditional_docs`, `/process-tasks`, `/update-task`, `/review-task`, `/review-workflow`, `/review-PR`, `/close-out` |
+| Git | `/commit`, `/init-worktree`, `/clean-worktree`, `/start-block`, `/merge-train` |
+| E2E | `/test_auth_gate`, `/test_crud_api`, `/test_error_handling`, `/test_ui_form` |
+
+### `brain/` — Reference Only
+
+`brain/` contains a reference copy of all brain-level commands (flat — same filenames as the brain
+repo's own `.claude/commands/`). It is **never** synced to `~/.claude/commands/` (the
+`--exclude='brain/'` flag in `sync-global-commands` enforces this). Brain commands are managed by
+the brain repo's own `sync-brain-commands` command.
+
+### `sync-global-commands`
+
+Run `/sync-global-commands` from base-template root to install (or update) all harness commands
+into `~/.claude/commands/`. The command:
+- Guards that it is running from the base-template root.
+- Runs `rsync -av --delete --exclude='brain/' .claude/commands/ ~/.claude/commands/`.
+- Verifies with a dry-run that nothing remains to sync.
+- Reports file counts before and after and confirms `brain/` is absent from global.
 
 ---
 
@@ -33,7 +93,7 @@ predictably-named output file.
 | Session End | `/close-out [--skip-coverage] [note]` | Verify coverage → patch docs → hand off; the quality-close pipeline after sdlc-run/sdlc-flow | status.md, log.md, docs/, git |
 | Block Setup | `/start-block [name]` | Flip a spec to `In progress` in status.md | status.md |
 | **1 — Roadmap** | `/generate-master-plan [desc]` | Author the full roadmap as canonical block definitions | `planning/master-plan.md` |
-| **1 — Plan** | `/generate-tasks <name>` ·  `/generate-tasks --from <path>` | Write the full task spec from a master-plan block, **or** from a standalone block file (`--from`) | `planning/<name>/tasks.md` |
+| **1 — Plan** | `/generate-tasks <name>` · `/generate-tasks --from <path>` | Write the full task spec from a master-plan block, **or** from a standalone block file (`--from`) | `planning/<name>/tasks.md` |
 | **1 — Plan (ad-hoc)** | `/chore` · `/ticket` · `/plan <desc>` | Plan ad-hoc work from a free-text description (not a master-plan block) | `planning/<prefix>-<slug>/{tasks,plan}.md` |
 | **1 — Plan (opt.)** | `/breakdown <spec>` | Decompose spec into atomic, agent-executable sub-steps | `planning/<name>/breakdown.md` |
 | **2 — Implement** | `/implement <spec> [N]` | Execute every task (or task N) in the spec | `planning/<name>/sdlc/reports/[taskN-]implement.md` |
@@ -51,14 +111,14 @@ predictably-named output file.
 
 ```
 SESSION START
-  /status                          → read-only: current focus and what's next
-  /process-tasks                   → read-only: which specs are eligible
+  /status                  → read-only: current focus and what's next
+  /process-tasks           → read-only: which specs are eligible
 
 BLOCK SETUP
-  /start-block <spec>              → status.md
+  /start-block <spec>      → status.md
 
 PHASE 1 — PLAN
-  /generate-tasks <spec>           → planning/<spec>/tasks.md
+  /generate-tasks <spec>                 → planning/<spec>/tasks.md
         ↓  (optional)
   /breakdown planning/<spec>/tasks.md   → planning/<spec>/breakdown.md
 
@@ -86,10 +146,10 @@ PHASE 5 — DOCUMENT                 ← gates on PASS verdict
         → planning/<spec>/sdlc/reports/[taskN-]document.md
 
 PHASE 6 — WRAP-UP
-  /log-work [notes]                → status.md, log.md
+  /log-work [notes]        → status.md, log.md
 
 (OPTIONAL) PHASE 7 — VERIFY RUN
-  /review-workflow <spec> [N]      → planning/<spec>/sdlc/reports/[taskN-]workflow-review.md
+  /review-workflow <spec> [N] → planning/<spec>/sdlc/reports/[taskN-]workflow-review.md
 ```
 
 ### Argument Convention
@@ -226,6 +286,15 @@ Start-of-session briefing: reads the three most recent Log entries, status.md, t
 spec's `tasks.md`, and the `reports/` directory listing; outputs a concise briefing (under 300
 words) and the exact next command. Read-only.
 
+### `/update-state`
+The canonical workflow for hand-editing any repo's `planning/state.json`: the authored-vs-derived
+field boundary, which `kind` (`project` / `brain` / `portfolio`) applies and what it requires, the
+`<Prefix>.<Phase>.<Letter>` block-ID convention and what has to move in lockstep when an id is
+renamed, and the edit → validate → `mev emit-state --write` → `mev validate-brain --state`
+procedure. Points to `core/planning/state-schema.md` as the single source of truth for field
+shapes rather than duplicating them. Use before any non-trivial `state.json` edit, or when another
+command's instructions say "update state.json" without repeating the mechanics.
+
 ### `/conditional_docs [task-type]`
 Routes the agent to the documentation most relevant to the current task type (feature, bug/fix,
 api/endpoint, test/testing, docs/documentation). Reduces CLAUDE.md overload by surfacing only
@@ -273,6 +342,20 @@ Reads a task spec and the source files each step touches, then writes a granular
 and `/fix` auto-detect this file and use the matching `### Step N:` section as the primary
 execution guide (HOW); `tasks.md` stays authoritative for scope (WHAT).
 
+### Pre-planning capture — `/capture`
+
+Before something is ready to plan, use `/capture` to park rich conversation notes without
+losing them. Creates `planning/<slug>/notes.md` with a structured scaffold and adds a
+pointer ticket to the brain's `planning/backlog.md`.
+
+| Command | Use for | Writes to |
+|---|---|---|
+| `/capture <title>` | Rich pre-plan notes — detailed enough to need a file, not yet a plan | `planning/<slug>/notes.md` + brain backlog |
+
+The notes file sections (What & Why · Context & Background · Key Information · Open Questions ·
+Rough Scope) are designed as direct input to the planning commands below — paste conversation
+content in, then promote with `/plan`, `/chore`, or `/generate-master-plan` when ready.
+
 ### Ad-hoc planners — `/chore`, `/ticket`, `/plan`
 
 Entry points into Phase 1 for work that **isn't** a master-plan block. Each takes a free-text
@@ -306,7 +389,7 @@ targeted changes addressing only the failures. Overwrites the `implement.md` slo
 if the review report is absent; soft-stops if the verdict is already PASS.
 
 ### `/update-task`
-Optionally marks a step done (prepends ✅) and/or appends a dated note to the spec's `## Notes`
+Optionally marks a step done (prepends `[done]`) and/or appends a dated note to the spec's `## Notes`
 section. Auto-detects the current spec from status.md if not given. Does not touch status.md.
 
 ### `/commit`

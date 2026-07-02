@@ -7,8 +7,9 @@ $ARGUMENTS — description of the bug fix, enhancement, or small behavior-change
 ## Purpose
 
 Plan one small, well-scoped behavior-change — a bug fix or targeted enhancement that requires
-new or modified tests. The output is a single-block `tasks.md` with `### N.` tasks, explicit
-Acceptance Criteria, and a Testing Strategy, feeding directly into lean `/sdlc-task`.
+new or modified tests. The output is a single-block `tasks.md` (prose) + `tasks.json` (the task
+list), explicit Acceptance Criteria, and a Testing Strategy, feeding directly into lean
+`/sdlc-task`.
 
 > **Distinct from `/chore`:** chores are maintenance (no behavior change, tests incidental).
 > Tickets are behavior-changing (tests required, AC is non-negotiable).
@@ -27,14 +28,16 @@ Acceptance Criteria, and a Testing Strategy, feeding directly into lean `/sdlc-t
 4. THINK HARD about scope before writing:
    - A ticket is a **single coherent unit** — one logical change, one set of tests.
    - If the fix touches more than 3–4 files or needs its own sub-phases, it belongs in `/plan`.
-   - Every `### N.` task must name ≥1 concrete file it creates or modifies (the Validate task
-     is exempt).
+   - Every task in `tasks.json` must name ≥1 concrete file in its `files[]` (the Validate task is
+     exempt).
 5. Choose a short descriptive slug (e.g. `fix-null-deref`, `add-rate-limit`, `patch-auth-refresh`).
-6. Create `planning/ticket-{slug}/` if it does not exist, then write the spec to
-   `planning/ticket-{slug}/tasks.md` using the Plan Format below.
+6. Create `planning/ticket-{slug}/` if it does not exist, then write **both**
+   `planning/ticket-{slug}/tasks.md` (prose) and `planning/ticket-{slug}/tasks.json` (task list)
+   using the Plan Format below.
 7. **Property self-check.** Before reporting, re-read the spec and **revise in place** until every
    property holds, then re-check:
-   - **Every `### N.` task names ≥1 concrete file** it creates or modifies (Validate is exempt).
+   - **`tasks.json` parses as valid JSON** and is a non-empty bare array (not wrapped in an object).
+   - **Every task names ≥1 concrete file** in its `files[]` (Validate is exempt).
    - **Acceptance Criteria are non-empty and observable** — each can be judged true/false.
    - **Testing Strategy is non-empty** — names the test file(s) and what each must cover.
    - **Validation Commands are present** (or `planning/harness.json` → `validation.checks[]`
@@ -79,18 +82,7 @@ last-run: never
 <new files to create, if any — test files go here when they don't exist yet>
 
 ## Step by Step Tasks
-IMPORTANT: Execute every step in order, top to bottom.
-
-### 1. <First Task Name>
-- Files: <file(s) this task touches>
-- <specific action>
-
-### 2. <Second Task Name>
-- Files: <file(s) this task touches>
-- <specific action>
-
-### N. Validate
-- Run the Validation Commands listed below and confirm all pass.
+See `tasks.json` in this directory — the task list is defined there, not here.
 
 ## Testing Strategy
 <which test file(s) cover this change; what behavior each test must assert; any edge cases>
@@ -109,11 +101,31 @@ IMPORTANT: Execute every step in order, top to bottom.
 _No amendments yet._
 ```
 
+`planning/ticket-{slug}/tasks.json` — a **bare array**, matching orchestrator's `SDLCTask` schema
+(`core/orchestrator/app/schemas/sdlc_schema.py`) plus two additive fields base-template's own
+tooling uses:
+```json
+[
+  { "task_id": 1, "title": "<First Task Name>", "description": "<specific action>", "acceptance_criteria": [], "validation_commands": [], "max_attempts": 3, "files": ["<file this task touches>"], "dependsOn": [] },
+  { "task_id": 2, "title": "<Second Task Name>", "description": "<specific action>", "acceptance_criteria": [], "validation_commands": [], "max_attempts": 3, "files": ["<file this task touches>"], "dependsOn": [1] },
+  { "task_id": "N", "title": "Validate", "description": "Run the Validation Commands listed below and confirm all pass.", "acceptance_criteria": [], "validation_commands": [], "max_attempts": 3, "files": [], "dependsOn": [1, 2] }
+]
+```
+
+### State refresh (do not hand-author `state.json`'s `tasks` field)
+
+If this repo has a `planning/state.json`, run `mev emit-state --write` after committing — it derives
+`tracks[].blocks[].tasks` (a `{ file, generated, counts }` pointer + status summary, **not** a copy
+of the task list — see `core/planning/state-schema.md`) from the `tasks.json` you just wrote. Do not
+hand-edit a `tasks` array into `state.json` yourself; that field is derived, same as `focus`. (This
+derivation isn't implemented in `mev` yet — running the command is a no-op until it ships; it's
+listed here so the step is already in place when it does.)
+
 ## Report
 
 Output the path and next step:
 ```
-planning/ticket-{slug}/tasks.md
+planning/ticket-{slug}/tasks.md + tasks.json
 
 Next (implement + test loop):
   /sdlc-task ticket-{slug}

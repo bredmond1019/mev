@@ -12,9 +12,15 @@ $ARGUMENTS — optional free-text note about what was done (passed straight thro
 
 ## Instructions
 
-1. Run `/log-work $ARGUMENTS` — this syncs status.md, appends the log entry, and syncs
+1. **Drain any durable caveat first.** If this session surfaced something the next agent must not
+   lose — a constraint, a known-issue/don't-re-investigate fact, an environmental gotcha, or a
+   not-yet-ticketed deferred follow-on — append it to `planning/state.json` `carryover[]` (field shape
+   in `planning/state-schema.md`). `/wrap-up` writes no handoff file, so `carryover[]` is the only
+   place this kind of note survives. Skip if the session produced none or the repo has no `state.json`.
+
+2. Run `/log-work $ARGUMENTS` — this syncs status.md, appends the log entry, and syncs
    the company brain. Wait for it to complete before continuing.
 
-2. Run `/commit` — stages and commits all remaining changes with a conventional message.
+3. Run `/commit` — stages and commits all remaining changes with a conventional message.
 
-That's it. No handoff file, no context summary — just log + commit.
+That's it. No handoff file, no context summary — just (drain →) log + commit.

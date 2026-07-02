@@ -29,7 +29,7 @@ start of a coding session before doing anything else.
 
 3. If a task spec exists for the current focus block at
    `planning/<name>/tasks.md`, read it. Identify:
-   - Which steps are marked done (have ✅)
+   - Which steps are marked done (have `[done]` prefix)
    - Which steps remain
    - Any notes in the `## Notes` section
 
@@ -37,7 +37,11 @@ start of a coding session before doing anything else.
    block (e.g. `implement.md`, `task3-test.md`). Note which pipeline steps have been completed
    (have a report file) and which haven't.
 
-5. Output the briefing in this exact format — keep it under 300 words:
+5. Read `planning/state.json` if present. Extract any active `carryover[]` entries (those whose
+   `clears_when` is unresolved) — durable constraints, known-issues, env caveats, and deferred
+   follow-ons. Skip silently if the file or array is absent.
+
+6. Output the briefing in this exact format — keep it under 300 words:
 
 ---
 
@@ -47,12 +51,16 @@ Use the author's own language where possible.>
 
 ## Where We Left Off
 <One paragraph. State: current block, last completed pipeline step (based on report files
-present), last completed spec task (based on ✅ markers), and anything explicitly noted
+present), last completed spec task (based on `[done]` markers), and anything explicitly noted
 as "in flight" or "next" in the Log.>
 
 ## Remaining Spec Tasks
-<Numbered list of un-checked (no ✅) steps from the current task spec.
+<Numbered list of un-checked (no `[done]` prefix) steps from the current task spec.
 If the spec is missing, say so. If all steps are done, say "All steps marked complete.">
+
+## Carryover
+<One line per active `carryover[]` entry: `slug` (`kind`) — gist. Omit this section entirely if
+there are none. Flag any `kind: env` caveat that gates the next step (e.g. "rebuild binary first").>
 
 ## Next Pipeline Step
 <Single line: the exact command to run next, with the full argument.>
@@ -68,5 +76,6 @@ Do not read any source code files. Do not run any commands. This is read-only.
 - `planning/handoff.md` (if present — check with ls first)
 - `log.md` (last 3 entries)
 - `planning/status.md`
+- `planning/state.json` (the `carryover[]` array, if present)
 - `planning/<name>/tasks.md` (current block's spec, if it exists)
 - `planning/<name>/sdlc/reports/` (directory listing to check which step reports exist)

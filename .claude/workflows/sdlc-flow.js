@@ -25,7 +25,7 @@
 //     → end-review → docs (gated on PASS) → wrap-up(PR)
 //
 //   Per-task loop (sequential, in the one worktree):
-//     /update-task (in-progress) → implement → fast-test → (triage → fix/​bail) ×≤3
+//     implement → fast-test → (triage → fix/​bail) ×≤3
 //     One state-commit per task. A triage MAJOR / immediate-bail reason breaks
 //     straight to wrap-up (draft PR) — it does NOT burn three attempts.
 //
@@ -42,7 +42,7 @@
 //   chore: wrap up <spec>               wrap-up agent (status/log/amendment-log)
 //
 // MODEL TIERING (the token lever — see the MODEL map below)
-//   haiku : worktree-setup, enumerate, scout/state-load, test, update-task, state-writer
+//   haiku : worktree-setup, enumerate, scout/state-load, test, state-writer
 //   sonnet: implement, fix, review, triage, docs, wrap-up
 //   opus  : ESCALATION on the FINAL per-task fix pass and the FINAL review attempt
 //
@@ -57,8 +57,8 @@ export const meta = {
   whenToUse: 'The default for non-trivial feature work — many moving parts in one spec. Sequential, no inter-task merges, one consolidated review, terminates in a PR. Usage: /sdlc-flow <spec-slug> [range] [--auto-merge] [--no-pr] [--resume]',
   phases: [
     { title: 'Worktree', detail: 'Create (or re-attach) the one shared worktree for the whole spec' },
-    { title: 'Plan',     detail: 'Enumerate tasks from tasks.md (### N. lint) + load resume state' },
-    { title: 'Tasks',    detail: 'Per task: update-task → implement → fast-test → (triage → fix/bail)' },
+    { title: 'Plan',     detail: 'Enumerate tasks from tasks.json (D16 lint) + load resume state' },
+    { title: 'Tasks',    detail: 'Per task: implement → fast-test → (triage → fix/bail)' },
     { title: 'Review',   detail: 'ONE consolidated review of the integrated tree; full gating suite' },
     { title: 'Docs',     detail: 'Surgical /update-docs --patch (gates on PASS verdict)' },
     { title: 'Wrap-up',  detail: 'status/log + amendment log on the branch, then open a PR (or draft PR on bail)' },
@@ -120,6 +120,7 @@ if (rangeSpec) {
 
 const blockDir      = `planning/${blockId}`
 const specFile      = `${blockDir}/tasks.md`
+const tasksJsonFile = `${blockDir}/tasks.json`
 const breakdownFile = `${blockDir}/breakdown.md`
 const reportsDir    = `${blockDir}/sdlc/reports`
 const stateFile     = `${blockDir}/sdlc/sdlc-flow-state.json`   // COMMITTED authoritative run index (D31)
@@ -150,15 +151,16 @@ const SETUP_SCHEMA = {
   }
 }
 
-// D16 preflight lint — the spec MUST carry `### N.` task headings or Analyze/loop would have to
-// guess the task count non-deterministically.
+// D16 preflight lint — the spec MUST carry a non-empty tasks.json array (a bare array of
+// SDLCTask-shaped objects, matching orchestrator's app/schemas/sdlc_schema.py — see D45) or the
+// per-task loop would have to guess the task count non-deterministically.
 const ENUMERATE_SCHEMA = {
   type: 'object',
-  required: ['hasTaskHeadings', 'allTasks'],
+  required: ['hasTasks', 'allTasks'],
   properties: {
-    hasTaskHeadings: { type: 'boolean', description: 'true if tasks.md has at least one "### N." numbered task heading' },
-    allTasks:        { type: 'array', items: { type: 'integer' }, description: 'Every task number found as a "### N." heading, in order' },
-    notes:           { type: 'string' }
+    hasTasks: { type: 'boolean', description: 'true if tasks.json parses as a non-empty array' },
+    allTasks: { type: 'array', items: { type: 'integer' }, description: 'Every task_id in tasks.json, in array order' },
+    notes:    { type: 'string' }
   }
 }
 
@@ -298,9 +300,8 @@ const STATE_WRITE_SCHEMA = {
 // ----------------------------------------------------------------
 const MODEL = {
   worktreeSetup: 'haiku',    // scripted git following an exact free-name + sparse-checkout recipe
-  enumerate:     'haiku',    // grep the spec for "### N." headings — a fixed procedure
+  enumerate:     'haiku',    // read + parse tasks.json's task list — a fixed procedure
   stateLoad:     'haiku',    // read + parse one JSON file (resume only)
-  updateTask:    'haiku',    // one surgical checkbox edit in tasks.md
   generateTasks: 'opus',     // PLANNING — authors the spec (fallback path only)
   implement:     'sonnet',   // writes code/content + tests against a scoped task
   fix:           'sonnet',   // targeted fixes; failures escalate, never silently ship
@@ -761,22 +762,23 @@ if (!setupResult.specFileExists) {
 }
 
 const enumResult = await tracedAgent(`${W}
-You enumerate the numbered tasks in a spec. Do NOT modify anything.
+You enumerate the tasks defined in a spec's tasks.json. Do NOT modify anything.
 
-STEP 1 — read the spec headings:
-  cd ${worktreePath} && grep -nE '^### [0-9]+\\.' ${specFile} || echo "NO_TASK_HEADINGS"
+STEP 1 — read the task list:
+  cd ${worktreePath} && cat ${tasksJsonFile} 2>/dev/null || echo "NO_TASKS_JSON"
 
-STEP 2 — Each "### N." line is one task. Collect every N in document order into allTasks.
-  Set hasTaskHeadings=true iff at least one "### N." heading exists.
+STEP 2 — Parse it as JSON. It is a BARE ARRAY (not wrapped in an object — matches orchestrator's
+  SDLCTask schema). Collect every task's "task_id" (in array order) into allTasks.
+  Set hasTasks=true iff it parsed as an array with at least one entry.
 
-Return via StructuredOutput: hasTaskHeadings, allTasks (integers in order), notes.
+Return via StructuredOutput: hasTasks, allTasks (integers in order), notes.
 `, withModel({ label: 'enumerate', schema: ENUMERATE_SCHEMA, phase: 'Plan' }, MODEL.enumerate))
 
-if (!enumResult || !enumResult.hasTaskHeadings || !(enumResult.allTasks || []).length) {
+if (!enumResult || !enumResult.hasTasks || !(enumResult.allTasks || []).length) {
   // D16 preflight lint — refuse to guess the task structure.
-  log(`ABORTED (D16) — ${specFile} has no "### N." numbered task headings.`)
-  log(`Fix: structure the spec with "### 1.", "### 2.", … task headings (see the spec template), commit, then re-run.`)
-  return { error: 'No task headings (D16)', blockId, specFile }
+  log(`ABORTED (D16) — ${tasksJsonFile} is missing, invalid, or is an empty array.`)
+  log(`Fix: run /generate-tasks ${blockId} to author tasks.json (see the spec template), commit, then re-run.`)
+  return { error: 'No tasks.json (D16)', blockId, specFile: tasksJsonFile }
 }
 
 const allTasks = enumResult.allTasks
@@ -896,16 +898,9 @@ for (const taskNum of taskList) {
   state.tasks[String(taskNum)] = state.tasks[String(taskNum)] || { status: 'running', attempts: 0, summary: '', issues: [], fixes: [], decisions: [], files_changed: [], commit: '', validated: '' }
   const t = state.tasks[String(taskNum)]
 
-  // 1. update-task → mark in-progress in tasks.md (on the branch).
-  await tracedAgent(`${W}
-You mark a task in-progress in the spec. Edit ONLY the one task's checkbox/status — surgical, no rewrite.
-  cd ${worktreePath} && cat ${specFile}
-Find the "### ${taskNum}." task heading. If the spec uses a checkbox/status marker for tasks, mark THIS
-task in-progress (e.g. "[~]" or a "(in progress)" note on the heading line). If the spec has no such
-marker, do nothing and report notes="no task-status marker in spec". Do NOT commit — the state-writer
-commits this later. Use the Edit tool.
-Return via StructuredOutput: reportFile="", success=true, notes.
-`, withModel({ label: `update-task-${taskNum}`, schema: STAGE_SCHEMA, phase: 'Tasks' }, MODEL.updateTask))
+  // "in-progress" is already tracked in state.tasks[N].status (set below, committed by the
+  // state-writer) — tasks.json is a task-definition file, not a live-status file, so there is no
+  // separate checkbox/marker to edit here.
 
   let taskPassed = false
   let prevFailBlob = null
@@ -924,24 +919,27 @@ shared worktree (sequential — earlier tasks in this spec are already committed
 on Task ${taskNum} of this spec.
 
 Target:
-  Spec:       ${blockId}
-  Task:       Task ${taskNum} only
-  Spec file:  ${specFile}
+  Spec:        ${blockId}
+  Task:        Task ${taskNum} only
+  Spec file:   ${specFile} (prose — Goal, Acceptance Criteria, Validation Commands)
+  Tasks file:  ${tasksJsonFile} (the task list — find the entry with "task_id": ${taskNum})
 
 1. Read CLAUDE.md and planning/context.md — internalize the project's standing rules (CLAUDE.md is the
    authority; assume no stack/locale/narrative/content rule unless written there). Universal harness
    rules always apply: no fabricated metrics or quotes, no emoji, every change ships with tests.
    Run: cd ${worktreePath} && cat CLAUDE.md
 
-2. Read the spec, focusing on the "### ${taskNum}." section:
-   Run: cd ${worktreePath} && cat ${specFile}
+2. Read the spec and the task list:
+   Run: cd ${worktreePath} && cat ${specFile} ${tasksJsonFile}
+   tasks.json is a bare array — find the object whose "task_id" is ${taskNum}. Its "title",
+   "description", and "files" define exactly what this task is.
    ${isFix ? `Do NOT re-implement from scratch. Make the MINIMUM targeted changes to address THIS failure:
-   ${prevFailBlob ? 'Failing checks/output from the last test run:\n' + prevFailBlob.split('\n').map(l => '     ' + l).join('\n') : ''}` : 'Implement ONLY "### ' + taskNum + '." — do NOT implement other tasks.'}
+   ${prevFailBlob ? 'Failing checks/output from the last test run:\n' + prevFailBlob.split('\n').map(l => '     ' + l).join('\n') : ''}` : `Implement ONLY task id ${taskNum} — do NOT implement other tasks.`}
 
 2.5. Optional breakdown (more granular sub-steps from /breakdown):
    Run: cd ${worktreePath} && ls ${breakdownFile} 2>/dev/null && echo "BREAKDOWN_EXISTS" || echo "NO_BREAKDOWN"
    If BREAKDOWN_EXISTS: read ${breakdownFile}, find "### Step ${taskNum}:", and use its atomic sub-steps as
-   the execution guide (run each inline "Verify:" checkpoint). tasks.md stays authoritative for scope.
+   the execution guide (run each inline "Verify:" checkpoint). tasks.json stays authoritative for scope.
 
 3. Execute methodically with Read/Edit/Write/Bash (all paths resolve from the worktree root).
 

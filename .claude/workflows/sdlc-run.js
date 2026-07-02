@@ -111,6 +111,7 @@ const parts = cleanArgs.split(/\s+/)
 const blockId = parts[0]
 const taskNumber = parts.length > 1 && !isNaN(parseInt(parts[1], 10)) ? parseInt(parts[1], 10) : null
 const specFile = `planning/${blockId}/tasks.md`
+const tasksJsonFile = `planning/${blockId}/tasks.json`
 const stem = taskNumber !== null ? `${blockId}-task${taskNumber}` : blockId
 const reportsDir = `planning/${blockId}/sdlc/reports`
 const taskPrefix = taskNumber !== null ? `task${taskNumber}-` : ''
@@ -818,7 +819,7 @@ if (currentStage === 'generate-tasks') {
   const genResult = await tracedAgent(`
 You need to generate the task spec for spec "${blockId}".
 
-Spec file to create: ${specFile}
+Files to create: ${specFile} (prose) AND ${tasksJsonFile} (task list).
 
 Instructions:
 
@@ -830,8 +831,11 @@ Instructions:
    no emoji, every change ships with tests.
 
 3. Read the generic spec skeleton as a format reference: .claude/workflows/templates/spec-template.md
-   Study its structure: Goal, Context Pointers, Step-by-Step Tasks (numbered ### sections with
-   sub-steps), Acceptance Criteria, Validation Commands, Notes section.
+   Study its structure: Goal, Context Pointers, a pointer to tasks.json, Acceptance Criteria,
+   Validation Commands, Notes section — and the tasks.json schema shown in the same template (a
+   bare array of SDLCTask-shaped objects: task_id, title, description, acceptance_criteria,
+   validation_commands, max_attempts, files, dependsOn — matches orchestrator's
+   app/schemas/sdlc_schema.py).
 
    Also create the spec directory structure now if it does not yet exist:
    mkdir -p planning/${blockId}/sdlc/reports
@@ -844,14 +848,7 @@ Instructions:
    [links to master plan sections, relevant content/code files, relevant DECISIONS entries]
 
    ## Step-by-Step Tasks
-   ### 1. [Task Name]
-   [sub-steps with exact file paths and component/function names]
-
-   ### 2. [Task Name]
-   ...
-
-   ### N. Validate
-   [validation steps — always the final task]
+   See tasks.json in this directory — the task list is defined there, not here.
 
    ## Acceptance Criteria
    [bullet list of what "done" looks like, testable and specific]
@@ -864,17 +861,24 @@ Instructions:
    ## Notes
    [empty section for in-progress updates]
 
+5. Write ${tasksJsonFile} as valid JSON — a BARE ARRAY, not wrapped in an object:
+   [
+     { "task_id": 1, "title": "[Task Name]", "description": "[sub-steps with exact file paths and component/function names]", "acceptance_criteria": [], "validation_commands": [], "max_attempts": 3, "files": ["[path/to/file]"], "dependsOn": [] },
+     ...
+     { "task_id": N, "title": "Validate", "description": "Run the Validation Commands listed below and confirm all pass.", "acceptance_criteria": [], "validation_commands": [], "max_attempts": 3, "files": [], "dependsOn": [1, 2, "…every prior task_id"] }
+   ]
+
    Rules:
    - Follow every CLAUDE.md standing rule; record any deferral in the Notes section
    - The Validation Commands section must mirror planning/harness.json (or the project's documented suite)
-   - The final task must always be "Validate"
+   - The final task's title must always be "Validate" and its dependsOn must list every other task_id
    - Tasks should be sized for the 21 hrs/week schedule
-   - Include exact file paths and component/function names
+   - Every task's "files" must name exact file paths; every task but Validate needs ≥1 entry
 
 Return your result using the StructuredOutput tool with fields:
   reportFile: path to the spec file written (${specFile})
-  success: true if written successfully
-  filesModified: ["${specFile}"]
+  success: true if both files were written successfully
+  filesModified: ["${specFile}", "${tasksJsonFile}"]
   notes: brief note about what was generated
 `, withModel({ label: 'generate-tasks', schema: STAGE_SCHEMA, phase: 'Plan' }, MODEL.generateTasks))
 
@@ -921,7 +925,8 @@ You are the implementation agent for the SDLC pipeline.
 Target:
   Spec:          ${blockId}
   Task:          ${taskNumber !== null ? `Task ${taskNumber} only` : 'all tasks'}
-  Spec file:     ${specFile}
+  Spec file:     ${specFile} (prose — Goal, Acceptance Criteria, Validation Commands)
+  Tasks file:    ${tasksJsonFile} (the task list)
   Report to write: ${implementReport}
 
 Instructions:
@@ -931,10 +936,10 @@ Instructions:
    locale-parity, narrative, or content-layout rule unless written there. Universal harness rules
    always apply: no fabricated metrics or quotes, no emoji, every change ships with tests.
 
-2. Read the spec file: ${specFile}
+2. Read the spec file and the task list: ${specFile} ${tasksJsonFile}
    ${taskNumber !== null
-     ? `Focus ONLY on the "### ${taskNumber}." section. Do not implement other tasks.`
-     : 'Read all tasks and execute them in order from first to last.'}
+     ? `tasks.json is a bare array — find the object whose "task_id" is ${taskNumber}. Its "title", "description", and "files" define exactly what this task is. Implement ONLY that task. Do not implement other tasks.`
+     : `tasks.json is a bare array — read every entry and execute them in array order from first to last.`}
 
 2.5. Check for an optional breakdown file (more granular sub-steps written by /breakdown):
    Run: ls ${breakdownFile} 2>/dev/null && echo "BREAKDOWN_EXISTS" || echo "NO_BREAKDOWN"
@@ -948,7 +953,7 @@ Instructions:
        : `Read all "### Step N:" sections in order and use their atomic sub-steps as your execution guide.
      The inline "Verify:" commands are live checkpoints — run each one before moving to the next step.`}
      The breakdown's "## Acceptance Criteria" and "## Validation Commands" match the spec.
-     tasks.md is still authoritative for scope and acceptance criteria; breakdown.md is authoritative
+     tasks.json is still authoritative for scope and tasks.md for acceptance criteria; breakdown.md is authoritative
      for HOW to execute each step.
 
    If NO_BREAKDOWN: proceed using tasks.md only (normal behavior).

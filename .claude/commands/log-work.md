@@ -51,16 +51,11 @@ accuracy over speed — use a capable model, not the cheapest.
 
 ### Step 2 — Local `planning/status.md` (state + momentum)
 
-6. Open this repo's `status_file` (`type: ProjectStatus`). Update, **surgically** (don't rewrite unchanged
-   sections):
+6. Shell out to `mev emit-state --write` to automatically regenerate the **Current focus** line, the `now` / `next` / `blocked` scalars, and the tier rollup tables. Do NOT manually reimplement focus derivation.
+   Then open this repo's `status_file` (`type: ProjectStatus`) and update **surgically**:
    - the `timestamp` frontmatter field → current ISO-8601 time;
-   - the **Current focus** line and any block statuses that changed (flip newly-done blocks to `Done`);
-   - the `## Momentum` body queues — at minimum keep `now` / `next` accurate, move finished `next` items
-     up, surface any new blocker in `blocked`;
-   - the **`now` / `next` / `blocked` frontmatter scalars** so they mirror the `## Momentum` headlines
-     (D30 — one edit, both places);
    - bump the `## Metrics` counters if present (cheap; skip if the file has none).
-   - If you are **not certain** which block(s) to mark `Done` or what the new focus is, state your
+   - If you are **not certain** what the new focus is, state your
      proposed change and ask before writing.
 7. **Settled decision?** If a settled architectural choice was made, ask whether to record it in
    `planning/decisions/` (never auto-author). On yes: next number from `planning/decisions/index.md`,
