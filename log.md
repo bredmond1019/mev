@@ -8,12 +8,29 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-02T08:23:55Z"
+timestamp: "2026-07-02T09:15:45Z"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## [run: 2026-07-02]
+
+MV.3.L (structural coverage: `index.md` ↔ directory, D17) complete across 5 tasks, final verdict PASS. Task 1 added `src/brain/structure.rs::check_structure(corpus, root)` — for each directory containing an `index.md` corpus member, gathers its direct-child corpus entries and the `index.md`'s extracted `Markdown`/`FileUri` link targets (via `links::extract_links` plus a local normalization helper mirroring `links.rs::normalize_path`), emitting `E_STRUCT_ORPHAN_FILE` for any uncovered direct child and `E_STRUCT_DANGLING_ROW` for any link resolving inside the corpus root to a nonexistent file; directories with no `index.md` are skipped entirely; 7 unit tests. Task 2 added the `validate_brain_structure(root)` library driver (schema pass → crawl → `check_structure`, mirroring `validate_brain_graph`) and wired a `--structure` CLI flag into `ValidateBrain`, dispatched ahead of `--state`/`--graph`/`--sync` but after `--links`. Task 3 added `tests/brain_structure.rs` — clean tree, orphan file, dangling row, both together, and the `--json` envelope carrying both codes, plus a CLI subprocess end-to-end exit-code check. Task 4 documented the `--structure` flag (dispatch precedence, both `E_STRUCT_*` codes, examples) in `docs/cli.md` and added a full "Structural coverage" section (module map, function/diagnostic tables) to `docs/architecture.md`. Task 5 confirmed all four harness gates green (fmt, clippy `-D warnings`, `cargo test`, release build) and sanity-ran `mev validate-brain --structure` against the live company brain: 84 genuine `E_STRUCT_ORPHAN_FILE` findings (files named in plain backtick text in index tables rather than as markdown links — correctly flagged per this check's link-based coverage definition), 0 `E_STRUCT_DANGLING_ROW`, no false positives. Notable decision: fixing the brain's own 84 orphan findings is out of scope for this validator-behavior block, deferred as a separate brain-content cleanup. Next: `MV.3B.R` (graph emit + structural query surface / Phase 3B).
+
+```
+48c3eb3 chore: flow state — docs
+8dd2571 chore: flow state — task 5 passed
+34c611e feat: implement 3.L-structural-coverage-task5
+39b2be6 chore: flow state — task 4 passed
+34e3a3f feat: implement 3.L-structural-coverage-task4
+009333b chore: flow state — task 3 passed
+c76daa2 feat: implement 3.L-structural-coverage-task3
+f362c31 chore: flow state — task 2 passed
+```
 
 ---
 
