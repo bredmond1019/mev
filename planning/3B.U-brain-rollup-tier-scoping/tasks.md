@@ -127,7 +127,7 @@ Same pure-compiler model as `MV.3B.T` (files in → files out; no DB, no network
 - Update `planning/index.md` (Active Concept Folders row) and this block's `docs/*/index.md` rows as needed.
 - **Acceptance:** schema, cli.md, architecture.md, and a decision file all reflect the new behaviour; indexes updated.
 
-### 6. Validate + clear carryover
+### 6. [~] Validate + clear carryover
 - Run the four harness gates: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `cargo build --release`.
 - **Dry-run** (no `--write`) `mev emit-state ..` against the live company brain from the mev dir; confirm the plan
   **preserves every existing `repos[]` entry** and populates `tier` with **zero drops** before anyone runs `--write`.
