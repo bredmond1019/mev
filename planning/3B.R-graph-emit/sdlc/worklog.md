@@ -9,3 +9,8 @@ Validated: gating checks (fast tripwire)
 What: Added graph_brain() library driver and mev emit-graph CLI subcommand (with --pretty) that crawls the corpus, builds the graph, and prints the GraphExport JSON envelope to stdout.
 Decisions: Mirrored manifest_brain exactly for graph_brain (find_brain_config -> crawl_corpus -> build_graph -> build_graph_export), re-exported GraphExport and build_graph_export from crate root alongside Manifest; EmitGraph CLI variant placed right before GenerateGraph in the enum, with a doc comment clarifying it emits JSON (vs generate-graph's HTML)
 Validated: gating checks (fast tripwire)
+
+## Task 3 — PASSED (1 attempt)
+What: Added tests/brain_graph_emit.rs integration test suite covering graph_brain nodes/edges/leaves, JSON round-trip, related-edge resolution, and missing-brain.toml error path.
+Decisions: Mirrored tests/brain_manifest.rs conventions (temp_dir/write_file/write_brain_toml helpers) for consistency with the existing manifest test suite.; Added a related-entries parameter to the local okf_doc() helper (not present in the manifest test's version) to construct related: edges in fixtures.
+Validated: gating checks (fast tripwire)
