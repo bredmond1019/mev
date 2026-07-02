@@ -1,4 +1,4 @@
 template: base-template
-commit: c7c904a8618339ce560190adb78fb9c224dd3c86
+commit: 9cca6e8a54d75aaac3d078c11cb3ffea75d61bb7
 generated: 2026-06-18
-synced: 2026-07-02 — D44-D47 tasks.json/state-pointer fix + skills cleanup
+synced: 2026-07-02 — add /sync-downstream-harness command
