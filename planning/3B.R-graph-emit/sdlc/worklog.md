@@ -23,3 +23,6 @@ Validated: gating checks (fast tripwire)
 ## Task 5 — PASSED (1 attempt)
 What: Validated the emit-graph implementation: fmt, clippy, cargo test, and release build all pass, and a live sanity-run against the agentic-portfolio brain confirmed 411 nodes, 1062 edges, 101 leaves.
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: none
