@@ -2,10 +2,10 @@
   "spec_slug": "3B.R-graph-emit",
   "branch": "3B.R-graph-emit-flow",
   "started_at": "2026-07-02T12:55:05Z",
-  "updated_at": "2026-07-02T12:55:05Z",
+  "updated_at": "2026-07-02T12:58:09Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.R-graph-emit-flow",
   "status": "running",
-  "current_task": 1,
+  "current_task": 2,
   "tasks": {
     "1": {
       "status": "passed",
@@ -21,6 +21,23 @@
         "src/brain/graph_emit.rs",
         "src/brain/mod.rs",
         "planning/3B.R-graph-emit/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added graph_brain() library driver and mev emit-graph CLI subcommand (with --pretty) that crawls the corpus, builds the graph, and prints the GraphExport JSON envelope to stdout.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Mirrored manifest_brain exactly for graph_brain (find_brain_config -> crawl_corpus -> build_graph -> build_graph_export), re-exported GraphExport and build_graph_export from crate root alongside Manifest",
+        "EmitGraph CLI variant placed right before GenerateGraph in the enum, with a doc comment clarifying it emits JSON (vs generate-graph's HTML)"
+      ],
+      "files_changed": [
+        "src/lib.rs",
+        "src/main.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -89,13 +106,37 @@
         "filesReadKb": null,
         "inTokEst": 562,
         "outTok": 2377
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 250,
+        "filesReadKb": null,
+        "inTokEst": 250,
+        "outTok": 969
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 869,
+        "filesReadKb": null,
+        "inTokEst": 869,
+        "outTok": 4467
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 562,
+        "filesReadKb": null,
+        "inTokEst": 562,
+        "outTok": 3308
       }
     ],
     "total": {
-      "promptTokEst": 3166,
+      "promptTokEst": 4847,
       "filesReadKb": 0,
-      "inTokEst": 3166,
-      "outTok": 12933
+      "inTokEst": 4847,
+      "outTok": 21677
     }
   }
 }
