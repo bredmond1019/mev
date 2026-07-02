@@ -17,6 +17,7 @@ pub use brain::emit::{
     render_wave_table, splice_generated, wave_order,
 };
 pub use brain::graph::{Graph, build_graph, check_graph};
+pub use brain::graph_emit::{GraphExport, build_graph_export};
 pub use brain::links::{
     LinkKind, LinkRef, check_links, check_moved_references, collect_doc_ids, extract_links,
     read_moves_pending,
@@ -564,6 +565,24 @@ pub fn manifest_brain(root: &std::path::Path) -> anyhow::Result<Manifest> {
 
     let (corpus, _crawl_diags) = crawl_corpus(root, &config);
     Ok(build_manifest(root, &corpus))
+}
+
+/// Build the graph-export envelope for a Brain corpus crawl.
+///
+/// Discovers `brain.toml`, crawls the corpus, builds the `scope:doc_id` knowledge graph, and
+/// converts it into a [`GraphExport`] envelope. Mirrors [`manifest_brain`]; this is a pure
+/// compiler — nothing is written to disk or a DB (D4). The caller (the `emit-graph` CLI
+/// subcommand) serialises the result to stdout.
+pub fn graph_brain(root: &std::path::Path) -> anyhow::Result<GraphExport> {
+    use brain::config::find_brain_config;
+    use brain::crawl::crawl_corpus;
+
+    let config = find_brain_config(root)
+        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
+
+    let (corpus, _crawl_diags) = crawl_corpus(root, &config);
+    let artifact = build_graph(&corpus, &config);
+    Ok(build_graph_export(root, &artifact))
 }
 
 /// Generate an interactive HTML knowledge graph of the Brain corpus.
