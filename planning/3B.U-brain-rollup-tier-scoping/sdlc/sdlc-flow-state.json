@@ -2,10 +2,10 @@
   "spec_slug": "3B.U-brain-rollup-tier-scoping",
   "branch": "3B.U-brain-rollup-tier-scoping-flow",
   "started_at": "2026-07-02T02:55:17Z",
-  "updated_at": "2026-07-02T02:55:17Z",
+  "updated_at": "2026-07-02T02:59:14Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.U-brain-rollup-tier-scoping-flow",
   "status": "running",
-  "current_task": 1,
+  "current_task": 2,
   "tasks": {
     "1": {
       "status": "passed",
@@ -32,6 +32,23 @@
         "src/brain/crawl.rs",
         "src/brain/visualize.rs",
         "src/lib.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added derive_brain_focus(scope, config, graph, files) -> Focus in src/brain/state.rs, computing brain-kind focus.now/next/blocked as the repo-tagged, deduped, config-ordered union of in-scope children's derive_focus output, with 4 new unit tests.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Repos with no loadable project-kind child contribute nothing to derive_brain_focus (mirrors derive_rollup's preserve/stub branches operating only on cached repos[] headline, not live focus — there's no tracks[] to derive from for a sourceless repo).",
+        "Dedup by (repo, id) is applied independently within each of now/next/blocked (not globally across all three), since the acceptance criteria phrase 'dedup by (repo, id), keep first' per list.",
+        "planning/3B.U-brain-rollup-tier-scoping/tasks.md already showed task 2 marked '[~]' before this attempt started (set externally by the flow orchestrator) — left untouched rather than editing to '[x]', matching task 1's commit convention of not touching tasks.md."
+      ],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.U-brain-rollup-tier-scoping-flow/src/brain/state.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -116,13 +133,37 @@
         "filesReadKb": null,
         "inTokEst": 592,
         "outTok": 1679
+      },
+      {
+        "label": "update-task-2",
+        "model": "haiku",
+        "promptTokEst": 265,
+        "filesReadKb": null,
+        "inTokEst": 265,
+        "outTok": 1083
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 922,
+        "filesReadKb": null,
+        "inTokEst": 922,
+        "outTok": 11302
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 592,
+        "filesReadKb": null,
+        "inTokEst": 592,
+        "outTok": 2099
       }
     ],
     "total": {
-      "promptTokEst": 4795,
+      "promptTokEst": 6574,
       "filesReadKb": 0,
-      "inTokEst": 4795,
-      "outTok": 48929
+      "inTokEst": 6574,
+      "outTok": 63413
     }
   }
 }
