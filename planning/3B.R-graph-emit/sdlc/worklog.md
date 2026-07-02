@@ -14,3 +14,8 @@ Validated: gating checks (fast tripwire)
 What: Added tests/brain_graph_emit.rs integration test suite covering graph_brain nodes/edges/leaves, JSON round-trip, related-edge resolution, and missing-brain.toml error path.
 Decisions: Mirrored tests/brain_manifest.rs conventions (temp_dir/write_file/write_brain_toml helpers) for consistency with the existing manifest test suite.; Added a related-entries parameter to the local okf_doc() helper (not present in the manifest test's version) to construct related: edges in fixtures.
 Validated: gating checks (fast tripwire)
+
+## Task 4 — PASSED (1 attempt)
+What: Documented the new `mev emit-graph` subcommand (cli.md) and the graph_emit.rs module/GraphExport type + tests/brain_graph_emit.rs (architecture.md), distinguishing it from generate-graph.
+Decisions: Placed the emit-graph CLI section between manifest and emit-state (its closest sibling emit commands) rather than immediately after generate-graph, since it groups better with the other pure-JSON emit subcommands.; Left docs/index.md unchanged as the spec anticipated — no new top-level doc file was added, only existing reference docs were extended.
+Validated: gating checks (fast tripwire)
