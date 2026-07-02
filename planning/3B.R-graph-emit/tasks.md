@@ -12,7 +12,7 @@ related: [master-plan, status, D4-corpus-engine-and-knowledge-graph]
 
 # Task Spec — Phase 3B, Block R (MV.3B.R)
 
-**Status:** Not started · **Last run:** never
+**Status:** In progress · **Last run:** never
 
 ## Goal
 Emit the `scope:doc_id` knowledge graph — authored nodes, `related:` edges, and marked leaves — as a canonical JSON artifact via a `mev emit-graph` subcommand, so the orchestrator can load it into a Postgres edges table beside `brain_documents`.
