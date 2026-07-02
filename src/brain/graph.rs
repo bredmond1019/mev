@@ -192,7 +192,7 @@ pub fn build_graph(corpus: &Corpus, _config: &BrainConfig) -> GraphArtifact {
 // ---------------------------------------------------------------------------
 
 /// Check the built graph for integrity violations: duplicate canonical ids,
-/// dangling `related:` edges, and leaf-target warnings.
+/// dangling `related:` edges, leaf-target warnings, and isolated nodes.
 ///
 /// Accepts the [`GraphArtifact`] produced by [`build_graph`] — does **not**
 /// re-walk the corpus.
@@ -201,6 +201,7 @@ pub fn build_graph(corpus: &Corpus, _config: &BrainConfig) -> GraphArtifact {
 /// - `E_GRAPH_DUPLICATE_DOC_ID` — two or more nodes share one canonical `scope:doc_id`.
 /// - `E_GRAPH_DANGLING_RELATED` — a `related:` entry resolves to no node and no leaf.
 /// - `W_GRAPH_LEAF_TARGET` — a `related:` entry resolves to a real file with no `doc_id`.
+/// - `W_GRAPH_ISOLATED_NODE` — a node (has `doc_id`) has zero outbound `related:` edges.
 pub fn check_graph(artifact: &GraphArtifact) -> Vec<Diagnostic> {
     let mut diags: Vec<Diagnostic> = Vec::new();
 
@@ -275,6 +276,26 @@ pub fn check_graph(artifact: &GraphArtifact) -> Vec<Diagnostic> {
                 format!(
                     "related target `{}` (resolved: `{qualified}`) does not exist in the corpus",
                     edge.to_ref
+                ),
+            ));
+        }
+    }
+
+    // --- Isolated nodes: a doc_id-bearing node with zero outbound related: edges ---
+    let referring_ids: HashSet<&str> = artifact
+        .graph
+        .edges
+        .iter()
+        .map(|e| e.from.as_str())
+        .collect();
+    for node in &artifact.graph.nodes {
+        if !referring_ids.contains(node.id.as_str()) {
+            diags.push(Diagnostic::warning(
+                &node.rel,
+                "W_GRAPH_ISOLATED_NODE",
+                format!(
+                    "`{}` has a doc_id but no `related:` entries — zero outbound edges",
+                    node.id
                 ),
             ));
         }
@@ -467,9 +488,15 @@ mod tests {
         let corpus = corpus_from(vec![e1, e2]);
         let artifact = build_graph(&corpus, &BrainConfig::default());
         let diags = check_graph(&artifact);
+        // beta has no related: of its own, so it legitimately trips
+        // W_GRAPH_ISOLATED_NODE; that's not what this test is about.
+        let resolution_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator != "W_GRAPH_ISOLATED_NODE")
+            .collect();
         assert!(
-            diags.is_empty(),
-            "bare in-scope edge should be OK: {diags:?}"
+            resolution_diags.is_empty(),
+            "bare in-scope edge should be OK: {resolution_diags:?}"
         );
     }
 
@@ -486,9 +513,15 @@ mod tests {
         let corpus = corpus_from(vec![e1, e2]);
         let artifact = build_graph(&corpus, &BrainConfig::default());
         let diags = check_graph(&artifact);
+        // target has no related: of its own, so it legitimately trips
+        // W_GRAPH_ISOLATED_NODE; that's not what this test is about.
+        let resolution_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator != "W_GRAPH_ISOLATED_NODE")
+            .collect();
         assert!(
-            diags.is_empty(),
-            "qualified cross-scope edge should be OK: {diags:?}"
+            resolution_diags.is_empty(),
+            "qualified cross-scope edge should be OK: {resolution_diags:?}"
         );
     }
 
@@ -576,6 +609,54 @@ mod tests {
             dangling[0].message.contains("mev-target"),
             "message names the target: {:?}",
             dangling[0].message
+        );
+    }
+
+    #[test]
+    fn node_with_no_related_produces_isolated_warning() {
+        let dir = TempDir::new().unwrap();
+        let e1 = make_entry(&dir, "brain", "a.md", "---\ndoc_id: alpha\n---");
+        let corpus = corpus_from(vec![e1]);
+        let artifact = build_graph(&corpus, &BrainConfig::default());
+        let diags = check_graph(&artifact);
+        let isolated: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                d.locator == "W_GRAPH_ISOLATED_NODE" && d.severity == crate::Severity::Warning
+            })
+            .collect();
+        assert_eq!(isolated.len(), 1, "expected isolated warning: {diags:?}");
+        assert!(isolated[0].message.contains("brain:alpha"));
+    }
+
+    #[test]
+    fn node_with_related_is_not_isolated() {
+        let dir = TempDir::new().unwrap();
+        let e1 = make_entry(
+            &dir,
+            "brain",
+            "a.md",
+            "---\ndoc_id: alpha\nrelated:\n  - beta\n---",
+        );
+        let e2 = make_entry(&dir, "brain", "b.md", "---\ndoc_id: beta\n---");
+        let corpus = corpus_from(vec![e1, e2]);
+        let artifact = build_graph(&corpus, &BrainConfig::default());
+        let diags = check_graph(&artifact);
+        // alpha has an outbound related: entry — must not be flagged isolated.
+        let alpha_isolated = diags
+            .iter()
+            .any(|d| d.locator == "W_GRAPH_ISOLATED_NODE" && d.message.contains("brain:alpha"));
+        assert!(
+            !alpha_isolated,
+            "alpha has an outbound edge, should not be isolated: {diags:?}"
+        );
+        // beta has no related: of its own — must be flagged isolated.
+        let beta_isolated = diags
+            .iter()
+            .any(|d| d.locator == "W_GRAPH_ISOLATED_NODE" && d.message.contains("brain:beta"));
+        assert!(
+            beta_isolated,
+            "beta has zero outbound edges, should be isolated: {diags:?}"
         );
     }
 }
