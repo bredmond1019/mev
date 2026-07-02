@@ -17,9 +17,10 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
+use crate::brain::config::{BrainConfig, RepoEntry};
 use crate::brain::state::{
-    Block, BlockedBy, Focus, StateFile, StateGraph, StateSource, derive_cross_repo, derive_focus,
-    derive_rollup,
+    Block, BlockedBy, Focus, StateFile, StateGraph, StateSource, TierScope, derive_cross_repo,
+    derive_focus, derive_rollup,
 };
 
 // ---------------------------------------------------------------------------
@@ -399,7 +400,29 @@ pub fn plan_state_json(files: &[(StateSource, StateFile)], graph: &StateGraph) -
                 derived.focus = derived_focus_for(src, file, graph, files);
             }
             "brain" => {
-                derived.repos = derive_rollup(&children, graph, files);
+                // TRANSITIONAL: MV.3B.U task 1 changed `derive_rollup`'s signature to
+                // take a tier scope + `BrainConfig` (for tier-scoping + non-destructive
+                // preservation), but threading the real config through this function's
+                // public signature and computing each brain file's true `TierScope` via
+                // `tier_scope_for` is MV.3B.U task 3's job. Until then, synthesize a
+                // config from the loaded leaf children (scope = All) so this call site
+                // keeps compiling and preserves today's (pre-task-3) behaviour.
+                let config_stub = BrainConfig {
+                    repos: children
+                        .iter()
+                        .map(|(s, _)| RepoEntry {
+                            slug: s.repo_slug.clone(),
+                            tier: String::new(),
+                            repo_path: String::new(),
+                            status_file: String::new(),
+                            cache_doc: String::new(),
+                            heading: String::new(),
+                        })
+                        .collect(),
+                    ..BrainConfig::default()
+                };
+                derived.repos =
+                    derive_rollup(&TierScope::All, &config_stub, &file.repos, graph, files);
                 derived.cross_repo = derive_cross_repo(files);
                 // brain `focus` is intentionally left untouched.
             }
