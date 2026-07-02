@@ -12,7 +12,7 @@ related: [master-plan, status, 3B.T-state-table-rollup-emit-tasks, state-schema]
 
 # Task Spec — Phase 3B, Block MV.3B.U — Brain rollup tier-scoping + brain-focus aggregation
 
-**Status:** Draft (0 tasks passed) · **Last run:** —
+**Status:** Draft (4 tasks passed) · **Last run:** 2026-07-02 03:09:45Z
 
 ## Goal
 Make `mev emit-state --write` **safe and correct for brain-kind `state.json` files** (`core/planning/state.json`,
@@ -104,7 +104,7 @@ Same pure-compiler model as `MV.3B.T` (files in → files out; no DB, no network
   - Leaf-file behaviour is byte-identical to before (no regression in `focus` derivation for `kind:"project"`).
   - Fixed point holds: running `emit-state --write` twice on the same tree produces no second-pass action.
 
-### 4. Integration tests (`tests/brain_emit.rs`)
+### 4. [~] Integration tests (`tests/brain_emit.rs`)
 - End-to-end `emit-state` over a temp brain fixture with a `brain.toml` declaring ≥5 core-tier repos where only 2
   have a `state.json`:
   - `repos[]` contains **all** in-scope repos (2 derived + 3 preserved/stub), each with `tier` populated, none dropped.

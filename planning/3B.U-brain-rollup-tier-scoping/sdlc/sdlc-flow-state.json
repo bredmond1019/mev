@@ -2,10 +2,10 @@
   "spec_slug": "3B.U-brain-rollup-tier-scoping",
   "branch": "3B.U-brain-rollup-tier-scoping-flow",
   "started_at": "2026-07-02T02:55:17Z",
-  "updated_at": "2026-07-02T03:04:20Z",
+  "updated_at": "2026-07-02T03:09:45Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.U-brain-rollup-tier-scoping-flow",
   "status": "running",
-  "current_task": 3,
+  "current_task": 4,
   "tasks": {
     "1": {
       "status": "passed",
@@ -66,6 +66,23 @@
       "files_changed": [
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.U-brain-rollup-tier-scoping-flow/src/brain/emit.rs",
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.U-brain-rollup-tier-scoping-flow/src/lib.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.U-brain-rollup-tier-scoping-flow/tests/brain_emit.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added 8 end-to-end integration tests (mod task4_tier_scoping_integration in tests/brain_emit.rs) covering emit_state's tier-scoped rollup (derived/preserved/stub branches, all repos retained), the malformed-child-JSON preserve regression, repo-tagged brain-focus union, HQ-shaped all-tier aggregation, and write/write fixed-point idempotence.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Reused the existing task4_emit_state module's fixture-helper pattern (temp_dir/write_file/write_json) but placed new tests in a separate module task4_tier_scoping_integration since task4_emit_state was already taken by the prior MV.3B.T block's Task 4 tests in the same file.",
+        "Built a single 'core fixture' (5 core-tier repos + 1 portfolio-tier control repo) reused across 6 of the 8 tests via shared helper functions, to keep the ≥5-repo/only-2-loadable acceptance criterion exercised consistently.",
+        "Asserted zero *unexpected* errors (excluding E_STATE_MALFORMED_JSON, which is the expected regression signal for repo-d) rather than zero errors overall in the core-rollup test, since the fixture intentionally includes one malformed child."
+      ],
+      "files_changed": [
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/3B.U-brain-rollup-tier-scoping-flow/tests/brain_emit.rs"
       ],
       "commit": "",
@@ -199,13 +216,37 @@
         "filesReadKb": null,
         "inTokEst": 592,
         "outTok": 2171
+      },
+      {
+        "label": "update-task-4",
+        "model": "haiku",
+        "promptTokEst": 265,
+        "filesReadKb": null,
+        "inTokEst": 265,
+        "outTok": 1165
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 922,
+        "filesReadKb": null,
+        "inTokEst": 922,
+        "outTok": 18518
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 592,
+        "filesReadKb": null,
+        "inTokEst": 592,
+        "outTok": 2327
       }
     ],
     "total": {
-      "promptTokEst": 8353,
+      "promptTokEst": 10132,
       "filesReadKb": 0,
-      "inTokEst": 8353,
-      "outTok": 79985
+      "inTokEst": 10132,
+      "outTok": 101995
     }
   }
 }
