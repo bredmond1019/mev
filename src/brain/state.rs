@@ -286,6 +286,42 @@ pub struct Backlog {
 }
 
 // ---------------------------------------------------------------------------
+// Carryover — durable caveats / follow-ons (v3)
+// ---------------------------------------------------------------------------
+
+/// The scope of a `carryover[]` entry.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct CarryoverScope {
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
+    pub cross_repo: Option<bool>,
+}
+
+/// A durable caveat, known issue, environmental note, or deferred follow-on.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Carryover {
+    /// Stable node key.
+    pub slug: String,
+    /// Where it applies.
+    pub scope: CarryoverScope,
+    /// Item kind (`constraint`, `known_issue`, `env`, `deferred`).
+    pub kind: String,
+    /// The caveat / follow-on text.
+    pub text: String,
+    /// Optional related edges (same forms as blocked_by).
+    #[serde(default)]
+    pub related: Vec<BlockedBy>,
+    /// Human-readable condition under which this entry should be deleted.
+    #[serde(default)]
+    pub clears_when: Option<String>,
+    /// Date recorded (YYYY-MM-DD).
+    pub created: String,
+}
+
+// ---------------------------------------------------------------------------
 // StateFile — top-level structure
 // ---------------------------------------------------------------------------
 
@@ -326,6 +362,9 @@ pub struct StateFile {
     /// HQ queued-ideas graph (brain HQ only; empty elsewhere).
     #[serde(default)]
     pub backlog: Vec<Backlog>,
+    /// Durable caveats and follow-ons.
+    #[serde(default)]
+    pub carryover: Vec<Carryover>,
 }
 
 // ---------------------------------------------------------------------------
@@ -493,6 +532,9 @@ const VALID_TRACK_BLOCK_STATUSES: &[&str] = &["open", "in_progress", "closed"];
 
 /// Valid `status` values for `backlog[]` entries (HQ brain only).
 const VALID_BACKLOG_STATUSES: &[&str] = &["idea", "ready", "promoted"];
+
+/// Valid `kind` values for `carryover[]` entries.
+const VALID_CARRYOVER_KINDS: &[&str] = &["constraint", "known_issue", "env", "deferred"];
 
 /// Validate the schema-ring constraints for a successfully-deserialized
 /// [`StateFile`].
@@ -689,6 +731,60 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                     VALID_BACKLOG_STATUSES.join(", ")
                 ),
             ));
+        }
+    }
+
+    // --- 9. carryover[] validation ---
+    for item in &file.carryover {
+        if !VALID_CARRYOVER_KINDS.contains(&item.kind.as_str()) {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_SCHEMA_BAD_KIND",
+                format!(
+                    "carryover item '{}' has invalid kind '{}'; expected one of: {}",
+                    item.slug,
+                    item.kind,
+                    VALID_CARRYOVER_KINDS.join(", ")
+                ),
+            ));
+        }
+
+        let scope_fields_set = item.scope.repo.is_some() as u8
+            + item.scope.tier.is_some() as u8
+            + item.scope.cross_repo.is_some() as u8;
+
+        if scope_fields_set != 1 {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_SCHEMA_MALFORMED_SCOPE",
+                format!(
+                    "carryover item '{}' has malformed scope; exactly one of 'repo', 'tier', or 'cross_repo' must be set",
+                    item.slug
+                ),
+            ));
+        }
+
+        for dep in &item.related {
+            if let BlockedBy::Block { repo, id, .. } = dep {
+                let repo_empty = repo.trim().is_empty();
+                let id_empty = id.trim().is_empty();
+                if repo_empty || id_empty {
+                    diags.push(Diagnostic::error(
+                        path,
+                        "E_STATE_SCHEMA_BAD_BLOCKED_BY",
+                        format!(
+                            "related entry in carryover item '{}' is missing required \
+                             field(s): {}",
+                            item.slug,
+                            [repo_empty.then_some("'repo'"), id_empty.then_some("'id'")]
+                                .into_iter()
+                                .flatten()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ));
+                }
+            }
         }
     }
 
@@ -1138,16 +1234,16 @@ pub fn check_backlog_integrity(
                         ));
                     }
                     Some(block_id) => {
-                        // Promoted and pointing at a block — verify the block exists.
-                        let block_key = format!("{}:{block_id}", backlog_node.repo);
-                        if !node_set.contains(block_key.as_str()) {
+                        // Promoted and pointing at a block — verify the block exists anywhere in the graph.
+                        let block_exists = graph.nodes.iter().any(|n| n.id == *block_id);
+                        if !block_exists {
                             diags.push(Diagnostic::error(
                                 path,
                                 "E_STATE_DANGLING_PROMOTION",
                                 format!(
                                     "backlog node '{}' promoted to block '{block_id}' which does \
-                                     not exist in '{}' tracks[]",
-                                    backlog_node.slug, backlog_node.repo
+                                     not exist in any repo's tracks[]",
+                                    backlog_node.slug
                                 ),
                             ));
                         }
@@ -1665,86 +1761,253 @@ pub fn derive_cross_repo(files: &[(StateSource, StateFile)]) -> Vec<CrossRepoEdg
 }
 
 // ---------------------------------------------------------------------------
-// Rollup derivation (MV.3B.T)
+// Tier scoping (MV.3B.U)
 // ---------------------------------------------------------------------------
 
-/// Derive the brain `repos[]` rollup from the loaded leaf (`kind == "project"`) state files.
+/// The set of `[[repos]]` a brain file's `repos[]` rollup should be scoped to.
 ///
-/// For each child with `kind == "project"`, calls [`derive_focus`] and maps block IDs back
-/// to [`Block`] structs using the child's own `tracks[]` for titles.  The `tier` field is
-/// left `None` — it is not derivable from state alone (it comes from the brain config).
+/// Determined by [`tier_scope_for`]: a brain file whose `repo` slug matches a
+/// `tier` value declared in `brain.toml` scopes to just that tier; a brain file
+/// whose `repo` slug matches no tier (the HQ root) scopes to every repo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TierScope {
+    /// Scope to only the `[[repos]]` entries whose `tier` equals this value.
+    Tier(String),
+    /// Scope to every `[[repos]]` entry (the HQ root).
+    All,
+}
+
+/// Determine the [`TierScope`] a brain file's `repos[]` rollup should use.
 ///
-/// The `graph` and `files` parameters are forwarded to [`derive_focus`] / [`ready_order`]
-/// so cross-repo dependency statuses are resolved correctly.
+/// `brain_file.repo` is matched against the set of `tier` values declared across
+/// `config.repos[]`. A match yields [`TierScope::Tier`] (that single tier); no
+/// match (e.g. the HQ root, whose `repo` is not itself a tier name) yields
+/// [`TierScope::All`].
+pub fn tier_scope_for(brain_file: &StateFile, config: &BrainConfig) -> TierScope {
+    let is_tier_name = config.repos.iter().any(|r| r.tier == brain_file.repo);
+    if is_tier_name {
+        TierScope::Tier(brain_file.repo.clone())
+    } else {
+        TierScope::All
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rollup derivation (MV.3B.T, tier-scoped in MV.3B.U)
+// ---------------------------------------------------------------------------
+
+/// Derive the brain `repos[]` rollup, tier-scoped and non-destructive.
+///
+/// Iterates the **in-scope** `config.repos[]` entries (filtered by `scope`, in
+/// config order) and, for each, produces one [`RepoRollup`]:
+/// - If a loadable `kind == "project"` child exists in `files` for that slug,
+///   derive its headline via [`derive_focus`] (as before) and set
+///   `tier: Some(<config tier>)`.
+/// - Else if `existing` (the brain file's current `repos[]`) already has an
+///   entry for that slug, **preserve it verbatim** (backfilling `tier` from
+///   config only when it was previously `None`). This is what prevents a
+///   malformed or not-yet-authored child `state.json` from silently dropping
+///   the repo out of the rollup.
+/// - Else, emit a tier-tagged empty stub.
+///
+/// `graph` and `files` are forwarded to [`derive_focus`] / [`ready_order`] so
+/// cross-repo dependency statuses are resolved correctly.
 pub fn derive_rollup(
-    children: &[(StateSource, StateFile)],
+    scope: &TierScope,
+    config: &BrainConfig,
+    existing: &[RepoRollup],
     graph: &StateGraph,
     files: &[(StateSource, StateFile)],
 ) -> Vec<RepoRollup> {
-    children
-        .iter()
-        .filter(|(_, f)| f.kind == "project")
-        .map(|(src, file)| {
-            let derived = derive_focus(src, file, graph, files);
+    let in_scope = config.repos.iter().filter(|r| match scope {
+        TierScope::Tier(t) => &r.tier == t,
+        TierScope::All => true,
+    });
 
-            // Build a title lookup from this child's tracks[].
-            let mut title_map: std::collections::HashMap<String, String> =
-                std::collections::HashMap::new();
-            for track in &file.tracks {
-                for block in &track.blocks {
-                    title_map.insert(block.id.clone(), block.title.clone());
+    in_scope
+        .map(|entry| {
+            let child = files
+                .iter()
+                .find(|(src, f)| src.repo_slug == entry.slug && f.kind == "project");
+
+            if let Some((src, file)) = child {
+                let derived = derive_focus(src, file, graph, files);
+
+                // Build a title lookup from this child's tracks[].
+                let mut title_map: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
+                for track in &file.tracks {
+                    for block in &track.blocks {
+                        title_map.insert(block.id.clone(), block.title.clone());
+                    }
+                }
+                let title_of = |id: &str| title_map.get(id).cloned().unwrap_or_default();
+
+                let now = derived
+                    .now
+                    .iter()
+                    .map(|id| Block {
+                        id: id.clone(),
+                        title: title_of(id),
+                        status: Some("in_progress".to_string()),
+                        note: None,
+                        repo: None,
+                        blocked_by: Vec::new(),
+                    })
+                    .collect();
+
+                let next = derived
+                    .next
+                    .iter()
+                    .map(|id| Block {
+                        id: id.clone(),
+                        title: title_of(id),
+                        status: None,
+                        note: None,
+                        repo: None,
+                        blocked_by: Vec::new(),
+                    })
+                    .collect();
+
+                let blocked = derived
+                    .blocked
+                    .iter()
+                    .map(|(id, unmet)| Block {
+                        id: id.clone(),
+                        title: title_of(id),
+                        status: None,
+                        note: None,
+                        repo: None,
+                        blocked_by: unmet.clone(),
+                    })
+                    .collect();
+
+                RepoRollup {
+                    repo: entry.slug.clone(),
+                    tier: Some(entry.tier.clone()),
+                    now,
+                    next,
+                    blocked,
+                }
+            } else if let Some(preserved) = existing.iter().find(|r| r.repo == entry.slug) {
+                let mut preserved = preserved.clone();
+                if preserved.tier.is_none() {
+                    preserved.tier = Some(entry.tier.clone());
+                }
+                preserved
+            } else {
+                RepoRollup {
+                    repo: entry.slug.clone(),
+                    tier: Some(entry.tier.clone()),
+                    now: Vec::new(),
+                    next: Vec::new(),
+                    blocked: Vec::new(),
                 }
             }
-            let title_of = |id: &str| title_map.get(id).cloned().unwrap_or_default();
+        })
+        .collect()
+}
 
-            let now = derived
-                .now
-                .iter()
-                .map(|id| Block {
+/// Derive a brain file's `focus.now/next/blocked` as the repo-tagged union of
+/// its in-scope children's derived focus (MV.3B.U task 2).
+///
+/// Iterates the **in-scope** `config.repos[]` entries (filtered by `scope`, in
+/// config order); for each repo with a loadable `kind == "project"` child in
+/// `files`, calls [`derive_focus`] and appends its `now`/`next`/`blocked`
+/// blocks — each tagged with `repo: Some(<slug>)` — to the corresponding
+/// brain-level list, in the child's own within-focus order.
+///
+/// Repos with no loadable child contribute nothing (mirrors [`derive_rollup`]'s
+/// preserve/stub branches, which operate on the cached `repos[]` headline, not
+/// `focus`, since there is no live tracks[] to derive from).
+///
+/// Deduplicated by `(repo, id)` within each of `now`/`next`/`blocked`
+/// independently — the first occurrence wins.
+pub fn derive_brain_focus(
+    scope: &TierScope,
+    config: &BrainConfig,
+    graph: &StateGraph,
+    files: &[(StateSource, StateFile)],
+) -> Focus {
+    use std::collections::HashSet;
+
+    let in_scope = config.repos.iter().filter(|r| match scope {
+        TierScope::Tier(t) => &r.tier == t,
+        TierScope::All => true,
+    });
+
+    let mut now: Vec<Block> = Vec::new();
+    let mut next: Vec<Block> = Vec::new();
+    let mut blocked: Vec<Block> = Vec::new();
+    let mut seen_now: HashSet<(String, String)> = HashSet::new();
+    let mut seen_next: HashSet<(String, String)> = HashSet::new();
+    let mut seen_blocked: HashSet<(String, String)> = HashSet::new();
+
+    for entry in in_scope {
+        let child = files
+            .iter()
+            .find(|(src, f)| src.repo_slug == entry.slug && f.kind == "project");
+
+        let Some((src, file)) = child else {
+            continue;
+        };
+
+        let derived = derive_focus(src, file, graph, files);
+
+        // Build a title lookup from this child's tracks[].
+        let mut title_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for track in &file.tracks {
+            for block in &track.blocks {
+                title_map.insert(block.id.clone(), block.title.clone());
+            }
+        }
+        let title_of = |id: &str| title_map.get(id).cloned().unwrap_or_default();
+
+        for id in &derived.now {
+            let key = (entry.slug.clone(), id.clone());
+            if seen_now.insert(key) {
+                now.push(Block {
                     id: id.clone(),
                     title: title_of(id),
                     status: Some("in_progress".to_string()),
                     note: None,
-                    repo: None,
+                    repo: Some(entry.slug.clone()),
                     blocked_by: Vec::new(),
-                })
-                .collect();
-
-            let next = derived
-                .next
-                .iter()
-                .map(|id| Block {
-                    id: id.clone(),
-                    title: title_of(id),
-                    status: None,
-                    note: None,
-                    repo: None,
-                    blocked_by: Vec::new(),
-                })
-                .collect();
-
-            let blocked = derived
-                .blocked
-                .iter()
-                .map(|(id, unmet)| Block {
-                    id: id.clone(),
-                    title: title_of(id),
-                    status: None,
-                    note: None,
-                    repo: None,
-                    blocked_by: unmet.clone(),
-                })
-                .collect();
-
-            RepoRollup {
-                repo: src.repo_slug.clone(),
-                tier: None,
-                now,
-                next,
-                blocked,
+                });
             }
-        })
-        .collect()
+        }
+
+        for id in &derived.next {
+            let key = (entry.slug.clone(), id.clone());
+            if seen_next.insert(key) {
+                next.push(Block {
+                    id: id.clone(),
+                    title: title_of(id),
+                    status: None,
+                    note: None,
+                    repo: Some(entry.slug.clone()),
+                    blocked_by: Vec::new(),
+                });
+            }
+        }
+
+        for (id, unmet) in &derived.blocked {
+            let key = (entry.slug.clone(), id.clone());
+            if seen_blocked.insert(key) {
+                blocked.push(Block {
+                    id: id.clone(),
+                    title: title_of(id),
+                    status: None,
+                    note: None,
+                    repo: Some(entry.slug.clone()),
+                    blocked_by: unmet.clone(),
+                });
+            }
+        }
+    }
+
+    Focus { now, next, blocked }
 }
 
 /// Return a deterministically sorted `Vec<&str>` from a `HashSet<&str>` for
@@ -3335,6 +3598,7 @@ mod tests {
             tiers: vec![],
             note: None,
             backlog: vec![],
+            carryover: vec![],
         };
         let src = StateSource {
             repo_slug: repo.to_string(),
@@ -3610,6 +3874,7 @@ mod tests {
             tiers: vec![],
             note: None,
             backlog: vec![],
+            carryover: vec![],
         };
         let src = StateSource {
             repo_slug: repo.to_string(),
@@ -3767,6 +4032,7 @@ mod tests {
             tiers: vec![],
             note: None,
             backlog: backlog_nodes,
+            carryover: vec![],
         };
         let src = StateSource {
             repo_slug: repo.to_string(),
@@ -3917,6 +4183,7 @@ mod tests {
             tiers: vec![],
             note: None,
             backlog: vec![],
+            carryover: vec![],
         };
         let mev_src = StateSource {
             repo_slug: "mev".to_string(),
@@ -3981,6 +4248,7 @@ mod tests {
             tiers: vec![],
             note: None,
             backlog: vec![],
+            carryover: vec![],
         }
     }
 
@@ -4023,6 +4291,7 @@ mod tests {
             tiers: vec![],
             note: None,
             backlog: vec![],
+            carryover: vec![],
         }
     }
 
@@ -4177,6 +4446,7 @@ mod tests {
             tiers: vec![],
             note: None,
             backlog: vec![],
+            carryover: vec![],
         };
         let src = StateSource {
             repo_slug: repo.to_string(),
@@ -4364,6 +4634,7 @@ mod tests {
             tiers: vec![],
             note: None,
             backlog: vec![],
+            carryover: vec![],
         };
         let src = StateSource {
             repo_slug: "hq".to_string(),
@@ -4474,4 +4745,417 @@ mod tests {
             "source_path should be skipped in JSON"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // TierScope / tier_scope_for / derive_rollup tier-scoping (MV.3B.U task 1)
+    // -----------------------------------------------------------------------
+
+    /// Config with a mix of core-tier and other-tier repos, mirroring the live
+    /// `brain.toml` shape (an HQ-root entry plus several tier repos).
+    fn make_mixed_tier_config() -> BrainConfig {
+        use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
+        BrainConfig {
+            vocab: VocabConfig::default(),
+            crawl: CrawlConfig::default(),
+            repos: vec![
+                RepoEntry {
+                    slug: "brain".to_string(),
+                    tier: "_root".to_string(),
+                    repo_path: ".".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "alpha".to_string(),
+                    tier: "core".to_string(),
+                    repo_path: "core/alpha".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "beta".to_string(),
+                    tier: "core".to_string(),
+                    repo_path: "core/beta".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "gamma".to_string(),
+                    tier: "portfolio".to_string(),
+                    repo_path: "portfolio/gamma".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+            ],
+        }
+    }
+
+    fn brain_state_file(repo: &str, repos: Vec<RepoRollup>) -> StateFile {
+        StateFile {
+            repo: repo.to_string(),
+            kind: "brain".to_string(),
+            updated: "2026-07-01".to_string(),
+            focus: Focus::default(),
+            tracks: vec![],
+            repos,
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+            carryover: vec![],
+        }
+    }
+
+    #[test]
+    fn tier_scope_for_returns_tier_when_repo_slug_matches_a_tier_name() {
+        let config = make_mixed_tier_config();
+        let core_brain = brain_state_file("core", vec![]);
+        let scope = tier_scope_for(&core_brain, &config);
+        assert_eq!(scope, TierScope::Tier("core".to_string()));
+    }
+
+    #[test]
+    fn tier_scope_for_returns_all_when_repo_slug_matches_no_tier() {
+        let config = make_mixed_tier_config();
+        // "hq" (or "brain") is not itself a tier value in the config — it's the
+        // HQ root's own repo slug — so it must scope to every repo.
+        let hq_brain = brain_state_file("hq", vec![]);
+        let scope = tier_scope_for(&hq_brain, &config);
+        assert_eq!(scope, TierScope::All);
+    }
+
+    #[test]
+    fn derive_rollup_core_scope_includes_only_core_tier_repos() {
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let files: Vec<(StateSource, StateFile)> = vec![];
+
+        let rollups = derive_rollup(&scope, &config, &[], &StateGraph::default(), &files);
+
+        let repos: Vec<&str> = rollups.iter().map(|r| r.repo.as_str()).collect();
+        assert_eq!(
+            repos,
+            vec!["alpha", "beta"],
+            "core scope must include only the two core-tier repos, in config order"
+        );
+    }
+
+    #[test]
+    fn derive_rollup_hq_scope_includes_every_tier() {
+        let config = make_mixed_tier_config();
+        let files: Vec<(StateSource, StateFile)> = vec![];
+
+        let rollups = derive_rollup(
+            &TierScope::All,
+            &config,
+            &[],
+            &StateGraph::default(),
+            &files,
+        );
+
+        let repos: Vec<&str> = rollups.iter().map(|r| r.repo.as_str()).collect();
+        assert_eq!(
+            repos,
+            vec!["brain", "alpha", "beta", "gamma"],
+            "All scope must include every configured repo"
+        );
+    }
+
+    #[test]
+    fn derive_rollup_derive_branch_uses_loaded_child_state() {
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair_alpha = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let files = vec![pair_alpha];
+
+        let rollups = derive_rollup(&scope, &config, &[], &StateGraph::default(), &files);
+
+        // alpha has a loaded child → derived headline; beta has none → stub.
+        let alpha = rollups.iter().find(|r| r.repo == "alpha").expect("alpha");
+        assert_eq!(alpha.now.len(), 1);
+        assert_eq!(alpha.now[0].id, "AL.1.A");
+        assert_eq!(alpha.tier.as_deref(), Some("core"));
+
+        let beta = rollups.iter().find(|r| r.repo == "beta").expect("beta");
+        assert!(beta.now.is_empty() && beta.next.is_empty() && beta.blocked.is_empty());
+        assert_eq!(beta.tier.as_deref(), Some("core"));
+    }
+
+    #[test]
+    fn derive_rollup_preserve_branch_keeps_existing_entry_when_no_child_state() {
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let files: Vec<(StateSource, StateFile)> = vec![];
+
+        // beta has no loadable child state.json, but the brain file already has
+        // a hand-authored entry for it — this must be preserved verbatim
+        // (this is the fix for the live bastion-drop incident).
+        let existing = vec![RepoRollup {
+            repo: "beta".to_string(),
+            tier: None, // authored before tier was ever populated
+            now: vec![Block {
+                id: "BE.1.A".to_string(),
+                title: "Hand-authored headline".to_string(),
+                status: Some("in_progress".to_string()),
+                note: None,
+                repo: None,
+                blocked_by: vec![],
+            }],
+            next: vec![],
+            blocked: vec![],
+        }];
+
+        let rollups = derive_rollup(&scope, &config, &existing, &StateGraph::default(), &files);
+
+        let beta = rollups.iter().find(|r| r.repo == "beta").expect("beta");
+        assert_eq!(beta.now.len(), 1);
+        assert_eq!(beta.now[0].id, "BE.1.A");
+        assert_eq!(beta.now[0].title, "Hand-authored headline");
+        // tier is backfilled from config even though the preserved entry had None.
+        assert_eq!(beta.tier.as_deref(), Some("core"));
+    }
+
+    #[test]
+    fn derive_rollup_stub_branch_emits_empty_tier_tagged_entry_when_neither_exists() {
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let files: Vec<(StateSource, StateFile)> = vec![];
+
+        // No loaded child, no existing entry → a stub.
+        let rollups = derive_rollup(&scope, &config, &[], &StateGraph::default(), &files);
+
+        let alpha = rollups.iter().find(|r| r.repo == "alpha").expect("alpha");
+        assert!(alpha.now.is_empty());
+        assert!(alpha.next.is_empty());
+        assert!(alpha.blocked.is_empty());
+        assert_eq!(alpha.tier.as_deref(), Some("core"));
+    }
+
+    #[test]
+    fn derive_rollup_tier_populated_in_every_branch() {
+        let config = make_mixed_tier_config();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair_alpha = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let files = vec![pair_alpha];
+
+        // beta: preserve branch.
+        let existing = vec![RepoRollup {
+            repo: "beta".to_string(),
+            tier: None,
+            now: vec![],
+            next: vec![],
+            blocked: vec![],
+        }];
+
+        let rollups = derive_rollup(
+            &TierScope::Tier("core".to_string()),
+            &config,
+            &existing,
+            &StateGraph::default(),
+            &files,
+        );
+
+        // alpha: derive branch. beta: preserve branch (no gamma — out of scope).
+        assert_eq!(rollups.len(), 2);
+        for rollup in &rollups {
+            assert!(
+                rollup.tier.is_some(),
+                "tier must be populated for repo '{}' in every branch",
+                rollup.repo
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // derive_brain_focus — repo-tagged union of children's derived focus
+    // (MV.3B.U task 2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn derive_brain_focus_unions_two_children() {
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair_alpha = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let pair_beta = leaf_pair(dir.path(), "beta", "BE.1.A");
+        let files = vec![pair_alpha, pair_beta];
+
+        let focus = derive_brain_focus(&scope, &config, &StateGraph::default(), &files);
+
+        let now_ids: Vec<&str> = focus.now.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(
+            now_ids,
+            vec!["AL.1.A", "BE.1.A"],
+            "focus.now must union both children's now blocks, in config order"
+        );
+    }
+
+    #[test]
+    fn derive_brain_focus_tags_each_block_with_its_source_repo() {
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair_alpha = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let files = vec![pair_alpha];
+
+        let focus = derive_brain_focus(&scope, &config, &StateGraph::default(), &files);
+
+        assert_eq!(focus.now.len(), 1);
+        assert_eq!(focus.now[0].repo.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn derive_brain_focus_respects_tier_scope_exclusion() {
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let dir = tempfile::tempdir().expect("tempdir");
+        // gamma is portfolio-tier — out of scope for the core brain.
+        let pair_gamma = leaf_pair(dir.path(), "gamma", "GA.1.A");
+        let files = vec![pair_gamma];
+
+        let focus = derive_brain_focus(&scope, &config, &StateGraph::default(), &files);
+
+        assert!(
+            focus.now.is_empty(),
+            "gamma (portfolio tier) must not appear in a core-scoped brain focus"
+        );
+    }
+
+    #[test]
+    fn derive_brain_focus_dedups_by_repo_and_id_and_preserves_ordering() {
+        use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
+
+        // A config where "alpha" is (accidentally) listed twice — the second
+        // listing must not produce a duplicate (repo, id) block in focus.now.
+        let config = BrainConfig {
+            vocab: VocabConfig::default(),
+            crawl: CrawlConfig::default(),
+            repos: vec![
+                RepoEntry {
+                    slug: "alpha".to_string(),
+                    tier: "core".to_string(),
+                    repo_path: "core/alpha".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "beta".to_string(),
+                    tier: "core".to_string(),
+                    repo_path: "core/beta".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "alpha".to_string(),
+                    tier: "core".to_string(),
+                    repo_path: "core/alpha".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+            ],
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair_alpha = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let pair_beta = leaf_pair(dir.path(), "beta", "BE.1.A");
+        let files = vec![pair_alpha, pair_beta];
+
+        let focus = derive_brain_focus(
+            &TierScope::Tier("core".to_string()),
+            &config,
+            &StateGraph::default(),
+            &files,
+        );
+
+        let now_pairs: Vec<(String, String)> = focus
+            .now
+            .iter()
+            .map(|b| (b.repo.clone().unwrap_or_default(), b.id.clone()))
+            .collect();
+        assert_eq!(
+            now_pairs,
+            vec![
+                ("alpha".to_string(), "AL.1.A".to_string()),
+                ("beta".to_string(), "BE.1.A".to_string()),
+            ],
+            "duplicate (repo, id) entries must be deduped, config order preserved"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
+// Carryover tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn carryover_array_deserializes() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "some-caveat",
+      "scope": { "repo": "bastion" },
+      "kind": "constraint",
+      "text": "A durable caveat.",
+      "created": "2026-06-30"
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).expect("should deserialize");
+    assert_eq!(file.carryover.len(), 1);
+    assert_eq!(file.carryover[0].slug, "some-caveat");
+    assert_eq!(file.carryover[0].scope.repo.as_deref(), Some("bastion"));
+    assert!(file.carryover[0].scope.tier.is_none());
+    assert_eq!(file.carryover[0].kind, "constraint");
+}
+
+#[test]
+fn carryover_schema_checks() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "bad-kind",
+      "scope": { "repo": "bastion" },
+      "kind": "unknown_kind",
+      "text": "Bad kind.",
+      "created": "2026-06-30"
+    },
+    {
+      "slug": "bad-scope",
+      "scope": { "repo": "bastion", "tier": "core" },
+      "kind": "known_issue",
+      "text": "Malformed scope.",
+      "created": "2026-06-30"
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+
+    let bad_kind = diags
+        .iter()
+        .any(|d| d.locator == "E_STATE_SCHEMA_BAD_KIND" && d.message.contains("bad-kind"));
+    let bad_scope = diags
+        .iter()
+        .any(|d| d.locator == "E_STATE_SCHEMA_MALFORMED_SCOPE" && d.message.contains("bad-scope"));
+
+    assert!(bad_kind, "Should flag bad kind");
+    assert!(bad_scope, "Should flag malformed scope");
 }

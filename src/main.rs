@@ -115,6 +115,15 @@ enum Command {
         #[arg(long)]
         write: bool,
     },
+    /// Generate an interactive HTML visualization of the knowledge graph (graph.html)
+    GenerateGraph {
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// The output directory to write the graph files to (defaults to <root>/planning/doc-graph)
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn print_diagnostic(d: &mev::Diagnostic) {
@@ -296,6 +305,22 @@ fn main() -> ExitCode {
                         }
                     }
                 }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::GenerateGraph { path, out } => {
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match mev::visualize_brain(&root, out) {
+                Ok(_) => ExitCode::SUCCESS,
                 Err(err) => {
                     eprintln!("error: {err:#}");
                     ExitCode::FAILURE

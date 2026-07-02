@@ -59,8 +59,8 @@ flowchart TD
 
 | Stage | Model | What it does |
 |---|---|---|
-| **Scout / worktree-setup** | haiku | Reads the spec and existing report state (for `--resume`). With `--worktree`, creates `trees/<branch>/` via cone-mode sparse checkout (all tracked top-level dirs — no stack assumptions, per [D5](../../planning/decisions/D5-okf-phase-2-adopted.md)). |
-| **Implement** | sonnet | Executes every task (or the selected range) against `tasks.md` (and `breakdown.md` if present). Runs the [D8](../../planning/decisions/D8-implement-completeness-self-check.md) completeness self-check before committing `feat:`/`fix:`. |
+| **Scout / worktree-setup** | haiku | Reads the spec and existing report state (for `--resume`). With `--worktree`, creates `trees/<branch>/` via cone-mode sparse checkout (all tracked top-level dirs — no stack assumptions, per D5). |
+| **Implement** | sonnet | Executes every task (or the selected range) against `tasks.md` (and `breakdown.md` if present). Runs the D8 completeness self-check before committing `feat:`/`fix:`. |
 | **Fast test** | haiku | Runs the `gates:true` checks from `harness.json` plus the universal emoji gate on changed markdown. Falls back to the spec's `## Validation Commands` if no config. |
 | **Triage** | sonnet | Classifies a failing test as `RETRYABLE` (transient, or failure changed — progress is possible) or stuck (same criteria twice, or structural). Stuck → commit the current state as `FAIL` and exit. |
 | **Fix** | sonnet | Targeted fix for the failing checks only — never a re-implement. Escalates to `opus` on the final attempt (`ESCALATION_MODEL`). |
@@ -95,7 +95,7 @@ In-place mode: written once, swept into the final `chore:` commit alongside `sta
 applied at `/clean-worktree` merge time.
 
 > **Token roll-up note:** `tokens.total` covers substantive stages (implement, test, fix).
-> Cheap Haiku helper agents are excluded. See [D37](../../planning/decisions/D37-unified-committed-state-and-telemetry.md).
+> Cheap Haiku helper agents are excluded. See D37.
 
 ---
 

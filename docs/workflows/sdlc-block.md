@@ -190,7 +190,7 @@ total across all blocks is in the top-level `tokens` key.
 
 > **Note:** the token roll-up covers **substantive stages only** — cheap Haiku helper agents
 > (state writers, gap-check summaries) are excluded from the per-block and cumulative totals.
-> See [D37](../../planning/decisions/D37-unified-committed-state-and-telemetry.md).
+> See D37.
 
 ---
 
