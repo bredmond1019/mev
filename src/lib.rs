@@ -23,6 +23,7 @@ pub use brain::links::{
 };
 pub use brain::manifest::{Manifest, ManifestEntry, build_manifest};
 pub use brain::okf::{OkfFrontmatter, validate_md_file};
+pub use brain::visualize::generate_graph_visual;
 pub use learn_ai::LearnAiValidator;
 pub use learn_ai::crawl::{ContentFile, Corpus, FileKind, Locale, crawl};
 pub use learn_ai::meta::validate_file;
@@ -414,7 +415,8 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
 /// planners:
 ///
 /// - [`brain::emit::plan_state_json`] — regenerates leaf `focus` (now/next/blocked)
-///   and brain `repos[]`/`cross_repo[]` from the authored `tracks[]` DAG.
+///   and brain `repos[]`/`cross_repo[]`/`focus` (tier-scoped, non-destructive rollup +
+///   repo-tagged focus union) from the authored `tracks[]` DAG.
 /// - [`brain::emit::plan_master_plan_tables`] — splices the wave/dependency table into
 ///   any `master-plan.md` that carries the `<!-- BEGIN generated:wave-table -->`
 ///   sentinels.
@@ -482,7 +484,7 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     let graph = build_state_graph(&loaded);
 
     // 4. Run both planners and merge their results.
-    let state_plan = plan_state_json(&loaded, &graph);
+    let state_plan = plan_state_json(&loaded, &graph, &config);
     let mp_plan = plan_master_plan_tables(&loaded, &graph);
 
     // 5. Apply both plans (write or dry-run).
@@ -516,6 +518,18 @@ pub fn manifest_brain(root: &std::path::Path) -> anyhow::Result<Manifest> {
 
     let (corpus, _crawl_diags) = crawl_corpus(root, &config);
     Ok(build_manifest(root, &corpus))
+}
+
+/// Generate an interactive HTML knowledge graph of the Brain corpus.
+///
+/// Discovers `brain.toml`, runs a crawl to build a manifest, and delegates to
+/// `generate_graph_visual` to write `graph.md` and `graph.html` to `out_dir`.
+/// If `out_dir` is `None`, defaults to `planning/doc-graph` under the brain root.
+pub fn visualize_brain(root: &std::path::Path, out_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let out = out_dir.unwrap_or_else(|| root.join("planning").join("doc-graph"));
+
+    let manifest = manifest_brain(root)?;
+    brain::visualize::generate_graph_visual(&manifest, &out)
 }
 
 /// Machine-readable envelope emitted by the `--json` flag for any `mev` subcommand.

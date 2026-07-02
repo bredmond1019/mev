@@ -51,6 +51,10 @@ pub struct ManifestEntry {
     pub status: Option<String>,
     /// OKF `keywords` field (3–7 free-form topic terms).
     pub keywords: Option<Vec<String>>,
+    /// OKF `related` field.
+    pub related: Option<Vec<String>>,
+    /// OKF `synced_from` watermark.
+    pub synced_from: Option<String>,
 }
 
 /// The complete manifest for a Brain corpus crawl.
@@ -90,20 +94,32 @@ pub fn build_manifest(root: &Path, corpus: &Corpus) -> Manifest {
                 .to_string_lossy()
                 .replace(std::path::MAIN_SEPARATOR, "/");
 
-            let (doc_id, doc_type, title, description, layer, project, status, keywords) =
-                match &entry.metadata {
-                    Some(meta) => (
-                        meta.doc_id.clone(),
-                        meta.type_.clone(),
-                        meta.title.clone(),
-                        meta.description.clone(),
-                        meta.layer.clone(),
-                        meta.project.clone(),
-                        meta.status.clone(),
-                        meta.keywords.clone(),
-                    ),
-                    None => (None, None, None, None, None, None, None, None),
-                };
+            let (
+                doc_id,
+                doc_type,
+                title,
+                description,
+                layer,
+                project,
+                status,
+                keywords,
+                related,
+                synced_from,
+            ) = match &entry.metadata {
+                Some(meta) => (
+                    meta.doc_id.clone(),
+                    meta.type_.clone(),
+                    meta.title.clone(),
+                    meta.description.clone(),
+                    meta.layer.clone(),
+                    meta.project.clone(),
+                    meta.status.clone(),
+                    meta.keywords.clone(),
+                    meta.related.clone(),
+                    meta.synced_from.clone(),
+                ),
+                None => (None, None, None, None, None, None, None, None, None, None),
+            };
 
             ManifestEntry {
                 rel,
@@ -116,6 +132,8 @@ pub fn build_manifest(root: &Path, corpus: &Corpus) -> Manifest {
                 project,
                 status,
                 keywords,
+                related,
+                synced_from,
             }
         })
         .collect();

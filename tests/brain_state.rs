@@ -1153,9 +1153,25 @@ fn derive_cross_repo_skips_external_deps() {
     );
 }
 
+fn make_config_with_repo(slug: &str, tier: &str) -> mev::brain::config::BrainConfig {
+    use mev::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
+    BrainConfig {
+        vocab: VocabConfig::default(),
+        crawl: CrawlConfig::default(),
+        repos: vec![RepoEntry {
+            slug: slug.to_string(),
+            tier: tier.to_string(),
+            repo_path: String::new(),
+            status_file: String::new(),
+            cache_doc: String::new(),
+            heading: String::new(),
+        }],
+    }
+}
+
 #[test]
 fn derive_rollup_reproduces_childs_derived_focus() {
-    use mev::brain::state::{build_state_graph, derive_rollup};
+    use mev::brain::state::{TierScope, build_state_graph, derive_rollup};
 
     // alpha: one in_progress block, one open block (no deps → ready).
     let (src_alpha, file_alpha) = make_leaf_pair_in_memory(
@@ -1171,9 +1187,15 @@ fn derive_rollup_reproduces_childs_derived_focus() {
     );
     let files = vec![(src_alpha.clone(), file_alpha.clone())];
     let graph = build_state_graph(&files);
-    let children = files.clone();
+    let config = make_config_with_repo("alpha", "core");
 
-    let rollups = derive_rollup(&children, &graph, &files);
+    let rollups = derive_rollup(
+        &TierScope::Tier("core".to_string()),
+        &config,
+        &[],
+        &graph,
+        &files,
+    );
 
     assert_eq!(rollups.len(), 1, "one child → one rollup entry");
     let rollup = &rollups[0];
@@ -1191,15 +1213,16 @@ fn derive_rollup_reproduces_childs_derived_focus() {
     // blocked should be empty.
     assert!(rollup.blocked.is_empty());
 
-    // tier should be None (not derivable from state).
-    assert!(rollup.tier.is_none());
+    // tier should be populated from config.
+    assert_eq!(rollup.tier.as_deref(), Some("core"));
 }
 
 #[test]
-fn derive_rollup_skips_brain_files() {
-    use mev::brain::state::{StateGraph, StateSource, derive_rollup};
+fn derive_rollup_stubs_when_only_a_brain_file_matches_the_slug() {
+    use mev::brain::state::{StateGraph, StateSource, TierScope, derive_rollup};
 
-    // A brain file should not appear in the rollup output.
+    // A brain-kind file must not be picked up as the rollup's derivation source
+    // for its own slug — it should fall back to an empty tier-tagged stub.
     let path = std::path::PathBuf::from("/tmp/hq-state.json");
     let json = serde_json::json!({
         "repo": "hq",
@@ -1215,13 +1238,21 @@ fn derive_rollup_skips_brain_files() {
         abs_path: path,
         expected_kind: "brain",
     };
-    let children = vec![(brain_src.clone(), brain_file.clone())];
-    let files = children.clone();
+    let files = vec![(brain_src.clone(), brain_file.clone())];
     let graph = StateGraph::default();
+    let config = make_config_with_repo("hq", "core");
 
-    let rollups = derive_rollup(&children, &graph, &files);
-    assert!(
-        rollups.is_empty(),
-        "brain files must not produce rollup entries, got: {rollups:?}"
+    let rollups = derive_rollup(
+        &TierScope::Tier("core".to_string()),
+        &config,
+        &[],
+        &graph,
+        &files,
     );
+    assert_eq!(rollups.len(), 1, "expected a stub entry for 'hq'");
+    assert_eq!(rollups[0].repo, "hq");
+    assert_eq!(rollups[0].tier.as_deref(), Some("core"));
+    assert!(rollups[0].now.is_empty());
+    assert!(rollups[0].next.is_empty());
+    assert!(rollups[0].blocked.is_empty());
 }

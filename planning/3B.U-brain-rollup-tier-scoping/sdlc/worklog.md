@@ -1,0 +1,39 @@
+# Worklog — 3B.U-brain-rollup-tier-scoping
+
+## Task 1 — PASSED (2 attempts)
+What: Fixed cargo fmt formatting diffs (crawl.rs, visualize.rs, lib.rs) and clippy errors in visualize.rs (collapsible_if via let-chain, double_ended_iterator_last via next_back)
+Issues hit: fmt; clippy
+Fixed via: Failure is a set of mechanical fmt/clippy lint issues (formatting diffs, collapsible_if, double-ended-iterator-last) with clear, bounded fixes (cargo fmt, small clippy edits) — not a structural or ambiguous problem.
+Decisions: Kept plan_state_json's public signature unchanged (no BrainConfig param) since threading the real config through the emit path is explicitly MV.3B.U task 3's scope; instead added a transitional shim in emit.rs's brain arm that synthesizes a BrainConfig from the already-loaded children with TierScope::All, so the crate keeps compiling and today's rollup behaviour is preserved byte-for-byte until task 3 lands.; Updated the two pre-existing derive_rollup unit tests in tests/brain_state.rs to the new 5-arg signature (necessary since the function they test changed signature, not scope creep into other tasks) and renamed derive_rollup_skips_brain_files to derive_rollup_stubs_when_only_a_brain_file_matches_the_slug to reflect the new stub semantics.; Reverted unrelated `cargo fmt` reformatting that touched crawl.rs/visualize.rs/lib.rs (pre-existing fmt/clippy debt untouched by this task) so the commit stays scoped to Task 1's files; verified via git stash that those fmt/clippy failures pre-date this change.; Used a let-chain (`if let Some(&degree) = ... && degree > 0`) rather than nested ifs to satisfy clippy::collapsible_if, since let-chains are stable in this toolchain (rustc/clippy 1.95); Left pre-existing clippy errors in okf.rs (ptr_arg) and state.rs (type_complexity) untouched since they are outside visualize.rs and not part of this task's failing checks, and cargo clippy (without --all-targets) does not surface them
+Validated: gating checks (fast tripwire)
+
+## Task 2 — PASSED (1 attempt)
+What: Added derive_brain_focus(scope, config, graph, files) -> Focus in src/brain/state.rs, computing brain-kind focus.now/next/blocked as the repo-tagged, deduped, config-ordered union of in-scope children's derive_focus output, with 4 new unit tests.
+Decisions: Repos with no loadable project-kind child contribute nothing to derive_brain_focus (mirrors derive_rollup's preserve/stub branches operating only on cached repos[] headline, not live focus — there's no tracks[] to derive from for a sourceless repo).; Dedup by (repo, id) is applied independently within each of now/next/blocked (not globally across all three), since the acceptance criteria phrase 'dedup by (repo, id), keep first' per list.; planning/3B.U-brain-rollup-tier-scoping/tasks.md already showed task 2 marked '[~]' before this attempt started (set externally by the flow orchestrator) — left untouched rather than editing to '[x]', matching task 1's commit convention of not touching tasks.md.
+Validated: gating checks (fast tripwire)
+
+## Task 3 — PASSED (1 attempt)
+What: plan_state_json now takes &BrainConfig and wires the brain arm to tier_scope_for/derive_rollup/derive_brain_focus, replacing the transitional All-scope stub; lib.rs::emit_state passes its resolved BrainConfig through.
+Decisions: Replaced the old brain_focus_untouched test with brain_focus_regenerated_as_repo_tagged_union, since brain focus is now actively derived (union) instead of left untouched — the old test's premise no longer holds.; Added a small config_with_repos test helper in tests/brain_emit.rs to build minimal BrainConfig fixtures for the four plan_state_json call sites that now require a &BrainConfig argument.
+Validated: gating checks (fast tripwire)
+
+## Task 4 — PASSED (1 attempt)
+What: Added 8 end-to-end integration tests (mod task4_tier_scoping_integration in tests/brain_emit.rs) covering emit_state's tier-scoped rollup (derived/preserved/stub branches, all repos retained), the malformed-child-JSON preserve regression, repo-tagged brain-focus union, HQ-shaped all-tier aggregation, and write/write fixed-point idempotence.
+Decisions: Reused the existing task4_emit_state module's fixture-helper pattern (temp_dir/write_file/write_json) but placed new tests in a separate module task4_tier_scoping_integration since task4_emit_state was already taken by the prior MV.3B.T block's Task 4 tests in the same file.; Built a single 'core fixture' (5 core-tier repos + 1 portfolio-tier control repo) reused across 6 of the 8 tests via shared helper functions, to keep the ≥5-repo/only-2-loadable acceptance criterion exercised consistently.; Asserted zero *unexpected* errors (excluding E_STATE_MALFORMED_JSON, which is the expected regression signal for repo-d) rather than zero errors overall in the core-rollup test, since the fixture intentionally includes one malformed child.
+Validated: gating checks (fast tripwire)
+
+## Task 5 — PASSED (1 attempt)
+What: Documented the tier-scoped/non-destructive brain rollup and repo-tagged brain-focus union in state-schema.md, docs/cli.md, docs/architecture.md, and a new append-only decision D7, with index updates.
+Decisions: core/planning/state-schema.md lives in a separate git repo (core) from the mev worktree, so it was committed there separately (commit aacf3e9) rather than in the mev branch commit.; New decision file is D7 (next sequential slot after D6) — planning/decisions/D7-brain-rollup-tier-scoping-and-preserve.md.; Updated planning/index.md's Active Concept Folders status for 3B.U from 'Spec drafted' to 'In progress (5/6 tasks)' since this task-5 pass completes docs/schema/decision but task 6 (validation gates + carryover clear) is still pending.
+Validated: gating checks (fast tripwire)
+
+## Task 6 — PASSED (1 attempt)
+What: Ran all four harness gates (fmt/clippy/test/build) clean, confirmed a non-destructive tier-scoped dry-run of `mev emit-state` against the live company brain (only pre-existing malformed-JSON warnings for orchestrator/bastion, no repo drops), and resolved the `mev-brain-rollup-tier-scoping` carryover in core/planning/state.json.
+Decisions: Task 6 required no mev source changes — it's a pure validate+resolve task; only tasks.md marker and the brain-side state.json carryover were touched.; Initial edit to core/planning/state.json accidentally clobbered concurrent legitimate external edits to that shared file (other repos' focus/rollup entries); recovered via `git checkout` to restore the already-correct committed content (commit a081aee) rather than re-overwriting it, per an explicit system note that the external changes were intentional and should not be reverted.; Did not run `mev emit-state --write` against the live brain — task 6 only calls for a dry-run verification plus the manual carryover resolution; an actual --write pass is left for a separate deliberate step.
+Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: none
+
+## Wrap-up — PASS
+Next: MV.3.L (structural coverage: index.md ↔ dir, D17) or MV.3B.R (graph emit / Phase 3B)

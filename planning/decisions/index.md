@@ -38,6 +38,11 @@ file**, append-only — never edit a settled decision; supersede it with a new o
   Registry-driven stable `scope:doc_id` canonical node ids; corpus membership rules (docs/ +
   planning/ + root README/CLAUDE, minus skip_dirs, minus ephemeral); nodes vs leaves; extensible
   edge model; authored-only graph guarantee. Settled 2026-06-28 from live 503-file corpus pass.
+- [D7: Brain rollup tier-scoping, preserve rule, and brain-focus union](./D7-brain-rollup-tier-scoping-and-preserve.md) —
+  Brain `repos[]` rollup scopes by tier (not global) via `brain.toml`; a tier repo with no loadable
+  child `state.json` is preserved verbatim instead of silently dropped (fixes the live
+  `core`/HQ rollup corruption incident); `RepoRollup.tier` is always populated; brain `focus` is
+  derived as a repo-tagged union of in-scope children's focus.
 
 <!-- Add a row per decision as they are made. Record new ones with /log-decision-style atomic
-     files (D7, D8, …). -->
+     files (D8, D9, …). -->

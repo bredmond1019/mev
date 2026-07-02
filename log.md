@@ -17,6 +17,25 @@ timestamp: "2026-06-30T21:10:46Z"
 
 ---
 
+## 2026-07-02
+
+### MV.3B.U complete: brain rollup tier-scoping + brain-focus aggregation (6 tasks, PASS)
+
+Implemented the full Block 3B.U fix for `emit-state --write` corruption of brain-kind `state.json` files across 6 tasks (all PASS). Task 1 added `TierScope` and `tier_scope_for(brain_file, config)` — a brain file's `repo` slug is matched against `brain.toml`'s tier map (a match scopes to that single tier, no match, e.g. the HQ root, scopes to all repos) — and rewrote `derive_rollup` to iterate the in-scope config repos in config order: derive the headline where a child `state.json` loads, else **preserve** the brain file's existing `repos[]` entry verbatim (backfilling `tier`), else emit a tier-tagged empty stub; no repo is ever silently dropped, and `RepoRollup.tier` is now always populated. Task 2 added `derive_brain_focus(scope, config, graph, files)`, computing brain-kind `focus.now/next/blocked` as the repo-tagged, deduped-by-`(repo, id)`-per-list, config-ordered union of in-scope children's derived focus. Task 3 threaded `&BrainConfig` through `plan_state_json` (brain arm now calls `tier_scope_for`/`derive_rollup`/`derive_brain_focus` instead of the transitional all-scope stub from task 1) and `lib.rs::emit_state`. Task 4 added 8 end-to-end integration tests covering tier-scoped rollup (derived/preserved/stub branches, all repos retained), the malformed-child-JSON preserve regression, repo-tagged focus union, HQ all-tier aggregation, and write/re-emit fixed-point idempotence. Task 5 documented the tier-scoped/non-destructive rollup and brain-focus union in `state-schema.md` (company-brain `core` repo), `docs/cli.md`, `docs/architecture.md`, and new decision `D7-brain-rollup-tier-scoping-and-preserve.md`. Task 6 confirmed all four harness gates green, ran a non-destructive tier-scoped dry-run of `mev emit-state` against the live company brain (only pre-existing malformed-JSON warnings for orchestrator/bastion, no repo drops), and resolved the `mev-brain-rollup-tier-scoping` carryover in `core/planning/state.json`. Final review verdict: PASS (no findings). This closes the corruption risk flagged at the end of `MV.3B.T` — `mev emit-state --write` is now safe to run against brain-kind files. Next: `MV.3.L` (structural coverage) or `MV.3B.R` (graph emit / Phase 3B).
+
+```
+a7d46d1 chore: flow state — docs
+6220f95 chore: flow state — task 6 passed
+57db0ec feat: implement 3B.U-brain-rollup-tier-scoping-task6
+78b46ba chore: flow state — task 5 passed
+e4543fa feat: implement 3B.U-brain-rollup-tier-scoping-task5
+8df7c85 chore: flow state — task 4 passed
+5d612b3 feat: implement 3B.U-brain-rollup-tier-scoping-task4
+88967d0 chore: flow state — task 3 passed
+```
+
+---
+
 ## 2026-06-30
 
 ### MV.3B.Q complete: manifest emit + D5 extract-once refactor (`manifest` subcommand, 6 tasks, PASS)

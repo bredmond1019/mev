@@ -17,9 +17,10 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
+use crate::brain::config::BrainConfig;
 use crate::brain::state::{
-    Block, BlockedBy, Focus, StateFile, StateGraph, StateSource, derive_cross_repo, derive_focus,
-    derive_rollup,
+    Block, BlockedBy, Focus, StateFile, StateGraph, StateSource, derive_brain_focus,
+    derive_cross_repo, derive_focus, derive_rollup, tier_scope_for,
 };
 
 // ---------------------------------------------------------------------------
@@ -376,20 +377,19 @@ fn derived_focus_for(
 /// Plan the derived-section rewrites for every loaded `state.json`.
 ///
 /// - Leaf (`kind == "project"`): regenerate `focus` from [`derive_focus`].
-/// - Brain (`kind == "brain"`): regenerate `repos[]` and `cross_repo[]`; the brain
-///   `focus` field is left untouched (its aggregation rule is not yet settled).
+/// - Brain (`kind == "brain"`): regenerate `repos[]` (tier-scoped, non-destructive —
+///   see [`tier_scope_for`] / [`derive_rollup`]), `cross_repo[]`, and `focus`
+///   (the repo-tagged union of in-scope children's derived focus — see
+///   [`derive_brain_focus`]).
 ///
 /// An [`EmitAction`] is added only when the re-serialised derived file differs from
 /// the re-serialised original (fixed-point property — no action when already correct).
-pub fn plan_state_json(files: &[(StateSource, StateFile)], graph: &StateGraph) -> EmitPlan {
+pub fn plan_state_json(
+    files: &[(StateSource, StateFile)],
+    graph: &StateGraph,
+    config: &BrainConfig,
+) -> EmitPlan {
     let mut plan = EmitPlan::default();
-
-    // Collect leaf children for the brain rollup derivation.
-    let children: Vec<(StateSource, StateFile)> = files
-        .iter()
-        .filter(|(_, f)| f.kind == "project")
-        .cloned()
-        .collect();
 
     for (src, file) in files {
         let mut derived = file.clone();
@@ -399,9 +399,10 @@ pub fn plan_state_json(files: &[(StateSource, StateFile)], graph: &StateGraph) -
                 derived.focus = derived_focus_for(src, file, graph, files);
             }
             "brain" => {
-                derived.repos = derive_rollup(&children, graph, files);
+                let scope = tier_scope_for(file, config);
+                derived.repos = derive_rollup(&scope, config, &file.repos, graph, files);
                 derived.cross_repo = derive_cross_repo(files);
-                // brain `focus` is intentionally left untouched.
+                derived.focus = derive_brain_focus(&scope, config, graph, files);
             }
             _ => continue, // unknown kind already flagged by check_schema
         }

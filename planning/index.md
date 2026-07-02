@@ -7,7 +7,7 @@ layer: [factory]
 project: mev
 status: active
 keywords: [planning navigation, context, master plan, SDLC, concept folders]
-related: [context, status, master-plan, archive-index]
+related: [context, status, master-plan]
 ---
 
 # mev — Planning Docs
@@ -63,6 +63,8 @@ at the top; only pipeline state lives under `sdlc/`.
 | `3.K-link-integrity/` | Task spec for `MV.3.K` — `mev validate-brain --links`: markdown/`file://`/`[[wikilink]]` resolution + `.brain-moves-pending` re-check | Passed (6/6) |
 | `3.P2-state-graph-validation/` | Task spec for `MV.3.P2` — v2 state-graph validator: `depends_on` DAG + cycle detection + derived-blocked + backlog nodes + focus-drift warnings | Spec drafted |
 | `3B.T-state-table-rollup-emit/` | Task spec for `MV.3B.T` — `mev emit-state`: emit master-plan wave/dependency tables (sentinel splice) + brain `repos[]`/`cross_repo[]` rollup from the authored `tracks[]` DAG | Spec drafted |
+| `3.L-structural-coverage/` | Task spec for `MV.3.L` — `mev validate-brain --structure`: bidirectional `index.md` ↔ directory coverage (orphan files + dangling rows, D17 / Standing Rule 7) | Spec drafted |
+| `3B.U-brain-rollup-tier-scoping/` | Task spec for `MV.3B.U` — make `emit-state --write` safe for brain-kind `state.json`: tier-scope the `repos[]` rollup, preserve sourceless entries, populate `tier`, derive brain `focus` as a repo-tagged union | In progress (5/6 tasks) |
 
 ## Archived Concept Folders
 

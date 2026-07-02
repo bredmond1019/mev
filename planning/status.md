@@ -8,17 +8,17 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-06-30T21:10:46Z"
-now: "MV.3B.Q shipped — PR #9 merged, worktree cleaned. Nothing in flight. Next: MV.3.L (structural coverage) or MV.3B.R (graph emit / Phase 3B)."
+timestamp: "2026-07-02T03:25:24Z"
+now: "MV.3B.U shipped — tier-scoped, non-destructive brain rollup + brain-focus union derived; all 4 harness gates green. Next: MV.3.L (structural coverage) or MV.3B.R (graph emit / Phase 3B)."
 next: "MV.3.L (structural coverage: index.md ↔ dir, D17); MV.3B.R (graph emit / Phase 3B)"
 blocked: []
 ---
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-06-30 — `MV.3B.Q` (manifest emit) fully implemented and PASS (6 tasks). D5 extract-once refactor: `OkfFrontmatter` gains `Serialize`; `CorpusEntry` carries `Option<OkfFrontmatter>` parsed once in `crawl_corpus()` (Task 1). Collapsed `read_doc_metadata` seam: `build_graph()` reads `doc_id`/`related` from `entry.metadata`; dead code (`RawFrontmatter`, `read_doc_metadata`) removed; `links.rs` `collect_doc_ids()` similarly updated (Task 2). New `src/brain/manifest.rs` with `ManifestEntry`/`Manifest` structs and `build_manifest()` function; path-separator normalization for cross-platform JSON (Task 3). `manifest_brain()` library driver + `mev manifest <root>` CLI subcommand with `--pretty` flag; 5 integration tests in `tests/brain_manifest.rs` (Task 4). `docs/cli.md` + `docs/architecture.md` updated with manifest subcommand reference and D5 refactor notes (Task 5). All four harness gates green (Task 6). Final review verdict: PASS.
+**Last updated:** 2026-07-02 — `MV.3B.U` (brain rollup tier-scoping + brain-focus aggregation) fully implemented and PASS (6 tasks). Added `TierScope` + `tier_scope_for(brain_file, config)` and rewrote `derive_rollup` to iterate the in-scope config repos (tier-filtered, or all for HQ), deriving a headline where a child `state.json` loads, else **preserving** the brain file's existing `repos[]` entry verbatim, else emitting a tier-tagged empty stub — no repo is ever silently dropped again; `RepoRollup.tier` is now always populated (Task 1). New `derive_brain_focus(scope, config, graph, files)` computes brain-kind `focus.now/next/blocked` as the repo-tagged, deduped (by `(repo, id)`, per-list), config-ordered union of in-scope children's derived focus (Task 2). `plan_state_json` now takes `&BrainConfig` and wires the brain arm through `tier_scope_for`/`derive_rollup`/`derive_brain_focus`, replacing the transitional all-scope stub; `lib.rs::emit_state` threads its resolved `BrainConfig` through (Task 3). 8 new end-to-end integration tests cover tier-scoped rollup (derived/preserved/stub branches), the malformed-child-JSON preserve regression, repo-tagged focus union, HQ all-tier aggregation, and write/re-emit idempotence (Task 4). `state-schema.md`, `docs/cli.md`, `docs/architecture.md` updated + new decision `D7-brain-rollup-tier-scoping-and-preserve.md` (Task 5). All four harness gates green; non-destructive dry-run verified against the live company brain (no repo drops); `mev-brain-rollup-tier-scoping` carryover resolved in `core/planning/state.json` (Task 6). Final review verdict: PASS.
 
-**Current focus:** `MV.3B.Q` Done — next: `MV.3.L` (structural coverage: `index.md` ↔ dir, D17) or `MV.3B.R` (graph emit / Phase 3B); see master-plan.md for ordering
+**Current focus:** `MV.3B.U` Done — next: `MV.3.L` (structural coverage: `index.md` ↔ dir, D17) or `MV.3B.R` (graph emit / Phase 3B); see master-plan.md for ordering
 
 ---
 
@@ -27,7 +27,7 @@ blocked: []
 > Working board — keep all five queues live. **Never end a meaningful session with every queue
 > empty.** The headlines of **now / next / blocked** mirror the frontmatter scalars above.
 
-- **now** — **`MV.3B.Q` Done** (manifest emit; 6 tasks, PASS). D5 extract-once refactor lands: `OkfFrontmatter` Serialize, `CorpusEntry.metadata`, `read_doc_metadata` seam collapsed; `src/brain/manifest.rs` with `ManifestEntry`/`Manifest`/`build_manifest`; `manifest_brain()` lib driver + `mev manifest` CLI (`--pretty`); docs updated; all harness gates green. **Prior:** `MV.3B.T` (state-graph table + rollup emit; 6 tasks, PASS, 275 tests, PR merged).
+- **now** — **`MV.3B.U` Done** (brain rollup tier-scoping + brain-focus aggregation; 6 tasks, PASS). `TierScope`/`tier_scope_for` + tier-scoped, non-destructive `derive_rollup` (derive/preserve/stub, `RepoRollup.tier` always populated); `derive_brain_focus` repo-tagged union; `plan_state_json`/`emit_state` thread `&BrainConfig`; 8 new integration tests; docs + `D7`; carryover resolved; live-brain dry-run verified no repo drops. **Prior:** `MV.3B.Q` (manifest emit; 6 tasks, PASS, PR #9 merged).
 - **next** — **`MV.3.L`** (structural coverage: `index.md` ↔ dir, D17) or **`MV.3B.R`** (graph emit / Phase 3B). Coordinate brain-side v2 `state.json` re-seed (5 files) for live `--state` validation. See master-plan.md for ordering.
 - **blocked** — nothing hard-blocked; live `mev validate-brain --state` on brain will fail until the brain-side v2 `state.json` re-seed lands — that is a brain-side coordination step, not a mev blocker.
 - **improve** — Phase 3B (D4): **`MV.3B.R`** graph emit → Postgres edges table + structural query surface (bastion/MCP); **`MV.3B.S`** graph-aware RAG (orchestrator). `index_brain.py` can now consume `mev manifest` → kill double crawl. Companion: register tier units + bare-bloat `skip_dirs` in `brain.toml`.
@@ -95,6 +95,7 @@ blocked: []
 | MV.3B.R | Graph emit + structural query surface | Not started | mev emits graph JSON; orchestrator loads Postgres edges table beside `brain_documents`; bastion/MCP structural queries (free/exact). Depends on `MV.3.J`. |
 | MV.3B.S | Graph-aware RAG (orchestrator) | Not started | Retrieval traverses edges to expand/rerank semantic hits + query router. Orchestrator-side; mev's edge model is the contract. |
 | MV.3B.T | Table/rollup emit (from v2 state graph) | Done | 6 tasks, PASS, 275 tests. `derive_focus`/`derive_rollup`/`derive_cross_repo` single-sourced; `emit.rs` (`wave_order`, `render_wave_table`, `splice_generated`); `plan_state_json`/`plan_master_plan_tables`/`apply_plan`; `emit_state` driver + `emit-state` CLI (`--write`). |
+| MV.3B.U | Brain rollup tier-scoping + brain-focus aggregation | Done | 6 tasks, PASS. `TierScope`/`tier_scope_for` + tier-scoped, non-destructive `derive_rollup` (derive/preserve/stub branches, `RepoRollup.tier` always populated); `derive_brain_focus` repo-tagged union; `plan_state_json`/`emit_state` thread `&BrainConfig` through; 8 new integration tests; docs + `D7` decision; carryover resolved. |
 
 ---
 

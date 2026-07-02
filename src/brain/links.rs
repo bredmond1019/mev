@@ -126,7 +126,43 @@ pub fn extract_links(contents: &str) -> Vec<LinkRef> {
     let len = bytes.len();
     let mut i = 0;
 
+    let mut in_fenced_code = false;
+    let mut in_inline_code = false;
+
     while i < len {
+        // Fenced code block toggle (```)
+        if i + 2 < len && bytes[i] == b'`' && bytes[i + 1] == b'`' && bytes[i + 2] == b'`' {
+            in_fenced_code = !in_fenced_code;
+            in_inline_code = false;
+            i += 3;
+            continue;
+        }
+
+        // Inline code toggle (`)
+        if !in_fenced_code && bytes[i] == b'`' {
+            in_inline_code = !in_inline_code;
+            i += 1;
+            continue;
+        }
+
+        // Skip link matching if inside any code block
+        if in_fenced_code || in_inline_code {
+            let ch_width = {
+                let b = bytes[i];
+                if b < 0x80 {
+                    1
+                } else if b < 0xE0 {
+                    2
+                } else if b < 0xF0 {
+                    3
+                } else {
+                    4
+                }
+            };
+            i += ch_width;
+            continue;
+        }
+
         // Try wikilink first: [[...]]
         if i + 3 < len && bytes[i] == b'[' && bytes[i + 1] == b'[' {
             // Look for closing ]]
