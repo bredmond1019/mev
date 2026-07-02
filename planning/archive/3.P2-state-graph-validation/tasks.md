@@ -5,7 +5,7 @@ description: Decomposed task spec for the v2 state-graph validator — depends_o
 doc_id: 3-P2-state-graph-validation-tasks
 layer: [factory, brain]
 project: mev
-status: active
+status: archived
 keywords: [state.json, depends_on, DAG, cycle detection, backlog, derivation drift, validate-brain, Phase 3]
 related: [master-plan, status, 3-P-state-integrity-tasks, state-json-schema]
 ---

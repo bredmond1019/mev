@@ -5,7 +5,7 @@ description: Task spec for the bidirectional index.md coverage check — orphan 
 doc_id: 3L-structural-coverage-tasks
 layer: [factory]
 project: mev
-status: active
+status: archived
 keywords: [structural coverage, index.md, orphan detection, dangling row, D17, validate-brain]
 related: [master-plan, status, D17-index-md-convention]
 ---

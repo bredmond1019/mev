@@ -5,7 +5,7 @@ description: Atomic sub-step breakdown of MV.3.P2 task 1 — migrate src/brain/s
 doc_id: 3-P2-task1-breakdown
 layer: [factory, brain]
 project: mev
-status: active
+status: archived
 keywords: [breakdown, state.json, serde, depends_on, id rename, backlog, MV.3.P2]
 related: [3-P2-state-graph-validation-tasks, state-json-schema]
 ---

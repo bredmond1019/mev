@@ -5,7 +5,7 @@ description: Task spec for emitting the scope:doc_id knowledge graph as a JSON a
 doc_id: 3BR-graph-emit-tasks
 layer: [factory]
 project: mev
-status: active
+status: archived
 keywords: [graph emit, knowledge graph, emit-graph, nodes, edges, structural query, D4]
 related: [master-plan, status, D4-corpus-engine-and-knowledge-graph]
 ---

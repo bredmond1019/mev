@@ -5,7 +5,7 @@ description: Decomposed task spec for the link-integrity validator — markdown 
 doc_id: 3-K-link-integrity-tasks
 layer: [factory, brain]
 project: mev
-status: active
+status: archived
 keywords: [link integrity, dead links, wikilinks, brain-moves-pending, validate-brain, Phase 3]
 related: [master-plan, status, 3-P-state-integrity-tasks]
 ---

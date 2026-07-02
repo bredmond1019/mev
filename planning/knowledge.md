@@ -64,8 +64,35 @@ _Architecture digest — the main components and how they fit together._
 - **Graph artifact: build + check separation.** `build_graph(corpus, config) -> GraphArtifact` builds an owned `GraphArtifact` wrapping `Graph{nodes: Vec<Node>, edges: Vec<Edge>}` plus lookup structures (`node_map`, `leaf_keys`). `check_graph(&artifact) -> Vec<Diagnostic>` consumes the built artifact — it does **not** re-walk the corpus. All types derive `serde::Serialize` so the validated graph is the emittable graph (D4 — Phase 3B Block R loads it into Postgres). Edge model: `Edge{from: String, to_ref: String, kind: EdgeKind::Related}` designed for typed-edge extension (no reshape needed to add `supersedes`/`depends-on`/`parent`).
   source: planning/archive/2.J-graph-integrity/tasks.md + worklog.md · date: 2026-06-29 · supersedes: — · freshness: 2026-06-29
 
-- **`read_doc_metadata` seam (D5 forward-compat).** In `src/brain/graph.rs`, a single helper `read_doc_metadata(entry) -> DocMeta{doc_id, related}` is the **only** site that reads inline Markdown frontmatter (`extract_frontmatter + OkfFrontmatter`) for graph construction. All of `build_graph`/`check_graph` route through it. This is the swap point for a future foreign-format extractor (D5 heterogeneous ingest) — one function swap rather than a refactor.
+- **`read_doc_metadata` seam (D5 forward-compat). — SUPERSEDED by the D5 extract-once entry below (Block 3B.Q removed this seam).** In `src/brain/graph.rs`, a single helper `read_doc_metadata(entry) -> DocMeta{doc_id, related}` was the **only** site that read inline Markdown frontmatter (`extract_frontmatter + OkfFrontmatter`) for graph construction. All of `build_graph`/`check_graph` routed through it.
   source: planning/archive/2.J-graph-integrity/tasks.md · date: 2026-06-29 · supersedes: — · freshness: 2026-06-29
+
+- **Frontmatter is parsed exactly once per file — D5 extract-once.** Frontmatter is read a single time, during `crawl_corpus()`, and surfaced on `CorpusEntry.metadata` (`Option<OkfFrontmatter>`); I/O or YAML errors degrade to `None`. `build_graph`, `collect_doc_ids` (links.rs), and `build_manifest` all read `doc_id`/`related`/OKF fields from `entry.metadata` — no site re-reads frontmatter. The old `read_doc_metadata()` seam and its `RawFrontmatter` helper in `graph.rs` were **removed**. `OkfFrontmatter` now derives `Clone + Serialize` (was `Deserialize`-only) — `Serialize` so the manifest can emit metadata, `Clone` because `CorpusEntry` derives `Clone`.
+  source: planning/archive/3B.Q-manifest-emit/worklog.md · date: 2026-06-30 · supersedes: `read_doc_metadata` seam entry above · freshness: 2026-07-02
+
+- **Manifest emit (`src/brain/manifest.rs`).** `build_manifest(root, corpus) -> Manifest` maps each `CorpusEntry` to a `ManifestEntry` (rel, scope, doc_id, doc_type, title, description, layer, project, status, keywords). Exposed via `mev::manifest_brain(root)` and the `mev manifest <root>` CLI (`--pretty`; compact JSON default). Output **is** JSON — no `--json` envelope. `manifest_brain()` discards crawl diagnostics (validate_brain owns diagnostics) and returns `Err` only on hard config failure.
+  source: planning/archive/3B.Q-manifest-emit/worklog.md · date: 2026-06-30 · supersedes: — · freshness: 2026-07-02
+
+- **Graph emit (`src/brain/graph_emit.rs`).** `build_graph_export(root, &GraphArtifact) -> GraphExport{version, root, nodes, edges, leaves}` reuses `Node`/`Edge` from `graph.rs` and sorts `leaves` for deterministic output; `graph_brain(root)` is the library driver (mirrors `manifest_brain`); `mev emit-graph [--pretty]` is the CLI. Distinct from the HTML-emitting `generate-graph` subcommand. All types `Serialize` so the validated graph is the emittable graph (D4 pure-compiler).
+  source: planning/archive/3B.R-graph-emit/tasks.md · date: 2026-07-01 · supersedes: — · freshness: 2026-07-02
+
+- **Link path resolution: lexical, never `canonicalize()`.** `normalize_path` resolves link/moved-reference paths by walking components lexically, so it works on paths that no longer exist on disk — the whole point of `.brain-moves-pending` is matching deleted/moved targets, which `canonicalize()` would fail on.
+  source: planning/archive/3.K-link-integrity/worklog.md · date: 2026-06-30 · supersedes: — · freshness: 2026-07-02
+
+- **`FileUri` vs `Markdown` link resolution differ.** In both `links.rs` and `structure.rs`, `file://` link targets resolve as absolute paths (strip the scheme); `Markdown` `[text](path)` links resolve relative to the containing file's directory. In `structure.rs`, `index.md` entries are identified by `entry.path.file_name() == Some("index.md")`, not by stem.
+  source: planning/archive/3.L-structural-coverage/sdlc/worklog.md · date: 2026-07-02 · supersedes: — · freshness: 2026-07-02
+
+- **State files are discovered by absolute path off the HQ root, NOT via the corpus crawl.** `planning/state.json` files live inside gitignored, nested-git sub-repos that the corpus crawl's nested-git pruning makes invisible, so discovery follows the sync pattern: HQ-root + each tier sub-brain's `planning/state.json` (brain files), plus each `brain.toml` `[[repos]]` `path`/`planning/state.json` (leaf files). Tier sub-brain state files are found by loading the HQ `state.json` and reading its `tiers[].rollup` paths — deliberately not by adding a `tiers` section to `brain.toml` (keeps tier topology in the state graph, not duplicated in config).
+  source: planning/archive/3.P-state-integrity/tasks.md · date: 2026-06-29 · supersedes: — · freshness: 2026-07-02
+
+- **v2 state schema — the authoritative work-block DAG.** The DAG lives in `tracks[].blocks[].depends_on[]` (reusing the `BlockedBy` enum: `{type:block,repo,id,what?}` | `{type:external,what}`). `type:block` entries become graph edges (`from`=owning `repo:id`, `to`=`entry.repo:entry.id`); `type:external` entries are leaves, never edges/nodes. `focus.blocked_by[]` is **no longer** an edge source in v2 — focus/rollup are derived views. Authored block `status` ∈ `{open,in_progress,closed}`; `blocked` is derived, never authored. `wave` (int) is the execution-order rank orthogonal to track grouping; `origin:{type:backlog,slug}` marks promoted blocks. HQ-only `backlog[]` nodes key on `slug`, status ∈ `{idea,ready,promoted}`, carry their own `depends_on[]` + optional `block` promotion pointer.
+  source: planning/archive/3.P2-state-graph-validation/tasks.md · date: 2026-06-30 · supersedes: v1 `state.json` model (Block 3.P) · freshness: 2026-07-02
+
+- **`ready_order` / `detect_cycles` (in `src/brain/state.rs`).** `ready_order(graph, files)` is a standalone reusable topo/readiness function — a block is *ready* iff every `type:block` dep is `closed` AND it has zero `type:external` deps; ready+`open` blocks order by `wave`, tiebreak track order then array order, with `wave=None` treated as `i64::MAX` (last). Built standalone (not buried in a check) because `emit-state` (3B.T) serializes this exact ordering. `detect_cycles` (DFS back-edge → `E_STATE_CYCLE` naming the path) walks only `BlockedBy` edges; `CrossRepo` edges are excluded from the DAG.
+  source: planning/archive/3.P2-state-graph-validation/tasks.md · date: 2026-06-30 · supersedes: — · freshness: 2026-07-02
+
+- **Derivation is single-sourced across validator and emitter.** `derive_focus` is the one derivation shared by both the validator (`check_focus_drift` delegates to it, then set-compares in place) and the emitter (`plan_state_json`), so the drift check and the emit can never disagree; same pattern for `derive_rollup`/`derive_cross_repo`. `emit-state --write` is by construction the fixed point of the drift check (run it, then `validate-brain --state` yields zero `W_STATE_FOCUS_DRIFT`/`W_STATE_ROLLUP_DRIFT`). Never reimplement derivation inline in emit.
+  source: planning/archive/3B.T-state-table-rollup-emit/tasks.md · date: 2026-06-30 · supersedes: — · freshness: 2026-07-02
 
 - **`validate_brain_sync` / `--sync` watermark check.** `validate_brain_sync(root) -> anyhow::Result<Report>` runs the normal OKF schema pass plus `check_sync(root, &config)` per `[[repos]]` entry. Source watermark = `timestamp` in `status_file`; cache watermark = `synced_from` in `cache_doc`; both paths from `brain.toml` `[[repos]]`, resolved relative to HQ root. Watermarks parsed strictly as RFC3339 (`DateTime::parse_from_rfc3339`); date-only strings (`"2026-06-27"`) are rejected as `E_SYNC_WATERMARK_MALFORMED`. CLI flag: `--sync` on `validate-brain`.
   source: planning/archive/block-n-sync-watermark/tasks.md · date: 2026-06-28 · supersedes: — · freshness: 2026-06-28
@@ -103,6 +130,27 @@ _Naming, patterns, and standing choices specific to this project._
 
 - **Phase sequence.** Phase 1 = learn-ai content validation (frontmatter, pair existence, anchor-slice). Phase 2 = Brain OKF validation (`validate-brain` + `brain.toml` config). Phase 3+ = graph/link/structural integrity checks. Compile and watch-mode deferred to Phase 3+.
   source: planning/decisions/D2-scope-and-sequence.md + log.md · date: 2026-06-18 · supersedes: — · freshness: 2026-06-27
+
+- **`validate-brain` flag dispatch precedence: `--links > --structure > --state > --graph > --sync > default`.** The `ValidateBrain` subcommand runs exactly one check mode via a mutually-exclusive `else if` ladder (documented in the `--structure` flag doc comment in `src/main.rs`); flags do **not** compose. New single-check flags are prepended at the top of the ladder rather than appended.
+  source: planning/archive/3.L-structural-coverage/sdlc/worklog.md · date: 2026-07-02 · supersedes: — · freshness: 2026-07-02
+
+- **Wikilinks are scope-agnostic bare `doc_id`s — unlike `related:` edges (`scope:doc_id`).** `[[name]]` matches the bare authored `doc_id` set (matching memory-doc usage). Consequently WikiLink targets are excluded from `.brain-moves-pending` path scanning — only `Markdown` and `FileUri` links are path-resolved against moved paths.
+  source: planning/archive/3.K-link-integrity/worklog.md · date: 2026-06-30 · supersedes: — · freshness: 2026-07-02
+
+- **`ManifestEntry` field-naming + path portability.** The OKF `type` field is stored as Rust field `doc_type` with `#[serde(rename = "doc_type")]` — avoids the `type` keyword while keeping `doc_type` in JSON (no hidden rename). `rel` paths are normalized to forward slashes via `replace(MAIN_SEPARATOR, '/')` for cross-platform JSON portability.
+  source: planning/archive/3B.Q-manifest-emit/worklog.md · date: 2026-06-30 · supersedes: — · freshness: 2026-07-02
+
+- **Generated views are spliced between sentinel comments** `<!-- BEGIN generated:<marker> -->` … `<!-- END generated:<marker> -->` (e.g. marker `wave-table` in `master-plan.md`). `splice_generated` replaces only the text between them, preserves every non-sentinel line verbatim, is idempotent, and preserves the original's trailing-newline behaviour. Missing/unbalanced sentinels → `EmitError::MissingSentinel`, surfaced as a soft `W_EMIT_NO_SENTINEL` warning — never invent sentinels into arbitrary prose.
+  source: planning/archive/3B.T-state-table-rollup-emit/tasks.md · date: 2026-06-30 · supersedes: — · freshness: 2026-07-02
+
+- **`Diagnostic` has only `error`/`warning` severities — no info.** Info-flavoured emit codes (`I_EMIT_WROTE`, `W_EMIT_DRY_RUN`) are therefore Warning severity so they surface in the human + `--json` reporter without failing the exit code; only `E_EMIT_WRITE_FAILED` (real IO failure) is Error severity.
+  source: planning/archive/3B.T-state-table-rollup-emit/breakdown.md · date: 2026-06-30 · supersedes: — · freshness: 2026-07-02
+
+- **v2 state-graph diagnostic codes** (in `validate_brain_state`): `E_STATE_CYCLE` (depends_on cycle, exit 1), `E_STATE_AUTHORED_BLOCKED` (track block authored `status:"blocked"`), `E_STATE_STATUS_INCONSISTENT` (`closed` block with a non-`closed` `type:block` dep), `E_STATE_DANGLING_PROMOTION` (`promoted` backlog node whose `block` pointer resolves to nothing), `W_STATE_FOCUS_DRIFT` (stored `focus` disagrees with derivation — warning, exit 0). Backlog dangling deps reuse `E_STATE_DANGLING_BLOCKED_BY`; bad backlog status reuses `E_STATE_SCHEMA_BAD_STATUS`.
+  source: planning/archive/3.P2-state-graph-validation/tasks.md · date: 2026-06-30 · supersedes: — · freshness: 2026-07-02
+
+- **`state-schema.md` lives in the `core` repo, not the `mev` worktree.** Schema/doc edits there are committed in `core` separately — they cannot ride along in a mev branch commit. Any mev block whose spec touches `state-schema.md` produces a cross-repo commit split; account for it in review/close-out rather than treating it as missing work.
+  source: planning/archive/3B.U-brain-rollup-tier-scoping/tasks.md · date: 2026-07-02 · supersedes: — · freshness: 2026-07-02
 
 ## Gotchas
 
