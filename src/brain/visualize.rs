@@ -33,7 +33,10 @@ pub fn generate_graph_visual(manifest: &Manifest, out_dir: &Path) -> anyhow::Res
                     } else {
                         format!("{}:{}", entry.scope, r)
                     };
-                    edges.push(VisEdge { from: node_id.clone(), to: target.clone() });
+                    edges.push(VisEdge {
+                        from: node_id.clone(),
+                        to: target.clone(),
+                    });
                     *node_degrees.entry(node_id.clone()).or_insert(0) += 1;
                     *node_degrees.entry(target.clone()).or_insert(0) += 1;
                 }
@@ -45,37 +48,44 @@ pub fn generate_graph_visual(manifest: &Manifest, out_dir: &Path) -> anyhow::Res
     for entry in &manifest.entries {
         if let Some(doc_id) = &entry.doc_id {
             let node_id = format!("{}:{}", entry.scope, doc_id);
-            if let Some(&degree) = node_degrees.get(&node_id) {
-                if degree > 0 {
-                    let raw_title = entry.title.clone().unwrap_or_else(|| doc_id.clone());
-                    let short_label = if raw_title.chars().count() <= 30 {
-                        raw_title.clone()
-                    } else {
-                        let truncated: String = raw_title.chars().take(27).collect();
-                        format!("{}...", truncated)
-                    };
-                    let doc_type = entry.doc_type.clone().unwrap_or_else(|| "Document".to_string());
-                    
-                    vis_nodes.push(VisNode {
-                        id: node_id.clone(),
-                        label: short_label,
-                        group: entry.scope.clone(),
-                        value: degree,
-                        title: format!("<div style='padding:5px; max-width: 300px;'><b>{}</b><br><i>{}</i><br>ID: {}</div>", raw_title, doc_type, node_id),
-                    });
-                    
-                    // Remove from node_degrees so we can process implicit targets
-                    node_degrees.remove(&node_id);
-                }
+            if let Some(&degree) = node_degrees.get(&node_id)
+                && degree > 0
+            {
+                let raw_title = entry.title.clone().unwrap_or_else(|| doc_id.clone());
+                let short_label = if raw_title.chars().count() <= 30 {
+                    raw_title.clone()
+                } else {
+                    let truncated: String = raw_title.chars().take(27).collect();
+                    format!("{}...", truncated)
+                };
+                let doc_type = entry
+                    .doc_type
+                    .clone()
+                    .unwrap_or_else(|| "Document".to_string());
+
+                vis_nodes.push(VisNode {
+                    id: node_id.clone(),
+                    label: short_label,
+                    group: entry.scope.clone(),
+                    value: degree,
+                    title: format!("<div style='padding:5px; max-width: 300px;'><b>{}</b><br><i>{}</i><br>ID: {}</div>", raw_title, doc_type, node_id),
+                });
+
+                // Remove from node_degrees so we can process implicit targets
+                node_degrees.remove(&node_id);
             }
         }
     }
-    
+
     // Add missing target nodes
     for (node_id, degree) in node_degrees {
         if degree > 0 {
             let scope = node_id.split(':').next().unwrap_or("unknown").to_string();
-            let label = node_id.split(':').last().unwrap_or(&node_id).to_string();
+            let label = node_id
+                .split(':')
+                .next_back()
+                .unwrap_or(&node_id)
+                .to_string();
             vis_nodes.push(VisNode {
                 id: node_id.clone(),
                 label: label.clone(),
@@ -91,7 +101,8 @@ pub fn generate_graph_visual(manifest: &Manifest, out_dir: &Path) -> anyhow::Res
     let node_count = vis_nodes.len();
     let edge_count = edges.len();
 
-    let md_content = format!(r#"---
+    let md_content = format!(
+        r#"---
 type: Reference
 title: Brain Knowledge Graph Visual
 description: "Interactive visualization of the scope:doc_id nodes and their related: edges across the portfolio."
@@ -106,9 +117,11 @@ status: active
 The knowledge graph is too large to render via Markdown ({node_count} nodes, {edge_count} edges). Instead, an **interactive HTML graph** has been generated.
 
 Open the `graph.html` file in this directory in any web browser to explore the graph. You can zoom, pan, and drag nodes to see their relationships.
-"#);
+"#
+    );
 
-    let html_content = format!(r#"<!DOCTYPE html>
+    let html_content = format!(
+        r#"<!DOCTYPE html>
 <html>
 <head>
     <title>Brain Knowledge Graph</title>
@@ -238,13 +251,16 @@ Open the `graph.html` file in this directory in any web browser to explore the g
     }}
 </script>
 </body>
-</html>"#);
+</html>"#
+    );
 
     std::fs::create_dir_all(out_dir)?;
     std::fs::write(out_dir.join("graph.md"), md_content)?;
     std::fs::write(out_dir.join("graph.html"), html_content)?;
-    
-    println!("Graph successfully generated with {node_count} connected nodes and {edge_count} edges.");
+
+    println!(
+        "Graph successfully generated with {node_count} connected nodes and {edge_count} edges."
+    );
     println!("-> {}", out_dir.join("graph.md").display());
     println!("-> {}", out_dir.join("graph.html").display());
     Ok(())
