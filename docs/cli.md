@@ -55,12 +55,12 @@ mev --json validate
 
 ---
 
-### `validate-brain [--sync] [--graph] [--state] [--links] [path]`
+### `validate-brain [--sync] [--graph] [--state] [--links] [--structure] [path]`
 
-Validate the Bastion Brain repo for OKF frontmatter compliance, and optionally check cross-repo sync watermark integrity, global knowledge-graph integrity, state.json schema and block-dependency graph integrity, or link integrity.
+Validate the Bastion Brain repo for OKF frontmatter compliance, and optionally check cross-repo sync watermark integrity, global knowledge-graph integrity, state.json schema and block-dependency graph integrity, link integrity, or structural `index.md` coverage.
 
 ```bash
-mev validate-brain [--sync] [--graph] [--state] [--links] [path]
+mev validate-brain [--sync] [--graph] [--state] [--links] [--structure] [path]
 ```
 
 | Argument / Flag | Default | Description |
@@ -69,7 +69,8 @@ mev validate-brain [--sync] [--graph] [--state] [--links] [path]
 | `--sync` | off | Also run the cross-repo sync watermark check (see below) |
 | `--graph` | off | Also run the global `scope:doc_id` knowledge-graph integrity check (see below). Takes precedence over `--sync` when both flags are present — `--graph` is a superset. |
 | `--state` | off | Also run the `planning/state.json` schema and cross-repo block-dependency graph integrity check (see below). Takes precedence over `--graph` and `--sync` in the dispatch chain. |
-| `--links` | off | Also run the link-integrity pass (see below) — flag dead markdown links, broken `file://` URIs, dangling `[[wikilinks]]`, and references to moved/deleted paths. Takes precedence over `--state`, `--graph`, and `--sync` in the dispatch chain. |
+| `--structure` | off | Also run the bidirectional `index.md` ↔ directory structural coverage check (see below) — flag corpus files not referenced by their directory's `index.md`, and `index.md` rows pointing at a nonexistent target. Takes precedence over `--state`, `--graph`, and `--sync` in the dispatch chain. |
+| `--links` | off | Also run the link-integrity pass (see below) — flag dead markdown links, broken `file://` URIs, dangling `[[wikilinks]]`, and references to moved/deleted paths. Takes the highest precedence overall — over `--structure`, `--state`, `--graph`, and `--sync` in the dispatch chain. |
 
 Resolves `brain.toml` by walking up from `path`. If no `brain.toml` is found, a fatal `Error`-severity diagnostic with locator `E_CONFIG_NOT_FOUND` is emitted and the process exits 1.
 
@@ -116,7 +117,7 @@ Graph errors (`E_GRAPH_DUPLICATE_DOC_ID`, dangling `related:`) cause exit 1. The
 
 When `--state` is passed, `mev` runs the full OKF schema pass first, then appends the state-validation pipeline:
 
-1. **Discovery** — finds all `planning/state.json` files: the HQ brain state, each tier sub-brain state (via `tiers[].rollup` in the HQ state), and each leaf project state (via `[[repos]]` in `brain.toml`). Missing files emit `W_STATE_FILE_MISSING`.
+1. **Discovery** — finds all `planning/state.json` files: the HQ brain state, each tier sub-brain state (via `tiers[].rollup` in the HQ state), and each leaf project state (via `[[repos]]` in `brain.toml`). A leaf repo whose `brain.toml` `tier` is `"portfolio"` is expected as `kind:"portfolio"` instead of `kind:"project"` — these are terminal repos (published to GitHub, no further planning state), expected to carry a non-empty `note` instead of `tracks[]`, and are skipped entirely by `emit-state`'s wave-table splice (no `master-plan.md` expected). Missing files emit `W_STATE_FILE_MISSING`.
 2. **Load** — deserializes each discovered file. Unparseable files emit `E_STATE_MALFORMED_JSON`.
 3. **Schema ring** — checks field validity within each file (kind membership, status enum values, `blocked_by` well-formedness, kind-appropriate sections). In v2 schema files: validates `depends_on[]` entry well-formedness on track blocks, rejects authored `status:"blocked"` (derived, not authored), and validates `backlog[].status` membership.
 4. **Graph** — builds the cross-repo block-dependency graph from all loaded files (v2: DAG edges sourced from `tracks[].blocks[].depends_on[]`) and checks it for integrity violations, including cycle detection over the `depends_on` DAG and backlog-node integrity.
@@ -124,13 +125,13 @@ When `--state` is passed, `mev` runs the full OKF schema pass first, then append
 6. **Rollup** — checks that brain `repos[]` headline entries (now/next) match their children's actual `focus` values.
 7. **Focus drift** — recomputes the expected `focus` from authored `tracks[]` and warns when the stored `focus` disagrees (warning-only; exit code is unchanged).
 
-`--state` takes precedence over `--graph` and `--sync` in the dispatch chain — when `--state` is present, neither `--graph` nor `--sync` are separately invoked. `--links` takes the highest precedence overall; when `--links` is present, `--state`, `--graph`, and `--sync` are not separately invoked.
+`--state` takes precedence over `--graph` and `--sync` in the dispatch chain — when `--state` is present, neither `--graph` nor `--sync` are separately invoked. `--structure` takes precedence over `--state`, `--graph`, and `--sync`. `--links` takes the highest precedence overall; when `--links` is present, `--structure`, `--state`, `--graph`, and `--sync` are not separately invoked.
 
 | Locator | Severity | Condition |
 |---|---|---|
 | `W_STATE_FILE_MISSING` | Warning | A registered repo has no `planning/state.json` |
 | `E_STATE_MALFORMED_JSON` | Error | A state.json file is not valid JSON or does not match the expected schema |
-| `E_STATE_SCHEMA_BAD_KIND` | Error | `kind` is not one of `project` or `brain` |
+| `E_STATE_SCHEMA_BAD_KIND` | Error | `kind` is not one of `project`, `brain`, or `portfolio` |
 | `E_STATE_SCHEMA_MISSING_FIELD` | Error/Warning | A required field is absent or a kind-appropriate section is missing |
 | `E_STATE_SCHEMA_BAD_STATUS` | Error | A `status` value is not in the allowed enum |
 | `E_STATE_SCHEMA_BAD_BLOCKED_BY` | Error | A `blocked_by[]` entry has an unknown or malformed `type` |
@@ -145,6 +146,26 @@ When `--state` is passed, `mev` runs the full OKF schema pass first, then append
 | `E_STATE_STATUS_INCONSISTENT` | Error | A `closed` block has a `type:block` `depends_on` target that is not `closed` |
 | `E_STATE_DANGLING_PROMOTION` | Error | A `status:"promoted"` backlog node's `block` pointer resolves to no `tracks[]` node |
 | `W_STATE_FOCUS_DRIFT` | Warning | Stored `focus` disagrees with the derivation from `tracks[]`; exit code is unchanged |
+
+#### `--structure` — structural `index.md` coverage check
+
+When `--structure` is passed, `mev` runs the full OKF schema pass first, then appends the structural coverage pass (D17 / CLAUDE.md Standing Rule 7):
+
+1. Crawls the corpus (same registry-driven walk as the OKF pass).
+2. Locates every directory's `index.md` corpus member and its direct-child corpus entries (siblings of that `index.md`; subdirectories are excluded — they are covered by their own `index.md`).
+3. Extracts every markdown `[text](path)` link and `file://` URI from each `index.md` and resolves it against that `index.md`'s directory.
+4. Checks both directions: every direct-child file must be referenced by the `index.md` (orphan detection), and every resolved `index.md` link that lands inside the corpus root must exist on disk (dangling-row detection).
+
+Directories with no `index.md` corpus member are skipped entirely — no coverage obligation, so no orphan diagnostics. `[[wikilink]]` targets, external (`http(s)://`, `mailto:`, etc.) links, and links that resolve outside the corpus root are ignored (owned elsewhere / out of scope for this check).
+
+| Locator | Severity | Condition |
+|---|---|---|
+| `E_STRUCT_ORPHAN_FILE` | Error | A corpus file in a directory is not referenced by that directory's `index.md`. Located at the orphan file. |
+| `E_STRUCT_DANGLING_ROW` | Error | An `index.md` row (markdown or `file://` link) resolves to a target inside the corpus root that does not exist on disk. Located at the `index.md`. |
+
+Any error-severity diagnostic causes exit 1.
+
+`--structure` takes precedence over `--state`, `--graph`, and `--sync` in the dispatch chain — when `--structure` is present, none of those are separately invoked. `--links` takes precedence over `--structure`.
 
 #### `--links` — link-integrity pass
 
@@ -212,6 +233,15 @@ mev validate-brain --links ~/Dev/agentic-portfolio
 
 # Machine-readable output including link diagnostics
 mev --json validate-brain --links ~/Dev/agentic-portfolio
+
+# OKF pass + structural index.md coverage check
+mev validate-brain --structure
+
+# Explicit path with structural coverage check
+mev validate-brain --structure ~/Dev/agentic-portfolio
+
+# Machine-readable output including structural diagnostics
+mev --json validate-brain --structure ~/Dev/agentic-portfolio
 ```
 
 ---
@@ -372,6 +402,7 @@ mev emit-state [--write] [path]
   - `repos[]` is **non-destructive**: for each in-scope repo, if a loadable child `state.json` exists, its headline is derived as before (`RepoRollup.tier` populated from config); if not, but the brain file already carries a `repos[]` entry for that slug, the entry is **preserved verbatim** (with `tier` backfilled); only when neither exists is a tier-tagged empty stub emitted. A malformed or not-yet-authored child `state.json` can therefore never silently drop a repo out of the rollup.
   - `focus.now/next/blocked` is derived as the **repo-tagged union** of the in-scope children's own derived `focus` (each block carries its source `repo`), in config-repo order then within-child order, deduplicated by `(repo, id)`. Repos with no loadable child contribute nothing to `focus` (they still surface in `repos[]` via the preserve/stub branch).
 - **`master-plan.md` wave tables**: splices a rendered wave/dependency Markdown table between the `<!-- BEGIN generated:wave-table -->` and `<!-- END generated:wave-table -->` sentinels. All narrative lines outside the sentinels are preserved verbatim. Re-running the emit is idempotent — if the splice produces no change, no `EmitAction` is recorded.
+- **Portfolio `state.json`** (`kind == "portfolio"`): not regenerated at all (no `focus` to derive — these are terminal repos), and skipped entirely by the wave-table splice pass — no `master-plan.md` is expected, so no `W_EMIT_NO_SENTINEL` is raised for these repos.
 
 #### Sentinel contract
 

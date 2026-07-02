@@ -466,10 +466,17 @@ pub fn plan_state_json(
 /// and adds an [`EmitAction`].  A missing file or missing sentinels produces a
 /// [`W_EMIT_NO_SENTINEL`] warning diagnostic — never invents sentinels into
 /// arbitrary prose.
+///
+/// `portfolio`-kind files are skipped entirely: they are terminal repos
+/// (published to GitHub, no further planning state) and never carry a
+/// `master-plan.md`, so flagging one would just be noise.
 pub fn plan_master_plan_tables(files: &[(StateSource, StateFile)], graph: &StateGraph) -> EmitPlan {
     let mut plan = EmitPlan::default();
 
     for (src, file) in files {
+        if file.kind == "portfolio" {
+            continue;
+        }
         let Some(planning_dir) = src.abs_path.parent() else {
             continue;
         };
