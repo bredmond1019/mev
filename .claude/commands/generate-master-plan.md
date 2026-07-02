@@ -12,7 +12,7 @@ $ARGUMENTS — free-text description of the project, its goal, and any planning 
 Turn a free-form planning session into a `planning/master-plan.md` whose phase/block structure
 `/generate-tasks` can consume **directly**. The master plan is the roadmap source of truth: a
 sequence of **block definitions** (What / Why / Build notes / Acceptance criteria), each addressable
-by a parseable `phaseN-blockX` identifier. `/generate-tasks <phaseN-blockX>` later explodes one
+by a parseable `<Prefix>.<PhaseNumber>.<BlockLetter>` identifier (e.g. `BA.11.B`). `/generate-tasks <Prefix>.<PhaseNumber>.<BlockLetter>` later explodes one
 block into a runnable `tasks.md`.
 
 > This is the **roadmap** producer. For a single ad-hoc / experimental feature you don't yet want in
@@ -40,11 +40,12 @@ block into a runnable `tasks.md`.
      user a targeted question** instead of writing a plausible-looking guess. The clarify gate governs
      *proactive* question rounds; this floor governs *never fabricating*. Prefer an honest "I need X to
      define block N" over a confident invention.
-4. **THINK HARD about phase/block decomposition before writing:**
+4. **Determine the Block ID Prefix:** Find this repo's `prefix` in `brain.toml` at the brain root (e.g., `BA`). Use this for all block IDs. If none exists, derive a strict two-letter uppercase prefix (e.g. `BA`). **This prefix must be unique across all projects.**
+5. **THINK HARD about phase/block decomposition before writing:**
    - **Sequence by dependency and competence, not calendar.** Foundational, enabling work is Phase 0;
      the hardest, most-differentiating work is the last phase. `/sdlc-block` runs **phases
      sequentially and the blocks within a phase in parallel** by default; add an optional
-     `- **Depends on:** Block <id>` line to a block only to override that default (e.g. to serialize
+     `- **Depends on:** <id> (e.g., `BA.0.A`)` line to a block only to override that default (e.g. to serialize
      two same-phase blocks that edit the same file).
    - A **block** is a coherent unit of work that `/generate-tasks` can turn into ~one spec (roughly a
      21-hour spread across a few sessions). Don't make blocks so large they hide separable concerns,
@@ -66,12 +67,14 @@ block into a runnable `tasks.md`.
      refinement when each becomes next.
    - Do **not** bake stack/locale/deployment specifics into blocks — those live in `CLAUDE.md` +
      `planning/harness.json`. Keep block definitions about *what*, *why*, *which files*, and *bounds*.
-5. Write (or revise) `planning/master-plan.md` using the Output Format below. Preserve the OKF
+6. Write (or revise) `planning/master-plan.md` using the Output Format below. Preserve the OKF
    frontmatter and any already-completed phases when revising.
-6. **Property self-check (before reporting).** Re-read what you wrote and **revise in place** until
+7. **Property self-check (before reporting).** Re-read what you wrote and **revise in place** until
    every property holds, then re-check:
-   - **Every block is a `### Block X — <name>` heading under a `## Phase N — <name>` heading**, so
-     `/generate-tasks phaseN-blockX` can parse and locate it. No flat lists for blocks.
+   - **Every block is a `### <Prefix>.<PhaseNumber>.<BlockLetter> — <name>` heading under a
+     `## Phase N — <name>` heading** — the heading is the bare ID (e.g. `### BA.0.A — <name>`), no
+     literal "Block" word — so `/generate-tasks <Prefix>.<PhaseNumber>.<BlockLetter>` can parse and
+     locate it. No flat lists for blocks.
    - **Every block names its Files** (New vs Modified, by path), so `/generate-tasks` can derive
      ownership without guessing. A block with no named files is too thin (a forward-looking distant
      block may name them provisionally — but it must say it is provisional).
@@ -82,7 +85,7 @@ block into a runnable `tasks.md`.
    - **The Quick Reference Sequence Table lists one row per block** and matches the block headings.
    - **No leftover scaffold sentinels** — no `{{TOKEN}}`, no unfilled `<...>` HTML-comment stubs, no
      empty bullets. (Legitimate `<...>` in code/prose is fine.)
-7. Report the path written and the first runnable block (see Report).
+8. Report the path written and the first runnable block (see Report).
 
 ## Codebase Structure
 
@@ -147,10 +150,11 @@ it leans on. Every block uses the same skeleton:
   projects with no shared layer.
 - **Out of scope** — explicit boundaries; what belongs to a later block. Note any cross-repo /
   not-yet-built prerequisite here.
-- **Depends on** *(optional)* — `- **Depends on:** Block <id>` (a bare `Block A` means Block A of the
-  *same* phase; a fully-qualified `phase0-blockA` is also accepted). Names sibling blocks that must
-  merge first. Omit it and the default order applies (see below); add it only to override that default —
-  e.g. two blocks in the same phase that edit the same file must be serialized.
+- **Depends on** *(optional)* — `- **Depends on:** <id> (e.g., `BA.0.A`)` (a bare letter `<BlockLetter>`
+  means `<Prefix>.<Phase>.<BlockLetter>` of the *same* phase; a fully-qualified `BA.0.A` is also
+  accepted). Names sibling blocks that must merge first. Omit it and the default order applies (see
+  below); add it only to override that default — e.g. two blocks in the same phase that edit the same
+  file must be serialized.
 - **Acceptance criteria** — each a true/false condition a reviewer can check against the diff, ending
   with the project's gating checks passing.
 
@@ -168,7 +172,8 @@ those blocks).
 
 ## Phase 0 — <name>
 
-### Block A — <name>
+### <Prefix>.<PhaseNumber>.<BlockLetter> — <name>
+<!-- Example: ### BA.0.A — Foundation setup (no "Block" word in the heading — the ID is self-describing) -->
 - **What:** <scope in implementation terms — concrete enough to scope tasks>
 - **Why:** <why this block, why now in the sequence>
 - **Files:**
@@ -176,18 +181,19 @@ those blocks).
   - *Modified* <path> (what changes), …
 - **Interfaces / shared surface:** <optional — shared exports/APIs this block consumes or must add>
 - **Out of scope:** <explicit boundaries; what is a later block's job; any cross-repo prerequisite>
-- **Depends on:** Block <id>   *(include only when a sibling in the same phase must merge first; omit this line entirely when the default phase-sequential / block-parallel order suffices)*
+- **Depends on:** <id> (e.g., `BA.0.A`)   *(include only when a sibling in the same phase must merge first; omit this line entirely when the default phase-sequential / block-parallel order suffices)*
 - **Acceptance criteria:** <observable, true/false conditions checkable against the diff; end with the
   project's gating checks passing>
 
-### Block B — <name>
+### <Prefix>.<PhaseNumber>.B — <name>
 <!-- same skeleton -->
 
 ---
 
 ## Phase 1 — <name>
 
-### Block A — <name>
+### <Prefix>.<PhaseNumber>.<BlockLetter> — <name>
+<!-- Example: ### BA.1.C — Foundation setup -->
 <!-- same skeleton; one sub-section per block -->
 
 ---
@@ -209,6 +215,36 @@ those blocks).
 left off.*
 ```
 
+### State Registration — register blocks in state.json
+
+After writing/revising `master-plan.md`, register every block (new or changed) in this repo's
+`planning/state.json` — the authoritative dependency graph that `master-plan.md`'s prose is a view over
+(see `state-schema.md`'s "Authored vs derived" table):
+
+1. Open `planning/state.json`. Find or create a `tracks[]` entry whose `title` matches the phase name
+   (one track per phase; reuse an existing track if the phase already has one).
+2. For each block in that phase, add an entry to that track's `blocks[]` if it doesn't already exist
+   (match by `id`):
+   - `id`: the block's canonical ID (e.g. `BA.0.A`)
+   - `title`: the block's name
+   - `status`: `"open"` — never hand-set `"blocked"` (that is a derived value, see the schema)
+   - `wave`: an integer execution-order rank. Default to `10 * <phase number>` (Phase 0 → `10`, Phase 1
+     → `20`, …) so every block in a phase shares a wave and later phases sort after.
+   - `depends_on`: one `{ "type": "block", "repo": "<this-repo-slug>", "id": "<ID>" }` entry per explicit
+     **Depends on:** line on the block (resolve a bare letter `X` to `<Prefix>.<PhaseNumber>.X`). Omit or
+     use `[]` when the block has no explicit "Depends on" line — do **not** encode the implicit
+     phase-sequential default as a `depends_on` edge; `wave` already expresses that ordering.
+   - If the block was promoted from an HQ backlog item, add `"origin": { "type": "backlog", "slug": "<slug>" }`.
+   - **Do not overwrite** an existing block's `status` or `tasks[]` if it is already `in_progress` /
+     `closed` / already has tasks — only add missing blocks, or update `title` / `wave` / `depends_on` on
+     ones still `open`.
+3. Save `planning/state.json` and validate it is still valid JSON:
+   `python3 -c "import json;json.load(open('planning/state.json'))"`.
+
+### State Refresh
+
+Run `mev emit-state --write` to update the brain's focus derivation and state based on the new planning files.
+
 ## Report
 
 Output the path written and the next step:
@@ -216,10 +252,10 @@ Output the path written and the next step:
 planning/master-plan.md  (<N> phases, <M> blocks)
 
 Blocks ready to generate:
-  - phase0-blockA — <name>
-  - phase0-blockB — <name>
+  - BA.0.A — <name>
+  - BA.0.B — <name>
   ...
 
 Next (turn the first block into a runnable spec):
-  /generate-tasks phase0-blockA
+  /generate-tasks BA.0.A
 ```
