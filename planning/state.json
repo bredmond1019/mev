@@ -89,7 +89,77 @@
           "status": "open",
           "depends_on": [],
           "wave": 4,
-          "origin": null
+          "origin": null,
+          "tasks": [
+            {
+              "task_id": 1,
+              "title": "Structure-check module (src/brain/structure.rs)",
+              "description": "Create src/brain/structure.rs (registered via pub mod structure; in mod.rs) implementing check_structure(corpus, root): per-directory orphan detection (direct-child corpus files not referenced by that dir's index.md → E_STRUCT_ORPHAN_FILE) and dangling-row detection (index.md markdown/file:// links whose in-corpus target is missing on disk → E_STRUCT_DANGLING_ROW), reusing links::extract_links. Ships with >=6 unit tests.",
+              "acceptance_criteria": [
+                "check_structure emits E_STRUCT_ORPHAN_FILE for a direct-child corpus file not referenced by its directory's index.md, located at the orphan file",
+                "check_structure emits E_STRUCT_DANGLING_ROW for an index.md link whose in-corpus target is missing on disk, located at the index.md",
+                "Directories with no index.md produce no orphan diagnostics; path normalization handles ./-prefix and mixed separators",
+                "src/brain/structure.rs carries >=6 unit tests covering clean/orphan/dangling/both/no-index/normalization cases"
+              ],
+              "status": "pending",
+              "validation_commands": [],
+              "max_attempts": 3
+            },
+            {
+              "task_id": 2,
+              "title": "Library driver + --structure CLI flag",
+              "description": "Add validate_brain_structure(root) to src/lib.rs mirroring validate_brain_graph (config resolve → schema pass → crawl once → check_structure → extend report), and add a structure: bool flag to the ValidateBrain subcommand in src/main.rs wired into the dispatch precedence chain with a matching doc comment.",
+              "acceptance_criteria": [
+                "src/lib.rs exposes validate_brain_structure with the E_CONFIG_NOT_FOUND fallback behaviour",
+                "mev validate-brain --structure <root> runs the structure check and returns a Report; exit 1 on any E_STRUCT_*",
+                "The ValidateBrain doc comment lists --structure alongside the existing flags"
+              ],
+              "status": "pending",
+              "validation_commands": [],
+              "max_attempts": 3
+            },
+            {
+              "task_id": 3,
+              "title": "Integration tests (tests/brain_structure.rs)",
+              "description": "Create tests/brain_structure.rs exercising validate-brain --structure end-to-end over temp-dir fixtures with a minimal brain.toml: clean tree (exit 0), orphan file (E_STRUCT_ORPHAN_FILE, exit 1), dangling row (E_STRUCT_DANGLING_ROW, exit 1), and --json envelope carrying the codes.",
+              "acceptance_criteria": [
+                "tests/brain_structure.rs covers clean, orphan, dangling-row, and --json envelope cases",
+                "All new integration tests pass under cargo test"
+              ],
+              "status": "pending",
+              "validation_commands": [],
+              "max_attempts": 3
+            },
+            {
+              "task_id": 4,
+              "title": "Documentation",
+              "description": "Document the --structure flag and the E_STRUCT_ORPHAN_FILE / E_STRUCT_DANGLING_ROW codes in docs/cli.md (match the --links section), and add structure.rs + check_structure + validate_brain_structure to docs/architecture.md's module map and function table.",
+              "acceptance_criteria": [
+                "docs/cli.md documents --structure, its precedence, both diagnostic codes, and exit behaviour",
+                "docs/architecture.md lists the structure.rs module and check_structure/validate_brain_structure"
+              ],
+              "status": "pending",
+              "validation_commands": [],
+              "max_attempts": 3
+            },
+            {
+              "task_id": 5,
+              "title": "Validate",
+              "description": "Run the four harness gates and confirm all pass; sanity-run mev validate-brain --structure .. against the live company brain to confirm genuine findings.",
+              "acceptance_criteria": [
+                "cargo fmt --check, cargo clippy -- -D warnings, cargo test, and cargo build --release all pass",
+                "A live --structure run against the company brain surfaces genuine findings (no false positives from scope/normalization bugs)"
+              ],
+              "status": "pending",
+              "validation_commands": [
+                "cargo fmt --check",
+                "cargo clippy -- -D warnings",
+                "cargo test",
+                "cargo build --release"
+              ],
+              "max_attempts": 3
+            }
+          ]
         }
       ]
     },
