@@ -36,13 +36,15 @@ src/
     ├── emit.rs     ← EmitError, EmitAction, EmitPlan; wave_order(), render_wave_table(), splice_generated(), plan_state_json(), plan_master_plan_tables(), apply_plan() — Phase 3 Block T (derived-view generation: wave tables, focus regen, brain rollup)
     ├── links.rs    ← LinkKind, LinkRef; extract_links(), check_links(), collect_doc_ids(), read_moves_pending(), check_moved_references() — Phase 3 Block K
     ├── structure.rs ← check_structure() — Phase 3 Block L (bidirectional index.md <-> directory structural coverage: orphan files, dangling rows)
-    └── manifest.rs ← ManifestEntry, Manifest, build_manifest() — Phase 3 Block Q (canonical corpus manifest for RAG indexer)
+    ├── manifest.rs ← ManifestEntry, Manifest, build_manifest() — Phase 3 Block Q (canonical corpus manifest for RAG indexer)
+    └── graph_emit.rs ← GraphExport, build_graph_export() — Phase 3B Block R (graph-export envelope for the orchestrator's Postgres edges table, D4)
 
 tests/
 ├── brain_config.rs    ← integration tests for brain.toml loading + BrainConfig
 ├── brain_corpus.rs    ← integration tests for crawl_corpus() multi-root walk + scope resolution
 ├── brain_crawl.rs     ← integration tests for crawl_brain()
 ├── brain_graph.rs     ← integration tests for validate_brain_graph() end-to-end — Phase 3 Block J
+├── brain_graph_emit.rs ← integration tests for graph_brain() end-to-end — Phase 3B Block R
 ├── brain_links.rs     ← integration tests for validate_brain_links() end-to-end — Phase 3 Block K
 ├── brain_manifest.rs  ← integration tests for manifest_brain() end-to-end — Phase 3 Block Q
 ├── brain_okf.rs       ← integration tests for validate_md_file()
@@ -423,3 +425,39 @@ Rust keyword).
 `manifest_brain(root: &Path) -> anyhow::Result<Manifest>` (in `src/lib.rs`) resolves
 `brain.toml`, crawls the corpus with `crawl_corpus`, and calls `build_manifest`. The returned
 `Manifest` is a pure value — nothing is written to disk. Invoked by `mev manifest`.
+
+---
+
+### Graph exporter (`src/brain/graph_emit.rs`) — Phase 3B Block R
+
+The graph-export module converts a pre-built `GraphArtifact` (from `graph::build_graph`) into
+a canonical, JSON-serializable envelope (`GraphExport`) with a `version`/`root` header,
+mirroring `manifest.rs`'s `Manifest`. Consumed by the orchestrator to load nodes and edges into
+a Postgres edges table beside `brain_documents` (D4).
+
+Design principles (shared with `manifest.rs`):
+- **Pure output** — `build_graph_export` does not write to disk or a DB; it returns a value the
+  caller serialises to stdout.
+- **No re-derivation** — nodes and edges are cloned straight from `artifact.graph` in walk
+  order; nothing is re-walked or re-inferred here.
+- **Deterministic leaves** — `leaves` is a sorted `Vec<String>` (from `artifact.leaf_keys`, a
+  `HashSet`) so repeated runs over an unchanged corpus emit byte-identical output.
+
+#### Public function
+
+| Function | Signature | Description |
+|---|---|---|
+| `build_graph_export` | `(&Path, &GraphArtifact) -> GraphExport` | `root` is stored as a display string in the envelope header. Clones `nodes`/`edges` from `artifact.graph`; collects `artifact.leaf_keys` into a sorted `Vec<String>`. |
+
+#### Graph-export types
+
+| Type | Description |
+|---|---|
+| `GraphExport` | The complete graph-export envelope: `version` (`"1"`), `root` (display path of HQ root), `nodes: Vec<Node>`, `edges: Vec<Edge>`, `leaves: Vec<String>` (sorted `scope:stem` for files with no `doc_id`). Derives `Serialize`; reuses `Node`/`Edge` from `graph.rs`. |
+
+#### Public library entry point
+
+`graph_brain(root: &Path) -> anyhow::Result<GraphExport>` (in `src/lib.rs`) resolves
+`brain.toml`, crawls the corpus with `crawl_corpus`, builds the graph with `build_graph`, and
+calls `build_graph_export`. The returned `GraphExport` is a pure value — nothing is written to
+disk or a DB. Invoked by `mev emit-graph`.
