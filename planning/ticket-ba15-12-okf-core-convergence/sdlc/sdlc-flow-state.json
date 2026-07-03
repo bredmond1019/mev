@@ -2,10 +2,10 @@
   "spec_slug": "ticket-ba15-12-okf-core-convergence",
   "branch": "ticket-ba15-12-okf-core-convergence-flow",
   "started_at": "2026-07-03T17:11:24Z",
-  "updated_at": "2026-07-03T17:27:37Z",
+  "updated_at": "2026-07-03T17:32:15Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/ticket-ba15-12-okf-core-convergence-flow",
   "status": "running",
-  "current_task": 3,
+  "current_task": 4,
   "tasks": {
     "1": {
       "status": "passed",
@@ -59,6 +59,25 @@
       ],
       "files_changed": [
         "src/brain/state.rs",
+        "planning/ticket-ba15-12-okf-core-convergence/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "brain/graph.rs and brain/graph_emit.rs now delegate their model/resolution/export types (EdgeKind, Edge, Node, Graph, GraphArtifact, EdgeResolution, resolve_edge, GraphExport, ExportedEdge, build_graph_export) to okf_core via pub use, keeping only mev-specific build_graph/check_graph logic local.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "okf-core's graph/graph_emit submodules are private and re-exported flat from the crate root, so imports use `okf_core::{...}` directly rather than `okf_core::graph::{...}`",
+        "graph_emit.rs's entire non-test body collapsed to a single pub use since okf-core's port has zero mev-specific logic layered on it",
+        "src/lib.rs required no changes since its existing brain::graph::{...}/brain::graph_emit::{...} re-exports keep resolving through the new pub use blocks"
+      ],
+      "files_changed": [
+        "src/brain/graph.rs",
+        "src/brain/graph_emit.rs",
         "planning/ticket-ba15-12-okf-core-convergence/tasks.md"
       ],
       "commit": "",
@@ -144,13 +163,29 @@
         "filesReadKb": null,
         "inTokEst": 602,
         "outTok": 2808
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 1032,
+        "filesReadKb": null,
+        "inTokEst": 1032,
+        "outTok": 13906
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 602,
+        "filesReadKb": null,
+        "inTokEst": 602,
+        "outTok": 2085
       }
     ],
     "total": {
-      "promptTokEst": 5966,
+      "promptTokEst": 7600,
       "filesReadKb": 0,
-      "inTokEst": 5966,
-      "outTok": 77585
+      "inTokEst": 7600,
+      "outTok": 93576
     }
   }
 }
