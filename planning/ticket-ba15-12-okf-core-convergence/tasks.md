@@ -142,3 +142,29 @@ cargo build --release
   is left to Tasks 3/4. `tests/brain_okf.rs`'s 14 assertions pass unmodified; `src/lib.rs`'s
   `OkfFrontmatter`/`validate_md_file` re-export needed no change (re-exported transitively through
   `brain::okf`).
+- 2026-07-03 (Task 3): repointed `brain/state.rs` at `okf_core`'s `state` module, which now ships
+  a byte-for-byte identical port of this file's former schema/loader/graph-model section
+  (`BlockedBy`/`Block`/`Focus`/`TrackBlock`/`Track`/`RepoRollup`/`Endpoint`/`CrossRepoEdge`/
+  `TierEntry`/`Origin`/`Backlog`/`CarryoverScope`/`Carryover`/`StateFile`/`StateLoadError`/
+  `load_state`/`StateSource`/`StateEdgeKind`/`StateEdge`/`StateNode`/`StateGraph`/
+  `build_state_graph` — confirmed via `diff` against `okf-core/src/state.rs`: only doc-comment
+  wording differs, every field name/type/order and derive is identical). Deleted all of those
+  duplicate definitions from `brain/state.rs` and replaced them with one `pub use okf_core::{...}`
+  block; the mev-specific validation/derivation logic that consumes them (`discover_state_files`,
+  `check_schema`, `check_state_graph`, `check_status_consistency`, `check_backlog_integrity`,
+  `check_rollup`, `detect_cycles`(`_dfs`), `ready_order`, `DerivedFocus`/`derive_focus`,
+  `check_focus_drift`, `derive_cross_repo`, `TierScope`/`tier_scope_for`, `derive_rollup`,
+  `derive_brain_focus`, `sorted_set`) is unchanged and now operates on the `okf_core` types.
+  `src/lib.rs`'s and `src/brain/emit.rs`'s `brain::state::X` imports needed no change — they
+  already used fully-qualified paths that the new `pub use` re-export continues to satisfy, so
+  neither file is touched by this task (contrary to the file list mev's own repo scan predicted;
+  no import repoint was actually needed downstream of `state.rs` itself). One pre-existing quirk
+  surfaced: two `#[test]` functions (`carryover_array_deserializes`,
+  `carryover_schema_checks`) live outside the `mod tests { }` block (after its closing brace) and
+  so are only compiled under `#[cfg(test)]` implicitly via the `#[test]` attribute itself, not via
+  the module — this predates this task (present in the Task-2 commit already) and was left as-is
+  (out of scope to restructure); it only required keeping a `#[cfg(test)] use std::path::PathBuf;`
+  import so both the release build (which doesn't need `PathBuf`) and the test build (which does,
+  for these two orphaned tests) compile clean under `clippy -D warnings`. `tests/brain_state.rs`'s
+  41 assertions and `tests/brain_emit.rs`'s assertions pass unmodified; combined suite is 312 lib
+  tests + all integration suites green (no regression in count).
