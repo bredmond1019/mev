@@ -55,7 +55,13 @@ $ARGUMENTS — path to the task spec to break down (e.g. `planning/<spec-slug>/t
 
 7. Write the breakdown to `planning/<block-dir>/breakdown.md` — same directory as the spec, named `breakdown.md`.
 
-8. Return only the path to the file created.
+8. Commit the breakdown. Leave the working tree clean:
+   ```bash
+   git add planning/<block-dir>/breakdown.md
+   git commit -m "planning: add breakdown for <spec-slug>"
+   ```
+
+9. Return only the path to the file created.
 
 ## What makes a sub-step unambiguous
 
