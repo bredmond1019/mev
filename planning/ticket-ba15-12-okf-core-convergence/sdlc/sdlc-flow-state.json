@@ -2,10 +2,10 @@
   "spec_slug": "ticket-ba15-12-okf-core-convergence",
   "branch": "ticket-ba15-12-okf-core-convergence-flow",
   "started_at": "2026-07-03T17:11:24Z",
-  "updated_at": "2026-07-03T17:11:24Z",
+  "updated_at": "2026-07-03T17:17:56Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/ticket-ba15-12-okf-core-convergence-flow",
   "status": "running",
-  "current_task": 1,
+  "current_task": 2,
   "tasks": {
     "1": {
       "status": "passed",
@@ -20,6 +20,27 @@
       "files_changed": [
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/ticket-ba15-12-okf-core-convergence-flow/Cargo.toml",
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/ticket-ba15-12-okf-core-convergence-flow/Cargo.lock"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "brain/okf.rs now re-exports okf_core::OkfFrontmatter (struct definition deleted) and validate_md_file's layer/keywords checks were adapted to the new Vec<String> (empty-means-absent) shape; all consumers repointed and the crate builds/tests/lints clean.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Discovered the ticket's stated blocker (bastion's okf-core not yet shipping a reconciled OkfFrontmatter/state/graph model) had lifted since the ticket was drafted -- ../bastion/crates/okf-core now has frontmatter.rs/parse.rs/state.rs/graph.rs/graph_emit.rs with a matching OkfFrontmatter model -- so proceeded to implement Task 2 rather than reporting blocked.",
+        "okf-core's OkfFrontmatter uses Vec<String> (empty=absent) for layer/keywords/related instead of mev's old Option<Vec<String>>; adapted validate_md_file's checks in place (iterate empty vec = no-op; check !is_empty() before the keywords 3-7 count) rather than wrapping/unwrapping at the call site, to keep the delegation genuine.",
+        "Also touched brain/manifest.rs and brain/graph.rs (nominally Task 3/4 files) with minimal one-line shape fixes (a non_empty_vec adapter in manifest.rs to preserve ManifestEntry's null-when-absent JSON output; .and_then->.map(..).unwrap_or_default() in graph.rs) because the OkfFrontmatter type change is crate-wide and the crate would not otherwise compile -- their own struct/logic delegation to okf-core is left to Tasks 3/4 as scoped.",
+        "src/lib.rs needed no edit: it already re-exports brain::okf::{OkfFrontmatter, validate_md_file}, and okf.rs's `pub use okf_core::OkfFrontmatter;` keeps that path resolving to the same public name."
+      ],
+      "files_changed": [
+        "src/brain/okf.rs",
+        "src/brain/manifest.rs",
+        "src/brain/graph.rs",
+        "planning/ticket-ba15-12-okf-core-convergence/tasks.md"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -72,13 +93,29 @@
         "filesReadKb": null,
         "inTokEst": 602,
         "outTok": 1833
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 1032,
+        "filesReadKb": null,
+        "inTokEst": 1032,
+        "outTok": 23289
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 602,
+        "filesReadKb": null,
+        "inTokEst": 602,
+        "outTok": 2218
       }
     ],
     "total": {
-      "promptTokEst": 2698,
+      "promptTokEst": 4332,
       "filesReadKb": 0,
-      "inTokEst": 2698,
-      "outTok": 17184
+      "inTokEst": 4332,
+      "outTok": 42691
     }
   }
 }
