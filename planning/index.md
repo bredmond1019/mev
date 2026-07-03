@@ -59,7 +59,7 @@ at the top; only pipeline state lives under `sdlc/`.
 | Folder | What | Status |
 |---|---|---|
 | `herdr-mev-patterns/` | Research notes — herdr patterns applicable to mev graph/crawl/validation (Block J done; patterns Q/R/S/watch deferred) | Active |
-| `emit-graph-resolved-edges/` | `MV.3B.V` context seed — export `check_graph`'s edge resolution in `emit-graph` (v2: `target_node_id`/`target_doc_id`), killing the Rust/Python resolution divergence OR.G exposed; gates the embed pass | Active — ready for `/generate-tasks MV.3B.V` |
+| `emit-graph-resolved-edges/` | `MV.3B.V` context seed — export `check_graph`'s edge resolution in `emit-graph` (v2: `target_node_id`/`target_doc_id`), killing the Rust/Python resolution divergence OR.G exposed; gates the embed pass | Active — spec decomposed; ready to run (`/sdlc-flow emit-graph-resolved-edges`) |
 
 ## Archived Concept Folders
 

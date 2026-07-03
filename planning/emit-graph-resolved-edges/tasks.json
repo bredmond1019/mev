@@ -1,0 +1,52 @@
+[
+  {
+    "task_id": 1,
+    "title": "Extract edge resolution into a shared pure function",
+    "description": "In src/brain/graph.rs, extract the per-edge resolution block from check_graph() (the `--- Edge resolution ---` loop, lines 232-281) into a pure function `resolve_edge` returning an `EdgeResolution` enum with variants `Resolved { node_id, doc_id }`, `LeafTarget { qualified }`, and `Dangling { qualified }`. The function qualifies a bare `to_ref` to the referrer's own scope, looks it up in `node_map` (Resolved carries the qualified `scope:doc_id` node_id and the target node's `doc_id`), else classifies it as a known leaf (`leaf_keys`) or dangling. Rewrite check_graph() to call resolve_edge and map Resolved -> no diagnostic (continue), LeafTarget -> W_GRAPH_LEAF_TARGET, Dangling -> E_GRAPH_DANGLING_RELATED, preserving the exact same referrer_rel, message strings, codes, and ordering. Diagnostics must be BYTE-IDENTICAL to before the refactor. Keep the `EdgeResolution` enum and `resolve_edge` `pub(crate)` (or `pub`) so graph_emit.rs can call them. Add unit tests for resolve_edge covering the resolved / leaf / dangling branches, and keep every existing graph.rs and tests/brain_graph.rs test passing unchanged.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/graph.rs"],
+    "dependsOn": []
+  },
+  {
+    "task_id": 2,
+    "title": "Ship resolved fields in the emit-graph export + bump version to \"2\"",
+    "description": "In src/brain/graph_emit.rs, introduce an export-local edge type `ExportedEdge { from, to_ref, kind, target_node_id: Option<String>, target_doc_id: Option<String> }` (do NOT add fields to graph.rs's shared `Edge` struct). Change `GraphExport.edges` to `Vec<ExportedEdge>`. In build_graph_export, for each artifact edge call `resolve_edge` (from task 1) using `artifact.node_map` / `artifact.leaf_keys`: on `Resolved { node_id, doc_id }` populate both fields (Some), on LeafTarget/Dangling leave both `None`; `to_ref` stays raw as-authored in all cases. Bump `version` from \"1\" to \"2\". Update the graph_emit.rs unit tests (they assert version \"1\" and the raw-edge shape) to assert version \"2\" and the new nullable fields for resolved vs dangling/leaf edges.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/graph_emit.rs"],
+    "dependsOn": [1]
+  },
+  {
+    "task_id": 3,
+    "title": "Parity test: export resolution matches check_graph diagnostics",
+    "description": "In tests/brain_graph_emit.rs, add an integration test that builds a synthetic corpus containing at least one resolved edge (bare related: to a real node in the referrer's scope), one leaf-target edge (related: to a doc-id-less file), and one dangling edge (related: to a non-existent id). Build the graph once, run both build_graph_export and check_graph over it, and assert edge-by-edge parity: an exported edge with non-null target_node_id has NO diagnostic whose code is E_GRAPH_DANGLING_RELATED or W_GRAPH_LEAF_TARGET for that edge, and an exported edge with null target_node_id has exactly the matching diagnostic (dangling -> E_GRAPH_DANGLING_RELATED, leaf -> W_GRAPH_LEAF_TARGET). Also assert a resolved edge's target_node_id equals the expected qualified scope:doc_id and target_doc_id equals the target's authored doc_id.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["tests/brain_graph_emit.rs"],
+    "dependsOn": [1, 2]
+  },
+  {
+    "task_id": 4,
+    "title": "Update docs/cli.md emit-graph Output shape",
+    "description": "In docs/cli.md, update the `emit-graph` section \"Output shape\" (around lines 407-448): change the JSON example `version` to \"2\", add `target_node_id` and `target_doc_id` to the example `edges[]` entry (show a resolved edge with both set and note null for dangling/leaf), add the two rows to the field table describing them as nullable (non-null = resolved to a node; null = dangling or leaf-target), and update the `version` row to note current schema version \"2\". Keep `to_ref` documented as raw as-authored. Do not change the `leaves[]` description.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["docs/cli.md"],
+    "dependsOn": [2]
+  },
+  {
+    "task_id": 5,
+    "title": "Validate",
+    "description": "Run the Validation Commands listed in tasks.md and confirm all pass.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": [],
+    "dependsOn": [1, 2, 3, 4]
+  }
+]
