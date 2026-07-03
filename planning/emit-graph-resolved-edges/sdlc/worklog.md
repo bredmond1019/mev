@@ -26,3 +26,6 @@ Validated: gating checks (fast tripwire)
 
 ## Docs
 Patched: docs/architecture.md
+
+## Wrap-up — PASS
+Next: Phase 4 (BlogValidator as a fourth ContentValidator impl) per master-plan.md, or the out-of-repo orchestrator follow-up where load_brain_edges.py deletes its own build_node_maps()/resolve_ref() and reads mev's exported target_node_id/target_doc_id fields directly. Phase 3B (corpus engine outputs, D4) is now fully closed.

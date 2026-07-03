@@ -2,9 +2,9 @@
   "spec_slug": "emit-graph-resolved-edges",
   "branch": "emit-graph-resolved-edges-flow",
   "started_at": "2026-07-03T10:57:53Z",
-  "updated_at": "2026-07-03T11:12:18Z",
+  "updated_at": "2026-07-03T11:15:28Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/emit-graph-resolved-edges-flow",
-  "status": "docs",
+  "status": "done",
   "current_task": 5,
   "tasks": {
     "1": {
@@ -214,13 +214,21 @@
         "filesReadKb": null,
         "inTokEst": 810,
         "outTok": 5497
+      },
+      {
+        "label": "wrap-up",
+        "model": "sonnet",
+        "promptTokEst": 837,
+        "filesReadKb": null,
+        "inTokEst": 837,
+        "outTok": 11581
       }
     ],
     "total": {
-      "promptTokEst": 10713,
+      "promptTokEst": 11550,
       "filesReadKb": 0,
-      "inTokEst": 10713,
-      "outTok": 62931
+      "inTokEst": 11550,
+      "outTok": 74512
     }
   }
 }
