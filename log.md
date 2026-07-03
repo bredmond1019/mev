@@ -8,12 +8,21 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-02T21:30:16Z"
+timestamp: "2026-07-03T11:21:34Z"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## [2026-07-03]
+
+### Shipped MV.3B.V — emit-graph ships resolved edges; Phase 3B closed
+- **What:** Shipped `MV.3B.V` (emit-graph resolved edges) — spec authored, `/sdlc-flow` PASS, code-review low clean, PR #13 merged to main. `emit-graph` now exports `target_node_id`/`target_doc_id` via a shared `resolve_edge` pure function (both `check_graph` and `build_graph_export` call it); output `version` bumped `"1"` → `"2"`. Closed `MV.3B.V` in `state.json`, added a deferred carryover for the orchestrator `load_brain_edges.py` cleanup (gates the embed pass `OR.H`), and ran `mev emit-state --write`. mev Phase 3B roadmap is now clear (focus empty).
+- **Why:** Single-source the edge resolution so the exported graph carries resolved target IDs directly, letting the orchestrator loader drop its own `build_node_maps()`/`resolve_ref()` logic. Closes Phase 3B (corpus engine outputs, D4) entirely.
+- **Refs:** `planning/emit-graph-resolved-edges/tasks.md` ; PR #13 ; master-plan §MV.3B.V.
 
 ---
 
