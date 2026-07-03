@@ -5,7 +5,7 @@ description: Repoint mev's brain/okf.rs, brain/state.rs, brain/graph.rs, and bra
 doc_id: ticket-ba15-12-okf-core-convergence
 layer: [factory]
 project: mev
-status: draft
+status: active
 keywords: [okf-core, BA.15.12, D9, D15, D16, format convergence]
 related: [D9-ba15-12-okf-core-convergence-mirror, master-plan, status]
 ---
@@ -18,8 +18,8 @@ by D16, mirrored in this repo's D9-ba15-12-okf-core-convergence-mirror.md): repo
 bastion's okf-core crate as the single implementation of OKF frontmatter, state.json schema, and
 graph edge-resolution, deleting the four duplicate modules once okf-core has grown the matching
 models.`
-status: Not started
-last-run: never
+status: Done
+last-run: 2026-07-03 (sdlc-flow, 6/6 tasks passed, review PASS)
 
 ## Description
 
@@ -138,6 +138,13 @@ cargo build --release
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the plan. -->
+- 2026-07-03 (Task 1): the worktree this ticket ran in (`core/mev/trees/ticket-ba15-12-okf-core-convergence-flow/`)
+  sits two directories deeper than the eventual merge target (`core/mev/`), so the ticket's literal
+  `Cargo.toml` path text (`../bastion/crates/okf-core`) does not resolve from inside the worktree as
+  written. Created a local, untracked filesystem symlink (`core/mev/trees/bastion -> ../../bastion`)
+  so `cargo build` could resolve the path dependency for in-worktree validation, without changing the
+  committed `Cargo.toml` text — the symlink is not staged/committed and the path is correct once this
+  branch merges into the non-worktree `core/mev/` checkout.
 - 2026-07-03 (Task 2): the blocker noted in Description/Notes had lifted since this ticket was
   drafted — bastion's `okf-core` now ships `frontmatter.rs`/`parse.rs`/`state.rs`/`graph.rs`/
   `graph_emit.rs` with a reconciled `OkfFrontmatter` model. Repointed `brain/okf.rs` at
