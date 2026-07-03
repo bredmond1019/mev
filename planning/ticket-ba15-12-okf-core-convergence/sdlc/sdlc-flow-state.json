@@ -2,10 +2,10 @@
   "spec_slug": "ticket-ba15-12-okf-core-convergence",
   "branch": "ticket-ba15-12-okf-core-convergence-flow",
   "started_at": "2026-07-03T17:11:24Z",
-  "updated_at": "2026-07-03T17:32:15Z",
+  "updated_at": "2026-07-03T17:36:13Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/ticket-ba15-12-okf-core-convergence-flow",
   "status": "running",
-  "current_task": 4,
+  "current_task": 5,
   "tasks": {
     "1": {
       "status": "passed",
@@ -79,6 +79,22 @@
         "src/brain/graph.rs",
         "src/brain/graph_emit.rs",
         "planning/ticket-ba15-12-okf-core-convergence/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "5": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Verified full-corpus parity: built baseline (main/6c0e0fa, pre-repoint) and post-repoint (worktree tip/dacc452) release binaries and confirmed validate-brain --json, emit-state, manifest, and emit-graph outputs are byte-identical on the live brain corpus; recorded the command log and MD5 checksums in tasks.md Notes and Amendment Log.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Built the baseline binary in the primary core/mev checkout (which was still sitting at commit 6c0e0fa, the exact pre-ticket commit) rather than creating a separate git worktree, since it already provided a clean pre-repoint build target.",
+        "Used diff + md5 checksums (not just diff exit code) to give unambiguous byte-identical proof for the ticket record."
+      ],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/ticket-ba15-12-okf-core-convergence-flow/planning/ticket-ba15-12-okf-core-convergence/tasks.md"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -179,13 +195,29 @@
         "filesReadKb": null,
         "inTokEst": 602,
         "outTok": 2085
+      },
+      {
+        "label": "implement-5-1",
+        "model": "sonnet",
+        "promptTokEst": 1032,
+        "filesReadKb": null,
+        "inTokEst": 1032,
+        "outTok": 6606
+      },
+      {
+        "label": "test-5-1",
+        "model": "haiku",
+        "promptTokEst": 602,
+        "filesReadKb": null,
+        "inTokEst": 602,
+        "outTok": 2504
       }
     ],
     "total": {
-      "promptTokEst": 7600,
+      "promptTokEst": 9234,
       "filesReadKb": 0,
-      "inTokEst": 7600,
-      "outTok": 93576
+      "inTokEst": 9234,
+      "outTok": 102686
     }
   }
 }

@@ -19,3 +19,8 @@ Validated: gating checks (fast tripwire)
 What: brain/graph.rs and brain/graph_emit.rs now delegate their model/resolution/export types (EdgeKind, Edge, Node, Graph, GraphArtifact, EdgeResolution, resolve_edge, GraphExport, ExportedEdge, build_graph_export) to okf_core via pub use, keeping only mev-specific build_graph/check_graph logic local.
 Decisions: okf-core's graph/graph_emit submodules are private and re-exported flat from the crate root, so imports use `okf_core::{...}` directly rather than `okf_core::graph::{...}`; graph_emit.rs's entire non-test body collapsed to a single pub use since okf-core's port has zero mev-specific logic layered on it; src/lib.rs required no changes since its existing brain::graph::{...}/brain::graph_emit::{...} re-exports keep resolving through the new pub use blocks
 Validated: gating checks (fast tripwire)
+
+## Task 5 — PASSED (1 attempt)
+What: Verified full-corpus parity: built baseline (main/6c0e0fa, pre-repoint) and post-repoint (worktree tip/dacc452) release binaries and confirmed validate-brain --json, emit-state, manifest, and emit-graph outputs are byte-identical on the live brain corpus; recorded the command log and MD5 checksums in tasks.md Notes and Amendment Log.
+Decisions: Built the baseline binary in the primary core/mev checkout (which was still sitting at commit 6c0e0fa, the exact pre-ticket commit) rather than creating a separate git worktree, since it already provided a clean pre-repoint build target.; Used diff + md5 checksums (not just diff exit code) to give unambiguous byte-identical proof for the ticket record.
+Validated: gating checks (fast tripwire)
