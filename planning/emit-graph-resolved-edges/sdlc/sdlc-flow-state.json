@@ -2,9 +2,9 @@
   "spec_slug": "emit-graph-resolved-edges",
   "branch": "emit-graph-resolved-edges-flow",
   "started_at": "2026-07-03T10:57:53Z",
-  "updated_at": "2026-07-03T11:09:28Z",
+  "updated_at": "2026-07-03T11:12:18Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/emit-graph-resolved-edges-flow",
-  "status": "running",
+  "status": "docs",
   "current_task": 5,
   "tasks": {
     "1": {
@@ -86,12 +86,14 @@
     }
   },
   "review": {
-    "verdict": null,
+    "verdict": "PASS",
     "findings": [],
-    "attempts": 0
+    "attempts": 1
   },
   "docs": {
-    "changed": [],
+    "changed": [
+      "docs/architecture.md"
+    ],
     "created": []
   },
   "bail_reason": null,
@@ -196,13 +198,29 @@
         "filesReadKb": null,
         "inTokEst": 582,
         "outTok": 1834
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 999,
+        "filesReadKb": null,
+        "inTokEst": 999,
+        "outTok": 2520
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 810,
+        "filesReadKb": null,
+        "inTokEst": 810,
+        "outTok": 5497
       }
     ],
     "total": {
-      "promptTokEst": 8904,
+      "promptTokEst": 10713,
       "filesReadKb": 0,
-      "inTokEst": 8904,
-      "outTok": 54914
+      "inTokEst": 10713,
+      "outTok": 62931
     }
   }
 }

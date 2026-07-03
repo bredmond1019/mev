@@ -23,3 +23,6 @@ Validated: gating checks (fast tripwire)
 ## Task 5 — PASSED (1 attempt)
 What: Task 5 (Validate) confirmed: cargo fmt --check, cargo clippy -- -D warnings, cargo test (312+ tests across all suites, 0 failures), and cargo build --release all pass cleanly on the working tree from tasks 1-4.
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: docs/architecture.md
