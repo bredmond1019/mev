@@ -13,105 +13,13 @@
 //! - **Deterministic leaves** — `leaves` is a sorted `Vec<String>` (from `artifact.leaf_keys`,
 //!   a `HashSet`) so repeated runs over an unchanged corpus emit byte-identical output.
 
-use std::path::Path;
-
-use serde::Serialize;
-
-use crate::brain::graph::{EdgeKind, EdgeResolution, GraphArtifact, Node, resolve_edge};
-
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
-/// The complete graph-export envelope for a Brain corpus crawl.
-///
-/// Serialises to JSON for consumption by the orchestrator's Postgres edges loader.
-#[derive(Debug, Serialize)]
-pub struct GraphExport {
-    /// Schema version — currently `"2"`.
-    pub version: String,
-    /// Display path of the HQ root used for the crawl.
-    pub root: String,
-    /// All graph nodes, in walk order.
-    pub nodes: Vec<Node>,
-    /// All graph edges, in walk order, carrying resolved target fields.
-    pub edges: Vec<ExportedEdge>,
-    /// `scope:stem` for every corpus file with no authored `doc_id`, sorted for
-    /// deterministic output.
-    pub leaves: Vec<String>,
-}
-
-/// One exported graph edge, augmented with the [`resolve_edge`] outcome.
-///
-/// `to_ref` stays raw as-authored in every case. `target_node_id`/`target_doc_id`
-/// are both `Some` when the edge resolves to a real node, and both `None` when it
-/// is dangling or resolves to a leaf (doc-id-less file) — this mirrors
-/// `check_graph`'s `E_GRAPH_DANGLING_RELATED`/`W_GRAPH_LEAF_TARGET` classification
-/// by construction, since both call [`resolve_edge`].
-///
-/// Export-local — deliberately not added to `graph.rs`'s shared `Edge` struct,
-/// which also backs `generate-graph` HTML and `check_graph` and must stay unchanged.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ExportedEdge {
-    /// The referring node's canonical `scope:doc_id`.
-    pub from: String,
-    /// The raw, as-authored `related:` reference (bare or qualified).
-    pub to_ref: String,
-    /// Edge type.
-    pub kind: EdgeKind,
-    /// Qualified `scope:doc_id` of the resolved target node, or `None` if the
-    /// edge is dangling or targets a leaf.
-    pub target_node_id: Option<String>,
-    /// The resolved target node's authored `doc_id`, or `None` if the edge is
-    /// dangling or targets a leaf.
-    pub target_doc_id: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Builder
-// ---------------------------------------------------------------------------
-
-/// Build a [`GraphExport`] from a pre-built [`GraphArtifact`].
-///
-/// `root` is the HQ directory that was crawled; it is stored as a display string in the
-/// envelope header and is not used to access the filesystem.
-///
-/// Nodes are cloned directly from `artifact.graph` (already deterministic walk order).
-/// Each edge is resolved via [`resolve_edge`] (the same pure function `check_graph`
-/// uses) to populate `target_node_id`/`target_doc_id` — both `Some` on `Resolved`,
-/// both `None` on `LeafTarget`/`Dangling`. `leaves` is `artifact.leaf_keys` collected
-/// into a `Vec<String>` and sorted.
-pub fn build_graph_export(root: &Path, artifact: &GraphArtifact) -> GraphExport {
-    let mut leaves: Vec<String> = artifact.leaf_keys.iter().cloned().collect();
-    leaves.sort();
-
-    let edges: Vec<ExportedEdge> = artifact
-        .graph
-        .edges
-        .iter()
-        .map(|edge| {
-            let (target_node_id, target_doc_id) = match resolve_edge(artifact, edge) {
-                EdgeResolution::Resolved { node_id, doc_id } => (Some(node_id), Some(doc_id)),
-                EdgeResolution::LeafTarget { .. } | EdgeResolution::Dangling { .. } => (None, None),
-            };
-            ExportedEdge {
-                from: edge.from.clone(),
-                to_ref: edge.to_ref.clone(),
-                kind: edge.kind.clone(),
-                target_node_id,
-                target_doc_id,
-            }
-        })
-        .collect();
-
-    GraphExport {
-        version: "2".to_string(),
-        root: root.display().to_string(),
-        nodes: artifact.graph.nodes.clone(),
-        edges,
-        leaves,
-    }
-}
+// The `GraphExport`/`ExportedEdge` model and the `build_graph_export` builder now live
+// in `okf_core::graph_emit` (BA.15.12/D16 convergence) — this module re-exports them so
+// every existing consumer (`crate::lib`, this file's own tests) keeps resolving the same
+// names. `okf_core::graph_emit::build_graph_export` consumes `okf_core::graph::resolve_edge`
+// against the same `GraphArtifact` shape `crate::brain::graph::build_graph` produces, so no
+// mev-specific adaptation is needed here.
+pub use okf_core::{ExportedEdge, GraphExport, build_graph_export};
 
 // ---------------------------------------------------------------------------
 // Unit tests
