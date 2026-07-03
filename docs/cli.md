@@ -408,7 +408,7 @@ the orchestrator to load into a Postgres edges table beside `brain_documents` (D
 
 ```json
 {
-  "version": "1",
+  "version": "2",
   "root": "/path/to/brain",
   "nodes": [
     {
@@ -422,7 +422,16 @@ the orchestrator to load into a Postgres edges table beside `brain_documents` (D
     {
       "from": "brain:alpha",
       "to_ref": "beta",
-      "kind": "related"
+      "kind": "related",
+      "target_node_id": "brain:beta",
+      "target_doc_id": "beta"
+    },
+    {
+      "from": "brain:alpha",
+      "to_ref": "missing",
+      "kind": "related",
+      "target_node_id": null,
+      "target_doc_id": null
     }
   ],
   "leaves": ["brain:a-leaf", "brain:z-leaf"]
@@ -431,7 +440,7 @@ the orchestrator to load into a Postgres edges table beside `brain_documents` (D
 
 | Field | Type | Description |
 |---|---|---|
-| `version` | string | Schema version — currently `"1"` |
+| `version` | string | Schema version — currently `"2"` |
 | `root` | string | Display path of the HQ root used for the crawl |
 | `nodes` | array | Every corpus file with an authored `doc_id`, in walk order — one node per `scope:doc_id` |
 | `nodes[].id` | string | Canonical node id: `scope:doc_id` |
@@ -442,6 +451,8 @@ the orchestrator to load into a Postgres edges table beside `brain_documents` (D
 | `edges[].from` | string | Canonical id of the source node (`scope:doc_id`) |
 | `edges[].to_ref` | string | The raw `related:` entry as authored (bare or `scope:doc_id`) — not yet resolved/normalized |
 | `edges[].kind` | string | Edge type; currently only `"related"` |
+| `edges[].target_node_id` | string \| null | Qualified `scope:doc_id` of the resolved target node; non-null when the edge resolves to a real node, `null` when it is dangling or targets a leaf (doc-id-less file) |
+| `edges[].target_doc_id` | string \| null | Authored `doc_id` of the resolved target node; non-null exactly when `target_node_id` is non-null |
 | `leaves` | array | `scope:stem` for every corpus file with **no** authored `doc_id`, sorted for deterministic output |
 
 `leaves` is always sorted, so repeated runs over an unchanged corpus emit byte-identical
