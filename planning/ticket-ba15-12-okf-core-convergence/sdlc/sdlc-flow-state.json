@@ -2,9 +2,9 @@
   "spec_slug": "ticket-ba15-12-okf-core-convergence",
   "branch": "ticket-ba15-12-okf-core-convergence-flow",
   "started_at": "2026-07-03T17:11:24Z",
-  "updated_at": "2026-07-03T17:44:08Z",
+  "updated_at": "2026-07-03T17:47:38Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/ticket-ba15-12-okf-core-convergence-flow",
-  "status": "docs",
+  "status": "done",
   "current_task": 6,
   "tasks": {
     "1": {
@@ -258,13 +258,21 @@
         "filesReadKb": null,
         "inTokEst": 838,
         "outTok": 10263
+      },
+      {
+        "label": "wrap-up",
+        "model": "haiku",
+        "promptTokEst": 300,
+        "filesReadKb": null,
+        "inTokEst": 300,
+        "outTok": 2000
       }
     ],
     "total": {
-      "promptTokEst": 12741,
+      "promptTokEst": 13625,
       "filesReadKb": 0,
-      "inTokEst": 12741,
-      "outTok": 121951
+      "inTokEst": 13625,
+      "outTok": 134470
     }
   }
 }
