@@ -17,6 +17,22 @@ timestamp: "2026-07-02T21:30:16Z"
 
 ---
 
+## [run: 2026-07-03]
+
+`MV.3B.V` (one graph resolver: `emit-graph` ships resolved edges) complete across 5 tasks, final verdict PASS. Task 1 extracted `check_graph()`'s per-edge resolution loop (`src/brain/graph.rs:232–281` — qualify a bare `to_ref` to the referrer's own scope, look up `node_map`, else classify leaf/dangling) into a pure `pub(crate) resolve_edge(artifact, edge) -> EdgeResolution` (`Resolved`/`LeafTarget`/`Dangling`), with `check_graph` now matching on it and producing byte-identical diagnostics; used Rust let-chains to satisfy `clippy::collapsible_if`; `EdgeResolution` derives `Debug`/`Clone`/`PartialEq`/`Eq`; 4 new unit tests. Task 2 extended `graph_emit.rs` with an export-local `ExportedEdge` (built via `resolve_edge`) carrying nullable `target_node_id`/`target_doc_id`, and bumped `GraphExport.version` `"1"` → `"2"`; `graph.rs`'s shared `Edge` struct was left untouched per the spec's disjoint-structs guidance; fixed the pre-existing `tests/brain_graph_emit.rs::graph_brain_export_round_trips_as_json` assertion (`version == "1"` → `"2"`) since it directly breaks under the version bump; added a null-target-fields unit test and extended the round-trip test to assert the two new JSON keys. Task 3 added an integration parity test (`export_resolution_matches_check_graph_diagnostics`) over a synthetic corpus (resolved, leaf-target, dangling `related:` edges) asserting edge-by-edge agreement between `build_graph_export`'s resolved fields and `check_graph`'s `E_GRAPH_DANGLING_RELATED`/`W_GRAPH_LEAF_TARGET` diagnostics, matching by locator code + `to_ref` substring in the diagnostic message. Task 4 updated `docs/cli.md`'s `emit-graph` "Output shape" section to document `version` `"2"` and the two new nullable fields with resolved + dangling example edges, leaving the unrelated `manifest` command's own `version: 1` section untouched. Task 5 confirmed all four harness gates green: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` (312+ tests, 0 failures), `cargo build --release`. No deviations from the spec surfaced across any task — all five passed on the first attempt. This closes Phase 3B (corpus engine outputs, D4) entirely — Q/R/S/T/U/V all Done or shipped elsewhere. Next: Phase 4 (`BlogValidator` as a fourth `ContentValidator` impl), or the out-of-repo orchestrator follow-up where `load_brain_edges.py` deletes its own `build_node_maps()`/`resolve_ref()` and reads mev's exported `target_node_id`/`target_doc_id` fields directly.
+
+```
+02d6021 chore: flow state — docs
+7544ba7 docs: update docs for emit-graph-resolved-edges
+86e108d chore: flow state — task 5 passed
+05af010 chore: flow state — task 4 passed
+642f7e2 docs: document emit-graph resolved edge fields, version 2
+f5d061c chore: flow state — task 3 passed
+e8123f5 test: add resolve_edge/check_graph/export parity test
+```
+
+---
+
 ## [2026-07-02]
 
 ### Archive 9 completed Phase 3/3B block folders; add graph-integrity check to /archive
