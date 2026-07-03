@@ -17,7 +17,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::brain::graph::{Edge, GraphArtifact, Node};
+use crate::brain::graph::{EdgeKind, EdgeResolution, GraphArtifact, Node, resolve_edge};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -28,17 +28,43 @@ use crate::brain::graph::{Edge, GraphArtifact, Node};
 /// Serialises to JSON for consumption by the orchestrator's Postgres edges loader.
 #[derive(Debug, Serialize)]
 pub struct GraphExport {
-    /// Schema version — currently `"1"`.
+    /// Schema version — currently `"2"`.
     pub version: String,
     /// Display path of the HQ root used for the crawl.
     pub root: String,
     /// All graph nodes, in walk order.
     pub nodes: Vec<Node>,
-    /// All graph edges, in walk order.
-    pub edges: Vec<Edge>,
+    /// All graph edges, in walk order, carrying resolved target fields.
+    pub edges: Vec<ExportedEdge>,
     /// `scope:stem` for every corpus file with no authored `doc_id`, sorted for
     /// deterministic output.
     pub leaves: Vec<String>,
+}
+
+/// One exported graph edge, augmented with the [`resolve_edge`] outcome.
+///
+/// `to_ref` stays raw as-authored in every case. `target_node_id`/`target_doc_id`
+/// are both `Some` when the edge resolves to a real node, and both `None` when it
+/// is dangling or resolves to a leaf (doc-id-less file) — this mirrors
+/// `check_graph`'s `E_GRAPH_DANGLING_RELATED`/`W_GRAPH_LEAF_TARGET` classification
+/// by construction, since both call [`resolve_edge`].
+///
+/// Export-local — deliberately not added to `graph.rs`'s shared `Edge` struct,
+/// which also backs `generate-graph` HTML and `check_graph` and must stay unchanged.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ExportedEdge {
+    /// The referring node's canonical `scope:doc_id`.
+    pub from: String,
+    /// The raw, as-authored `related:` reference (bare or qualified).
+    pub to_ref: String,
+    /// Edge type.
+    pub kind: EdgeKind,
+    /// Qualified `scope:doc_id` of the resolved target node, or `None` if the
+    /// edge is dangling or targets a leaf.
+    pub target_node_id: Option<String>,
+    /// The resolved target node's authored `doc_id`, or `None` if the edge is
+    /// dangling or targets a leaf.
+    pub target_doc_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -50,17 +76,39 @@ pub struct GraphExport {
 /// `root` is the HQ directory that was crawled; it is stored as a display string in the
 /// envelope header and is not used to access the filesystem.
 ///
-/// Nodes and edges are cloned directly from `artifact.graph` (already deterministic walk
-/// order); `leaves` is `artifact.leaf_keys` collected into a `Vec<String>` and sorted.
+/// Nodes are cloned directly from `artifact.graph` (already deterministic walk order).
+/// Each edge is resolved via [`resolve_edge`] (the same pure function `check_graph`
+/// uses) to populate `target_node_id`/`target_doc_id` — both `Some` on `Resolved`,
+/// both `None` on `LeafTarget`/`Dangling`. `leaves` is `artifact.leaf_keys` collected
+/// into a `Vec<String>` and sorted.
 pub fn build_graph_export(root: &Path, artifact: &GraphArtifact) -> GraphExport {
     let mut leaves: Vec<String> = artifact.leaf_keys.iter().cloned().collect();
     leaves.sort();
 
+    let edges: Vec<ExportedEdge> = artifact
+        .graph
+        .edges
+        .iter()
+        .map(|edge| {
+            let (target_node_id, target_doc_id) = match resolve_edge(artifact, edge) {
+                EdgeResolution::Resolved { node_id, doc_id } => (Some(node_id), Some(doc_id)),
+                EdgeResolution::LeafTarget { .. } | EdgeResolution::Dangling { .. } => (None, None),
+            };
+            ExportedEdge {
+                from: edge.from.clone(),
+                to_ref: edge.to_ref.clone(),
+                kind: edge.kind.clone(),
+                target_node_id,
+                target_doc_id,
+            }
+        })
+        .collect();
+
     GraphExport {
-        version: "1".to_string(),
+        version: "2".to_string(),
         root: root.display().to_string(),
         nodes: artifact.graph.nodes.clone(),
-        edges: artifact.graph.edges.clone(),
+        edges,
         leaves,
     }
 }
@@ -126,17 +174,59 @@ mod tests {
         let root = std::path::Path::new("/hq");
         let export = build_graph_export(root, &artifact);
 
-        assert_eq!(export.version, "1");
+        assert_eq!(export.version, "2");
         assert_eq!(export.root, "/hq");
         assert_eq!(export.nodes.len(), 2);
         assert_eq!(export.edges.len(), 1);
         assert_eq!(export.edges[0].from, "brain:alpha");
         assert_eq!(export.edges[0].to_ref, "beta");
         assert_eq!(
+            export.edges[0].target_node_id,
+            Some("brain:beta".to_string()),
+            "bare `beta` ref resolves to the beta node in the referrer's own scope"
+        );
+        assert_eq!(export.edges[0].target_doc_id, Some("beta".to_string()));
+        assert_eq!(
             export.leaves,
             vec!["brain:a-leaf".to_string(), "brain:z-leaf".to_string()],
             "leaves must be sorted"
         );
+    }
+
+    #[test]
+    fn dangling_and_leaf_edges_have_null_target_fields() {
+        let dir = TempDir::new().unwrap();
+        let e1 = make_entry(
+            &dir,
+            "brain",
+            "a.md",
+            "---\ndoc_id: alpha\nrelated:\n  - missing\n  - z-leaf\n---",
+        );
+        let e2 = make_entry(&dir, "brain", "z-leaf.md", "# No frontmatter");
+        let corpus = corpus_from(vec![e1, e2]);
+        let config = BrainConfig::default();
+        let artifact = build_graph(&corpus, &config);
+
+        let root = std::path::Path::new("/hq");
+        let export = build_graph_export(root, &artifact);
+
+        assert_eq!(export.edges.len(), 2);
+
+        let dangling = export
+            .edges
+            .iter()
+            .find(|e| e.to_ref == "missing")
+            .expect("dangling edge present");
+        assert_eq!(dangling.target_node_id, None);
+        assert_eq!(dangling.target_doc_id, None);
+
+        let leaf = export
+            .edges
+            .iter()
+            .find(|e| e.to_ref == "z-leaf")
+            .expect("leaf-target edge present");
+        assert_eq!(leaf.target_node_id, None);
+        assert_eq!(leaf.target_doc_id, None);
     }
 
     #[test]
@@ -148,7 +238,7 @@ mod tests {
         let root = std::path::Path::new("/hq");
         let export = build_graph_export(root, &artifact);
 
-        assert_eq!(export.version, "1");
+        assert_eq!(export.version, "2");
         assert!(export.nodes.is_empty());
         assert!(export.edges.is_empty());
         assert!(export.leaves.is_empty());
@@ -179,6 +269,14 @@ mod tests {
         assert!(value.get("nodes").is_some(), "nodes key present");
         assert!(value.get("edges").is_some(), "edges key present");
         assert!(value.get("leaves").is_some(), "leaves key present");
-        assert_eq!(value["version"], "1");
+        assert_eq!(value["version"], "2");
+        assert!(
+            value["edges"][0].get("target_node_id").is_some(),
+            "target_node_id key present on exported edge"
+        );
+        assert!(
+            value["edges"][0].get("target_doc_id").is_some(),
+            "target_doc_id key present on exported edge"
+        );
     }
 }
