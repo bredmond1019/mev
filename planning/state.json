@@ -213,6 +213,19 @@
       "related": [],
       "clears_when": "orchestrator load_brain_edges.py reads mev's target_node_id/target_doc_id and its own resolution helpers are deleted; v2 fixtures updated",
       "created": "2026-07-03"
+    },
+    {
+      "slug": "ba15-12-okf-core-convergence",
+      "scope": {
+        "repo": null,
+        "tier": null,
+        "cross_repo": true
+      },
+      "kind": "deferred",
+      "text": "bastion's BA.15.12 (mev/okf-core format convergence, D15, scope widened by bastion's D16) will eventually delete this repo's brain/okf.rs, brain/state.rs, brain/graph.rs, and brain/graph_emit.rs and repoint at bastion's okf-core crate. Not yet a block here -- bastion has not run /generate-tasks for BA.15.12 yet. When it does, the mev-side half (D15: \"executed partly in mev's own repo\") needs its own task spec in this repo. See this repo's D9-ba15-12-okf-core-convergence-mirror.md and core/bastion/planning/master-plan.md's BA.15.12 write-up for the live spec.",
+      "related": [],
+      "clears_when": "BA.15.12's mev-side task spec exists in this repo (promoted out of carryover into a tracked block)",
+      "created": "2026-07-03"
     }
   ]
 }

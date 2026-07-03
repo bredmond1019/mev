@@ -47,6 +47,11 @@ file**, append-only — never edit a settled decision; supersede it with a new o
   New `state.json` `kind:"portfolio"` for repos published to GitHub with no further planning
   state (`rag-engine-rs`, `workflow-engine-rs`, `claude-sdk-rs`); requires a `note` instead of
   `tracks[]`; exempt from the `master-plan.md` sentinel warning in `emit-state`.
+- [D9: BA.15.12 (okf-core format convergence) — mev-side mirror](./D9-ba15-12-okf-core-convergence-mirror.md) —
+  Mirrors bastion's D15/D16: a pending cross-repo dependency where bastion's `okf-core` crate
+  eventually becomes the single implementation of `brain/okf.rs`, `brain/state.rs`, `brain/graph.rs`,
+  and `brain/graph_emit.rs`, deleted here once `okf-core` gains the matching models. Not yet scheduled
+  as a block in this repo — corrects `master-plan.md`'s stale "out of scope" note on `MV.3B.V`.
 
 <!-- Add a row per decision as they are made. Record new ones with /log-decision-style atomic
-     files (D9, D10, …). -->
+     files (D10, D11, …). -->
