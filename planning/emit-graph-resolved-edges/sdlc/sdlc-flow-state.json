@@ -1,0 +1,84 @@
+{
+  "spec_slug": "emit-graph-resolved-edges",
+  "branch": "emit-graph-resolved-edges-flow",
+  "started_at": "2026-07-03T10:57:53Z",
+  "updated_at": "2026-07-03T10:57:53Z",
+  "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/emit-graph-resolved-edges-flow",
+  "status": "running",
+  "current_task": 1,
+  "tasks": {
+    "1": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Extracted check_graph's edge-resolution loop into a pure pub(crate) resolve_edge(artifact, edge) -> EdgeResolution function (Resolved/LeafTarget/Dangling), with check_graph now matching on it and producing byte-identical diagnostics.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Used Rust let-chains (if let ... && let ... {}) instead of nested if to satisfy clippy::collapsible_if",
+        "EdgeResolution derives Debug, Clone, PartialEq, Eq to support direct equality assertions in unit tests and future parity test (task 3)",
+        "Added 4 new unit tests for resolve_edge (resolved, leaf, dangling, cross-scope qualified) alongside the existing check_graph tests, all passing unchanged"
+      ],
+      "files_changed": [
+        "src/brain/graph.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    }
+  },
+  "review": {
+    "verdict": null,
+    "findings": [],
+    "attempts": 0
+  },
+  "docs": {
+    "changed": [],
+    "created": []
+  },
+  "bail_reason": null,
+  "pr": {
+    "url": null,
+    "number": null
+  },
+  "tokens": {
+    "stages": [
+      {
+        "label": "worktree-setup",
+        "model": "haiku",
+        "promptTokEst": 782,
+        "filesReadKb": null,
+        "inTokEst": 782,
+        "outTok": 9077
+      },
+      {
+        "label": "enumerate",
+        "model": "haiku",
+        "promptTokEst": 252,
+        "filesReadKb": null,
+        "inTokEst": 252,
+        "outTok": 746
+      },
+      {
+        "label": "implement-1-1",
+        "model": "sonnet",
+        "promptTokEst": 992,
+        "filesReadKb": null,
+        "inTokEst": 992,
+        "outTok": 9946
+      },
+      {
+        "label": "test-1-1",
+        "model": "haiku",
+        "promptTokEst": 582,
+        "filesReadKb": null,
+        "inTokEst": 582,
+        "outTok": 1881
+      }
+    ],
+    "total": {
+      "promptTokEst": 2608,
+      "filesReadKb": 0,
+      "inTokEst": 2608,
+      "outTok": 21650
+    }
+  }
+}
