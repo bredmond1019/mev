@@ -29,3 +29,6 @@ Validated: gating checks (fast tripwire)
 What: Task 6 (validation gate) confirmed: cargo fmt --check, cargo clippy -- -D warnings, cargo test (312 lib tests + all integration suites, 0 failed), and cargo build --release all pass cleanly on the worktree tip after Tasks 1-5's okf-core repoint.
 Decisions: No commit made — task 6 has no files to modify (files: [] in tasks.json) and is purely a validation check; working tree was already clean after Tasks 1-5's commits.
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: docs/architecture.md
