@@ -8,12 +8,37 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-02T21:30:16Z"
+timestamp: "2026-07-03T11:21:34Z"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## [run: 2026-07-03]
+
+Shipped `ticket-ba15-12-okf-core-convergence` (mev-side half of bastion's `BA.15.12`, D9/D15/D16) across 6 tasks, final verdict PASS. Task 1 added `okf-core` as an unpinned path dependency (`../bastion/crates/okf-core`, D15 discipline); `cargo build --release` succeeded with the dependency present but unused (a local untracked symlink worked around the worktree's extra directory depth for in-worktree validation only). Task 2 repointed `brain/okf.rs` at `okf_core::OkfFrontmatter` (struct deleted, `pub use`), adapting `validate_md_file`'s `layer`/`keywords` checks to the crate's `Vec<String>` (empty-means-absent) shape, and applied minimal one-line shape fixes to `brain/manifest.rs` and `brain/graph.rs` to keep the crate compiling ahead of Tasks 3/4. Task 3 repointed `brain/state.rs` at `okf_core`'s state schema/loader/graph model (confirmed byte-for-byte via diff before deleting mev's copies), keeping mev-specific validation/derivation logic (`discover_state_files`, `check_schema`, `check_state_graph`, `derive_focus`/`derive_rollup`/`derive_cross_repo`/`derive_brain_focus`, cycle detection, tier scoping) local. Task 4 repointed `brain/graph.rs` and `brain/graph_emit.rs` at `okf_core`'s graph/graph_emit model+resolution types (`EdgeKind`, `Edge`, `Node`, `Graph`, `EdgeResolution`, `resolve_edge`, `GraphExport`, `ExportedEdge`, `build_graph_export`), keeping only `build_graph`/`check_graph`'s corpus-walking logic local. Task 5 verified byte-identical `validate-brain --json`/`emit-state`/`manifest`/`emit-graph` output on the live brain corpus, baseline (pre-repoint, commit `6c0e0fa`) vs. post (commit `dacc452`), confirmed by `diff` + matching md5 checksums. Task 6 confirmed all four harness gates green: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` (312 lib tests + all integration suites, 0 failures), `cargo build --release`. Notable decision: the ticket's stated blocker (waiting on bastion's own `okf-core`-side `BA.15.12` spec) had already lifted by the time this ticket ran — `okf-core` shipped `frontmatter.rs`/`parse.rs`/`state.rs`/`graph.rs`/`graph_emit.rs` with a matching model — so the ticket proceeded rather than reporting blocked. This closes out D9's pending cross-repo dependency on the mev side. Next: Phase 4 (`BlogValidator` as a fourth `ContentValidator` impl) per master-plan.md, or the out-of-repo orchestrator follow-up (`load_brain_edges.py` cleanup).
+
+```
+2689b56 chore: flow state — docs
+dba383a docs: update docs for ticket-ba15-12-okf-core-convergence
+8b5413d chore: flow state — task 6 passed
+7a06737 chore: flow state — task 5 passed
+f5bbd23 feat: implement ticket-ba15-12-okf-core-convergence-task5
+dacc452 chore: flow state — task 4 passed
+6fa1777 feat: implement ticket-ba15-12-okf-core-convergence-task4
+```
+
+---
+
+## [2026-07-03]
+
+### Shipped MV.3B.V — emit-graph ships resolved edges; Phase 3B closed
+- **What:** Shipped `MV.3B.V` (emit-graph resolved edges) — spec authored, `/sdlc-flow` PASS, code-review low clean, PR #13 merged to main. `emit-graph` now exports `target_node_id`/`target_doc_id` via a shared `resolve_edge` pure function (both `check_graph` and `build_graph_export` call it); output `version` bumped `"1"` → `"2"`. Closed `MV.3B.V` in `state.json`, added a deferred carryover for the orchestrator `load_brain_edges.py` cleanup (gates the embed pass `OR.H`), and ran `mev emit-state --write`. mev Phase 3B roadmap is now clear (focus empty).
+- **Why:** Single-source the edge resolution so the exported graph carries resolved target IDs directly, letting the orchestrator loader drop its own `build_node_maps()`/`resolve_ref()` logic. Closes Phase 3B (corpus engine outputs, D4) entirely.
+- **Refs:** `planning/emit-graph-resolved-edges/tasks.md` ; PR #13 ; master-plan §MV.3B.V.
 
 ---
 

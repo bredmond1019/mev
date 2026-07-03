@@ -74,6 +74,13 @@ pub struct Manifest {
 // Builder
 // ---------------------------------------------------------------------------
 
+/// Convert an `okf-core` `Vec<String>` list field (empty means absent, per the
+/// BA.15.12 convergence) back to the `Option<Vec<String>>` shape `ManifestEntry`
+/// exposes — preserving the pre-convergence `null`-when-absent JSON output.
+fn non_empty_vec(v: &[String]) -> Option<Vec<String>> {
+    if v.is_empty() { None } else { Some(v.to_vec()) }
+}
+
 /// Build a [`Manifest`] from a pre-crawled [`Corpus`].
 ///
 /// `root` is the HQ directory that was crawled; it is stored as a display string in the
@@ -111,11 +118,11 @@ pub fn build_manifest(root: &Path, corpus: &Corpus) -> Manifest {
                     meta.type_.clone(),
                     meta.title.clone(),
                     meta.description.clone(),
-                    meta.layer.clone(),
+                    non_empty_vec(&meta.layer),
                     meta.project.clone(),
                     meta.status.clone(),
-                    meta.keywords.clone(),
-                    meta.related.clone(),
+                    non_empty_vec(&meta.keywords),
+                    non_empty_vec(&meta.related),
                     meta.synced_from.clone(),
                 ),
                 None => (None, None, None, None, None, None, None, None, None, None),
@@ -171,11 +178,11 @@ mod tests {
                 title: Some(title.to_string()),
                 description: Some("A description.".to_string()),
                 doc_id: Some(doc_id.to_string()),
-                layer: Some(vec!["brain".to_string()]),
+                layer: vec!["brain".to_string()],
                 project: Some("mev".to_string()),
                 status: Some("active".to_string()),
-                keywords: Some(vec!["foo".to_string(), "bar".to_string()]),
-                related: None,
+                keywords: vec!["foo".to_string(), "bar".to_string()],
+                related: vec![],
                 synced_from: None,
             }),
         }

@@ -51,7 +51,12 @@ accuracy over speed — use a capable model, not the cheapest.
 
 ### Step 2 — Local `planning/status.md` (state + momentum)
 
-6. Shell out to `mev emit-state --write` to automatically regenerate the **Current focus** line, the `now` / `next` / `blocked` scalars, and the tier rollup tables. Do NOT manually reimplement focus derivation.
+6. **First, flip any block this session closed.** If a block completed (review PASS / merged), set its
+   `status` to `closed` in `planning/state.json` `tracks[].blocks[]` **before** deriving — that authored
+   field is the *input* the derivation reads; `emit-state` never infers completion from `status.md`
+   (the sync is one-way by design). Skipping this leaves `focus` and every tier rollup stale until a
+   future session reconciles by hand (the engine-rs `state-json-block-status-stale` incident, 2026-07-03).
+   Then shell out to `mev emit-state --write` to automatically regenerate the **Current focus** line, the `now` / `next` / `blocked` scalars, and the tier rollup tables. Do NOT manually reimplement focus derivation.
    Then open this repo's `status_file` (`type: ProjectStatus`) and update **surgically**:
    - the `timestamp` frontmatter field → current ISO-8601 time;
    - bump the `## Metrics` counters if present (cheap; skip if the file has none).
