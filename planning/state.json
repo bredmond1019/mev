@@ -200,19 +200,6 @@
       ],
       "clears_when": "init-worktree.md is patched to prevent or auto-detect this failure mode, or the pattern is confirmed not to recur across several subsequent /init-worktree runs",
       "created": "2026-07-02"
-    },
-    {
-      "slug": "orchestrator-load-brain-edges-loader-cleanup",
-      "scope": {
-        "repo": null,
-        "tier": null,
-        "cross_repo": true
-      },
-      "kind": "deferred",
-      "text": "MV.3B.V shipped: mev emit-graph now exports resolved target_node_id/target_doc_id per edge (output version bumped 1->2). The cross-repo follow-up runs in the orchestrator repo (its own small spec): delete build_node_maps()/resolve_ref() from scripts/load_brain_edges.py and read mev's exported fields directly, so the loader has NO resolution logic ever. Update fixture payloads in tests/test_load_brain_edges.py + tests/workflows/test_brain_graph_retrieval.py to the v2 shape. This gates the embed pass (OR.H, Mac Mini): the first-ever live 'mev emit-graph | load_brain_edges.py' run must happen against the corrected contract. Full audit: brain core/planning/brain-graph-overlap/notes.md.",
-      "related": [],
-      "clears_when": "orchestrator load_brain_edges.py reads mev's target_node_id/target_doc_id and its own resolution helpers are deleted; v2 fixtures updated",
-      "created": "2026-07-03"
     }
   ]
 }
