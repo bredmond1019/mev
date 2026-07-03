@@ -8,12 +8,21 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-03T11:21:34Z"
+timestamp: "2026-07-03T18:30:00Z"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## [2026-07-03]
+
+### ticket-ba15-12-okf-core-convergence wrap-up: PR merge, worktree/stash cleanup, state.json carryover resolved, handoff
+- **What:** Ran `/sdlc-flow` on `ticket-ba15-12-okf-core-convergence` (mev's half of bastion's `BA.15.12`/D9/D15/D16 cross-repo format convergence) to completion — all 6 tasks PASS, final review PASS, PR #14 opened. Ran `/code-review low` on the diff (clean, no findings), then merged PR #14. Fast-forward merged local `main` to `origin/main`, removed the completed worktree (`trees/ticket-ba15-12-okf-core-convergence-flow`), and deleted the local + remote feature branch. Found a stale pre-session git stash carrying an earlier draft of this ticket's `tasks.md`/`tasks.json`; diffed it against the merged, completed version, confirmed it was fully superseded, and dropped it. Removed the now-resolved `ba15-12-okf-core-convergence` carryover entry from `planning/state.json` and ran `mev emit-state --write` to reconcile derived rollups. Wrote `planning/handoff.md` for the next agent.
+- **Why:** Standard end-of-flow cleanup after a shipped ticket — merge, prune the worktree/branch, and reconcile `state.json` so derived focus/rollup stay accurate; the stale stash was pre-session clutter left over from before this ticket's work began and needed to be verified-safe before dropping so no in-flight draft content was lost.
+- **Refs:** PR #14; `planning/ticket-ba15-12-okf-core-convergence/tasks.md`; `planning/state.json`; `planning/handoff.md`; D9/D15/D16.
 
 ---
 
