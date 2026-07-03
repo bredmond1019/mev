@@ -2,7 +2,7 @@
   "spec_slug": "emit-graph-resolved-edges",
   "branch": "emit-graph-resolved-edges-flow",
   "started_at": "2026-07-03T10:57:53Z",
-  "updated_at": "2026-07-03T11:15:28Z",
+  "updated_at": "2026-07-03T11:16:48Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/emit-graph-resolved-edges-flow",
   "status": "done",
   "current_task": 5,
@@ -98,8 +98,8 @@
   },
   "bail_reason": null,
   "pr": {
-    "url": null,
-    "number": null
+    "url": "https://github.com/bredmond1019/mev/pull/13",
+    "number": 13
   },
   "tokens": {
     "stages": [
@@ -222,13 +222,21 @@
         "filesReadKb": null,
         "inTokEst": 837,
         "outTok": 11581
+      },
+      {
+        "label": "pr-create",
+        "model": "sonnet",
+        "promptTokEst": 764,
+        "filesReadKb": null,
+        "inTokEst": 764,
+        "outTok": 1920
       }
     ],
     "total": {
-      "promptTokEst": 11550,
+      "promptTokEst": 12314,
       "filesReadKb": 0,
-      "inTokEst": 11550,
-      "outTok": 74512
+      "inTokEst": 12314,
+      "outTok": 76432
     }
   }
 }
