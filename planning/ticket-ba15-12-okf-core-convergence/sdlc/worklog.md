@@ -24,3 +24,8 @@ Validated: gating checks (fast tripwire)
 What: Verified full-corpus parity: built baseline (main/6c0e0fa, pre-repoint) and post-repoint (worktree tip/dacc452) release binaries and confirmed validate-brain --json, emit-state, manifest, and emit-graph outputs are byte-identical on the live brain corpus; recorded the command log and MD5 checksums in tasks.md Notes and Amendment Log.
 Decisions: Built the baseline binary in the primary core/mev checkout (which was still sitting at commit 6c0e0fa, the exact pre-ticket commit) rather than creating a separate git worktree, since it already provided a clean pre-repoint build target.; Used diff + md5 checksums (not just diff exit code) to give unambiguous byte-identical proof for the ticket record.
 Validated: gating checks (fast tripwire)
+
+## Task 6 — PASSED (1 attempt)
+What: Task 6 (validation gate) confirmed: cargo fmt --check, cargo clippy -- -D warnings, cargo test (312 lib tests + all integration suites, 0 failed), and cargo build --release all pass cleanly on the worktree tip after Tasks 1-5's okf-core repoint.
+Decisions: No commit made — task 6 has no files to modify (files: [] in tasks.json) and is purely a validation check; working tree was already clean after Tasks 1-5's commits.
+Validated: gating checks (fast tripwire)
