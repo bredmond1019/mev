@@ -191,6 +191,74 @@ pub fn build_graph(corpus: &Corpus, _config: &BrainConfig) -> GraphArtifact {
 // Graph integrity checks
 // ---------------------------------------------------------------------------
 
+/// The outcome of resolving one edge's `to_ref` against a [`GraphArtifact`].
+///
+/// Produced by [`resolve_edge`] — the single source of truth for edge resolution,
+/// shared by `check_graph` (diagnostics) and `build_graph_export` (exported fields).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EdgeResolution {
+    /// The (qualified) `to_ref` resolves to a real node.
+    Resolved {
+        /// Qualified `scope:doc_id` of the target node.
+        node_id: String,
+        /// The target node's authored `doc_id`.
+        doc_id: String,
+    },
+    /// The (qualified) `to_ref` resolves to a known leaf file (no `doc_id`).
+    LeafTarget {
+        /// The qualified `scope:doc_id`-shaped key used for the leaf lookup.
+        qualified: String,
+    },
+    /// The (qualified) `to_ref` resolves to nothing in the corpus.
+    Dangling {
+        /// The qualified `scope:doc_id`-shaped key that could not be found.
+        qualified: String,
+    },
+}
+
+/// Resolve one edge's `to_ref` against the built [`GraphArtifact`].
+///
+/// Qualifies a bare `to_ref` (no `:`) to the referrer's own scope (looked up via
+/// `edge.from` in `node_map`), then looks the qualified id up in `node_map`. Falls
+/// back to classifying the qualified key as a known leaf (`leaf_keys`) or dangling.
+///
+/// Pure: takes only the artifact and one edge, returns an [`EdgeResolution`] — no
+/// diagnostics are produced here. `check_graph` and `build_graph_export` each map
+/// the resolution to their own output shape.
+pub fn resolve_edge(artifact: &GraphArtifact, edge: &Edge) -> EdgeResolution {
+    // Determine the referrer's scope from the from-node.
+    let from_scope: &str = artifact
+        .node_map
+        .get(edge.from.as_str())
+        .and_then(|&idx| artifact.graph.nodes.get(idx))
+        .map(|n| n.scope.as_str())
+        .unwrap_or("");
+
+    // Normalise to_ref: if it contains ':' it is already qualified; otherwise
+    // qualify it within the referrer's scope.
+    let qualified: String = if edge.to_ref.contains(':') {
+        edge.to_ref.clone()
+    } else {
+        format!("{from_scope}:{}", edge.to_ref)
+    };
+
+    if let Some(&idx) = artifact.node_map.get(qualified.as_str())
+        && let Some(node) = artifact.graph.nodes.get(idx)
+    {
+        return EdgeResolution::Resolved {
+            node_id: qualified,
+            doc_id: node.doc_id.clone(),
+        };
+    }
+
+    // Not a node: check if it's a known leaf.
+    if artifact.leaf_keys.contains(&qualified) {
+        EdgeResolution::LeafTarget { qualified }
+    } else {
+        EdgeResolution::Dangling { qualified }
+    }
+}
+
 /// Check the built graph for integrity violations: duplicate canonical ids,
 /// dangling `related:` edges, leaf-target warnings, and isolated nodes.
 ///
@@ -231,14 +299,6 @@ pub fn check_graph(artifact: &GraphArtifact) -> Vec<Diagnostic> {
 
     // --- Edge resolution ---
     for edge in &artifact.graph.edges {
-        // Determine the referrer's scope from the from-node.
-        let from_scope: &str = artifact
-            .node_map
-            .get(edge.from.as_str())
-            .and_then(|&idx| artifact.graph.nodes.get(idx))
-            .map(|n| n.scope.as_str())
-            .unwrap_or("");
-
         let referrer_rel: &std::path::Path = artifact
             .node_map
             .get(edge.from.as_str())
@@ -246,38 +306,30 @@ pub fn check_graph(artifact: &GraphArtifact) -> Vec<Diagnostic> {
             .map(|n| n.rel.as_path())
             .unwrap_or_else(|| std::path::Path::new(""));
 
-        // Normalise to_ref: if it contains ':' it is already qualified; otherwise
-        // qualify it within the referrer's scope.
-        let qualified: String = if edge.to_ref.contains(':') {
-            edge.to_ref.clone()
-        } else {
-            format!("{from_scope}:{}", edge.to_ref)
-        };
-
-        if artifact.node_map.contains_key(qualified.as_str()) {
-            // Resolved to a node — OK.
-            continue;
-        }
-
-        // Not a node: check if it's a known leaf.
-        if artifact.leaf_keys.contains(&qualified) {
-            diags.push(Diagnostic::warning(
-                referrer_rel,
-                "W_GRAPH_LEAF_TARGET",
-                format!(
-                    "related target `{}` (resolved: `{qualified}`) is a leaf file (no `doc_id`)",
-                    edge.to_ref
-                ),
-            ));
-        } else {
-            diags.push(Diagnostic::error(
-                referrer_rel,
-                "E_GRAPH_DANGLING_RELATED",
-                format!(
-                    "related target `{}` (resolved: `{qualified}`) does not exist in the corpus",
-                    edge.to_ref
-                ),
-            ));
+        match resolve_edge(artifact, edge) {
+            EdgeResolution::Resolved { .. } => {
+                // Resolved to a node — OK.
+            }
+            EdgeResolution::LeafTarget { qualified } => {
+                diags.push(Diagnostic::warning(
+                    referrer_rel,
+                    "W_GRAPH_LEAF_TARGET",
+                    format!(
+                        "related target `{}` (resolved: `{qualified}`) is a leaf file (no `doc_id`)",
+                        edge.to_ref
+                    ),
+                ));
+            }
+            EdgeResolution::Dangling { qualified } => {
+                diags.push(Diagnostic::error(
+                    referrer_rel,
+                    "E_GRAPH_DANGLING_RELATED",
+                    format!(
+                        "related target `{}` (resolved: `{qualified}`) does not exist in the corpus",
+                        edge.to_ref
+                    ),
+                ));
+            }
         }
     }
 
@@ -657,6 +709,99 @@ mod tests {
         assert!(
             beta_isolated,
             "beta has zero outbound edges, should be isolated: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_edge — pure resolution function
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_edge_returns_resolved_for_known_node() {
+        let dir = TempDir::new().unwrap();
+        let e1 = make_entry(
+            &dir,
+            "brain",
+            "a.md",
+            "---\ndoc_id: alpha\nrelated:\n  - beta\n---",
+        );
+        let e2 = make_entry(&dir, "brain", "b.md", "---\ndoc_id: beta\n---");
+        let corpus = corpus_from(vec![e1, e2]);
+        let artifact = build_graph(&corpus, &BrainConfig::default());
+        let edge = &artifact.graph.edges[0];
+        let resolution = resolve_edge(&artifact, edge);
+        assert_eq!(
+            resolution,
+            EdgeResolution::Resolved {
+                node_id: "brain:beta".to_string(),
+                doc_id: "beta".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_edge_returns_leaf_target_for_doc_id_less_file() {
+        let dir = TempDir::new().unwrap();
+        let e1 = make_entry(
+            &dir,
+            "brain",
+            "a.md",
+            "---\ndoc_id: alpha\nrelated:\n  - leaf-stem\n---",
+        );
+        let e2 = make_entry(&dir, "brain", "leaf-stem.md", "# No frontmatter");
+        let corpus = corpus_from(vec![e1, e2]);
+        let artifact = build_graph(&corpus, &BrainConfig::default());
+        let edge = &artifact.graph.edges[0];
+        let resolution = resolve_edge(&artifact, edge);
+        assert_eq!(
+            resolution,
+            EdgeResolution::LeafTarget {
+                qualified: "brain:leaf-stem".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_edge_returns_dangling_for_missing_target() {
+        let dir = TempDir::new().unwrap();
+        let e1 = make_entry(
+            &dir,
+            "brain",
+            "a.md",
+            "---\ndoc_id: alpha\nrelated:\n  - typo-nonexistent\n---",
+        );
+        let corpus = corpus_from(vec![e1]);
+        let artifact = build_graph(&corpus, &BrainConfig::default());
+        let edge = &artifact.graph.edges[0];
+        let resolution = resolve_edge(&artifact, edge);
+        assert_eq!(
+            resolution,
+            EdgeResolution::Dangling {
+                qualified: "brain:typo-nonexistent".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_edge_qualified_ref_resolves_across_scopes() {
+        let dir = TempDir::new().unwrap();
+        let e1 = make_entry(
+            &dir,
+            "brain",
+            "a.md",
+            "---\ndoc_id: alpha\nrelated:\n  - mev:target\n---",
+        );
+        let e2 = make_entry(&dir, "mev", "t.md", "---\ndoc_id: target\n---");
+        let corpus = corpus_from(vec![e1, e2]);
+        let artifact = build_graph(&corpus, &BrainConfig::default());
+        let edge = &artifact.graph.edges[0];
+        let resolution = resolve_edge(&artifact, edge);
+        assert_eq!(
+            resolution,
+            EdgeResolution::Resolved {
+                node_id: "mev:target".to_string(),
+                doc_id: "target".to_string(),
+            }
         );
     }
 }
