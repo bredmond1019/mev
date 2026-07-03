@@ -124,6 +124,17 @@ cargo build --release
   rough timeframe — a long gap leaves this repo pinned to a stale `okf-core` API or leaves bastion's
   `okf-core` growth unconsumed. No hard deadline is set; sequence, not calendar (this repo's own
   standing rule).
+- **Task 5 parity verification result (2026-07-03):** ran all four commands against the live brain
+  corpus (`/Users/brandon/Dev/agentic-portfolio`) with two release binaries — baseline built from
+  `main`/commit `6c0e0fa` (pre-repoint, in the primary `core/mev` checkout) and post built from this
+  worktree's tip after Tasks 1–4 (commit `dacc452`). Commands run against each binary:
+  `mev validate-brain <root> --json`, `mev emit-state <root>`, `mev manifest <root>`,
+  `mev emit-graph <root>`. Compared with `diff` (exit 0 on all four) and confirmed with `md5`
+  checksums matching exactly: `validate-brain` output `ad3e510d132baa995f70fb117f371d85`,
+  `emit-state` output `c605ece18e60fa1e479cba369853a043`, `manifest` output
+  `62328f950fddb9ed0dca4eafba52ff60`, `emit-graph` output `303a87ab2824d37cd3d57f14f77f03f8` — all
+  four byte-identical baseline vs. post-repoint, stderr empty on both sides for all four commands.
+  Confirms Tasks 2–4's repoint changed implementation only, not observable behavior.
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the plan. -->
@@ -189,3 +200,11 @@ cargo build --release
   `okf-core`'s port, which its own tests already lock in). Ran `cargo run -- validate-brain
   /Users/brandon/Dev/agentic-portfolio --json` as a smoke check post-repoint (full before/after
   byte-identical diff across all four commands is Task 5's job, not this task's).
+- 2026-07-03 (Task 5): built two release binaries — baseline from the primary `core/mev` checkout
+  at commit `6c0e0fa` (tip of `main`, pre-repoint) and post from this worktree's tip after Tasks 1–4
+  (commit `dacc452`) — and ran `validate-brain --json`, `emit-state`, `manifest`, and `emit-graph`
+  against the live brain corpus (`/Users/brandon/Dev/agentic-portfolio`) with each binary. `diff`
+  reported no differences on any of the four output pairs, confirmed with matching `md5` checksums
+  and empty stderr on both sides for all four commands. See Notes for the full command log and
+  checksums. No code changes were needed for this task; it is a verification-only task, and its file
+  list (`tasks.md`) is updated with this record per the task's acceptance criteria.
