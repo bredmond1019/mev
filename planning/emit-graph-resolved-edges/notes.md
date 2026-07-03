@@ -81,7 +81,10 @@ Each entry in `edges[]` gains two **nullable** fields:
   `index_brain.py --rebuild` off `mev manifest`. **This block gates the embed pass** — the operator
   is holding embedding until it lands.
 - **Not this block:** BA.15.12 (okf-core dedup) touches `brain/okf.rs`/`brain/state.rs` — disjoint
-  files; the two can proceed independently, MV.3B.V first.
+  files; the two can proceed independently, MV.3B.V first. *(Update 2026-07-03: accurate against
+  bastion's D15 at the time this shipped. Bastion's D16 has since widened BA.15.12 to also cover
+  `brain/graph.rs`/`graph_emit.rs` — the files this block touches. See this repo's own
+  `planning/decisions/D9-ba15-12-okf-core-convergence-mirror.md`.)*
 
 ## Acceptance (mirror of master-plan §MV.3B.V)
 

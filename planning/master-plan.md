@@ -413,7 +413,10 @@ JSON; never touches a DB); persistence and the AI layer are the orchestrator's. 
 - **Out of scope:** the orchestrator-side loader change (separate repo/spec); `leaves[]` semantics
   (doc-id-less files — orthogonal, unchanged); any change to `validate-brain` diagnostics or other
   subcommands; the BA.15.12 okf-core dedup (different files: `okf.rs`/`state.rs`, not
-  `graph.rs`/`graph_emit.rs`).
+  `graph.rs`/`graph_emit.rs`). *(Update 2026-07-03: this was accurate against bastion's D15 at the
+  time. Bastion's `D16-ba15-12-scope-widened-graph-resolution.md` has since widened BA.15.12 to
+  include `graph.rs`/`graph_emit.rs` too — see this repo's own `D9-ba15-12-okf-core-convergence-
+  mirror.md`.)*
 - **Ratchet:** resolution as an exported contract, not a private lint — the divergence class dies.
 - **Eval slice:** n/a — deterministic acceptance only.
 - **Ladder rung:** solve → repeatable.

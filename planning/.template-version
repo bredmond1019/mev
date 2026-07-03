@@ -1,4 +1,4 @@
 template: base-template
-commit: a72be239102a288a12d637eec2963fc4a516fc3e
+commit: 03fd9495d1c2ba0b8219fa0c5ef7fef981cbc943
 generated: 2026-06-18
-synced: 2026-07-02 — require related: on doc_id-bearing authored .md files
+synced: 2026-07-03 — docs: commit after breakdown.md creation

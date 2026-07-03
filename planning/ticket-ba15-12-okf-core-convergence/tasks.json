@@ -1,0 +1,89 @@
+[
+  {
+    "task_id": 1,
+    "title": "Add okf-core path dependency",
+    "description": "Add okf-core as an unpinned Cargo path dependency (okf-core = { path = \"../bastion/crates/okf-core\" }) to Cargo.toml, matching the discipline bastion itself uses for its mev/bella-engine dependencies (D15). Confirm `cargo build --release` succeeds with the new dependency present but unused.",
+    "acceptance_criteria": [
+      "Cargo.toml declares okf-core as a path dependency pointing at ../bastion/crates/okf-core",
+      "cargo build --release succeeds"
+    ],
+    "validation_commands": ["cargo build --release"],
+    "max_attempts": 3,
+    "files": ["Cargo.toml"],
+    "dependsOn": []
+  },
+  {
+    "task_id": 2,
+    "title": "Repoint brain/okf.rs at okf-core's OkfFrontmatter model",
+    "description": "BLOCKED on bastion's okf-core-side BA.15.12 task spec shipping a reconciled OkfFrontmatter model (okf-core today only has frontmatter.rs + parse.rs, unreconciled with mev's list-layer, serde_yaml-based OkfFrontmatter). Once that lands: delete the duplicate OkfFrontmatter struct + validate_md_file logic from brain/okf.rs, delegate to okf-core's equivalents, and update every consumer's imports (src/lib.rs's re-export, src/brain/links.rs, src/brain/manifest.rs, src/brain/structure.rs, src/brain/crawl.rs, src/brain/emit.rs -- confirmed via grep to import from brain::okf today) to the new path. Do not change observable behavior -- tests/brain_okf.rs's assertions must still pass unmodified.",
+    "acceptance_criteria": [
+      "brain/okf.rs no longer defines its own OkfFrontmatter struct or duplicate parsing logic -- it delegates to okf-core",
+      "src/lib.rs's OkfFrontmatter / validate_md_file re-exports still resolve to the same public names",
+      "every consumer file's imports (links.rs, manifest.rs, structure.rs, crawl.rs, emit.rs) are repointed and compile",
+      "tests/brain_okf.rs passes with unchanged assertions (import paths may change)"
+    ],
+    "validation_commands": ["cargo test brain_okf", "cargo clippy -- -D warnings"],
+    "max_attempts": 3,
+    "files": ["src/brain/okf.rs", "src/lib.rs", "src/brain/links.rs", "src/brain/manifest.rs", "src/brain/structure.rs", "src/brain/crawl.rs", "src/brain/emit.rs"],
+    "dependsOn": [1]
+  },
+  {
+    "task_id": 3,
+    "title": "Repoint brain/state.rs at okf-core's state schema",
+    "description": "BLOCKED on bastion's okf-core-side BA.15.12 task spec shipping a state.json serde schema (okf-core has zero state code today; state.rs is 5,383 lines, the largest duplicate). Once that lands: delete the duplicate schema/graph/emit-engine logic from brain/state.rs, delegate to okf-core's equivalents, and update every consumer's imports. Do not change observable behavior -- tests/brain_state.rs's and tests/brain_emit.rs's assertions must still pass unmodified.",
+    "acceptance_criteria": [
+      "brain/state.rs no longer defines its own state.json schema/graph/emit-engine structs -- it delegates to okf-core",
+      "every consumer file's imports are repointed and compile",
+      "tests/brain_state.rs and tests/brain_emit.rs pass with unchanged assertions (import paths may change)"
+    ],
+    "validation_commands": ["cargo test brain_state", "cargo test brain_emit", "cargo clippy -- -D warnings"],
+    "max_attempts": 3,
+    "files": ["src/brain/state.rs"],
+    "dependsOn": [1]
+  },
+  {
+    "task_id": 4,
+    "title": "Repoint brain/graph.rs and brain/graph_emit.rs at okf-core's graph/edge-resolution model",
+    "description": "BLOCKED on bastion's okf-core-side BA.15.12 task spec shipping a graph/edge-resolution model (okf-core has no equivalent today; this is the surface D16 added to BA.15.12's scope after MV.3B.V shipped resolve_edge/EdgeResolution and ExportedEdge here). Once that lands: delete the duplicate Graph/build_graph/check_graph/resolve_edge/EdgeResolution logic from brain/graph.rs and the duplicate GraphExport/ExportedEdge/build_graph_export logic from brain/graph_emit.rs, delegate to okf-core's equivalents, and update every consumer's imports. Preserve the referrer-scope-only resolution semantics MV.3B.V's parity test locked in -- master-plan.md calls these the validated semantics versus the orchestrator's superseded, divergent ones. Do not change observable behavior -- tests/brain_graph.rs's and tests/brain_graph_emit.rs's assertions must still pass unmodified.",
+    "acceptance_criteria": [
+      "brain/graph.rs no longer defines its own Graph/resolve_edge/EdgeResolution logic -- it delegates to okf-core",
+      "brain/graph_emit.rs no longer defines its own GraphExport/ExportedEdge/build_graph_export logic -- it delegates to okf-core",
+      "GraphExport.version stays \"2\" and ExportedEdge's nullable target_node_id/target_doc_id fields keep their current null/resolved semantics",
+      "src/lib.rs's Graph / build_graph / check_graph / GraphExport / build_graph_export re-exports still resolve to the same public names",
+      "tests/brain_graph.rs and tests/brain_graph_emit.rs pass with unchanged assertions (import paths may change)"
+    ],
+    "validation_commands": ["cargo test brain_graph", "cargo test brain_graph_emit", "cargo clippy -- -D warnings"],
+    "max_attempts": 3,
+    "files": ["src/brain/graph.rs", "src/brain/graph_emit.rs", "src/lib.rs"],
+    "dependsOn": [1]
+  },
+  {
+    "task_id": 5,
+    "title": "Full-corpus parity verification",
+    "description": "Run `cargo run -- validate-brain <root> --json`, `cargo run -- emit-state <root>`, `cargo run -- manifest <root>`, and `cargo run -- emit-graph <root>` against the live brain corpus (/Users/brandon/Dev/agentic-portfolio) before this ticket's changes (baseline, captured from main) and after (post-repoint), and diff the outputs -- must be byte-identical. Record the diff command and result in this ticket's Notes.",
+    "acceptance_criteria": [
+      "validate-brain --json output is byte-identical before and after the repoint on the live brain corpus",
+      "emit-state, manifest, and emit-graph output are each byte-identical before and after the repoint on the live brain corpus",
+      "the parity check is recorded (command + result) in this ticket's Notes for the review pass"
+    ],
+    "validation_commands": ["cargo run -- validate-brain /Users/brandon/Dev/agentic-portfolio --json"],
+    "max_attempts": 3,
+    "files": ["planning/ticket-ba15-12-okf-core-convergence/tasks.md"],
+    "dependsOn": [2, 3, 4]
+  },
+  {
+    "task_id": "6",
+    "title": "Validate",
+    "description": "Run the Validation Commands listed below and confirm all pass.",
+    "acceptance_criteria": [
+      "cargo fmt --check passes",
+      "cargo clippy -- -D warnings passes",
+      "cargo test passes with combined test count not lower than before this ticket",
+      "cargo build --release succeeds"
+    ],
+    "validation_commands": ["cargo fmt --check", "cargo clippy -- -D warnings", "cargo test", "cargo build --release"],
+    "max_attempts": 3,
+    "files": [],
+    "dependsOn": [1, 2, 3, 4, 5]
+  }
+]

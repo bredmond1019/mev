@@ -28,16 +28,16 @@ src/
     ├── mod.rs      ← BrainValidator (implements ContentValidator); wires crawl_corpus
     ├── config.rs   ← BrainConfig, CrawlConfig, VocabConfig, RepoEntry; find_brain_config(), load_brain_config()
     ├── crawl.rs    ← crawl_corpus() → (Corpus, Vec<Diagnostic>); Corpus, CorpusEntry, MdFile; crawl_brain() (legacy)
-    ├── okf.rs      ← OkfFrontmatter, validate_md_file() — OKF field checks; root-instruction-file exemption
+    ├── okf.rs      ← OkfFrontmatter (re-exported from bastion's okf-core crate, BA.15.12/D15/D16), validate_md_file() — OKF field checks; root-instruction-file exemption
     ├── scope.rs    ← scope_units(), scope_for(), owning_unit() — registry-driven scope resolver
     ├── sync.rs     ← (internal) sync helpers
-    ├── graph.rs    ← EdgeKind, Edge, Node, Graph, GraphArtifact, DocMeta; build_graph(), check_graph() — Phase 3 Block J (read_doc_metadata removed by D5 extract-once refactor in Block Q)
-    ├── state.rs    ← StateFile, TrackBlock, Backlog, Origin, StateGraph, StateNode, StateEdge, StateSource, TierScope; discover_state_files(), load_state(), check_schema(), build_state_graph(), check_state_graph(), check_rollup(), detect_cycles(), ready_order(), check_focus_drift(), derive_focus(), derive_rollup(), derive_cross_repo(), tier_scope_for(), derive_brain_focus() — Phase 3 Block P / P2 / T / MV.3B.U (v2: depends_on DAG, cycle detection, derived-blocked enforcement, backlog nodes, focus-drift warnings, single-source derivation helpers; MV.3B.U: tier-scoped non-destructive rollup + brain-focus union)
+    ├── graph.rs    ← EdgeKind, Edge, Node, Graph, GraphArtifact, EdgeResolution, resolve_edge (re-exported from okf-core, BA.15.12/D16), DocMeta; build_graph(), check_graph() — Phase 3 Block J (read_doc_metadata removed by D5 extract-once refactor in Block Q)
+    ├── state.rs    ← serde schema, StateGraph, StateNode, StateEdge, StateSource, TierEntry, load_state(), build_state_graph() (re-exported from okf-core, BA.15.12/D15/D16); mev-local: discover_state_files(), check_schema(), check_state_graph(), check_rollup(), detect_cycles(), ready_order(), check_focus_drift(), derive_focus(), derive_rollup(), derive_cross_repo(), tier_scope_for(), derive_brain_focus() — Phase 3 Block P / P2 / T / MV.3B.U (v2: depends_on DAG, cycle detection, derived-blocked enforcement, backlog nodes, focus-drift warnings, single-source derivation helpers; MV.3B.U: tier-scoped non-destructive rollup + brain-focus union)
     ├── emit.rs     ← EmitError, EmitAction, EmitPlan; wave_order(), render_wave_table(), splice_generated(), plan_state_json(), plan_master_plan_tables(), apply_plan() — Phase 3 Block T (derived-view generation: wave tables, focus regen, brain rollup)
     ├── links.rs    ← LinkKind, LinkRef; extract_links(), check_links(), collect_doc_ids(), read_moves_pending(), check_moved_references() — Phase 3 Block K
     ├── structure.rs ← check_structure() — Phase 3 Block L (bidirectional index.md <-> directory structural coverage: orphan files, dangling rows)
     ├── manifest.rs ← ManifestEntry, Manifest, build_manifest() — Phase 3 Block Q (canonical corpus manifest for RAG indexer)
-    └── graph_emit.rs ← GraphExport, build_graph_export() — Phase 3B Block R (graph-export envelope for the orchestrator's Postgres edges table, D4)
+    └── graph_emit.rs ← GraphExport, ExportedEdge, build_graph_export() (re-exported from okf-core, BA.15.12/D16) — Phase 3B Block R (graph-export envelope for the orchestrator's Postgres edges table, D4)
 
 tests/
 ├── brain_config.rs    ← integration tests for brain.toml loading + BrainConfig
@@ -207,6 +207,12 @@ Resolution algorithm: longest-prefix match using `Path::strip_prefix` (prevents 
 
 The graph module builds and validates the serializable `scope:doc_id` knowledge graph over the Brain corpus.
 
+> **BA.15.12/D16 convergence:** `EdgeKind`, `Edge`, `Node`, `Graph`, `GraphArtifact`,
+> `EdgeResolution`, and `resolve_edge` are re-exported from bastion's `okf-core` crate
+> (single source of truth for the shared model); `build_graph()`/`check_graph()` (mev-specific
+> corpus-walk and diagnostic logic) stay local and consume the shared types. Behavior is
+> unchanged — verified byte-identical output against the pre-convergence build.
+
 #### Public functions
 
 | Function | Signature | Description |
@@ -244,6 +250,13 @@ The graph module builds and validates the serializable `scope:doc_id` knowledge 
 ### State integrity (`src/brain/state.rs`) — Phase 3 Block P / P2
 
 The state module discovers, loads, and validates all `planning/state.json` files across the registered repos, then builds and checks the cross-repo block-dependency graph. Block P2 extends the v1 model to the v2 schema: `depends_on[]` DAG edges on track blocks, cycle detection, derived-blocked enforcement, backlog-node integrity, and focus-drift warnings.
+
+> **BA.15.12/D15/D16 convergence:** the `state.json` serde schema, `load_state`, and the
+> `StateGraph`/`build_state_graph` model are re-exported from bastion's `okf-core` crate
+> (single source of truth); the mev-specific validation/derivation logic below
+> (`check_*`/`derive_*`, `discover_state_files`, and friends) stays local and consumes the
+> shared types. Behavior is unchanged — verified byte-identical output against the
+> pre-convergence build.
 
 #### Public functions
 
@@ -446,6 +459,11 @@ Design principles (shared with `manifest.rs`):
   lockstep with the validator's dangling/leaf-target diagnostics.
 - **Deterministic leaves** — `leaves` is a sorted `Vec<String>` (from `artifact.leaf_keys`, a
   `HashSet`) so repeated runs over an unchanged corpus emit byte-identical output.
+
+> **BA.15.12/D16 convergence:** `GraphExport`, `ExportedEdge`, and `build_graph_export` are
+> re-exported from bastion's `okf-core` crate — this module has zero mev-specific logic
+> layered on top of the shared port. Behavior is unchanged — verified byte-identical output
+> against the pre-convergence build.
 
 #### Public function
 
