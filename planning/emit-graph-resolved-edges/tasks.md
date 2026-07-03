@@ -37,7 +37,10 @@ Rust/Python edge semantics can no longer diverge.
 - **Out of scope (hard boundary, from the block):** the orchestrator-side loader change
   (separate repo/spec); `leaves[]` semantics (doc-id-less files — unchanged); any change to
   `validate-brain` diagnostics or other subcommands; the BA.15.12 okf-core dedup
-  (`okf.rs`/`state.rs`, not touched here).
+  (`okf.rs`/`state.rs`, not touched here). *(Update 2026-07-03: accurate against bastion's D15 at
+  the time this shipped. Bastion's D16 has since widened BA.15.12 to also cover
+  `graph.rs`/`graph_emit.rs` — the files this block touched. See
+  `planning/decisions/D9-ba15-12-okf-core-convergence-mirror.md`.)*
 
 ## Step-by-Step Tasks
 See `tasks.json` in this directory — the task list is defined there, not here.
