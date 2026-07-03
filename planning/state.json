@@ -222,9 +222,9 @@
         "cross_repo": true
       },
       "kind": "deferred",
-      "text": "bastion's BA.15.12 (mev/okf-core format convergence, D15, scope widened by bastion's D16) will eventually delete this repo's brain/okf.rs, brain/state.rs, brain/graph.rs, and brain/graph_emit.rs and repoint at bastion's okf-core crate. Not yet a block here -- bastion has not run /generate-tasks for BA.15.12 yet. When it does, the mev-side half (D15: \"executed partly in mev's own repo\") needs its own task spec in this repo. See this repo's D9-ba15-12-okf-core-convergence-mirror.md and core/bastion/planning/master-plan.md's BA.15.12 write-up for the live spec.",
+      "text": "bastion's BA.15.12 (mev/okf-core format convergence, D15, scope widened by bastion's D16) will eventually delete this repo's brain/okf.rs, brain/state.rs, brain/graph.rs, and brain/graph_emit.rs and repoint at bastion's okf-core crate. The mev-side task spec now exists (planning/ticket-ba15-12-okf-core-convergence/, an ad-hoc /ticket spec, not a tracked state.json block -- D34 seam) but its repoint tasks (2/3/4 in tasks.json) are BLOCKED: bastion has not yet run /generate-tasks for BA.15.12's own okf-core-side spec, so okf-core has no state schema, reconciled OkfFrontmatter model, or graph/edge-resolution model to repoint at yet. See this repo's D9-ba15-12-okf-core-convergence-mirror.md, this ticket's tasks.md, and core/bastion/planning/master-plan.md's BA.15.12 write-up for the live spec.",
       "related": [],
-      "clears_when": "BA.15.12's mev-side task spec exists in this repo (promoted out of carryover into a tracked block)",
+      "clears_when": "bastion's okf-core-side BA.15.12 spec ships and this repo's ticket-ba15-12-okf-core-convergence spec completes (repoint done, dupes deleted)",
       "created": "2026-07-03"
     }
   ]

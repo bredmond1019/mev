@@ -11,7 +11,7 @@ related: [master-plan, context]
 timestamp: "2026-07-03T11:21:34Z"
 now: "MV.3B.V shipped (emit-graph resolved edges, PASS, 5 tasks). Phase 3B fully closed. Next: Phase 4 (BlogValidator) or the orchestrator-side load_brain_edges.py follow-up."
 next: "Phase 4 — BlogValidator, or cross-repo orchestrator load_brain_edges.py cleanup"
-blocked: []
+blocked: ["ticket-ba15-12-okf-core-convergence — waits on bastion's okf-core-side BA.15.12 spec shipping"]
 ---
 
 # STATUS — Current State & Progress
@@ -29,7 +29,7 @@ blocked: []
 
 - **now** — **`MV.3B.V` Done** (one graph resolver: `emit-graph` ships resolved edges; 5 tasks, PASS). `resolve_edge()` extracted as a shared pure function in `graph.rs`; `graph_emit.rs`'s `ExportedEdge` carries nullable `target_node_id`/`target_doc_id`; `GraphExport.version` bumped `"1"` → `"2"`; parity test asserts export/lint agreement; docs updated. **Prior:** `MV.3B.R` (graph emit; 5 tasks, PASS, PR #12 merged).
 - **next** — Phase 4 (`BlogValidator` as a fourth `ContentValidator` impl) per master-plan.md, or the out-of-repo orchestrator follow-up (`load_brain_edges.py` deletes its own resolution logic and reads mev's exported fields).
-- **blocked** — nothing hard-blocked; live `mev validate-brain --state` on brain will fail until the brain-side v2 `state.json` re-seed lands — that is a brain-side coordination step, not a mev blocker.
+- **blocked** — `planning/ticket-ba15-12-okf-core-convergence/` (mev-side half of bastion's `BA.15.12`, D9) is written but its repoint tasks can't execute until bastion's own `okf-core`-side `BA.15.12` spec ships (`okf-core` has no state schema / graph model yet). Otherwise nothing hard-blocked; live `mev validate-brain --state` on brain will fail until the brain-side v2 `state.json` re-seed lands — that is a brain-side coordination step, not a mev blocker.
 - **improve** — Phase 3B (D4) is now fully closed (Q/R/S/T/U/V). Cross-repo follow-up (own spec, orchestrator repo): `load_brain_edges.py` deletes `build_node_maps()`/`resolve_ref()` and reads mev's `target_node_id`/`target_doc_id` directly.
 - **recurring** — none yet
 

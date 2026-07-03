@@ -1,0 +1,130 @@
+---
+type: Plan
+title: "Ticket: mev-side BA.15.12 (okf-core format convergence)"
+description: Repoint mev's brain/okf.rs, brain/state.rs, brain/graph.rs, and brain/graph_emit.rs at bastion's okf-core crate as the single implementation of OKF frontmatter, state.json schema, and graph edge-resolution, deleting the duplicate struct/logic definitions here.
+doc_id: ticket-ba15-12-okf-core-convergence
+layer: [factory]
+project: mev
+status: draft
+keywords: [okf-core, BA.15.12, D9, D15, D16, format convergence]
+related: [D9-ba15-12-okf-core-convergence-mirror, master-plan, status]
+---
+
+# Ticket: mev-side BA.15.12 (okf-core format convergence)
+
+## Metadata
+prompt: `mev-side half of bastion's BA.15.12 (mev/okf-core format convergence, D15, scope widened
+by D16, mirrored in this repo's D9-ba15-12-okf-core-convergence-mirror.md): repoint this repo at
+bastion's okf-core crate as the single implementation of OKF frontmatter, state.json schema, and
+graph edge-resolution, deleting the four duplicate modules once okf-core has grown the matching
+models.`
+status: Not started
+last-run: never
+
+## Description
+
+`brain/okf.rs` (899 lines), `brain/state.rs` (5,383 lines), `brain/graph.rs` (807 lines), and
+`brain/graph_emit.rs` (282 lines) each define a struct/logic set that duplicates something bastion's
+`okf-core` crate also implements or is slated to implement — `OkfFrontmatter` parsing (`okf.rs` vs
+`okf-core/src/frontmatter.rs`), the `state.json` schema + emit engine (`state.rs`, no `okf-core`
+counterpart today), and graph edge resolution (`graph.rs`'s `resolve_edge`/`EdgeResolution` +
+`graph_emit.rs`'s `GraphExport`/`ExportedEdge`, no `okf-core` counterpart today). bastion's D15
+(scoped `okf.rs`+`state.rs`) and D16 (widened to add `graph.rs`+`graph_emit.rs`, after this repo
+shipped `MV.3B.V`) name `okf-core` as the destination single implementation.
+
+**This ticket is blocked on bastion's own BA.15.12 task spec landing first.** `okf-core` today has
+only `frontmatter.rs` + `parse.rs` (605 lines total, per `crates/okf-core/src/*.rs` in the bastion
+repo as of 2026-07-03) — no state schema, no reconciled `OkfFrontmatter` model, and no graph/edge-
+resolution model exist yet for this repo to repoint at. Task 2 below (the actual repoint) cannot be
+executed until `okf-core` ships those types; its concrete sub-steps are deliberately left to be
+filled in against `okf-core`'s real shape once it exists, rather than guessing at an API that isn't
+written yet (this repo's own `CLAUDE.md` standing rule: don't fabricate what can't be grounded).
+
+## Relevant Files
+
+- `Cargo.toml` — add `okf-core = { path = "../bastion/crates/okf-core" }` as an unpinned path
+  dependency (same discipline as bastion's own `mev`/`bella-engine` deps, D15).
+- `src/brain/okf.rs` — `OkfFrontmatter` struct + `validate_md_file`; the OKF-parsing duplicate.
+- `src/brain/state.rs` — the `state.json` schema, graph, and emit engine; the largest duplicate.
+- `src/brain/graph.rs` — `Graph`, `build_graph`, `check_graph`, `resolve_edge`/`EdgeResolution`
+  (added in `MV.3B.V`); the graph-resolution duplicate D16 pulled into scope.
+- `src/brain/graph_emit.rs` — `GraphExport`, `ExportedEdge`, `build_graph_export` (also `MV.3B.V`);
+  consumes `graph.rs`'s `resolve_edge`, so it moves in lockstep with it.
+- `src/lib.rs` — re-exports `brain::okf::{OkfFrontmatter, validate_md_file}`,
+  `brain::graph::{Graph, build_graph, check_graph}`, `brain::graph_emit::{GraphExport,
+  build_graph_export}` — these public re-exports are this crate's contract with `bastion`'s
+  `brainval` pass-through (`bastion graph`/`validate-brain`/etc.) and must keep resolving to the
+  same names even once their internals move to `okf-core`.
+- `src/brain/links.rs`, `src/brain/manifest.rs`, `src/brain/structure.rs`, `src/brain/crawl.rs`,
+  `src/brain/emit.rs` — confirmed (via grep) to import from `okf.rs`/`state.rs`/`graph.rs`/
+  `graph_emit.rs` today; each needs its imports repointed once those modules delegate to
+  `okf-core`, not fully rewritten.
+
+### New Files
+
+None expected — `okf-core` is the new-code destination, in the bastion repo, out of this ticket's
+scope.
+
+## Step by Step Tasks
+See `tasks.json` in this directory — the task list is defined there, not here.
+
+## Testing Strategy
+
+- `tests/brain_okf.rs`, `tests/brain_state.rs`, `tests/brain_graph.rs`, `tests/brain_graph_emit.rs`
+  (all four exist today) must keep passing unmodified in behavior — same assertions, same fixtures —
+  proving the repoint changed *implementation*, not *observable behavior*. Update only what breaks
+  on type-path changes (e.g. `okf::OkfFrontmatter` → `okf_core::OkfFrontmatter`), not on logic.
+- **Parity test (new or extended):** run `cargo run -- validate-brain <live brain root> --json`,
+  `cargo run -- emit-state <live brain root>`, `cargo run -- manifest <live brain root>`, and
+  `cargo run -- emit-graph <live brain root>` before and after the repoint, on the full live brain
+  corpus (`/Users/brandon/Dev/agentic-portfolio`), and diff the outputs — must be byte-identical.
+  This mirrors the parity check bastion's own `BA.15.2` already ran against this crate's public API.
+- Edge case: confirm `GraphExport.version` stays `"2"` and `ExportedEdge`'s nullable
+  `target_node_id`/`target_doc_id` fields keep their current null/resolved semantics after the move —
+  the repoint must not silently regress `MV.3B.V`'s behavior.
+
+## Acceptance Criteria
+
+- `Cargo.toml` depends on `okf-core` as an unpinned path dependency; `cargo build --release`
+  succeeds.
+- `brain/okf.rs`, `brain/state.rs`, `brain/graph.rs`, and `brain/graph_emit.rs` no longer contain
+  duplicate struct/logic definitions — they delegate to `okf-core`'s types (or are deleted outright
+  if `okf-core` provides direct equivalents with no mev-specific wrapping needed).
+- `src/lib.rs`'s public re-exports (`OkfFrontmatter`, `validate_md_file`, `Graph`, `build_graph`,
+  `check_graph`, `GraphExport`, `build_graph_export`) still resolve to the same names bastion's
+  `brainval` pass-through depends on — no breaking change to the cross-repo path-dependency contract
+  (D15).
+- `cargo run -- validate-brain`/`emit-state`/`manifest`/`emit-graph` output on the live brain corpus
+  is byte-identical before and after the repoint.
+- All four existing test files (`tests/brain_okf.rs`, `tests/brain_state.rs`, `tests/brain_graph.rs`,
+  `tests/brain_graph_emit.rs`) pass with unchanged assertions (only import paths may change).
+- Combined test count is not lower than before this ticket.
+- `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `cargo build --release` all pass.
+
+## Validation Commands
+
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
+cargo build --release
+
+## Notes
+
+- **Hard prerequisite, not yet met:** bastion's `okf-core`-side task spec for `BA.15.12` (tracked in
+  the bastion repo at `planning/15.12-mev-okf-core-convergence/` once `/generate-tasks` runs there)
+  must land and ship `okf-core`'s state schema, reconciled `OkfFrontmatter` model, and graph/edge-
+  resolution model before Task 2 in `tasks.json` can actually be implemented. Running `/sdlc-task` on
+  this ticket before that lands will fail at Task 2 for lack of a real `okf-core` API to repoint at.
+- Do not delete `src/brain/graph.rs`'s `resolve_edge`/`EdgeResolution` helper (or `graph_emit.rs`'s
+  consumption of it) without first confirming `okf-core`'s graph model reproduces the exact
+  referrer-scope-only resolution semantics `MV.3B.V`'s parity test locked in — this repo's own
+  `master-plan.md` calls those "the validated ones" versus the orchestrator's now-superseded,
+  divergent resolution logic.
+- Cross-repo coordination: this ticket and bastion's `BA.15.12` task spec should land in the same
+  rough timeframe — a long gap leaves this repo pinned to a stale `okf-core` API or leaves bastion's
+  `okf-core` growth unconsumed. No hard deadline is set; sequence, not calendar (this repo's own
+  standing rule).
+
+## Amendment Log
+<!-- Append-only. Pipeline stages append one dated line here when they deviate from the plan. -->
+_No amendments yet._
