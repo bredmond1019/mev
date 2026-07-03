@@ -212,7 +212,8 @@ The graph module builds and validates the serializable `scope:doc_id` knowledge 
 | Function | Signature | Description |
 |---|---|---|
 | `build_graph` | `(&Corpus, &BrainConfig) -> GraphArtifact` | Walks the corpus once; files with a `doc_id` become nodes, others become leaves. Derives `doc_id` and `related` from `entry.metadata` (D5 extract-once). Returns the serializable graph plus lookup structures. |
-| `check_graph` | `(&GraphArtifact) -> Vec<Diagnostic>` | Checks the built graph for integrity violations without re-walking the corpus. |
+| `check_graph` | `(&GraphArtifact) -> Vec<Diagnostic>` | Checks the built graph for integrity violations without re-walking the corpus. Internally matches on `resolve_edge`'s result per edge. |
+| `resolve_edge` | `(&GraphArtifact, &Edge) -> EdgeResolution` | `pub(crate)`. Resolves a single edge's `to_ref` against the graph's nodes/leaves without re-walking the corpus. Shared by `check_graph` and `graph_emit::build_graph_export` so diagnostics and the export's resolved target fields stay in lockstep. |
 
 #### Graph types
 
@@ -224,6 +225,7 @@ The graph module builds and validates the serializable `scope:doc_id` knowledge 
 | `Graph` | Serializable D4 artifact: `nodes: Vec<Node>`, `edges: Vec<Edge>`. |
 | `GraphArtifact` | Build output: `graph`, `node_map` (canonical id → node index), `leaf_keys` (files with no `doc_id`). |
 | `DocMeta` | Metadata extracted by `read_doc_metadata`: `doc_id: Option<String>`, `related: Vec<String>`. |
+| `EdgeResolution` | `pub(crate)` enum returned by `resolve_edge`: `Resolved { node_id, doc_id }` (qualified target found), `LeafTarget` (target exists but has no `doc_id`), `Dangling` (target not found). Derives `Debug`, `Clone`, `PartialEq`, `Eq`. |
 
 #### Diagnostic locators emitted by `check_graph`
 
@@ -438,8 +440,10 @@ a Postgres edges table beside `brain_documents` (D4).
 Design principles (shared with `manifest.rs`):
 - **Pure output** — `build_graph_export` does not write to disk or a DB; it returns a value the
   caller serialises to stdout.
-- **No re-derivation** — nodes and edges are cloned straight from `artifact.graph` in walk
-  order; nothing is re-walked or re-inferred here.
+- **No re-derivation of nodes** — nodes are cloned straight from `artifact.graph` in walk order;
+  nothing is re-walked here. Edges are resolved per-edge via `graph::resolve_edge` (the same
+  resolution `check_graph` uses) so the export's `target_node_id`/`target_doc_id` stay in
+  lockstep with the validator's dangling/leaf-target diagnostics.
 - **Deterministic leaves** — `leaves` is a sorted `Vec<String>` (from `artifact.leaf_keys`, a
   `HashSet`) so repeated runs over an unchanged corpus emit byte-identical output.
 
@@ -447,13 +451,14 @@ Design principles (shared with `manifest.rs`):
 
 | Function | Signature | Description |
 |---|---|---|
-| `build_graph_export` | `(&Path, &GraphArtifact) -> GraphExport` | `root` is stored as a display string in the envelope header. Clones `nodes`/`edges` from `artifact.graph`; collects `artifact.leaf_keys` into a sorted `Vec<String>`. |
+| `build_graph_export` | `(&Path, &GraphArtifact) -> GraphExport` | `root` is stored as a display string in the envelope header. Clones `nodes` from `artifact.graph`; builds `edges: Vec<ExportedEdge>` by resolving each edge with `graph::resolve_edge` and mapping the result to nullable `target_node_id`/`target_doc_id`; collects `artifact.leaf_keys` into a sorted `Vec<String>`. |
 
 #### Graph-export types
 
 | Type | Description |
 |---|---|
-| `GraphExport` | The complete graph-export envelope: `version` (`"1"`), `root` (display path of HQ root), `nodes: Vec<Node>`, `edges: Vec<Edge>`, `leaves: Vec<String>` (sorted `scope:stem` for files with no `doc_id`). Derives `Serialize`; reuses `Node`/`Edge` from `graph.rs`. |
+| `GraphExport` | The complete graph-export envelope: `version` (`"2"`), `root` (display path of HQ root), `nodes: Vec<Node>`, `edges: Vec<ExportedEdge>`, `leaves: Vec<String>` (sorted `scope:stem` for files with no `doc_id`). Derives `Serialize`; reuses `Node` from `graph.rs`. |
+| `ExportedEdge` | Export-local edge shape: `from`, `to_ref`, `kind` (mirrors `graph::Edge`), plus `target_node_id: Option<String>` and `target_doc_id: Option<String>` — both `Some` when the edge resolves to a real node, both `None` when dangling or targeting a leaf. Derives `Serialize`. |
 
 #### Public library entry point
 
