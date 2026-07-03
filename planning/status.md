@@ -8,17 +8,17 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-07-02T21:30:16Z"
-now: "MV.3B.R shipped and merged (PR #12); worktree cleaned; state.json flipped to closed/done. Next: MV.3B.S (graph-aware RAG, orchestrator-side)."
-next: "MV.3B.S (graph-aware RAG, orchestrator-side)"
+timestamp: "2026-07-03T11:12:18Z"
+now: "MV.3B.V shipped (emit-graph resolved edges, PASS, 5 tasks). Phase 3B fully closed. Next: Phase 4 (BlogValidator) or the orchestrator-side load_brain_edges.py follow-up."
+next: "Phase 4 — BlogValidator, or cross-repo orchestrator load_brain_edges.py cleanup"
 blocked: []
 ---
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-07-02 — `MV.3B.R` (graph emit + structural query surface, D4) fully implemented and PASS (5 tasks). Added `src/brain/graph_emit.rs::GraphExport { version, root, nodes, edges, leaves }` + `build_graph_export(root, &GraphArtifact) -> GraphExport`, reusing `Node`/`Edge` from `graph.rs` and sorting `leaves` for deterministic output; 3 unit tests (Task 1). Added `graph_brain(root)` library driver (mirroring `manifest_brain`) and a new `mev emit-graph [--pretty] [path]` CLI subcommand that crawls the corpus, builds the graph, and prints the `GraphExport` JSON envelope to stdout (Task 2). Added `tests/brain_graph_emit.rs` covering nodes/edges/leaves, JSON round-trip, `related:` edge resolution, and the missing-`brain.toml` error path (Task 3). Documented the `emit-graph` subcommand in `docs/cli.md` (distinguishing it from the existing HTML-emitting `generate-graph`) and the `graph_emit.rs` module/`GraphExport` type in `docs/architecture.md` (Task 4). All four harness gates green (fmt, clippy `-D warnings`, `cargo test`, release build); sanity-ran `mev emit-graph` against the live company brain — 411 nodes, 1062 edges, 101 leaves, pure stdout emit with no DB/file writes (Task 5). Final review verdict: PASS.
+**Last updated:** 2026-07-03 — `MV.3B.V` (one graph resolver: `emit-graph` ships resolved edges) fully implemented and PASS (5 tasks). Task 1 extracted `check_graph()`'s per-edge resolution loop into a pure `resolve_edge(artifact, edge) -> EdgeResolution` (`Resolved`/`LeafTarget`/`Dangling`) in `src/brain/graph.rs`, with `check_graph` now matching on it and producing byte-identical diagnostics; 4 new unit tests. Task 2 extended `graph_emit.rs` to build an export-local `ExportedEdge` (via `resolve_edge`) carrying nullable `target_node_id`/`target_doc_id`, and bumped `GraphExport.version` `"1"` → `"2"`; `graph.rs`'s shared `Edge` struct stays untouched. Task 3 added an integration parity test (`export_resolution_matches_check_graph_diagnostics`) asserting edge-by-edge agreement between `build_graph_export`'s resolved fields and `check_graph`'s `E_GRAPH_DANGLING_RELATED`/`W_GRAPH_LEAF_TARGET` diagnostics over a synthetic corpus. Task 4 updated `docs/cli.md`'s `emit-graph` Output shape to document version `"2"` and the two new nullable fields. Task 5 confirmed all four harness gates green (fmt, clippy `-D warnings`, 312+ tests, release build). Final review verdict: PASS.
 
-**Current focus:** `MV.3B.R` Done — next: `MV.3B.S` (graph-aware RAG, orchestrator-side); see master-plan.md for ordering. (Separately: the brain's own 84 `E_STRUCT_ORPHAN_FILE` findings are a brain-content cleanup, not a mev task.)
+**Current focus:** `MV.3B.V` Done — Phase 3B (corpus engine outputs, D4) is now fully closed (Q/R/S/T/U/V all Done or shipped-elsewhere). Next: Phase 4 (`BlogValidator` as a fourth `ContentValidator` impl) per master-plan.md, or the out-of-repo orchestrator follow-up (`load_brain_edges.py` deletes its own `build_node_maps()`/`resolve_ref()` and reads mev's exported `target_node_id`/`target_doc_id` fields directly). (Separately: the brain's own 84 `E_STRUCT_ORPHAN_FILE` findings are a brain-content cleanup, not a mev task.)
 
 ---
 
@@ -27,10 +27,10 @@ blocked: []
 > Working board — keep all five queues live. **Never end a meaningful session with every queue
 > empty.** The headlines of **now / next / blocked** mirror the frontmatter scalars above.
 
-- **now** — **`MV.3B.R` Done** (graph emit + structural query surface, D4; 5 tasks, PASS). `graph_emit.rs::GraphExport`/`build_graph_export` (nodes/edges/sorted leaves); `graph_brain` driver + `mev emit-graph [--pretty]` CLI; 3 unit + 4 integration tests; docs updated; live-brain sanity run: 411 nodes, 1062 edges, 101 leaves, pure stdout emit. **Prior:** `MV.3.L` (structural coverage; 5 tasks, PASS, PR #11 merged).
-- **next** — **`MV.3B.S`** (graph-aware RAG, orchestrator-side; mev's edge model is the contract). Coordinate brain-side v2 `state.json` re-seed (5 files) for live `--state` validation. See master-plan.md for ordering.
+- **now** — **`MV.3B.V` Done** (one graph resolver: `emit-graph` ships resolved edges; 5 tasks, PASS). `resolve_edge()` extracted as a shared pure function in `graph.rs`; `graph_emit.rs`'s `ExportedEdge` carries nullable `target_node_id`/`target_doc_id`; `GraphExport.version` bumped `"1"` → `"2"`; parity test asserts export/lint agreement; docs updated. **Prior:** `MV.3B.R` (graph emit; 5 tasks, PASS, PR #12 merged).
+- **next** — Phase 4 (`BlogValidator` as a fourth `ContentValidator` impl) per master-plan.md, or the out-of-repo orchestrator follow-up (`load_brain_edges.py` deletes its own resolution logic and reads mev's exported fields).
 - **blocked** — nothing hard-blocked; live `mev validate-brain --state` on brain will fail until the brain-side v2 `state.json` re-seed lands — that is a brain-side coordination step, not a mev blocker.
-- **improve** — Phase 3B (D4): **`MV.3B.S`** graph-aware RAG (orchestrator) is next; the Postgres edges-table load + bastion/MCP structural query surface (consuming `mev emit-graph`'s JSON) is an out-of-repo orchestrator/bastion companion task. `index_brain.py` can now consume `mev manifest` → kill double crawl. Companion: register tier units + bare-bloat `skip_dirs` in `brain.toml`.
+- **improve** — Phase 3B (D4) is now fully closed (Q/R/S/T/U/V). Cross-repo follow-up (own spec, orchestrator repo): `load_brain_edges.py` deletes `build_node_maps()`/`resolve_ref()` and reads mev's `target_node_id`/`target_doc_id` directly.
 - **recurring** — none yet
 
 ## Metrics
@@ -96,6 +96,7 @@ blocked: []
 | MV.3B.S | Graph-aware RAG (orchestrator) | Not started | Retrieval traverses edges to expand/rerank semantic hits + query router. Orchestrator-side; mev's edge model is the contract. |
 | MV.3B.T | Table/rollup emit (from v2 state graph) | Done | 6 tasks, PASS, 275 tests. `derive_focus`/`derive_rollup`/`derive_cross_repo` single-sourced; `emit.rs` (`wave_order`, `render_wave_table`, `splice_generated`); `plan_state_json`/`plan_master_plan_tables`/`apply_plan`; `emit_state` driver + `emit-state` CLI (`--write`). |
 | MV.3B.U | Brain rollup tier-scoping + brain-focus aggregation | Done | 6 tasks, PASS. `TierScope`/`tier_scope_for` + tier-scoped, non-destructive `derive_rollup` (derive/preserve/stub branches, `RepoRollup.tier` always populated); `derive_brain_focus` repo-tagged union; `plan_state_json`/`emit_state` thread `&BrainConfig` through; 8 new integration tests; docs + `D7` decision; carryover resolved. |
+| MV.3B.V | One graph resolver: `emit-graph` ships resolved edges | Done | 5 tasks, PASS. `resolve_edge(artifact, edge) -> EdgeResolution` extracted from `check_graph`'s resolution loop (`graph.rs`); `graph_emit.rs`'s `ExportedEdge` carries nullable `target_node_id`/`target_doc_id` via `resolve_edge`; `GraphExport.version` `"1"` → `"2"`; `check_graph` diagnostics byte-identical; edge-by-edge parity test over synthetic corpus; `docs/cli.md` updated; all harness gates green. Phase 3B fully closed. |
 
 ---
 
