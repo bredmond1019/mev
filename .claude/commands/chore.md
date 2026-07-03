@@ -16,7 +16,9 @@ $ARGUMENTS — description of the chore to plan.
    block in state.json" below.
 5. Create the directory `planning/chore-{descriptive-name}/` if it does not exist, then save **both**
    `planning/chore-{descriptive-name}/tasks.md` (prose) and `tasks.json` (task list) using the Plan
-   Format below.
+   Format below. In the `tasks.md` frontmatter, **populate `related:` with ≥1 real `doc_id`** (the
+   project `master-plan`, a governing decision, or a doc the chore touches) — never `related: []`, or
+   the file is an isolated graph node (`mev`'s `W_GRAPH_ISOLATED_NODE`). Use genuine doc_ids only.
 6. Return only the paths to the files created.
 
 ## Codebase Structure
@@ -38,7 +40,21 @@ every change ships with tests.
 
 ## Plan Format
 
+`tasks.md` opens with OKF frontmatter (required on every new `.md` under `planning/`), then the prose:
+
 ```md
+---
+type: Plan
+title: Chore — <chore name>
+description: <one-line summary of the chore>
+doc_id: chore-<slug>
+layer: [<inferred layer>]
+project: <repo slug>
+status: active
+keywords: [<3-5 terms>]
+related: [<≥1 real doc_id>]   # required — never leave empty; else this file is an isolated graph node (mev W_GRAPH_ISOLATED_NODE)
+---
+
 # Chore: <chore name>
 
 ## Metadata

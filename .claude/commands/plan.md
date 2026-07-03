@@ -67,6 +67,10 @@ can run a single block.
    - The **Quick Reference Sequence Table** has one row per block and matches the block headings.
    - No leftover scaffold sentinels (`{{TOKEN}}`, unfilled `<placeholder>`-style angle stubs, empty
      bullets). Legitimate `<...>` in code/prose is fine.
+   - **Frontmatter `related:` carries ≥1 real `doc_id`** (not `[]`) so this plan is not an isolated
+     graph node (`mev`'s `W_GRAPH_ISOLATED_NODE`) — the source `/capture` notes doc_id if this plan
+     was promoted from one, else the project `master-plan` or a governing decision. Use genuine
+     doc_ids only; never invent one.
 10. Report the path and next steps.
 
 ## Codebase Structure
@@ -97,6 +101,8 @@ The plan uses the same block-definition skeleton as `master-plan.md` (so `/sdlc-
 type: Plan
 title: <Feature Name> Plan
 description: Mini-roadmap for <feature name> — ad-hoc, not in master-plan.md.
+doc_id: plan-<slug>
+related: [<≥1 real doc_id>]   # required — never leave empty; else this plan is an isolated graph node (mev W_GRAPH_ISOLATED_NODE)
 ---
 
 # <Feature Name> — Plan

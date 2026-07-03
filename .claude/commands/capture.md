@@ -50,6 +50,10 @@ to the user.
 5. Create `planning/<slug>/notes.md` using the Output Format below. Leave the body sections
    as scaffolded prompts — **do not invent content** the user hasn't provided. The user will
    fill in the detail (paste conversation content) after the file exists.
+   - **Populate `related:` with ≥1 real `doc_id`** — the project's `master-plan` doc_id, a
+     governing decision, or the parent `index`. Never ship `related: []`: a doc_id-bearing file
+     with zero outbound edges is an isolated graph node (`mev`'s `W_GRAPH_ISOLATED_NODE`). Use
+     genuine doc_ids that exist in the corpus — do not invent one to satisfy the rule.
 
 ### Step 4 — Brain backlog pointer (skip if standalone)
 
@@ -90,7 +94,7 @@ layer: [<inferred layer>]
 project: <repo slug>
 status: draft
 keywords: [<3-5 terms>]
-related: []
+related: [<≥1 real doc_id>]   # required — never leave empty; else this file is an isolated graph node (mev W_GRAPH_ISOLATED_NODE)
 ---
 
 # <Title>
