@@ -85,6 +85,10 @@ block into a runnable `tasks.md`.
    - **The Quick Reference Sequence Table lists one row per block** and matches the block headings.
    - **No leftover scaffold sentinels** — no `{{TOKEN}}`, no unfilled `<...>` HTML-comment stubs, no
      empty bullets. (Legitimate `<...>` in code/prose is fine.)
+   - **Frontmatter `related:` carries ≥1 real `doc_id`** (not `[]`) so the roadmap is not an isolated
+     graph node (`mev`'s `W_GRAPH_ISOLATED_NODE`) — a governing decision, the project `context` doc,
+     or a source `/capture` notes doc_id. Use genuine doc_ids only; never invent one. On a *revise*,
+     leave an already-populated `related:` intact.
 8. Report the path written and the first runnable block (see Report).
 
 ## Codebase Structure
@@ -112,6 +116,8 @@ Acceptance criteria leave the project's gated checks (`planning/harness.json` �
 type: Plan
 title: <Project Name> Master Plan
 description: Strategic roadmap and phase specifications for <Project Name>.
+doc_id: <project>-master-plan
+related: [<≥1 real doc_id>]   # required — never leave empty; else this roadmap is an isolated graph node (mev W_GRAPH_ISOLATED_NODE)
 ---
 
 # <Project Name> — Master Plan

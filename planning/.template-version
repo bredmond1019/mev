@@ -1,4 +1,4 @@
 template: base-template
-commit: 9cca6e8a54d75aaac3d078c11cb3ffea75d61bb7
+commit: a72be239102a288a12d637eec2963fc4a516fc3e
 generated: 2026-06-18
-synced: 2026-07-02 — add /sync-downstream-harness command
+synced: 2026-07-02 — require related: on doc_id-bearing authored .md files
