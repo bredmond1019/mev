@@ -127,4 +127,18 @@ cargo build --release
 
 ## Amendment Log
 <!-- Append-only. Pipeline stages append one dated line here when they deviate from the plan. -->
-_No amendments yet._
+- 2026-07-03 (Task 2): the blocker noted in Description/Notes had lifted since this ticket was
+  drafted — bastion's `okf-core` now ships `frontmatter.rs`/`parse.rs`/`state.rs`/`graph.rs`/
+  `graph_emit.rs` with a reconciled `OkfFrontmatter` model. Repointed `brain/okf.rs` at
+  `okf_core::OkfFrontmatter` (`pub use`, struct deleted) and adapted `validate_md_file`'s
+  `layer`/`keywords` checks to the model's `Vec<String>` (empty-means-absent) shape, replacing
+  the old `Option<Vec<String>>` checks. Because the struct is shared crate-wide, also updated
+  the two other real (non-test) consumers whose code touched the changed field shape directly —
+  `brain/manifest.rs`'s `build_manifest` (added a `non_empty_vec` adapter so `ManifestEntry`'s
+  `Option<Vec<String>>` fields, and its `null`-when-absent JSON output, are unchanged) and
+  `brain/graph.rs`'s `related` extraction (`.and_then` → `.map(..).unwrap_or_default()`) — these
+  two files are outside Task 2's nominal file list (they belong to Tasks 3/4) but needed a
+  one-line shape fix to keep the crate compiling; their own struct/logic delegation to `okf-core`
+  is left to Tasks 3/4. `tests/brain_okf.rs`'s 14 assertions pass unmodified; `src/lib.rs`'s
+  `OkfFrontmatter`/`validate_md_file` re-export needed no change (re-exported transitively through
+  `brain::okf`).

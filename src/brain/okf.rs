@@ -1,14 +1,13 @@
 //! OKF frontmatter validation for the company-brain repo (Phase 2, Block H).
 //!
-//! Defines [`OkfFrontmatter`] — the serde struct for the OKF YAML frontmatter schema
-//! (D27) — and [`validate_md_file`], which checks every required field, controlled-vocab
-//! membership, kebab-case `doc_id`, and keyword count on a single brain `.md` file.
+//! [`OkfFrontmatter`] is re-exported from bastion's `okf-core` crate (BA.15.12 /
+//! D15/D16 format convergence) — this module no longer defines its own struct.
+//! [`validate_md_file`] checks every required field, controlled-vocab membership,
+//! kebab-case `doc_id`, and keyword count on a single brain `.md` file, against
+//! that shared model.
 //!
-//! Design mirrors `learn_ai::meta`: all fields are `Option` (extras tolerated, no
-//! `deny_unknown_fields`), read/parse failures short-circuit to a single diagnostic,
-//! and every field violation gets its own precise-locator diagnostic.
-
-use serde::{Deserialize, Serialize};
+//! Design mirrors `learn_ai::meta`: read/parse failures short-circuit to a single
+//! diagnostic, and every field violation gets its own precise-locator diagnostic.
 
 use crate::Diagnostic;
 use crate::brain::config::BrainConfig;
@@ -16,44 +15,18 @@ use crate::brain::crawl::MdFile;
 use crate::shared::{extract_frontmatter, non_empty};
 
 // ---------------------------------------------------------------------------
-// OKF frontmatter struct
+// OKF frontmatter struct — delegated to okf-core (BA.15.12 convergence)
 // ---------------------------------------------------------------------------
 
 /// The OKF YAML frontmatter schema (D27) for company-brain `.md` files.
 ///
-/// All fields are `Option` so per-field presence checks produce precise-locator
-/// diagnostics rather than aborting deserialization. Unknown keys are tolerated
-/// (`deny_unknown_fields` is deliberately absent), consistent with the live corpus
-/// carrying extra fields.
-///
-/// `layer` is a list per the settled canonical form — the live corpus only uses
-/// `[brain, meta]`-style lists, never bare scalars.
-///
-/// `Serialize` is derived so [`crate::brain::crawl::CorpusEntry`] can carry parsed
-/// metadata and emit it in the manifest (D5 extract-once refactor, Block Q).
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct OkfFrontmatter {
-    /// `type` field (renamed because `type` is a Rust keyword).
-    #[serde(rename = "type")]
-    pub type_: Option<String>,
-    pub title: Option<String>,
-    pub description: Option<String>,
-    pub doc_id: Option<String>,
-    /// Closed-set list: `brain · engine · factory · console · surface · infra · business · content · meta`.
-    pub layer: Option<Vec<String>>,
-    /// Closed-set scalar; omitted on cross-cutting docs (absence is not an error).
-    pub project: Option<String>,
-    /// Closed-set scalar: `active · draft · deprecated · superseded · archived`.
-    pub status: Option<String>,
-    /// 3–7 free-form topic terms (outside that range → `warning`).
-    pub keywords: Option<Vec<String>>,
-    /// Tolerated but not validated.
-    pub related: Option<Vec<String>>,
-    /// Cross-repo sync watermark: the `synced_from` date the brain cache was last synced from.
-    /// Tolerated by the OKF schema (presence-only, not format-checked here); consumed by the
-    /// `--sync` watermark check in `brain::sync`.
-    pub synced_from: Option<String>,
-}
+/// Single source of truth: [`okf_core::OkfFrontmatter`] (BA.15.12/D15/D16). The three
+/// required scalars (`type_`/`title`/`description`) and the optional `doc_id`/`project`/
+/// `status`/`synced_from` scalars are `Option<String>`; `layer`/`keywords`/`related` are
+/// `Vec<String>` (empty means absent — deserialization defaults absent keys to `vec![]`,
+/// not `None`), unlike the `Option<Vec<String>>` shape this module used before the
+/// convergence. Per-field checks below account for that shape.
+pub use okf_core::OkfFrontmatter;
 
 // ---------------------------------------------------------------------------
 // Controlled-vocabulary sets (config-driven — no hardcoded literal arrays)
@@ -228,19 +201,19 @@ pub fn validate_md_file(mf: &MdFile, config: &BrainConfig) -> Vec<Diagnostic> {
     require_str(mf, "description", &fm.description, &mut diags);
 
     // --- Controlled vocab: layer (list — each bad member is its own error) ---
-    if let Some(layers) = &fm.layer {
-        for layer in layers {
-            if !is_valid_layer(layer.as_str(), config) {
-                diags.push(Diagnostic::error(
-                    mf.rel.clone(),
-                    "layer",
-                    format!(
-                        "layer value '{layer}' is not in the configured vocabulary \
-                         ({})",
-                        config.vocab.layer.join("|")
-                    ),
-                ));
-            }
+    // `fm.layer` is `Vec<String>` (empty means absent) since the okf-core convergence;
+    // iterating an empty vec is a no-op, preserving the prior `Option`-absent behavior.
+    for layer in &fm.layer {
+        if !is_valid_layer(layer.as_str(), config) {
+            diags.push(Diagnostic::error(
+                mf.rel.clone(),
+                "layer",
+                format!(
+                    "layer value '{layer}' is not in the configured vocabulary \
+                     ({})",
+                    config.vocab.layer.join("|")
+                ),
+            ));
         }
     }
 
@@ -286,8 +259,10 @@ pub fn validate_md_file(mf: &MdFile, config: &BrainConfig) -> Vec<Diagnostic> {
     }
 
     // --- keywords: count 3–7 warning when present ---
-    if let Some(keywords) = &fm.keywords {
-        let count = keywords.len();
+    // Empty `Vec` means absent (see the module doc comment) — must not be flagged, same
+    // as the prior `Option::None` behavior.
+    if !fm.keywords.is_empty() {
+        let count = fm.keywords.len();
         if !(3..=7).contains(&count) {
             diags.push(Diagnostic::warning(
                 mf.rel.clone(),

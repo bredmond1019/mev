@@ -140,10 +140,13 @@ pub fn build_graph(corpus: &Corpus, _config: &BrainConfig) -> GraphArtifact {
             .as_ref()
             .and_then(|m| m.doc_id.clone())
             .filter(|s| !s.trim().is_empty());
+        // `related` is `Vec<String>` (empty means absent) since the okf-core
+        // convergence, not `Option<Vec<String>>` — no `unwrap_or_default` needed
+        // beyond the outer `Option<OkfFrontmatter>`.
         let related = entry
             .metadata
             .as_ref()
-            .and_then(|m| m.related.clone())
+            .map(|m| m.related.clone())
             .unwrap_or_default();
 
         match doc_id {
