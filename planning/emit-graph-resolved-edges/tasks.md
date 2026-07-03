@@ -12,7 +12,7 @@ related: [master-plan, emit-graph-resolved-edges]
 
 # Task Spec — Phase 3B, Block V (emit-graph resolved edges)
 
-**Status:** Not started · **Last run:** never
+**Status:** All 4 tasks passed · **Last run:** 2026-07-03T11:07:26Z
 
 ## Goal
 Extract `check_graph()`'s per-edge resolution into one pure function both the lint pass and

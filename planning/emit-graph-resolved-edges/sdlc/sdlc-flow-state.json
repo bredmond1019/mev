@@ -2,10 +2,10 @@
   "spec_slug": "emit-graph-resolved-edges",
   "branch": "emit-graph-resolved-edges-flow",
   "started_at": "2026-07-03T10:57:53Z",
-  "updated_at": "2026-07-03T11:04:40Z",
+  "updated_at": "2026-07-03T11:07:26Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/emit-graph-resolved-edges-flow",
   "status": "running",
-  "current_task": 3,
+  "current_task": 4,
   "tasks": {
     "1": {
       "status": "passed",
@@ -54,6 +54,21 @@
       ],
       "files_changed": [
         "tests/brain_graph_emit.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "docs/cli.md emit-graph Output shape now documents version \"2\" and the nullable target_node_id/target_doc_id fields (with resolved + dangling example edges), matching the graph_emit.rs ExportedEdge shape shipped in tasks 1-2.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Left the unrelated `manifest` command's own \"version: 1\" section untouched (line 304/337) — it's a separate command/schema, out of scope for this task."
+      ],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/emit-graph-resolved-edges-flow/docs/cli.md"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -138,13 +153,29 @@
         "filesReadKb": null,
         "inTokEst": 582,
         "outTok": 2099
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 992,
+        "filesReadKb": null,
+        "inTokEst": 992,
+        "outTok": 5248
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 582,
+        "filesReadKb": null,
+        "inTokEst": 582,
+        "outTok": 1714
       }
     ],
     "total": {
-      "promptTokEst": 5756,
+      "promptTokEst": 7330,
       "filesReadKb": 0,
-      "inTokEst": 5756,
-      "outTok": 44760
+      "inTokEst": 7330,
+      "outTok": 51722
     }
   }
 }

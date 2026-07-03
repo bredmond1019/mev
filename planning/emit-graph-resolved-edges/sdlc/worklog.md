@@ -14,3 +14,8 @@ Validated: gating checks (fast tripwire)
 What: Added an integration test (export_resolution_matches_check_graph_diagnostics) asserting edge-by-edge parity between build_graph_export's resolved target_node_id/target_doc_id and check_graph's E_GRAPH_DANGLING_RELATED/W_GRAPH_LEAF_TARGET diagnostics over a synthetic corpus with resolved, leaf-target, and dangling related: edges.
 Decisions: Used mev::brain::config::find_brain_config + mev::brain::crawl::crawl_corpus directly (rather than the higher-level graph_brain helper) so the test could run both check_graph and build_graph_export over the same GraphArtifact for a true parity comparison.; Matched diagnostics to edges by asserting the diagnostic's locator code and that its message contains the edge's raw to_ref string (check_graph's messages embed to_ref in backticks), since Diagnostic has no direct edge reference field.
 Validated: gating checks (fast tripwire)
+
+## Task 4 — PASSED (1 attempt)
+What: docs/cli.md emit-graph Output shape now documents version "2" and the nullable target_node_id/target_doc_id fields (with resolved + dangling example edges), matching the graph_emit.rs ExportedEdge shape shipped in tasks 1-2.
+Decisions: Left the unrelated `manifest` command's own "version: 1" section untouched (line 304/337) — it's a separate command/schema, out of scope for this task.
+Validated: gating checks (fast tripwire)
