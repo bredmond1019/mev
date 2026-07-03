@@ -6,8 +6,8 @@
     "now": [],
     "next": [
       {
-        "id": "MV.3B.S",
-        "title": "Graph-aware RAG (orchestrator integration)",
+        "id": "MV.3B.V",
+        "title": "One graph resolver — emit-graph ships resolved edges (target_node_id/target_doc_id)",
         "status": null,
         "note": null,
         "repo": null,
@@ -112,8 +112,8 @@
         },
         {
           "id": "MV.3B.S",
-          "title": "Graph-aware RAG (orchestrator integration)",
-          "status": "open",
+          "title": "Graph-aware RAG (renamed OR.G; shipped orchestrator-side, PR #2)",
+          "status": "closed",
           "depends_on": [
             {
               "type": "block",
@@ -138,6 +138,21 @@
             }
           ],
           "wave": 6,
+          "origin": null
+        },
+        {
+          "id": "MV.3B.V",
+          "title": "One graph resolver — emit-graph ships resolved edges (target_node_id/target_doc_id)",
+          "status": "open",
+          "depends_on": [
+            {
+              "type": "block",
+              "repo": "mev",
+              "id": "MV.3B.R",
+              "what": "extends the emit-graph output MV.3B.R shipped"
+            }
+          ],
+          "wave": 7,
           "origin": null
         }
       ]

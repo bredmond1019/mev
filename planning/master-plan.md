@@ -337,7 +337,13 @@ JSON; never touches a DB); persistence and the AI layer are the orchestrator's. 
 - **Acceptance:** the emitted graph round-trips (every authored node + `related:` edge present, leaves
   marked); a structural query returns a doc's neighbors with zero embedding calls.
 
-### MV.3B.S — Graph-aware RAG *(orchestrator; mev provides the edges)*
+### MV.3B.S — Graph-aware RAG *(orchestrator; mev provides the edges)* — **Closed (renamed `OR.G`; shipped orchestrator-side, PR #2, 2026-07-02)**
+
+> **2026-07-03:** This block was renamed **`OR.G`** in the program docs (it was always
+> orchestrator-side work) and shipped there: `brain_edges` table + `_structural_expand` retrieval
+> stage. Its follow-up **on the mev side** is `MV.3B.V` below — the shipped loader re-implemented
+> edge resolution with divergent semantics, which MV.3B.V eliminates by exporting mev's own
+> resolution in `emit-graph`.
 - **What:** the orchestrator's retrieval path uses the graph to **expand/rerank** semantic hits — traverse
   `related:` (later `supersedes`/`parent`/`depends-on`) from the top vector matches to feed the LLM
   *connected* context, not isolated chunks. A query **router** sends structural questions to the graph
@@ -380,6 +386,43 @@ JSON; never touches a DB); persistence and the AI layer are the orchestrator's. 
   must not be run against any brain-kind `state.json`. Spec: `planning/3B.U-brain-rollup-tier-scoping/tasks.md`.
   Carryover: `mev-brain-rollup-tier-scoping` (in `core/planning/state.json`).
 
+### MV.3B.V — One graph resolver: `emit-graph` ships resolved edges
+
+- **What:** Export the edge resolution `check_graph()` already computes. Extract the per-edge
+  resolution block (`src/brain/graph.rs:232-281` — qualify a bare `to_ref` to the **referrer's own
+  scope**, look up `node_map`, else classify leaf/dangling) into a pure function both callers use:
+  `check_graph()` keeps emitting its diagnostics from it (behavior unchanged), and
+  `build_graph_export()` (`src/brain/graph_emit.rs:55-66` — today clones raw edges verbatim)
+  populates two new **nullable** fields per exported edge: `target_node_id` (qualified
+  `scope:doc_id`) and `target_doc_id`. Null = dangling/leaf, exactly the shape the orchestrator's
+  `brain_edges` table stores. Bump the `emit-graph` output `version` (`"1"` → `"2"`) and update
+  `docs/cli.md` §emit-graph "Output shape".
+- **Why:** The orchestrator's `OR.G` loader (`scripts/load_brain_edges.py`) re-implemented this
+  resolution independently **with divergent semantics** — bare refs resolve *globally,
+  last-write-wins* there vs *referrer-scope-only* here, so the same edge can be "resolved" in
+  Postgres and `E_GRAPH_DANGLING_RELATED` in `validate-brain` (or resolve to the wrong repo's doc:
+  every repo's `planning/master-plan.md` shares bare doc_id `master-plan`). One algorithm, one
+  place, one language — lint and export agree by construction. Full audit:
+  brain `core/planning/brain-graph-overlap/notes.md`; scheduled in the consolidated program plan
+  (brain `core/planning/master-plan.md`, Program Phase 1). **mev's scope-qualified semantics win** —
+  they are the validated ones.
+- **Interfaces / seam:** `emit-graph` JSON is the contract `orchestrator/scripts/load_brain_edges.py`
+  consumes (its tests pin `docs/cli.md`'s documented shape). Cross-repo follow-up (executed in
+  orchestrator, its own small spec): delete `build_node_maps()`/`resolve_ref()` there and read the
+  exported fields — the loader becomes a pure loader with **no resolution logic, ever**.
+- **Out of scope:** the orchestrator-side loader change (separate repo/spec); `leaves[]` semantics
+  (doc-id-less files — orthogonal, unchanged); any change to `validate-brain` diagnostics or other
+  subcommands; the BA.15.12 okf-core dedup (different files: `okf.rs`/`state.rs`, not
+  `graph.rs`/`graph_emit.rs`).
+- **Ratchet:** resolution as an exported contract, not a private lint — the divergence class dies.
+- **Eval slice:** n/a — deterministic acceptance only.
+- **Ladder rung:** solve → repeatable.
+- **Acceptance:** on the full live brain corpus, every exported edge's resolution agrees with
+  `validate-brain`'s diagnostics (resolved ↔ no diagnostic; null ↔ `E_GRAPH_DANGLING_RELATED` or
+  leaf warning) — asserted by a parity test; `check_graph()` diagnostics byte-identical to before
+  the refactor; output `version` bumped + `docs/cli.md` updated; gated checks pass
+  (`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `cargo build --release`).
+
 ---
 
 ## Phase 4 — Depth / Hardening: blog + linting
@@ -419,9 +462,10 @@ existence — applied across content types.
 | 3 | MV.3.P2 | State-graph expansion validation (cycles + status + drift) | Guard the v2 full DAG (acyclicity, derived blocked, drift) | Brain correctness (D29/D36) |
 | 3B | MV.3B.Q | Manifest emit (file-list + metadata JSON) | Embedder consumes it; kill double crawl | Corpus engine output (D4) |
 | 3B | MV.3B.R | Graph emit + structural query surface | Free/exact "where/what's connected" answers | Knowledge graph as product (D4) |
-| 3B | MV.3B.S | Graph-aware RAG *(orchestrator)* | Fuse semantic + structural retrieval | The two-mode endgame (D4) |
+| 3B | MV.3B.S | Graph-aware RAG *(orchestrator)* — closed, renamed `OR.G`, shipped there | Fuse semantic + structural retrieval | The two-mode endgame (D4) |
 | 3B | MV.3B.T | State-graph derived-view emit (`emit-state`) | Generate leaf `focus` + master-plan tables + brain rollup (single engine `/log-work` calls) | Corpus engine output (D3/D4) |
 | 3B | MV.3B.U | Brain rollup tier-scoping + brain-focus aggregation | Make `emit-state --write` safe for brain-kind state.json (no rollup truncation) | Corpus engine output (D3/D4) |
+| 3B | MV.3B.V | `emit-graph` ships resolved edges (`target_node_id`/`target_doc_id`) | One resolver — kill the Rust/Python semantic divergence OR.G exposed | Corpus engine output (D4); gates the embed pass |
 | 4 | — | Blog validation + code-block/link linting | Cover a fourth content type | Whole-tree coverage |
 | 5+ | — | `watch` (hot-reload) + `compile` (manifest.json) | Speed + precompiled index | Differentiating build |
 
