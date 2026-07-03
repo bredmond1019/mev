@@ -2,10 +2,10 @@
   "spec_slug": "ticket-ba15-12-okf-core-convergence",
   "branch": "ticket-ba15-12-okf-core-convergence-flow",
   "started_at": "2026-07-03T17:11:24Z",
-  "updated_at": "2026-07-03T17:17:56Z",
+  "updated_at": "2026-07-03T17:27:37Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/ticket-ba15-12-okf-core-convergence-flow",
   "status": "running",
-  "current_task": 2,
+  "current_task": 3,
   "tasks": {
     "1": {
       "status": "passed",
@@ -40,6 +40,25 @@
         "src/brain/okf.rs",
         "src/brain/manifest.rs",
         "src/brain/graph.rs",
+        "planning/ticket-ba15-12-okf-core-convergence/tasks.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "3": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "brain/state.rs now delegates its state.json serde schema, loader, and StateGraph/build_state_graph to okf_core (via one pub use block), keeping only mev-specific validation/derivation logic (discover_state_files, check_schema, check_state_graph, check_status_consistency, check_backlog_integrity, check_rollup, detect_cycles, ready_order, derive_focus/derive_cross_repo/derive_rollup/derive_brain_focus, tier scoping).",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Confirmed via diff that okf-core's state.rs schema/graph section is a byte-for-byte port of mev's (only doc comments differ) before deleting mev's copies, so serialization output is guaranteed unchanged.",
+        "Left src/lib.rs and src/brain/emit.rs untouched: both already import via fully-qualified brain::state::X paths, which the new pub use re-export continues to satisfy, so no downstream import repoint was needed despite tasks.json listing state.rs as the only file.",
+        "Discovered a pre-existing (Task-2-era) quirk: two #[test] fns (carryover_array_deserializes/carryover_schema_checks) live outside the `mod tests {}` block; fixed by scoping `use std::path::PathBuf` with #[cfg(test)] (separate from the unconditional `use std::path::Path`) rather than restructuring the test module, since restructuring was out of this task's scope.",
+        "Added TierEntry to the pub use okf_core::{...} list (used only by tests/brain_emit.rs) even though it wasn't in tasks.json's explicit type list, since it's part of the same schema struct set and omitting it would break existing test imports."
+      ],
+      "files_changed": [
+        "src/brain/state.rs",
         "planning/ticket-ba15-12-okf-core-convergence/tasks.md"
       ],
       "commit": "",
@@ -109,13 +128,29 @@
         "filesReadKb": null,
         "inTokEst": 602,
         "outTok": 2218
+      },
+      {
+        "label": "implement-3-1",
+        "model": "sonnet",
+        "promptTokEst": 1032,
+        "filesReadKb": null,
+        "inTokEst": 1032,
+        "outTok": 32086
+      },
+      {
+        "label": "test-3-1",
+        "model": "haiku",
+        "promptTokEst": 602,
+        "filesReadKb": null,
+        "inTokEst": 602,
+        "outTok": 2808
       }
     ],
     "total": {
-      "promptTokEst": 4332,
+      "promptTokEst": 5966,
       "filesReadKb": 0,
-      "inTokEst": 4332,
-      "outTok": 42691
+      "inTokEst": 5966,
+      "outTok": 77585
     }
   }
 }
