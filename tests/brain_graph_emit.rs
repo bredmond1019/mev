@@ -191,3 +191,93 @@ fn graph_brain_errors_without_brain_toml() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Parity: `build_graph_export`'s resolved `target_node_id`/`target_doc_id` fields agree,
+/// edge by edge, with `check_graph`'s diagnostics — both are driven by the same
+/// `resolve_edge` function (Phase 3B, Block V).
+///
+/// The synthetic corpus carries one of each edge shape:
+/// - `doc-a` -> `doc-b` (bare, same-scope `related:`) resolves to a real node.
+/// - `doc-a` -> `leaf-file` (bare `related:`) resolves to a doc-id-less leaf file.
+/// - `doc-a` -> `missing` (bare `related:`) resolves to nothing at all (dangling).
+#[test]
+fn export_resolution_matches_check_graph_diagnostics() {
+    use mev::brain::config::find_brain_config;
+    use mev::brain::crawl::crawl_corpus;
+    use mev::{build_graph, build_graph_export, check_graph};
+
+    let dir = temp_dir("parity");
+    write_brain_toml(&dir);
+
+    write_file(
+        &dir,
+        "docs/a.md",
+        &okf_doc("doc-a", "Doc A", &["doc-b", "leaf-file", "missing"]),
+    );
+    write_file(&dir, "docs/b.md", &okf_doc("doc-b", "Doc B", &[]));
+    write_file(&dir, "docs/leaf-file.md", no_frontmatter_doc());
+
+    let config = find_brain_config(&dir).expect("brain.toml must be found");
+    let (corpus, _crawl_diags) = crawl_corpus(&dir, &config);
+    let artifact = build_graph(&corpus, &config);
+
+    let diags = check_graph(&artifact);
+    let export = build_graph_export(&dir, &artifact);
+
+    assert_eq!(export.edges.len(), 3, "expected exactly 3 edges");
+
+    for edge in &export.edges {
+        let dangling_diag = diags.iter().any(|d| {
+            d.locator == "E_GRAPH_DANGLING_RELATED" && d.message.contains(edge.to_ref.as_str())
+        });
+        let leaf_diag = diags.iter().any(|d| {
+            d.locator == "W_GRAPH_LEAF_TARGET" && d.message.contains(edge.to_ref.as_str())
+        });
+
+        match edge.to_ref.as_str() {
+            "doc-b" => {
+                assert!(
+                    edge.target_node_id.is_some() && edge.target_doc_id.is_some(),
+                    "resolved edge to doc-b must have non-null target fields, got: {edge:?}"
+                );
+                assert_eq!(
+                    edge.target_node_id,
+                    Some("brain:doc-b".to_string()),
+                    "target_node_id must be the qualified scope:doc_id"
+                );
+                assert_eq!(
+                    edge.target_doc_id,
+                    Some("doc-b".to_string()),
+                    "target_doc_id must be the target's authored doc_id"
+                );
+                assert!(
+                    !dangling_diag && !leaf_diag,
+                    "resolved edge must have no dangling/leaf diagnostic, got diags: {diags:#?}"
+                );
+            }
+            "leaf-file" => {
+                assert!(
+                    edge.target_node_id.is_none() && edge.target_doc_id.is_none(),
+                    "leaf-target edge must have null target fields, got: {edge:?}"
+                );
+                assert!(
+                    leaf_diag && !dangling_diag,
+                    "leaf-target edge must have exactly a W_GRAPH_LEAF_TARGET diagnostic, got diags: {diags:#?}"
+                );
+            }
+            "missing" => {
+                assert!(
+                    edge.target_node_id.is_none() && edge.target_doc_id.is_none(),
+                    "dangling edge must have null target fields, got: {edge:?}"
+                );
+                assert!(
+                    dangling_diag && !leaf_diag,
+                    "dangling edge must have exactly an E_GRAPH_DANGLING_RELATED diagnostic, got diags: {diags:#?}"
+                );
+            }
+            other => panic!("unexpected edge to_ref: {other}"),
+        }
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
