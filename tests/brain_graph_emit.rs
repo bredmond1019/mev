@@ -123,7 +123,7 @@ fn graph_brain_nodes_edges_and_leaf() {
 }
 
 /// The export round-trips: `serde_json::to_string` parses back as a `serde_json::Value` with
-/// `version == "1"` and `nodes`/`edges`/`leaves` arrays.
+/// `version == "2"` and `nodes`/`edges`/`leaves` arrays.
 #[test]
 fn graph_brain_export_round_trips_as_json() {
     let dir = temp_dir("round-trip");
@@ -139,7 +139,7 @@ fn graph_brain_export_round_trips_as_json() {
     let json = serde_json::to_string(&export).expect("export must serialize to JSON");
 
     let value: serde_json::Value = serde_json::from_str(&json).expect("JSON must be valid");
-    assert_eq!(value["version"], "1");
+    assert_eq!(value["version"], "2");
     assert!(value["nodes"].is_array(), "nodes must be an array");
     assert!(value["edges"].is_array(), "edges must be an array");
     assert!(value["leaves"].is_array(), "leaves must be an array");
