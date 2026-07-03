@@ -19,3 +19,7 @@ Validated: gating checks (fast tripwire)
 What: docs/cli.md emit-graph Output shape now documents version "2" and the nullable target_node_id/target_doc_id fields (with resolved + dangling example edges), matching the graph_emit.rs ExportedEdge shape shipped in tasks 1-2.
 Decisions: Left the unrelated `manifest` command's own "version: 1" section untouched (line 304/337) — it's a separate command/schema, out of scope for this task.
 Validated: gating checks (fast tripwire)
+
+## Task 5 — PASSED (1 attempt)
+What: Task 5 (Validate) confirmed: cargo fmt --check, cargo clippy -- -D warnings, cargo test (312+ tests across all suites, 0 failures), and cargo build --release all pass cleanly on the working tree from tasks 1-4.
+Validated: gating checks (fast tripwire)
