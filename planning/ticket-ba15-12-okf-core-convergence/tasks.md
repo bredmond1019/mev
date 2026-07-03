@@ -168,3 +168,24 @@ cargo build --release
   for these two orphaned tests) compile clean under `clippy -D warnings`. `tests/brain_state.rs`'s
   41 assertions and `tests/brain_emit.rs`'s assertions pass unmodified; combined suite is 312 lib
   tests + all integration suites green (no regression in count).
+- 2026-07-03 (Task 4): repointed `brain/graph.rs` and `brain/graph_emit.rs` at `okf_core`'s
+  `graph`/`graph_emit` modules, which now ship a byte-for-byte identical port of both files'
+  former pure model/resolution sections (confirmed by inspection: `EdgeKind`/`Edge`/`Node`/
+  `Graph`/`GraphArtifact`/`EdgeResolution`/`resolve_edge` in `graph.rs`, and the entirety of
+  `graph_emit.rs` — `GraphExport`/`ExportedEdge`/`build_graph_export` — have no mev-specific
+  logic layered on top; `graph_emit.rs`'s whole non-test body is now a `pub use`). Deleted all of
+  those duplicate definitions from both files and replaced them with one `pub use okf_core::{...}`
+  each (note: the crate's public path is `okf_core::{Edge, ...}` directly, not
+  `okf_core::graph::{...}` — `okf-core`'s `graph`/`graph_emit` submodules are private, re-exported
+  flat from its crate root). The mev-specific corpus-walking/diagnostic logic that consumes these
+  types (`build_graph`, `check_graph`) is unchanged and now operates on the `okf_core` types.
+  `src/lib.rs` needed no change — its `brain::graph::{Graph, build_graph, check_graph}` and
+  `brain::graph_emit::{GraphExport, build_graph_export}` re-exports continue to resolve through
+  the new `pub use` blocks in each module (contrary to the file list mev's own repo scan
+  predicted). `tests/brain_graph.rs`'s 7 assertions and `tests/brain_graph_emit.rs`'s 5 assertions
+  pass unmodified; combined suite is still 312 lib tests + all integration suites green (no
+  regression in count). Confirmed `GraphExport.version` stays `"2"` and `ExportedEdge`'s
+  `target_node_id`/`target_doc_id` null/resolved semantics are unchanged (both come straight from
+  `okf-core`'s port, which its own tests already lock in). Ran `cargo run -- validate-brain
+  /Users/brandon/Dev/agentic-portfolio --json` as a smoke check post-repoint (full before/after
+  byte-identical diff across all four commands is Task 5's job, not this task's).

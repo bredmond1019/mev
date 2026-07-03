@@ -26,7 +26,6 @@
 //! solely from confirmed authored metadata (frontmatter today; reviewed sidecars later).
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 
 use crate::Diagnostic;
 use crate::brain::config::BrainConfig;
@@ -35,74 +34,19 @@ use crate::brain::crawl::Corpus;
 // ---------------------------------------------------------------------------
 // Graph model (D4 serializable, emittable artifact)
 // ---------------------------------------------------------------------------
-
-/// The kind of a directed edge in the knowledge graph.
-///
-/// `Related` is the only variant today, sourced from the `related:` frontmatter list.
-/// Typed edges (`supersedes`, `depends-on`, `parent`) extend this enum in a later block
-/// without reshaping `Edge` or `check_graph`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EdgeKind {
-    Related,
-}
-
-/// A directed edge in the knowledge graph.
-///
-/// `from` and `to_ref` are both *as-authored* (from `related:` entries); normalisation to
-/// qualified `scope:doc_id` happens in `check_graph` at resolution time.  `kind` carries
-/// the discriminant so typed edges extend the same emitted schema with no reshape.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct Edge {
-    /// Canonical id of the source node (`scope:doc_id`).
-    pub from: String,
-    /// The raw `related:` entry as authored (bare or `scope:doc_id`).
-    pub to_ref: String,
-    /// Edge type.
-    pub kind: EdgeKind,
-}
-
-/// A graph node — a Brain corpus file with an authored `doc_id`.
-///
-/// Files **without** a `doc_id` are leaves; they are tracked in
-/// [`GraphArtifact::leaf_keys`] for the leaf-target lint, but never become nodes.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct Node {
-    /// Canonical id: `scope:doc_id`.
-    pub id: String,
-    /// Owning scope slug (from the corpus registry).
-    pub scope: String,
-    /// Authored `doc_id` (location-independent frontmatter field).
-    pub doc_id: String,
-    /// Path of the file relative to the HQ crawl root.
-    pub rel: PathBuf,
-}
-
-/// The serializable, emittable knowledge graph — the D4 artifact.
-///
-/// Produced by [`build_graph`] and consumed (read-only) by `check_graph`.
-/// Phase 3B Block R loads this into Postgres alongside embeddings.
-#[derive(Debug, Default, serde::Serialize)]
-pub struct Graph {
-    pub nodes: Vec<Node>,
-    pub edges: Vec<Edge>,
-}
+//
+// The pure model (`EdgeKind`, `Edge`, `Node`, `Graph`, `GraphArtifact`) and the pure
+// resolution primitives (`EdgeResolution`, `resolve_edge`) now live in `okf_core::graph`
+// (BA.15.12/D16 convergence) — this module re-exports them so every existing consumer
+// (`build_graph`, `check_graph`, `crate::brain::graph_emit`, `crate::lib`) keeps resolving
+// the same names. `build_graph` (corpus-walking construction) and `check_graph`
+// (diagnostic-producing checks) stay here: they depend on mev-only types (`Corpus`,
+// `BrainConfig`, `Diagnostic`) that have no place in the shared crate.
+pub use okf_core::{Edge, EdgeKind, EdgeResolution, Graph, GraphArtifact, Node, resolve_edge};
 
 // ---------------------------------------------------------------------------
 // Graph construction
 // ---------------------------------------------------------------------------
-
-/// All data produced by [`build_graph`]: the serializable graph artifact plus the
-/// lookup structures required by `check_graph`.
-pub struct GraphArtifact {
-    /// The serializable, emittable graph (D4 artifact).
-    pub graph: Graph,
-    /// `canonical_id → node index` for O(1) resolution in `check_graph`.
-    pub node_map: HashMap<String, usize>,
-    /// `scope:stem` for every corpus file that has **no** authored `doc_id`.
-    /// Used by the leaf-target lint (`W_GRAPH_LEAF_TARGET`).
-    pub leaf_keys: HashSet<String>,
-}
 
 /// Build the global `scope:doc_id` knowledge graph over the supplied corpus.
 ///
@@ -193,74 +137,6 @@ pub fn build_graph(corpus: &Corpus, _config: &BrainConfig) -> GraphArtifact {
 // ---------------------------------------------------------------------------
 // Graph integrity checks
 // ---------------------------------------------------------------------------
-
-/// The outcome of resolving one edge's `to_ref` against a [`GraphArtifact`].
-///
-/// Produced by [`resolve_edge`] — the single source of truth for edge resolution,
-/// shared by `check_graph` (diagnostics) and `build_graph_export` (exported fields).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EdgeResolution {
-    /// The (qualified) `to_ref` resolves to a real node.
-    Resolved {
-        /// Qualified `scope:doc_id` of the target node.
-        node_id: String,
-        /// The target node's authored `doc_id`.
-        doc_id: String,
-    },
-    /// The (qualified) `to_ref` resolves to a known leaf file (no `doc_id`).
-    LeafTarget {
-        /// The qualified `scope:doc_id`-shaped key used for the leaf lookup.
-        qualified: String,
-    },
-    /// The (qualified) `to_ref` resolves to nothing in the corpus.
-    Dangling {
-        /// The qualified `scope:doc_id`-shaped key that could not be found.
-        qualified: String,
-    },
-}
-
-/// Resolve one edge's `to_ref` against the built [`GraphArtifact`].
-///
-/// Qualifies a bare `to_ref` (no `:`) to the referrer's own scope (looked up via
-/// `edge.from` in `node_map`), then looks the qualified id up in `node_map`. Falls
-/// back to classifying the qualified key as a known leaf (`leaf_keys`) or dangling.
-///
-/// Pure: takes only the artifact and one edge, returns an [`EdgeResolution`] — no
-/// diagnostics are produced here. `check_graph` and `build_graph_export` each map
-/// the resolution to their own output shape.
-pub fn resolve_edge(artifact: &GraphArtifact, edge: &Edge) -> EdgeResolution {
-    // Determine the referrer's scope from the from-node.
-    let from_scope: &str = artifact
-        .node_map
-        .get(edge.from.as_str())
-        .and_then(|&idx| artifact.graph.nodes.get(idx))
-        .map(|n| n.scope.as_str())
-        .unwrap_or("");
-
-    // Normalise to_ref: if it contains ':' it is already qualified; otherwise
-    // qualify it within the referrer's scope.
-    let qualified: String = if edge.to_ref.contains(':') {
-        edge.to_ref.clone()
-    } else {
-        format!("{from_scope}:{}", edge.to_ref)
-    };
-
-    if let Some(&idx) = artifact.node_map.get(qualified.as_str())
-        && let Some(node) = artifact.graph.nodes.get(idx)
-    {
-        return EdgeResolution::Resolved {
-            node_id: qualified,
-            doc_id: node.doc_id.clone(),
-        };
-    }
-
-    // Not a node: check if it's a known leaf.
-    if artifact.leaf_keys.contains(&qualified) {
-        EdgeResolution::LeafTarget { qualified }
-    } else {
-        EdgeResolution::Dangling { qualified }
-    }
-}
 
 /// Check the built graph for integrity violations: duplicate canonical ids,
 /// dangling `related:` edges, leaf-target warnings, and isolated nodes.
