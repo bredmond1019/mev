@@ -208,7 +208,13 @@ pub fn check_sync(root: &Path, config: &BrainConfig) -> Vec<Diagnostic> {
         };
 
         // --- compare watermarks ---
-        if source_dt != cache_dt {
+        // Invariant: watermarks are compared as instants (UTC), never as raw strings
+        // or offset-sensitive values — a `-03:00` and a `Z` watermark denoting the
+        // same moment are in sync (no E_SYNC_DRIFT). `DateTime<FixedOffset>`'s
+        // `PartialEq` is already instant-based, but we normalize to UTC explicitly
+        // here so this comparison cannot be silently regressed (e.g. by a future
+        // refactor to a string or offset-aware type) into an offset-sensitive one.
+        if source_dt.to_utc() != cache_dt.to_utc() {
             diags.push(Diagnostic::error(
                 cache_path.clone(),
                 "E_SYNC_DRIFT",
@@ -563,6 +569,75 @@ mod tests {
         assert_eq!(
             diags[0].locator, "E_SYNC_WATERMARK_MISSING",
             "expected E_SYNC_WATERMARK_MISSING, got: {:?}",
+            diags[0].locator
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-offset instant comparison tests (Task 2, Block MV.4.D)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn same_instant_across_offsets_produces_no_e_sync_drift() {
+        let dir = std::env::temp_dir().join("mev-sync-test-same-instant-cross-offset");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 2026-06-27T00:00:00Z and 2026-06-26T21:00:00-03:00 denote the same instant.
+        std::fs::write(
+            dir.join("status.md"),
+            status_md_with_timestamp("2026-06-27T00:00:00Z"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("cache.md"),
+            cache_md_with_synced_from("2026-06-26T21:00:00-03:00"),
+        )
+        .unwrap();
+
+        let config = make_config("status.md", "cache.md");
+        let diags = check_sync(&dir, &config);
+
+        assert!(
+            diags.is_empty(),
+            "same instant across offsets should produce no diagnostics, got: {diags:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn different_instant_across_offsets_produces_e_sync_drift() {
+        let dir = std::env::temp_dir().join("mev-sync-test-diff-instant-cross-offset");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 2026-06-27T00:00:00Z and 2026-06-27T00:00:00-03:00 denote different instants
+        // (the latter is 3 hours later in UTC terms).
+        std::fs::write(
+            dir.join("status.md"),
+            status_md_with_timestamp("2026-06-27T00:00:00Z"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("cache.md"),
+            cache_md_with_synced_from("2026-06-27T00:00:00-03:00"),
+        )
+        .unwrap();
+
+        let config = make_config("status.md", "cache.md");
+        let diags = check_sync(&dir, &config);
+
+        assert_eq!(
+            diags.len(),
+            1,
+            "different instant across offsets should produce exactly one diagnostic, got: {diags:?}"
+        );
+        assert_eq!(
+            diags[0].locator, "E_SYNC_DRIFT",
+            "expected E_SYNC_DRIFT, got: {:?}",
             diags[0].locator
         );
 
