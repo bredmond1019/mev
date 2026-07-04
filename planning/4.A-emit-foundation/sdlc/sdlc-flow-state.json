@@ -2,9 +2,9 @@
   "spec_slug": "4.A-emit-foundation",
   "branch": "4.A-emit-foundation-flow",
   "started_at": "2026-07-04T02:00:53Z",
-  "updated_at": "2026-07-04T02:13:18Z",
+  "updated_at": "2026-07-04T02:16:20Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/4.A-emit-foundation-flow",
-  "status": "docs",
+  "status": "done",
   "current_task": 4,
   "tasks": {
     "1": {
@@ -183,13 +183,21 @@
         "filesReadKb": null,
         "inTokEst": 794,
         "outTok": 5758
+      },
+      {
+        "label": "wrap-up",
+        "model": "sonnet",
+        "promptTokEst": 808,
+        "filesReadKb": null,
+        "inTokEst": 808,
+        "outTok": 11932
       }
     ],
     "total": {
-      "promptTokEst": 8939,
+      "promptTokEst": 9747,
       "filesReadKb": 0,
-      "inTokEst": 8939,
-      "outTok": 49361
+      "inTokEst": 9747,
+      "outTok": 61293
     }
   }
 }

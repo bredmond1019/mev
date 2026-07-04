@@ -21,3 +21,6 @@ Validated: gating checks (fast tripwire)
 
 ## Docs
 Patched: docs/architecture.md
+
+## Wrap-up — PASS
+Next: MV.4.B (project caches + tier rollups) or MV.4.C (HQ board) — state-sync-loop Phase 4, per core/planning/state-sync-loop/master-plan.md
