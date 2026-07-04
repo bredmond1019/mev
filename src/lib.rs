@@ -457,9 +457,9 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
 
 /// Generate derived views for the company-brain repo and optionally write them.
 ///
-/// Phase 3, Block T: the single derivation engine for every generated view the v2
+/// Phase 4, Block MV.4.E: the single derivation engine for every generated view the v2
 /// state schema declares. Resolves `brain.toml`, discovers and loads all
-/// `planning/state.json` files, builds the block-dependency graph, then runs both
+/// `planning/state.json` files, builds the block-dependency graph, then runs all five
 /// planners:
 ///
 /// - [`brain::emit::plan_state_json`] — regenerates leaf `focus` (now/next/blocked)
@@ -468,20 +468,31 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
 /// - [`brain::emit::plan_master_plan_tables`] — splices the wave/dependency table into
 ///   any `master-plan.md` that carries the `<!-- BEGIN generated:wave-table -->`
 ///   sentinels.
+/// - [`brain::emit::plan_project_caches`] — splices the derived focus line + a
+///   `synced_from` watermark into each leaf project's `docs/projects/<slug>.md` cache
+///   doc (`<!-- BEGIN generated:project-cache -->` sentinels).
+/// - [`brain::emit::plan_tier_rollups`] — splices the tier-scoped rollup table into
+///   each tier sub-brain's sibling `status.md` (`<!-- BEGIN generated:tier-rollup -->`
+///   sentinels).
+/// - [`brain::emit::plan_hq_board`] — splices the NOW/NEXT/BLOCKED Operating Board into
+///   the HQ brain's `status.md` (`<!-- BEGIN generated:hq-board -->` sentinels).
 ///
 /// When `write` is `false` (default), the function is a **dry-run**: no files are
 /// written and each planned action is reported as a `W_EMIT_DRY_RUN` diagnostic.
 /// When `write` is `true`, the derived content is written in place and each write
 /// is reported as an `I_EMIT_WROTE` diagnostic.
 ///
-/// A master-plan file lacking the sentinels is skipped with a `W_EMIT_NO_SENTINEL`
+/// A target file lacking the relevant sentinels is skipped with a `W_EMIT_NO_SENTINEL`
 /// warning — the emitter never splices into arbitrary prose.
 ///
 /// Resolves `brain.toml` the same way as [`validate_brain`] — see that function's
 /// doc for the `E_CONFIG_NOT_FOUND` fallback behaviour.
 pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report> {
     use brain::config::find_brain_config;
-    use brain::emit::{apply_plan, plan_master_plan_tables, plan_state_json};
+    use brain::emit::{
+        apply_plan, plan_hq_board, plan_master_plan_tables, plan_project_caches, plan_state_json,
+        plan_tier_rollups,
+    };
     use brain::state::{StateLoadError, build_state_graph, discover_state_files, load_state};
 
     let config = match find_brain_config(root) {
@@ -531,16 +542,25 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     // 3. Build the block-dependency graph.
     let graph = build_state_graph(&loaded);
 
-    // 4. Run both planners and merge their results.
+    // 4. Run all five planners.
     let state_plan = plan_state_json(&loaded, &graph, &config);
     let mp_plan = plan_master_plan_tables(&loaded, &graph);
+    let project_caches_plan = plan_project_caches(root, &loaded, &graph, &config);
+    let tier_rollups_plan = plan_tier_rollups(&loaded, &graph, &config);
+    let hq_board_plan = plan_hq_board(&loaded, &graph, &config);
 
-    // 5. Apply both plans (write or dry-run).
+    // 5. Apply all five plans (write or dry-run), in a stable order.
     let state_diags = apply_plan(&state_plan, write);
     let mp_diags = apply_plan(&mp_plan, write);
+    let project_caches_diags = apply_plan(&project_caches_plan, write);
+    let tier_rollups_diags = apply_plan(&tier_rollups_plan, write);
+    let hq_board_diags = apply_plan(&hq_board_plan, write);
 
     report.diagnostics.extend(state_diags);
     report.diagnostics.extend(mp_diags);
+    report.diagnostics.extend(project_caches_diags);
+    report.diagnostics.extend(tier_rollups_diags);
+    report.diagnostics.extend(hq_board_diags);
 
     Ok(report)
 }
