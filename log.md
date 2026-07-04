@@ -17,6 +17,22 @@ timestamp: "2026-07-04T09:04:10Z"
 
 ---
 
+## [run: 2026-07-04]
+
+Shipped `4.C-hq-board-emit` (Phase 4, state-sync-loop Wave 2) across 3 tasks, final verdict PASS. Task 1 added a pure `render_hq_board(focus, edges) -> String` (`src/brain/emit.rs`), rendering NOW/NEXT/BLOCKED sections as `repo:id — title` lines with cross-repo-edge/`blocked_by` annotations, plus a `task1_render_hq_board` test module in `tests/brain_emit.rs` covering rendering, ordering, edge-note annotation, `what`-fallback, external deps, multi-blocker joins, no-trailing-newline, and empty-focus cases; empty NOW/NEXT/BLOCKED sections render a literal `_none_` line rather than being omitted, and the renderer preserves the input `Focus` vector order rather than re-sorting (derive_brain_focus already establishes deterministic ordering). Task 2 added `plan_hq_board`, which locates the HQ brain's sibling `status.md` (the `state.json` parent, for the brain-kind file whose `tier_scope_for` resolves to `TierScope::All`), builds the board via `render_hq_board(derive_brain_focus(...), derive_cross_repo(...))`, and splices it into the `markers::HQ_BOARD` sentinel with fixed-point/no-sentinel-warning semantics mirroring `plan_project_caches`/`plan_tier_rollups`; confirmed the target-doc resolution against the real company-brain repo (`planning/state.json` sits beside `planning/status.md`, which already carries a hand-maintained "## Operating Board" section this planner will eventually generate); not wired into `emit_state` (MV.4.E's job). 6 new tests in a `task2_plan_hq_board` module cover splice-produces-expected-content, missing-sentinel-warns, missing-file-warns, tier-sub-brain-is-skipped, fixed-point-no-action-on-second-pass, and a marker-constant sanity check. Task 3 confirmed all four harness gates green (`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` — 76 tests, `cargo build --release`) with no code changes needed. Final review verdict: PASS. This closes Wave 2 of the state-sync-loop spine (`MV.4.A → {B,C} → E`) — both `MV.4.B` and `MV.4.C` are now Done, unblocking `MV.4.E`. Next: `MV.4.E` (spine terminus, wires `MV.4.B`+`MV.4.C` planners into `emit_state`).
+
+```
+7ab7b40 docs: update docs for 4.C-hq-board-emit
+657d9d2 chore: flow state — task 3 passed
+58b72a6 chore: flow state — task 2 passed
+39c1c51 feat: implement 4.C-hq-board-emit-task2
+02ea055 chore: flow state — task 1 passed
+29d94e7 feat: implement 4.C-hq-board-emit-task1
+9f21c53 chore: init worktree 4.C-hq-board-emit-flow
+```
+
+---
+
 ## [2026-07-04]
 
 ### Close-out: 4.B-cache-rollup-emit
