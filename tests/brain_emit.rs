@@ -1161,6 +1161,278 @@ mod task3_planners {
     }
 
     // -----------------------------------------------------------------------
+    // plan_project_caches
+    // -----------------------------------------------------------------------
+
+    /// Build a [`BrainConfig`] with one `[[repos]]` entry naming `cache_doc`.
+    fn config_with_cache_doc(slug: &str, tier: &str, cache_doc: &str) -> BrainConfig {
+        BrainConfig {
+            repos: vec![RepoEntry {
+                slug: slug.to_string(),
+                tier: tier.to_string(),
+                repo_path: String::new(),
+                status_file: String::new(),
+                cache_doc: cache_doc.to_string(),
+                heading: String::new(),
+            }],
+            ..BrainConfig::default()
+        }
+    }
+
+    fn cache_doc_with_sentinel(synced_from: &str) -> String {
+        format!(
+            "---\n\
+             type: ProjectContext\n\
+             title: myrepo Project Context\n\
+             description: Test cache.\n\
+             synced_from: \"{synced_from}\"\n\
+             ---\n\n\
+             # myrepo\n\n\
+             Narrative before.\n\n\
+             <!-- BEGIN generated:project-cache -->\n\
+             <!-- END generated:project-cache -->\n\n\
+             Narrative after.\n"
+        )
+    }
+
+    #[test]
+    fn project_cache_splice_produces_expected_content() {
+        use mev::brain::emit::plan_project_caches;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_rel = "docs/projects/myrepo.md";
+        let cache_path = tmp.path().join(cache_rel);
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(&cache_path, cache_doc_with_sentinel("2026-01-01T00:00:00Z")).unwrap();
+
+        let tracks = vec![Track {
+            title: "P".to_string(),
+            blocks: vec![track_block(
+                "B1",
+                "Block One",
+                Some("in_progress"),
+                Some(1),
+                vec![],
+            )],
+        }];
+        let mut file = make_leaf_file("myrepo", tracks, Focus::default());
+        file.updated = "2026-07-04T02:21:44Z".to_string();
+        let src = StateSource {
+            repo_slug: "myrepo".to_string(),
+            abs_path: PathBuf::from("/fake/myrepo/planning/state.json"),
+            expected_kind: "project",
+        };
+
+        let files = vec![(src, file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_cache_doc("myrepo", "core", cache_rel);
+
+        let plan = plan_project_caches(tmp.path(), &files, &graph, &config);
+
+        assert_eq!(
+            plan.actions.len(),
+            1,
+            "expected one action; got {}",
+            plan.actions.len()
+        );
+        let action = &plan.actions[0];
+        assert_eq!(action.path, cache_path);
+
+        assert!(
+            action.new_content.contains("Narrative before."),
+            "narrative before sentinel was lost"
+        );
+        assert!(
+            action.new_content.contains("Narrative after."),
+            "narrative after sentinel was lost"
+        );
+        assert!(
+            action.new_content.contains("`B1` — Block One"),
+            "focus-line missing derived block: {}",
+            action.new_content
+        );
+        assert!(
+            action
+                .new_content
+                .contains("synced_from: \"2026-07-04T02:21:44Z\""),
+            "synced_from watermark not reconciled: {}",
+            action.new_content
+        );
+        assert!(
+            !action.new_content.contains("2026-01-01T00:00:00Z"),
+            "stale synced_from watermark should not survive"
+        );
+    }
+
+    #[test]
+    fn project_cache_missing_sentinel_warns_no_action() {
+        use mev::brain::emit::plan_project_caches;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_rel = "docs/projects/myrepo.md";
+        let cache_path = tmp.path().join(cache_rel);
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &cache_path,
+            "---\ntype: ProjectContext\n---\n\n# myrepo\n\nNo sentinels.\n",
+        )
+        .unwrap();
+
+        let file = make_leaf_file("myrepo", vec![], Focus::default());
+        let src = StateSource {
+            repo_slug: "myrepo".to_string(),
+            abs_path: PathBuf::from("/fake/myrepo/planning/state.json"),
+            expected_kind: "project",
+        };
+
+        let files = vec![(src, file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_cache_doc("myrepo", "core", cache_rel);
+
+        let plan = plan_project_caches(tmp.path(), &files, &graph, &config);
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "no action expected when sentinels are absent; got {}",
+            plan.actions.len()
+        );
+        let warn = plan
+            .diagnostics
+            .iter()
+            .find(|d| d.locator == "W_EMIT_NO_SENTINEL");
+        assert!(
+            warn.is_some(),
+            "expected W_EMIT_NO_SENTINEL diagnostic; got none"
+        );
+    }
+
+    #[test]
+    fn project_cache_missing_file_warns_no_action() {
+        use mev::brain::emit::plan_project_caches;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // No cache doc written at all.
+        let cache_rel = "docs/projects/myrepo.md";
+
+        let file = make_leaf_file("myrepo", vec![], Focus::default());
+        let src = StateSource {
+            repo_slug: "myrepo".to_string(),
+            abs_path: PathBuf::from("/fake/myrepo/planning/state.json"),
+            expected_kind: "project",
+        };
+
+        let files = vec![(src, file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_cache_doc("myrepo", "core", cache_rel);
+
+        let plan = plan_project_caches(tmp.path(), &files, &graph, &config);
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "no action expected when the cache doc is missing; got {}",
+            plan.actions.len()
+        );
+        let warn = plan
+            .diagnostics
+            .iter()
+            .find(|d| d.locator == "W_EMIT_NO_SENTINEL");
+        assert!(
+            warn.is_some(),
+            "expected W_EMIT_NO_SENTINEL diagnostic; got none"
+        );
+    }
+
+    #[test]
+    fn project_cache_fixed_point_no_action_on_second_pass() {
+        use mev::brain::emit::plan_project_caches;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_rel = "docs/projects/myrepo.md";
+        let cache_path = tmp.path().join(cache_rel);
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(&cache_path, cache_doc_with_sentinel("2026-01-01T00:00:00Z")).unwrap();
+
+        let tracks = vec![Track {
+            title: "P".to_string(),
+            blocks: vec![track_block(
+                "B1",
+                "Block One",
+                Some("in_progress"),
+                Some(1),
+                vec![],
+            )],
+        }];
+        let mut file = make_leaf_file("myrepo", tracks, Focus::default());
+        file.updated = "2026-07-04T02:21:44Z".to_string();
+        let src = StateSource {
+            repo_slug: "myrepo".to_string(),
+            abs_path: PathBuf::from("/fake/myrepo/planning/state.json"),
+            expected_kind: "project",
+        };
+
+        let files = vec![(src, file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_cache_doc("myrepo", "core", cache_rel);
+
+        // First pass produces an action; write it to disk.
+        let plan1 = plan_project_caches(tmp.path(), &files, &graph, &config);
+        assert_eq!(
+            plan1.actions.len(),
+            1,
+            "first pass should produce an action"
+        );
+        std::fs::write(&cache_path, &plan1.actions[0].new_content).unwrap();
+
+        // Second pass over the already-correct content: no action.
+        let plan2 = plan_project_caches(tmp.path(), &files, &graph, &config);
+        assert_eq!(
+            plan2.actions.len(),
+            0,
+            "second pass (fixed point) should produce no action; got {}",
+            plan2.actions.len()
+        );
+    }
+
+    #[test]
+    fn project_cache_non_project_kind_is_skipped() {
+        use mev::brain::emit::plan_project_caches;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_rel = "docs/projects/myrepo.md";
+        let cache_path = tmp.path().join(cache_rel);
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(&cache_path, cache_doc_with_sentinel("2026-01-01T00:00:00Z")).unwrap();
+
+        let mut file = make_leaf_file("myrepo", vec![], Focus::default());
+        file.kind = "portfolio".to_string();
+        let src = StateSource {
+            repo_slug: "myrepo".to_string(),
+            abs_path: PathBuf::from("/fake/myrepo/planning/state.json"),
+            expected_kind: "portfolio",
+        };
+
+        let files = vec![(src, file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_cache_doc("myrepo", "portfolio", cache_rel);
+
+        let plan = plan_project_caches(tmp.path(), &files, &graph, &config);
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "portfolio-kind repos should never be targeted; got {}",
+            plan.actions.len()
+        );
+        assert!(
+            plan.diagnostics.is_empty(),
+            "no diagnostics expected for a skipped non-project-kind repo; got: {:?}",
+            plan.diagnostics
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // apply_plan
     // -----------------------------------------------------------------------
 
