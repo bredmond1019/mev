@@ -998,6 +998,94 @@ pub fn plan_tier_rollups(
 }
 
 // ---------------------------------------------------------------------------
+// plan_hq_board
+// ---------------------------------------------------------------------------
+
+/// Plan the HQ Operating Board splice into the HQ brain's sibling `status.md`.
+///
+/// For every loaded `kind == "brain"` file whose [`tier_scope_for`] resolves to
+/// [`TierScope::All`] (the HQ root — a tier sub-brain resolves to
+/// [`TierScope::Tier`] and is out of scope here; its rolled-up view is
+/// [`plan_tier_rollups`]'s responsibility), derives the brain-wide [`Focus`] via
+/// [`derive_brain_focus`] and the `cross_repo[]` edges via [`derive_cross_repo`],
+/// then renders them via [`render_hq_board`].
+///
+/// The target doc is `<HQ state.json parent>/status.md` — the same
+/// state-file-relative resolution [`plan_master_plan_tables`] and
+/// [`plan_tier_rollups`] use for their sibling Markdown files. If it exists and
+/// carries the [`markers::HQ_BOARD`] sentinels, the rendered board is spliced in
+/// and an [`EmitAction`] is added only when the resulting content differs from
+/// the original (fixed-point property). A missing `status.md`, or one lacking
+/// the sentinels, produces a `W_EMIT_NO_SENTINEL` warning diagnostic and no
+/// write — this planner never splices into arbitrary prose.
+pub fn plan_hq_board(
+    files: &[(StateSource, StateFile)],
+    graph: &StateGraph,
+    config: &BrainConfig,
+) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+
+    for (src, file) in files {
+        if file.kind != "brain" {
+            continue;
+        }
+        let scope = tier_scope_for(file, config);
+        if !matches!(scope, TierScope::All) {
+            continue; // tier sub-brains are plan_tier_rollups's responsibility
+        }
+
+        let Some(planning_dir) = src.abs_path.parent() else {
+            continue;
+        };
+        let board_path = planning_dir.join("status.md");
+
+        let original = match std::fs::read_to_string(&board_path) {
+            Ok(s) => s,
+            Err(_) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &board_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "no status.md beside HQ '{}' state.json; skipping hq-board emit",
+                        src.repo_slug
+                    ),
+                ));
+                continue;
+            }
+        };
+
+        let focus = derive_brain_focus(&scope, config, graph, files);
+        let edges = derive_cross_repo(files);
+        let board = render_hq_board(&focus, &edges);
+
+        match splice_generated(&original, markers::HQ_BOARD, &board) {
+            Ok(new_content) => {
+                if new_content != original {
+                    plan.actions.push(EmitAction {
+                        path: board_path,
+                        new_content,
+                        note: format!("update HQ operating board for '{}'", src.repo_slug),
+                    });
+                }
+            }
+            Err(_) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &board_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "status.md for HQ '{}' has no <!-- BEGIN generated:hq-board --> \
+                         sentinels; skipping",
+                        src.repo_slug
+                    ),
+                ));
+            }
+        }
+    }
+
+    plan
+}
+
+// ---------------------------------------------------------------------------
 // apply_plan
 // ---------------------------------------------------------------------------
 
