@@ -1,0 +1,42 @@
+[
+  {
+    "task_id": 1,
+    "title": "Generated-marker name constants + route the wave-table call site through them",
+    "description": "In src/brain/emit.rs, introduce named constants for the generated-region markers the state-sync-loop planners target: at minimum WAVE_TABLE = \"wave-table\", plus the markers MV.4.B/C will use (PROJECT_CACHE = \"project-cache\", TIER_ROLLUP = \"tier-rollup\", HQ_BOARD = \"hq-board\"). Expose them as `pub const` (or a small `pub mod markers`) so downstream blocks reuse them. Replace the hardcoded string literal in the plan_master_plan_tables call site (`splice_generated(&original, \"wave-table\", &table)`, ~line 511) with the WAVE_TABLE constant. Do NOT change splice_generated's behaviour or the emitted table content — this is a pure introduce-constant + reference refactor. Add unit tests in tests/brain_emit.rs asserting the constant values and that splice_generated works when passed the constants.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/emit.rs", "tests/brain_emit.rs"],
+    "dependsOn": []
+  },
+  {
+    "task_id": 2,
+    "title": "Global repo:id→status map helper",
+    "description": "In src/brain/emit.rs, add a pure helper `pub fn global_status_map(files: &[(StateSource, StateFile)]) -> HashMap<String, Option<String>>` that walks every loaded state file's tracks[].blocks[] and maps each block to its authored status, keyed \"{repo_slug}:{block_id}\" (using StateSource.repo_slug so keys are globally unique across repos). This is the cross-file status lookup that render_wave_table lacks today (it only sees one repo's file). Add unit tests in tests/brain_emit.rs: a multi-repo input produces correctly-namespaced keys; a block with absent status maps to None; keys from different repos do not collide.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/emit.rs", "tests/brain_emit.rs"],
+    "dependsOn": [1]
+  },
+  {
+    "task_id": 3,
+    "title": "Fix render_wave_table cross-repo blocked bug using the global map",
+    "description": "In src/brain/emit.rs, fix render_wave_table's known bug where cross-repo depends_on edges are always treated as unmet (lines ~162-172, the `// Cross-repo: treat as unmet (conservative)` branch). Add a global status map parameter (`&HashMap<String, Option<String>>` keyed \"repo:id\") to render_wave_table and resolve cross-repo BlockedBy::Block deps against it: the dep is met when the map's \"{repo}:{id}\" entry is Some(\"closed\"), unmet otherwise. Same-repo derivation and external-dep handling are unchanged. Update plan_master_plan_tables to build the map via global_status_map(files) and pass it into render_wave_table; the previously-unused `graph` param handling stays as-is. Update the 7 existing render_wave_table call sites in tests/brain_emit.rs to pass the new argument, and add tests proving the fix: a block depending on a CLOSED cross-repo block renders `open` (not `blocked`), and a block depending on an OPEN/absent cross-repo block renders `blocked`.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/emit.rs", "tests/brain_emit.rs"],
+    "dependsOn": [2]
+  },
+  {
+    "task_id": 4,
+    "title": "Validate",
+    "description": "Run the Validation Commands listed in tasks.md and confirm all pass.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": [],
+    "dependsOn": [1, 2, 3]
+  }
+]

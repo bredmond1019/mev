@@ -61,6 +61,7 @@ at the top; only pipeline state lives under `sdlc/`.
 | `herdr-mev-patterns/` | Research notes — herdr patterns applicable to mev graph/crawl/validation (Block J done; patterns Q/R/S/watch deferred) | Active |
 | `emit-graph-resolved-edges/` | `MV.3B.V` context seed — export `check_graph`'s edge resolution in `emit-graph` (v2: `target_node_id`/`target_doc_id`), killing the Rust/Python resolution divergence OR.G exposed; gates the embed pass | Active — spec decomposed; ready to run (`/sdlc-flow emit-graph-resolved-edges`) |
 | `ticket-ba15-12-okf-core-convergence/` | mev-side half of bastion's `BA.15.12` (D9 mirror of bastion's D15/D16) — repoint `brain/okf.rs`+`state.rs`+`graph.rs`+`graph_emit.rs` at bastion's `okf-core` crate, deleting the duplicates | Blocked — waits on bastion's `okf-core`-side `BA.15.12` task spec shipping first |
+| `4.A-emit-foundation/` | `MV.4.A` (state-sync-loop) — emit foundation: generated-marker name constants, global `repo:id→status` map helper, and the `render_wave_table` cross-repo `blocked` bug fix that `MV.4.B/C` build on | Active — spec decomposed; ready to run (`/sdlc-flow 4.A-emit-foundation`) |
 
 ## Archived Concept Folders
 
