@@ -8,12 +8,29 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-04T15:30:00Z"
+timestamp: "2026-07-04T15:45:00Z"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## [run: 2026-07-04]
+
+Shipped `4.E-emit-state-wiring` (Phase 4, state-sync-loop spine terminus) across the full spec, final verdict PASS (4 tasks). Task 1 wired all three previously-standalone planners into `emit_state` (`src/lib.rs`): it now calls `plan_state_json`, `plan_master_plan_tables`, `plan_project_caches`, `plan_tier_rollups`, and `plan_hq_board` — in that stable order — applying each via `apply_plan(&plan, write)` and merging diagnostics; the doc comment was updated to name all five generated surfaces. No planner signatures or behaviour changed — pure wiring, per the task spec. Task 2 added a new `mv4e_ripple` integration test module in `tests/brain_emit.rs`, building a real on-disk fixture (brain.toml + HQ + one tier sub-brain + two leaf project repos) and proving that a single `emit_state(&dir, true)` call ripples a close-A-unblocks-B cross-repo dependency change (repo-a's `RA.1.A` flipped `in_progress` → `closed`, unblocking repo-b's `RB.1.A`) across every generated surface at once: the leaf `state.json` focus, the leaf project-cache doc + its `synced_from` watermark, the tier rollup table, the HQ operating board (the closed block drops out of BLOCKED/NOW/NEXT everywhere; the dependent block moves from BLOCKED to open), and the master-plan wave table — plus a fixed-point check that a second pass over the emitted corpus is byte-identical with zero `I_EMIT_WROTE` diagnostics. Task 3 patched `docs/cli.md`'s `emit-state` section to document the three newly wired surfaces (project caches, tier rollups, HQ board) and their sentinel markers, generalizing the sentinel-contract prose to name all four markers rather than duplicating near-identical blocks. Task 4 ran the full validation suite (fmt, clippy `-D warnings`, test, release build) — all four gates green, no fixes needed, no commit required (nothing to commit). Final review verdict: PASS. This closes Phase 4 (state-sync-loop) entirely — the spine `MV.4.A → {B,C,D} → E` is fully Done, with a single `mev emit-state --write` now refreshing every human-read status surface (leaf focus, brain rollup, master-plan tables, project caches, tier rollups, HQ board) in one pass. Next: pick the next phase/spec per `master-plan.md` — Phase 4 is complete; the out-of-repo orchestrator follow-up (`load_brain_edges.py` reading mev's exported edge fields directly) remains outstanding as separate work.
+
+```
+216c7fa chore: flow state — docs
+605eff0 docs: update docs for 4.E-emit-state-wiring
+4454d0d chore: flow state — task 4 passed
+90aeaae chore: flow state — task 3 passed
+471d0d5 docs: update docs/cli.md emit-state section for MV.4.E surfaces
+d7de03c chore: flow state — task 2 passed
+92a1c02 feat: implement 4.E-emit-state-wiring-task2
+616a097 chore: flow state — task 1 passed
+```
 
 ---
 
