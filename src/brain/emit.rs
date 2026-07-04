@@ -798,7 +798,8 @@ fn reconcile_synced_from(original: &str, new_value: &str) -> String {
 /// (the same resolution `check_sync` uses). If the target doc exists and carries
 /// the [`markers::PROJECT_CACHE`] sentinels, splices in the rendered
 /// [`render_focus_line`] headline and reconciles the doc's OKF frontmatter
-/// `synced_from` field to the child file's `updated` watermark (see
+/// `synced_from` field to the child repo's own `status_file` `timestamp`
+/// watermark — the same field `check_sync` validates against (see
 /// [`reconcile_synced_from`]). An [`EmitAction`] is added only when the resulting
 /// content differs from the original (fixed-point property).
 ///
@@ -806,6 +807,9 @@ fn reconcile_synced_from(original: &str, new_value: &str) -> String {
 /// `W_EMIT_NO_SENTINEL` warning diagnostic and no write — this planner never
 /// splices into arbitrary prose. A repo with no matching `[[repos]]` entry, or
 /// whose entry has a blank `cache_doc`, is silently skipped (nothing to target).
+/// If `status_file` can't be read or has no `timestamp` field, the same warning
+/// is emitted and the cache write is skipped — `synced_from` is never reconciled
+/// to a value that `check_sync` couldn't validate anyway.
 pub fn plan_project_caches(
     root: &std::path::Path,
     files: &[(StateSource, StateFile)],
@@ -859,7 +863,27 @@ pub fn plan_project_caches(
             }
         };
 
-        let new_content = reconcile_synced_from(&spliced, &file.updated);
+        let status_path = root.join(&entry.status_file);
+        let timestamp = match crate::brain::sync::read_watermark(&status_path)
+            .ok()
+            .and_then(|fm| fm.timestamp)
+        {
+            Some(t) => t,
+            None => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &status_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "repo '{}': status_file '{}' has no readable 'timestamp' field; \
+                         skipping cache emit",
+                        src.repo_slug, entry.status_file
+                    ),
+                ));
+                continue;
+            }
+        };
+
+        let new_content = reconcile_synced_from(&spliced, &timestamp);
 
         if new_content != original {
             plan.actions.push(EmitAction {

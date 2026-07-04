@@ -1166,17 +1166,40 @@ mod task3_planners {
 
     /// Build a [`BrainConfig`] with one `[[repos]]` entry naming `cache_doc`.
     fn config_with_cache_doc(slug: &str, tier: &str, cache_doc: &str) -> BrainConfig {
+        config_with_cache_and_status(slug, tier, cache_doc, "")
+    }
+
+    fn config_with_cache_and_status(
+        slug: &str,
+        tier: &str,
+        cache_doc: &str,
+        status_file: &str,
+    ) -> BrainConfig {
         BrainConfig {
             repos: vec![RepoEntry {
                 slug: slug.to_string(),
                 tier: tier.to_string(),
                 repo_path: String::new(),
-                status_file: String::new(),
+                status_file: status_file.to_string(),
                 cache_doc: cache_doc.to_string(),
                 heading: String::new(),
             }],
             ..BrainConfig::default()
         }
+    }
+
+    /// A minimal `planning/status.md`-shaped source file carrying only the
+    /// OKF `timestamp` watermark [`plan_project_caches`] reads.
+    fn status_file_with_timestamp(timestamp: &str) -> String {
+        format!(
+            "---\n\
+             type: ProjectStatus\n\
+             title: myrepo Status\n\
+             description: Test status file.\n\
+             timestamp: \"{timestamp}\"\n\
+             ---\n\n\
+             # Status\n"
+        )
     }
 
     fn cache_doc_with_sentinel(synced_from: &str) -> String {
@@ -1205,6 +1228,15 @@ mod task3_planners {
         std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         std::fs::write(&cache_path, cache_doc_with_sentinel("2026-01-01T00:00:00Z")).unwrap();
 
+        let status_rel = "myrepo/planning/status.md";
+        let status_path = tmp.path().join(status_rel);
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &status_path,
+            status_file_with_timestamp("2026-07-04T02:21:44Z"),
+        )
+        .unwrap();
+
         let tracks = vec![Track {
             title: "P".to_string(),
             blocks: vec![track_block(
@@ -1216,7 +1248,9 @@ mod task3_planners {
             )],
         }];
         let mut file = make_leaf_file("myrepo", tracks, Focus::default());
-        file.updated = "2026-07-04T02:21:44Z".to_string();
+        // The brain's own coarse freshness scalar — deliberately different from the
+        // status_file's `timestamp` to prove the emitter no longer reads this field.
+        file.updated = "2026-06-01".to_string();
         let src = StateSource {
             repo_slug: "myrepo".to_string(),
             abs_path: PathBuf::from("/fake/myrepo/planning/state.json"),
@@ -1225,7 +1259,7 @@ mod task3_planners {
 
         let files = vec![(src, file)];
         let graph = build_state_graph(&files);
-        let config = config_with_cache_doc("myrepo", "core", cache_rel);
+        let config = config_with_cache_and_status("myrepo", "core", cache_rel, status_rel);
 
         let plan = plan_project_caches(tmp.path(), &files, &graph, &config);
 
@@ -1255,12 +1289,16 @@ mod task3_planners {
             action
                 .new_content
                 .contains("synced_from: \"2026-07-04T02:21:44Z\""),
-            "synced_from watermark not reconciled: {}",
+            "synced_from watermark not reconciled to the status_file's timestamp: {}",
             action.new_content
         );
         assert!(
             !action.new_content.contains("2026-01-01T00:00:00Z"),
             "stale synced_from watermark should not survive"
+        );
+        assert!(
+            !action.new_content.contains("2026-06-01"),
+            "synced_from must not be sourced from state.json's own coarse 'updated' scalar"
         );
     }
 
@@ -1345,6 +1383,51 @@ mod task3_planners {
     }
 
     #[test]
+    fn project_cache_missing_status_timestamp_warns_no_action() {
+        use mev::brain::emit::plan_project_caches;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_rel = "docs/projects/myrepo.md";
+        let cache_path = tmp.path().join(cache_rel);
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(&cache_path, cache_doc_with_sentinel("2026-01-01T00:00:00Z")).unwrap();
+
+        // status_file exists but carries no `timestamp` field.
+        let status_rel = "myrepo/planning/status.md";
+        let status_path = tmp.path().join(status_rel);
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(&status_path, "---\ntype: ProjectStatus\n---\n\n# Status\n").unwrap();
+
+        let file = make_leaf_file("myrepo", vec![], Focus::default());
+        let src = StateSource {
+            repo_slug: "myrepo".to_string(),
+            abs_path: PathBuf::from("/fake/myrepo/planning/state.json"),
+            expected_kind: "project",
+        };
+
+        let files = vec![(src, file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_cache_and_status("myrepo", "core", cache_rel, status_rel);
+
+        let plan = plan_project_caches(tmp.path(), &files, &graph, &config);
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "no action expected when status_file has no timestamp; got {}",
+            plan.actions.len()
+        );
+        let warn = plan
+            .diagnostics
+            .iter()
+            .find(|d| d.locator == "W_EMIT_NO_SENTINEL");
+        assert!(
+            warn.is_some(),
+            "expected W_EMIT_NO_SENTINEL diagnostic; got none"
+        );
+    }
+
+    #[test]
     fn project_cache_fixed_point_no_action_on_second_pass() {
         use mev::brain::emit::plan_project_caches;
 
@@ -1353,6 +1436,15 @@ mod task3_planners {
         let cache_path = tmp.path().join(cache_rel);
         std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         std::fs::write(&cache_path, cache_doc_with_sentinel("2026-01-01T00:00:00Z")).unwrap();
+
+        let status_rel = "myrepo/planning/status.md";
+        let status_path = tmp.path().join(status_rel);
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &status_path,
+            status_file_with_timestamp("2026-07-04T02:21:44Z"),
+        )
+        .unwrap();
 
         let tracks = vec![Track {
             title: "P".to_string(),
@@ -1365,7 +1457,7 @@ mod task3_planners {
             )],
         }];
         let mut file = make_leaf_file("myrepo", tracks, Focus::default());
-        file.updated = "2026-07-04T02:21:44Z".to_string();
+        file.updated = "2026-06-01".to_string();
         let src = StateSource {
             repo_slug: "myrepo".to_string(),
             abs_path: PathBuf::from("/fake/myrepo/planning/state.json"),
@@ -1374,7 +1466,7 @@ mod task3_planners {
 
         let files = vec![(src, file)];
         let graph = build_state_graph(&files);
-        let config = config_with_cache_doc("myrepo", "core", cache_rel);
+        let config = config_with_cache_and_status("myrepo", "core", cache_rel, status_rel);
 
         // First pass produces an action; write it to disk.
         let plan1 = plan_project_caches(tmp.path(), &files, &graph, &config);
@@ -2803,6 +2895,22 @@ heading = "Repo B"
         write_file(root, &format!("repos/{repo}/planning/master-plan.md"), &doc);
     }
 
+    /// A leaf project repo's own `planning/status.md`, carrying the OKF
+    /// `timestamp` watermark [`plan_project_caches`] reconciles the brain
+    /// cache doc's `synced_from` field against.
+    fn write_leaf_status_md(root: &Path, repo: &str, timestamp: &str) {
+        let doc = format!(
+            "---\n\
+             type: ProjectStatus\n\
+             title: {repo} status\n\
+             description: Status fixture for {repo}.\n\
+             timestamp: \"{timestamp}\"\n\
+             ---\n\n\
+             # Status\n"
+        );
+        write_file(root, &format!("repos/{repo}/planning/status.md"), &doc);
+    }
+
     /// A leaf project repo's brain cache doc, carrying the PROJECT_CACHE sentinel.
     fn write_project_cache_doc(root: &Path, repo: &str) {
         let doc = format!(
@@ -2842,6 +2950,7 @@ heading = "Repo B"
             &serde_json::json!([]),
         );
         write_leaf_master_plan(root, "repo-a");
+        write_leaf_status_md(root, "repo-a", "2026-07-01T12:00:00Z");
         write_project_cache_doc(root, "repo-a");
 
         write_leaf_state(
@@ -2853,6 +2962,7 @@ heading = "Repo B"
             &serde_json::json!([{ "type": "block", "repo": "repo-a", "id": "RA.1.A" }]),
         );
         write_leaf_master_plan(root, "repo-b");
+        write_leaf_status_md(root, "repo-b", "2026-07-01T12:00:00Z");
         write_project_cache_doc(root, "repo-b");
     }
 
