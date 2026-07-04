@@ -115,9 +115,12 @@ pub fn wave_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> Ve
 ///
 /// The table is rendered without a trailing newline; callers that embed it inside
 /// a document are responsible for any required surrounding blank lines.
-pub fn render_wave_table(repo_slug: &str, file: &StateFile, graph: &StateGraph) -> String {
-    use std::collections::HashMap;
-
+pub fn render_wave_table(
+    repo_slug: &str,
+    file: &StateFile,
+    graph: &StateGraph,
+    global_status: &HashMap<String, Option<String>>,
+) -> String {
     // Build a status map across all blocks in this file: id → authored status.
     // We need it to compute derived "blocked" status (unmet dep check).
     let mut all_status: HashMap<String, Option<String>> = HashMap::new();
@@ -127,10 +130,10 @@ pub fn render_wave_table(repo_slug: &str, file: &StateFile, graph: &StateGraph) 
         }
     }
 
-    // We also need a cross-file status map to resolve cross-repo deps.
-    // Since this function only receives `file` (one repo), we can only check
-    // same-repo deps inline.  Cross-repo deps are always treated as unmet for
-    // the purpose of the `blocked` derived status — this is safe/conservative.
+    // Cross-repo deps are resolved against `global_status` (built by
+    // `global_status_map` across every loaded state file): a cross-repo dep is
+    // met when the target block's authored status is `closed`, unmet otherwise
+    // (including when the target is absent from the map).
     //
     // Build the ordered list of (wave_key, iteration_idx, block_id) for this repo.
     let mut ordered: Vec<(i64, usize, &str)> = Vec::new();
@@ -151,15 +154,9 @@ pub fn render_wave_table(repo_slug: &str, file: &StateFile, graph: &StateGraph) 
         }
     }
 
-    // We need the graph to resolve cross-repo dep statuses for the "blocked" derivation.
-    // Use wave_order across the whole graph to build a global status map.
-    // Since `graph` carries the adjacency / dep data, we extract from `wave_order` context.
-    // For simplicity: build a minimal global key→status from what we have in `graph`.
-    // StateGraph exposes `blocks` and `deps` but not a status map.  We cannot reconstruct
-    // per-repo statuses from `StateGraph` alone here; instead we replicate the same
-    // "treat cross-repo dep as unmet unless we can prove it closed" conservative rule.
-    //
-    // The graph is accepted for forward-compat; we use it only for the _ suppression.
+    // `graph` is accepted for API symmetry with `wave_order` / forward-compat
+    // (e.g. cycle-aware derivation); it is not used for the `blocked` derivation
+    // today — cross-repo resolution goes through `global_status` instead.
     let _ = graph;
 
     // Header
@@ -194,8 +191,11 @@ pub fn render_wave_table(repo_slug: &str, file: &StateFile, graph: &StateGraph) 
                         // Same-repo: check authored status.
                         all_status.get(id.as_str()).and_then(|s| s.as_deref()) != Some("closed")
                     } else {
-                        // Cross-repo: treat as unmet (conservative).
-                        true
+                        // Cross-repo: resolve against the global status map — met
+                        // only when the target block is authored `closed`; unmet
+                        // when open or absent from the map.
+                        let key = format!("{repo}:{id}");
+                        global_status.get(&key).and_then(|s| s.as_deref()) != Some("closed")
                     }
                 }
             });
@@ -529,6 +529,7 @@ pub fn plan_state_json(
 /// `master-plan.md`, so flagging one would just be noise.
 pub fn plan_master_plan_tables(files: &[(StateSource, StateFile)], graph: &StateGraph) -> EmitPlan {
     let mut plan = EmitPlan::default();
+    let global_status = global_status_map(files);
 
     for (src, file) in files {
         if file.kind == "portfolio" {
@@ -563,7 +564,7 @@ pub fn plan_master_plan_tables(files: &[(StateSource, StateFile)], graph: &State
             }
         };
 
-        let table = render_wave_table(&src.repo_slug, file, graph);
+        let table = render_wave_table(&src.repo_slug, file, graph, &global_status);
 
         match splice_generated(&original, markers::WAVE_TABLE, &table) {
             Ok(new_content) => {
