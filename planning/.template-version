@@ -1,4 +1,4 @@
 template: base-template
-commit: 9ea6decce523300fb82ad18a65f50272edab7702
+commit: 96a65494e57a671b034124b3af855282e7a1f54b
 generated: 2026-06-18
-synced: 2026-07-03 — chore(harness): sync wrap-up cross-repo constraints rule
+synced: 2026-07-04 — BT.1.B: log-work/prime rewire + BT.1.A authoring completeness + sdlc-block canonical id parsing
