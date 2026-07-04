@@ -82,7 +82,9 @@ When `--sync` is passed, `mev` runs the full OKF schema pass first, then appends
 
 - Reads `timestamp` from `<repo_path>/<status_file>` (the sub-repo's status file).
 - Reads `synced_from` from `<cache_doc>` (the brain cache doc for that repo).
-- Both values must be present and valid RFC3339 datetimes; they must be identical.
+- Both values must be present and valid RFC3339 datetimes; they are compared as explicit UTC
+  instants (each side normalized via `.to_utc()`), not as raw strings — a `-03:00` watermark and
+  a `Z` watermark denoting the same moment are in sync.
 
 A mismatch or missing watermark emits an `Error`-severity diagnostic and causes exit 1.
 
@@ -91,7 +93,7 @@ A mismatch or missing watermark emits an `Error`-severity diagnostic and causes 
 | `E_SYNC_FILE_MISSING` | `status_file` or `cache_doc` does not exist, or cannot be read |
 | `E_SYNC_WATERMARK_MISSING` | `timestamp` or `synced_from` field is absent from the frontmatter |
 | `E_SYNC_WATERMARK_MALFORMED` | A watermark is present but is not a valid RFC3339 datetime |
-| `E_SYNC_DRIFT` | Both watermarks parse successfully but their values differ |
+| `E_SYNC_DRIFT` | Both watermarks parse successfully but denote different instants |
 
 #### `--graph` — knowledge-graph integrity check
 
