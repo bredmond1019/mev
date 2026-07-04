@@ -18,3 +18,6 @@ Validated: gating checks (fast tripwire)
 ## Task 4 — PASSED (1 attempt)
 What: Task 4 (validate) confirmed all four gated checks pass: cargo fmt --check, cargo clippy -- -D warnings, cargo test (all suites incl. brain_emit), and cargo build --release — no code changes needed.
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: docs/architecture.md
