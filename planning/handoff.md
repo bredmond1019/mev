@@ -1,70 +1,95 @@
 ---
 type: Handoff
-created: 2026-07-03
+created: 2026-07-04
 ---
 
-# Handoff — 4.A-emit-foundation shipped; MV.4.B/MV.4.C now unblocked
+# Handoff — 4.B-cache-rollup-emit shipped; MV.4.C now the only thing blocking MV.4.E
 
 > **For the next agent:** Read this immediately after `/prime`. Delete this file once consumed.
 
 ## What we're doing and why
-`4.A-emit-foundation` (Phase 4, state-sync-loop Wave 1) is done, reviewed PASS, and merged via
-PR #15. It's the spine block (`MV.4.A → {B,C} → E`) for the state-sync-loop initiative: giving
-`mev emit-state` named generated-marker constants, a cross-repo status lookup, and fixing a
-long-standing bug where `render_wave_table` always rendered cross-repo `depends_on` edges as
-`blocked` even when the depended-on block was closed elsewhere. This closes the foundation work
-and clears the way for `MV.4.B` (project caches + tier rollups) and `MV.4.C` (HQ board), both of
-which build directly on `global_status_map` and the marker constants added here. Full detail:
-`planning/4.A-emit-foundation/tasks.md` (Done, 4 tasks) and `core/planning/state-sync-loop/master-plan.md`.
+`4.B-cache-rollup-emit` (Phase 4, state-sync-loop Wave 2) is done, reviewed PASS, and open as
+PR #16 (not yet merged). It's the second spine block (`MV.4.A → {B,C} → E`) for the
+state-sync-loop initiative: two new emit planners — `plan_project_caches` (project-cache
+focus-line + `synced_from` splice) and `plan_tier_rollups` (tier rollup table splice) — both
+following `plan_master_plan_tables`'s splice/fixed-point/`W_EMIT_NO_SENTINEL` pattern from
+`4.A-emit-foundation`. Full detail: `planning/4.B-cache-rollup-emit/tasks.md` (Done, 3 tasks)
+and `core/planning/state-sync-loop/master-plan.md`.
 
 ## Completed this session
-- Ran `/sdlc-flow 4.A-emit-foundation` -> **PASS**, all 4 tasks, review clean (0 findings), PR #15.
+- Ran `/sdlc-flow 4.B-cache-rollup-emit` → **PASS**, all 3 tasks, review clean (0 findings), PR #16.
   Key code in `src/brain/emit.rs`:
-  - Task 1: added `pub mod markers { pub const WAVE_TABLE, PROJECT_CACHE, TIER_ROLLUP, HQ_BOARD }`;
-    `plan_master_plan_tables` now references `markers::WAVE_TABLE` instead of a hardcoded string.
-  - Task 2: added `global_status_map(files: &[(StateSource, StateFile)]) -> HashMap<String, Option<String>>`
-    (placed after `render_wave_table`), keyed `"{repo_slug}:{block_id}"` across all repos; 4 new
-    unit tests (multi-repo namespacing, no-collision, absent-status -> `None`, empty input).
-  - Task 3: threaded the map into `render_wave_table`, fixing the always-`blocked` cross-repo bug
-    -- a block depending on a closed cross-repo block now renders `open`; absent/open cross-repo
-    deps still render `blocked`. `plan_master_plan_tables` builds the map via `global_status_map(files)`
-    and passes it through. 7 existing call sites updated (pass empty map, no behavior change for
-    same-repo fixtures) plus 3 new cross-repo closed/open/absent tests.
-  - Task 4: confirmed all four harness gates green, no code changes needed.
-- Ran `/close-out` after the flow: re-verified all four gates (`fmt`, `clippy -D warnings`,
-  `cargo test` -- 34 tests across `tests/brain_emit.rs` + others, `cargo build --release`) and
-  the emoji gate, all green in the worktree. Coverage scan: only source files changed were
-  `src/brain/emit.rs` (639 lines) + `tests/brain_emit.rs` (2252 lines); every new public function
-  (`wave_order`, `render_wave_table`, `global_status_map`, `splice_generated`, `plan_state_json`,
-  `plan_master_plan_tables`, `apply_plan`) has 5-27 direct test references -- no blocking gaps.
-  Ran `/update-docs --patch`: `docs/cli.md` and `docs/architecture.md` already document
-  `emit-state`/`emit_state` fully (patched in-flow by the `docs` stage, commit `780cb2b`) --
-  audit found no STALE or MISSING items.
-- `planning/status.md` and `log.md` were already updated by the flow's wrap-up stage (commit
-  `a0332d4`) -- both correctly reflect `4.A-emit-foundation` as Done and point `next` at
-  `MV.4.B`/`MV.4.C`.
+  - Task 1: added `pub fn plan_project_caches` (+ private `render_focus_line`,
+    `reconcile_synced_from`) — resolves each `kind == "project"` file's `brain.toml`
+    `[[repos]].cache_doc`, splices a derived focus-line into the `PROJECT_CACHE` sentinel, and
+    reconciles the doc's `synced_from` frontmatter to the child's `updated` watermark. 5 new
+    integration tests.
+  - Task 2: added `pub fn plan_tier_rollups` (+ private `render_tier_rollup_table`) — for each
+    `kind == "brain"` file whose `tier_scope_for` resolves to `TierScope::Tier`, derives
+    tier-scoped rollup rows via `derive_rollup` and splices them into the sibling `status.md`'s
+    `TIER_ROLLUP` sentinel. `TierScope::All` (the HQ root) is explicitly out of scope — that's
+    `MV.4.C`'s job. 5+ new integration tests.
+  - Task 3: confirmed all four harness gates green, no code changes needed.
+  - Neither planner is wired into `emit_state` yet — that's `MV.4.E`'s job.
+- Ran `/close-out --clean-worktree`:
+  - Re-verified all four gates (`fmt`, `clippy -D warnings`, `cargo test` — 312 tests across
+    the full suite, `cargo build --release`) plus the emoji gate, all green in the worktree.
+  - Coverage scan: only source files changed were `src/brain/emit.rs` (+299 lines) and
+    `tests/brain_emit.rs` (+536 lines, ~3x the source) — every new public function has direct
+    test coverage. No blocking gaps.
+  - Docs audit: `docs/architecture.md` already documents `plan_project_caches`/
+    `plan_tier_rollups` in full (patched in-flow by the `docs` stage). No CLI surface changed
+    (`main.rs` untouched — neither planner is wired to a command yet). No STALE or MISSING
+    items found.
+  - Updated `planning/state.json`'s authored `tracks[]`: `MV.4.A` and `MV.4.B` status flipped
+    `open` → `closed` (both are in fact done; the file hadn't been updated since `4.A` merged).
+    Attempted `mev emit-state --write ..` to regenerate the derived `focus` section to match,
+    but this **cannot work from inside a feature worktree** — `brain.toml`'s `[[repos]]` entry
+    for `mev` points at the canonical `core/mev` path, so `emit-state` run from
+    `trees/4.B-cache-rollup-emit-flow/` walks up, finds the real brain root, and operates on
+    the **main-branch checkout's** `state.json`, not this worktree's copy (verified: main's
+    `state.json` is untouched, `git status` clean there; this worktree's `focus` section is
+    still stale — `MV.4.A`/`MV.4.B` still listed in `next`/`blocked` as if open). This is a
+    structural limitation, not a bug to fix here — see Durable State Updates below.
 
 ## Remaining work
-- **`MV.4.B`** (project caches + tier rollups) or **`MV.4.C`** (HQ board) -- either can start
-  next per `core/planning/state-sync-loop/master-plan.md`'s wave ordering; both now have
-  `global_status_map` and the marker constants available to build on.
-- Merge PR #15 (`4.A-emit-foundation-flow` -> `main`) and clean up the worktree
-  (`trees/4.A-emit-foundation-flow`) -- not yet done this session; `/clean-worktree` handles this.
+- **Merge PR #16** (`4.B-cache-rollup-emit-flow` → `main`) and clean up the worktree
+  (`trees/4.B-cache-rollup-emit-flow`) — not yet done this session; `/clean-worktree` handles
+  this.
+- **`MV.4.C`** (HQ board) — the only remaining blocker for `MV.4.E`. Builds on `MV.4.A`'s
+  `global_status_map`/marker constants, same as `MV.4.B` did.
+- **`MV.4.D`** (validate-brain --sync timestamp hardening) — independent, no blockers, could be
+  picked up any time.
+- **`MV.4.E`** (spine terminus) — blocked on `MV.4.C` (and `MV.4.D`, per the authored
+  `depends_on`, though that dependency looks more like sequencing convenience than a real code
+  dependency — worth confirming when `MV.4.E` starts).
+- After merge: run `mev emit-state --write` **from the main checkout** (not a worktree) to
+  regenerate the stale derived `focus` section in `core/mev/planning/state.json` now that
+  `MV.4.A`/`MV.4.B` are marked closed in the authored tracks.
 - mev-local backlog (not critical path, unchanged from before): MV.1.D (cross-file integrity),
   MV.1.E (pt-BR parity), Phase 4 (`BlogValidator`).
-- Cross-repo, unrelated to this session: 3 open `state.json` `carryover[]` entries --
+- Cross-repo, unrelated to this session: 3 open `state.json` `carryover[]` entries —
   `brazilianportugui-block-id-rename-pending`, `brain-index-md-orphan-files-cleanup`,
-  `sdlc-flow-worktree-sparse-checkout-cone-bug` -- none touched or resolved this session.
+  `sdlc-flow-worktree-sparse-checkout-cone-bug` — none touched or resolved this session.
 
 ## Durable State Updates
-None. This session's work was fully contained in `4.A-emit-foundation`'s own task spec and
-didn't surface a new constraint, known-issue, or deferred follow-on worth a `carryover[]` entry.
-No `tasks.json` was hand-edited.
+- `planning/state.json` (this worktree's copy, on branch `4.B-cache-rollup-emit-flow`):
+  `tracks[Phase 4].blocks[MV.4.A].status` and `[MV.4.B].status` flipped `open` → `closed`.
+  The derived `focus.next`/`focus.blocked` arrays were **not** regenerated (see note above on
+  why `emit-state` can't reach this worktree's file) — they will read stale (still listing
+  `MV.4.A`/`MV.4.B` as open) until the next `mev emit-state --write` run against the merged
+  main checkout. This will surface as a `W_STATE_FOCUS_DRIFT` warning (non-gating) if
+  `mev validate-brain --state` runs against this file before that regen happens — expected,
+  not a bug.
+- No new `carryover[]` entry added — this is a one-time regen gap that self-resolves on the
+  next real `emit-state` run post-merge, not a recurring constraint worth tracking there.
+- No `tasks.json` was hand-edited.
 
 ## Open questions / choices
-None -- clear to proceed. `MV.4.B` vs `MV.4.C` ordering is a judgment call for whoever picks up
-next (`master-plan.md` doesn't strictly sequence them relative to each other, only both after `A`).
+None — clear to proceed. `MV.4.C` vs `MV.4.D` ordering is a judgment call (`MV.4.D` has no
+dependencies and could go first if preferred, but `MV.4.C` is the one actually gating `MV.4.E`).
 
 ## First command after `/prime`
-`/clean-worktree 4.A-emit-foundation-flow` (merge PR #15 and remove the worktree), then choose
-`MV.4.B` or `MV.4.C` and run `/generate-tasks`.
+`/clean-worktree 4.B-cache-rollup-emit-flow` (merge PR #16 and remove the worktree), then run
+`mev emit-state --write` from the main checkout to fix the stale `focus` derivation, then choose
+`MV.4.C` or `MV.4.D` and run `/generate-tasks`.
