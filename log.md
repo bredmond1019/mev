@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-04T15:45:00Z"
+timestamp: "2026-07-04T11:47:55Z"
 ---
 
 # Log — mev
@@ -35,6 +35,11 @@ d7de03c chore: flow state — task 2 passed
 ---
 
 ## [2026-07-04]
+
+### Close-out: 4.E-emit-state-wiring
+- **What:** Closed out `4.E-emit-state-wiring`: gates green, coverage adequate, docs already patched in-flow. Reconciled `MV.4.E` to `closed` in `planning/state.json` (Phase 4 state-sync-loop fully done). PR #18 open, not yet merged.
+- **Why:** Standard close-out gate after `4.E-emit-state-wiring` (Phase 4 spine terminus) shipped via `sdlc-flow` — confirm gates/coverage/docs are genuinely green and reconcile the authored state tracker so Phase 4 is provably closed before merge.
+- **Refs:** `core/planning/state-sync-loop/master-plan.md` (spine `MV.4.A → {B,C,D} → E`); PR #18; `planning/state.json`.
 
 ### Close-out: 4.D-sync-comparator-hardening
 - **What:** Ran `/close-out` for `4.D-sync-comparator-hardening` following its `/sdlc-run` completion (PASS, commits landed directly on `main` — no worktree/PR this time). Re-verified all four harness gates (`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` — 314 tests, `cargo build --release`) plus the emoji gate, all green. Coverage scan found the one behavioral change (the `.to_utc()` instant-comparison hardening in `check_sync`) already covered by the two new regression tests added in-flow — no blocking gaps. Docs audit found no STALE/MISSING items (`docs/cli.md`'s `--sync` section was already patched in-flow to describe the instant-based comparison). Hand-edited `planning/state.json`'s authored `tracks[]`: `MV.4.D` flipped `open` → `closed`. Ran `mev emit-state --write` from the main checkout per protocol — regenerated derived `focus`: `next` is now just `MV.4.E` with `blocked_by: []` (all three prerequisites — `MV.4.B`, `MV.4.C`, `MV.4.D` — now closed), `blocked` is now empty. 0 errors.
