@@ -12,7 +12,7 @@ related: [state-sync-loop-master-plan, master-plan, status, state-json-schema]
 
 # Task Spec — Phase 4, Block MV.4.A (Emit foundation)
 
-**Status:** Not started · **Last run:** never
+**Status:** Done · **Last run:** 2026-07-03 (4 tasks, PASS)
 
 ## Goal
 Lay the emit foundation for the state-sync-loop status generators: introduce generated-marker name
