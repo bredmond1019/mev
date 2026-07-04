@@ -1312,8 +1312,22 @@ pub enum TierScope {
 /// match (e.g. the HQ root, whose `repo` is not itself a tier name) yields
 /// [`TierScope::All`].
 pub fn tier_scope_for(brain_file: &StateFile, config: &BrainConfig) -> TierScope {
+    // A node scopes to a single tier if either:
+    //  (a) some repo declares it as a `tier` value — the common case, where the
+    //      tier has child repos carrying `tier = "<name>"`; or
+    //  (b) it is registered as a tier-container self-entry (`slug == repo_path ==
+    //      "<name>"`) — a childless brain tier, e.g. a document-only sub-brain
+    //      whose own `[[repos]]` entry is the only thing naming it. Without this,
+    //      such a tier matches no `tier` value and is wrongly scoped as the HQ
+    //      root (`All`), producing a spurious hq-board emit.
+    // The HQ root itself (`repo_path == "."`) never matches (b) and correctly
+    // resolves to `All`.
     let is_tier_name = config.repos.iter().any(|r| r.tier == brain_file.repo);
-    if is_tier_name {
+    let is_tier_container = config
+        .repos
+        .iter()
+        .any(|r| r.slug == brain_file.repo && r.repo_path == brain_file.repo);
+    if is_tier_name || is_tier_container {
         TierScope::Tier(brain_file.repo.clone())
     } else {
         TierScope::All
@@ -4555,6 +4569,46 @@ mod tests {
         let hq_brain = brain_state_file("hq", vec![]);
         let scope = tier_scope_for(&hq_brain, &config);
         assert_eq!(scope, TierScope::All);
+    }
+
+    #[test]
+    fn tier_scope_for_returns_tier_for_childless_tier_container_self_entry() {
+        use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
+        // A document-only brain tier with NO child repos carrying `tier =
+        // "business"` — its only declaration is its own `_root` container
+        // self-entry (`slug == repo_path == "business"`). It must still scope to
+        // its own tier (not `All`, which would spuriously target it as HQ).
+        let config = BrainConfig {
+            vocab: VocabConfig::default(),
+            crawl: CrawlConfig::default(),
+            repos: vec![
+                RepoEntry {
+                    slug: "brain".to_string(),
+                    tier: "_root".to_string(),
+                    repo_path: ".".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "business".to_string(),
+                    tier: "_root".to_string(),
+                    repo_path: "business".to_string(),
+                    status_file: "business/planning/status.md".to_string(),
+                    cache_doc: "business/index.md".to_string(),
+                    heading: "business Sub-Brain".to_string(),
+                },
+            ],
+        };
+        let business_brain = brain_state_file("business", vec![]);
+        assert_eq!(
+            tier_scope_for(&business_brain, &config),
+            TierScope::Tier("business".to_string())
+        );
+        // The HQ root (repo_path ".") must remain `All`, not be caught by the
+        // container-self-entry rule.
+        let hq_brain = brain_state_file("brain", vec![]);
+        assert_eq!(tier_scope_for(&hq_brain, &config), TierScope::All);
     }
 
     #[test]
