@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-07-03T18:30:00Z"
+timestamp: "2026-07-04T02:21:44Z"
 now: "4.A-emit-foundation shipped (PASS, 4 tasks). Generated-marker name constants added to src/brain/emit.rs; global_status_map helper maps repo:id -> status across all state files; render_wave_table now resolves cross-repo depends_on edges against that map, fixing the always-blocked bug. Next: MV.4.B (project caches + tier rollups) or MV.4.C (HQ board), which build on this foundation."
 next: "MV.4.B (project caches + tier rollups) or MV.4.C (HQ board) — state-sync-loop Phase 4"
 blocked: []

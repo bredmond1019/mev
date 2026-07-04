@@ -3,79 +3,68 @@ type: Handoff
 created: 2026-07-03
 ---
 
-# Handoff — BA.15.12 okf-core convergence shipped; mev backlog is now the deprioritized tail
+# Handoff — 4.A-emit-foundation shipped; MV.4.B/MV.4.C now unblocked
 
 > **For the next agent:** Read this immediately after `/prime`. Delete this file once consumed.
 
 ## What we're doing and why
-`ticket-ba15-12-okf-core-convergence` (mev's half of bastion's BA.15.12, D9/D15/D16) is done and
-merged. `brain/okf.rs`, `brain/state.rs`, `brain/graph.rs`, and `brain/graph_emit.rs` now delegate
-their shared struct/schema/model definitions to bastion's `okf-core` crate (an unpinned Cargo path
-dependency, `../bastion/crates/okf-core`, D15 discipline) via `pub use`, keeping only mev-specific
-validation/derivation/corpus-walking logic local. This closes out a cross-repo dependency that had
-been sitting blocked since D9 — the ticket's stated blocker (waiting on bastion's own `okf-core`-side
-BA.15.12 spec) had already lifted by the time this ticket ran, so it proceeded rather than reporting
-blocked. Full detail: `planning/ticket-ba15-12-okf-core-convergence/tasks.md` (status: Done, 6 tasks,
-full amendment log with parity-verification checksums).
-
-With this closed, mev has **no active critical-path work** — Phase 3/3B (graph + state integrity +
-corpus-engine emits) and now the okf-core convergence are all done. Remaining mev work is either
-deprioritized backlog (MV.1.D, MV.1.E, Phase 4/BlogValidator) or an out-of-repo follow-on
-(orchestrator's `load_brain_edges.py` cleanup).
+`4.A-emit-foundation` (Phase 4, state-sync-loop Wave 1) is done, reviewed PASS, and merged via
+PR #15. It's the spine block (`MV.4.A → {B,C} → E`) for the state-sync-loop initiative: giving
+`mev emit-state` named generated-marker constants, a cross-repo status lookup, and fixing a
+long-standing bug where `render_wave_table` always rendered cross-repo `depends_on` edges as
+`blocked` even when the depended-on block was closed elsewhere. This closes the foundation work
+and clears the way for `MV.4.B` (project caches + tier rollups) and `MV.4.C` (HQ board), both of
+which build directly on `global_status_map` and the marker constants added here. Full detail:
+`planning/4.A-emit-foundation/tasks.md` (Done, 4 tasks) and `core/planning/state-sync-loop/master-plan.md`.
 
 ## Completed this session
-- Ran `/sdlc-flow ticket-ba15-12-okf-core-convergence` → **PASS**, all 6 tasks, review clean
-  (0 findings), PR #14. Key code: `src/brain/okf.rs` (struct deleted, `pub use okf_core::OkfFrontmatter`,
-  `validate_md_file`'s `layer`/`keywords` checks adapted to `Vec<String>` empty-means-absent shape);
-  `src/brain/state.rs` (~350 lines of duplicated schema/loader/graph-model deleted, replaced with one
-  `pub use okf_core::{...}` block; ~4,600 lines of mev-only `check_*`/`derive_*` logic untouched);
-  `src/brain/graph.rs` + `src/brain/graph_emit.rs` (model + resolution primitives re-exported from
-  `okf_core`; `build_graph`/`check_graph` stay local); one-line shape fixes to `src/brain/manifest.rs`
-  (`non_empty_vec` bridge preserving `null`-when-absent JSON output).
-- `/code-review low` → `(none)` — mechanical re-export refactor, no runtime bugs; docs already
-  updated in-branch (`docs/architecture.md` carries BA.15.12/D16 convergence notes per module).
-- Merged PR #14 to `main` (`gh pr merge --merge`), fast-forwarded local `main`, deleted local +
-  remote branch, removed the worktree.
-- Stashed and inspected pre-session uncommitted edits to
-  `planning/ticket-ba15-12-okf-core-convergence/{tasks.md,tasks.json}` that conflicted with the
-  merge — confirmed they were exactly the pre-run ticket draft (fully superseded by the merged,
-  completed version) and dropped the stash.
-- Removed the resolved `ba15-12-okf-core-convergence` carryover entry from `planning/state.json`
-  (its `clears_when` — "ticket completes, repoint done, dupes deleted" — is now satisfied) and ran
-  `mev emit-state --write` to reconcile derived rollups across the company brain.
+- Ran `/sdlc-flow 4.A-emit-foundation` -> **PASS**, all 4 tasks, review clean (0 findings), PR #15.
+  Key code in `src/brain/emit.rs`:
+  - Task 1: added `pub mod markers { pub const WAVE_TABLE, PROJECT_CACHE, TIER_ROLLUP, HQ_BOARD }`;
+    `plan_master_plan_tables` now references `markers::WAVE_TABLE` instead of a hardcoded string.
+  - Task 2: added `global_status_map(files: &[(StateSource, StateFile)]) -> HashMap<String, Option<String>>`
+    (placed after `render_wave_table`), keyed `"{repo_slug}:{block_id}"` across all repos; 4 new
+    unit tests (multi-repo namespacing, no-collision, absent-status -> `None`, empty input).
+  - Task 3: threaded the map into `render_wave_table`, fixing the always-`blocked` cross-repo bug
+    -- a block depending on a closed cross-repo block now renders `open`; absent/open cross-repo
+    deps still render `blocked`. `plan_master_plan_tables` builds the map via `global_status_map(files)`
+    and passes it through. 7 existing call sites updated (pass empty map, no behavior change for
+    same-repo fixtures) plus 3 new cross-repo closed/open/absent tests.
+  - Task 4: confirmed all four harness gates green, no code changes needed.
+- Ran `/close-out` after the flow: re-verified all four gates (`fmt`, `clippy -D warnings`,
+  `cargo test` -- 34 tests across `tests/brain_emit.rs` + others, `cargo build --release`) and
+  the emoji gate, all green in the worktree. Coverage scan: only source files changed were
+  `src/brain/emit.rs` (639 lines) + `tests/brain_emit.rs` (2252 lines); every new public function
+  (`wave_order`, `render_wave_table`, `global_status_map`, `splice_generated`, `plan_state_json`,
+  `plan_master_plan_tables`, `apply_plan`) has 5-27 direct test references -- no blocking gaps.
+  Ran `/update-docs --patch`: `docs/cli.md` and `docs/architecture.md` already document
+  `emit-state`/`emit_state` fully (patched in-flow by the `docs` stage, commit `780cb2b`) --
+  audit found no STALE or MISSING items.
+- `planning/status.md` and `log.md` were already updated by the flow's wrap-up stage (commit
+  `a0332d4`) -- both correctly reflect `4.A-emit-foundation` as Done and point `next` at
+  `MV.4.B`/`MV.4.C`.
 
 ## Remaining work
-- **Cross-repo follow-up (orchestrator repo, its own small spec, not gated by anything now):**
-  rip resolution out of `scripts/load_brain_edges.py` — delete `build_node_maps()`/`resolve_ref()`,
-  read mev's exported `target_node_id`/`target_doc_id` directly; update v2 fixtures in
-  `tests/test_load_brain_edges.py` + `tests/workflows/test_brain_graph_retrieval.py`. See carryover
-  slug `orchestrator-load-brain-edges-loader-cleanup` (still open, unaffected by this session).
-  **This gates the embed pass (OR.H).**
-- mev-local backlog (not critical path): MV.1.D (cross-file integrity), MV.1.E (pt-BR parity),
-  Phase 4 (`BlogValidator`).
+- **`MV.4.B`** (project caches + tier rollups) or **`MV.4.C`** (HQ board) -- either can start
+  next per `core/planning/state-sync-loop/master-plan.md`'s wave ordering; both now have
+  `global_status_map` and the marker constants available to build on.
+- Merge PR #15 (`4.A-emit-foundation-flow` -> `main`) and clean up the worktree
+  (`trees/4.A-emit-foundation-flow`) -- not yet done this session; `/clean-worktree` handles this.
+- mev-local backlog (not critical path, unchanged from before): MV.1.D (cross-file integrity),
+  MV.1.E (pt-BR parity), Phase 4 (`BlogValidator`).
+- Cross-repo, unrelated to this session: 3 open `state.json` `carryover[]` entries --
+  `brazilianportugui-block-id-rename-pending`, `brain-index-md-orphan-files-cleanup`,
+  `sdlc-flow-worktree-sparse-checkout-cone-bug` -- none touched or resolved this session.
 
 ## Durable State Updates
-- `planning/state.json` `carryover[]`: removed `ba15-12-okf-core-convergence` (resolved this
-  session — ticket shipped). The other four existing carryover entries (`brazilianportugui-...`,
-  `brain-index-md-orphan-files-cleanup`, `sdlc-flow-worktree-sparse-checkout-cone-bug`,
-  `orchestrator-load-brain-edges-loader-cleanup`) are untouched and still open.
-- Ran `mev emit-state --write` after the edit — this also rewrites derived rollups in the **parent
-  brain repo** (`agentic-portfolio/planning/state.json`, `core/planning/state.json`), which is a
-  *separate* git repo; if those are dirty, commit them from the `agentic-portfolio` root session,
-  not from mev.
-- No new `tracks[].blocks[]` entry was added for this ticket — per the existing
-  `ba15-12-okf-core-convergence` carryover note, this work ran as an ad-hoc `/ticket` spec
-  (`planning/ticket-ba15-12-okf-core-convergence/`), not a tracked `state.json` block (D34 seam).
+None. This session's work was fully contained in `4.A-emit-foundation`'s own task spec and
+didn't surface a new constraint, known-issue, or deferred follow-on worth a `carryover[]` entry.
+No `tasks.json` was hand-edited.
 
 ## Open questions / choices
-None — clear to proceed. The orchestrator follow-up is well-specified in its own carryover entry.
-
-## Context the next agent needs
-mev has no active critical-path work right now. If picking up mev-side work, choose from the
-deprioritized backlog above. If the priority is unblocking the embed pass, the next real step is in
-the **orchestrator repo**, not here.
+None -- clear to proceed. `MV.4.B` vs `MV.4.C` ordering is a judgment call for whoever picks up
+next (`master-plan.md` doesn't strictly sequence them relative to each other, only both after `A`).
 
 ## First command after `/prime`
-`git -C /Users/brandon/Dev/agentic-portfolio status --short` (review + commit the parent-brain
-`state.json` rollups written by `mev emit-state --write`, if dirty), then decide between mev backlog
-and the orchestrator loader cleanup.
+`/clean-worktree 4.A-emit-foundation-flow` (merge PR #15 and remove the worktree), then choose
+`MV.4.B` or `MV.4.C` and run `/generate-tasks`.
