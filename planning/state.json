@@ -4,16 +4,7 @@
   "updated": "2026-07-04",
   "focus": {
     "now": [],
-    "next": [
-      {
-        "id": "MV.4.E",
-        "title": "Wire all planners into emit_state; preserve fixed-point; brain-wide ripple integration test (close-A-unblocks-B across every surface)",
-        "status": null,
-        "note": null,
-        "repo": null,
-        "blocked_by": []
-      }
-    ],
+    "next": [],
     "blocked": []
   },
   "tracks": [
