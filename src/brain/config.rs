@@ -162,6 +162,65 @@ pub fn find_brain_config(start: &Path) -> Result<BrainConfig, ConfigError> {
     load_brain_config(&root.join("brain.toml"))
 }
 
+/// Best-effort check: is `path` inside a *linked* git worktree (as opposed to a
+/// repo's main working tree)?
+///
+/// Runs `git -C <path> rev-parse --git-dir` and `git -C <path> rev-parse
+/// --git-common-dir`. In a repo's main working tree these resolve to the same
+/// directory; in a linked worktree (created via `git worktree add`) `--git-dir`
+/// points at `<main-repo>/.git/worktrees/<name>` while `--git-common-dir` points
+/// at the main repo's `.git`, so they differ.
+///
+/// This is a *safety check*, not a hard requirement: any failure to invoke git
+/// at all (not a git repo, git missing from `PATH`, a git error) must resolve to
+/// `false` (fail open) rather than propagating an error — many existing tests
+/// use a bare [`tempfile::tempdir`] (no `git init`) as a brain root, and this
+/// function must not treat that as a worktree.
+pub fn is_linked_worktree(path: &Path) -> bool {
+    let git_dir = match run_git_rev_parse(path, "--git-dir") {
+        Some(dir) => dir,
+        None => return false,
+    };
+    let git_common_dir = match run_git_rev_parse(path, "--git-common-dir") {
+        Some(dir) => dir,
+        None => return false,
+    };
+
+    let resolve = |raw: &str| -> PathBuf {
+        let candidate = PathBuf::from(raw);
+        let joined = if candidate.is_absolute() {
+            candidate
+        } else {
+            path.join(candidate)
+        };
+        joined.canonicalize().unwrap_or(joined)
+    };
+
+    resolve(&git_dir) != resolve(&git_common_dir)
+}
+
+/// Run `git -C <path> rev-parse <arg>` and return its trimmed stdout, or `None`
+/// if git could not be invoked or exited non-zero.
+fn run_git_rev_parse(path: &Path, arg: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .arg("rev-parse")
+        .arg(arg)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests (inline)
 // ---------------------------------------------------------------------------
@@ -211,5 +270,69 @@ mod tests {
         let slugs = cfg.projects();
         assert!(slugs.contains(&"brain"), "expected slug 'brain'");
         assert!(slugs.contains(&"mev"), "expected slug 'mev'");
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .expect("failed to invoke git");
+        assert!(status.success(), "git {:?} failed in {:?}", args, dir);
+    }
+
+    #[test]
+    fn is_linked_worktree_false_for_main_tree() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo_path = dir.path();
+        run_git(repo_path, &["init", "-q"]);
+        run_git(repo_path, &["config", "user.email", "test@example.com"]);
+        run_git(repo_path, &["config", "user.name", "Test"]);
+        std::fs::write(repo_path.join("README.md"), "hello").expect("write file");
+        run_git(repo_path, &["add", "README.md"]);
+        run_git(repo_path, &["commit", "-q", "-m", "initial commit"]);
+
+        assert!(
+            !is_linked_worktree(repo_path),
+            "main working tree should not be reported as a linked worktree"
+        );
+    }
+
+    #[test]
+    fn is_linked_worktree_true_for_linked_worktree() {
+        let main_dir = tempfile::tempdir().expect("tempdir");
+        let main_path = main_dir.path();
+        run_git(main_path, &["init", "-q"]);
+        run_git(main_path, &["config", "user.email", "test@example.com"]);
+        run_git(main_path, &["config", "user.name", "Test"]);
+        std::fs::write(main_path.join("README.md"), "hello").expect("write file");
+        run_git(main_path, &["add", "README.md"]);
+        run_git(main_path, &["commit", "-q", "-m", "initial commit"]);
+
+        let worktree_parent = tempfile::tempdir().expect("tempdir");
+        let worktree_path = worktree_parent.path().join("wt");
+        run_git(
+            main_path,
+            &[
+                "worktree",
+                "add",
+                worktree_path.to_str().expect("utf8 path"),
+            ],
+        );
+
+        assert!(
+            is_linked_worktree(&worktree_path),
+            "linked worktree should be reported as such"
+        );
+    }
+
+    #[test]
+    fn is_linked_worktree_false_for_non_git_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(
+            !is_linked_worktree(dir.path()),
+            "a plain non-git directory must fail open to false"
+        );
     }
 }
