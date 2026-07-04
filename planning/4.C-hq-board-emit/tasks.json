@@ -1,0 +1,32 @@
+[
+  {
+    "task_id": 1,
+    "title": "render_hq_board — pure NOW/NEXT/BLOCKED Operating Board renderer",
+    "description": "In src/brain/emit.rs, add a pure `pub fn render_hq_board(focus: &Focus, edges: &[CrossRepoEdge]) -> String` mirroring render_wave_table's pure-renderer style. Render three sections — NOW, NEXT, BLOCKED — each listing the repo-tagged blocks from the brain-derived Focus as `repo:id — title`, with blocked entries annotated by their blocked_by / the matching cross_repo[] edge. Deterministic/stable order, no trailing newline. Add unit tests in tests/brain_emit.rs asserting the rendered sections and ordering over a synthetic multi-repo Focus + edge set.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/emit.rs", "tests/brain_emit.rs"],
+    "dependsOn": []
+  },
+  {
+    "task_id": 2,
+    "title": "plan_hq_board — locate HQ board doc, build board, splice into hq-board sentinel",
+    "description": "In src/brain/emit.rs, add `pub fn plan_hq_board(...) -> EmitPlan` following the plan_master_plan_tables pattern. Locate the HQ Operating Board doc at the brain root (resolve via the brain-kind StateSource / config). Build the board with render_hq_board(derive_brain_focus(TierScope::All, config, graph, files), derive_cross_repo(files)) and splice into the markers::HQ_BOARD sentinel via splice_generated. Push an EmitAction only when content changed (fixed-point); emit W_EMIT_NO_SENTINEL when the doc/sentinels are absent. Add tests in tests/brain_emit.rs over a synthetic brain fixture with the sentinel: splice-into-sentinel produces expected content, missing-sentinel-warns, already-correct-no-action. Depends on task 1 for render_hq_board (and both edit the same files, so the chain also keeps the merge clean).",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/emit.rs", "tests/brain_emit.rs"],
+    "dependsOn": [1]
+  },
+  {
+    "task_id": 3,
+    "title": "Validate",
+    "description": "Run the Validation Commands listed in tasks.md and confirm all pass.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": [],
+    "dependsOn": [1, 2]
+  }
+]

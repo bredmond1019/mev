@@ -1,0 +1,32 @@
+[
+  {
+    "task_id": 1,
+    "title": "plan_project_caches — focus-line + synced_from into each docs/projects/<slug>.md project-cache sentinel",
+    "description": "In src/brain/emit.rs, add `pub fn plan_project_caches(...) -> EmitPlan` following the plan_master_plan_tables pattern. For each project-kind repo, locate <brain-root>/docs/projects/<slug>.md (resolve the brain root the way the sibling planners do, via the brain-kind StateSource / config). Render the repo's derived focus-line from derive_focus (headline of now/next/blocked) and splice it into the markers::PROJECT_CACHE sentinel via splice_generated. Also reconcile the doc's OKF frontmatter synced_from field to the child state file's `updated` watermark (StateFile.updated). Push an EmitAction only when the resulting content differs from the original (fixed-point); emit W_EMIT_NO_SENTINEL when the target doc is missing or lacks the sentinels. Add tests in tests/brain_emit.rs over synthetic fixtures: splice-produces-expected-content, missing-sentinel-warns, and already-correct-no-action.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/emit.rs", "tests/brain_emit.rs"],
+    "dependsOn": []
+  },
+  {
+    "task_id": 2,
+    "title": "plan_tier_rollups — tier rollup rows into each tier doc's tier-rollup sentinel",
+    "description": "In src/brain/emit.rs, add `pub fn plan_tier_rollups(...) -> EmitPlan` following the same pattern as plan_project_caches / plan_master_plan_tables. For each tier, derive the tier-scoped rollup rows via derive_rollup(tier_scope_for(...), config, existing repos[], graph, files) and render them as the tier rollup table body, then splice into the tier doc's markers::TIER_ROLLUP sentinel. Same fixed-point (EmitAction only on change) and W_EMIT_NO_SENTINEL (missing file/sentinels) behaviour. Add tests in tests/brain_emit.rs over synthetic multi-repo fixtures: rollup-rows-render-expected-content, missing-sentinel-warns, and already-correct-no-action. Depends on task 1 only because both edit src/brain/emit.rs + tests/brain_emit.rs (serialize to keep the merge clean); no logic dependency.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/emit.rs", "tests/brain_emit.rs"],
+    "dependsOn": [1]
+  },
+  {
+    "task_id": 3,
+    "title": "Validate",
+    "description": "Run the Validation Commands listed in tasks.md and confirm all pass.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": [],
+    "dependsOn": [1, 2]
+  }
+]
