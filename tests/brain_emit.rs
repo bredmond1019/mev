@@ -1433,6 +1433,270 @@ mod task3_planners {
     }
 
     // -----------------------------------------------------------------------
+    // plan_tier_rollups
+    // -----------------------------------------------------------------------
+
+    fn status_doc_with_sentinel() -> String {
+        "---\n\
+         type: ProjectStatus\n\
+         title: core tier status\n\
+         description: Test tier status doc.\n\
+         ---\n\n\
+         # core\n\n\
+         Narrative before.\n\n\
+         <!-- BEGIN generated:tier-rollup -->\n\
+         <!-- END generated:tier-rollup -->\n\n\
+         Narrative after.\n"
+            .to_string()
+    }
+
+    #[test]
+    fn tier_rollup_splice_produces_expected_content() {
+        use mev::brain::emit::plan_tier_rollups;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let status_path = tmp.path().join("core/planning/status.md");
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(&status_path, status_doc_with_sentinel()).unwrap();
+
+        // Leaf repo "repo-a" (core tier) with one in_progress block.
+        let leaf_tracks = vec![Track {
+            title: "P".to_string(),
+            blocks: vec![track_block(
+                "RA.1.A",
+                "Repo A block",
+                Some("in_progress"),
+                Some(1),
+                vec![],
+            )],
+        }];
+        let leaf_file = make_leaf_file("repo-a", leaf_tracks, Focus::default());
+        let leaf_src = StateSource {
+            repo_slug: "repo-a".to_string(),
+            abs_path: PathBuf::from("/fake/repo-a/planning/state.json"),
+            expected_kind: "project",
+        };
+
+        // Tier brain: repo == "core", matches brain.toml's tier = "core", so
+        // tier_scope_for resolves TierScope::Tier("core").
+        let mut tier_file = make_brain_file(vec![], vec![], Focus::default());
+        tier_file.repo = "core".to_string();
+        let tier_src = StateSource {
+            repo_slug: "core".to_string(),
+            abs_path: tmp.path().join("core/planning/state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![(leaf_src, leaf_file), (tier_src, tier_file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_repos(&[("repo-a", "core")]);
+
+        let plan = plan_tier_rollups(&files, &graph, &config);
+
+        assert_eq!(
+            plan.actions.len(),
+            1,
+            "expected one action; got {}",
+            plan.actions.len()
+        );
+        let action = &plan.actions[0];
+        assert_eq!(action.path, status_path);
+        assert!(
+            action.new_content.contains("Narrative before."),
+            "narrative before sentinel was lost"
+        );
+        assert!(
+            action.new_content.contains("Narrative after."),
+            "narrative after sentinel was lost"
+        );
+        assert!(
+            action.new_content.contains("`RA.1.A` — Repo A block"),
+            "tier rollup table missing derived block: {}",
+            action.new_content
+        );
+        assert!(
+            action.new_content.contains("repo-a"),
+            "tier rollup table missing repo row: {}",
+            action.new_content
+        );
+    }
+
+    #[test]
+    fn tier_rollup_missing_sentinel_warns_no_action() {
+        use mev::brain::emit::plan_tier_rollups;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let status_path = tmp.path().join("core/planning/status.md");
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &status_path,
+            "---\ntype: ProjectStatus\n---\n\n# core\n\nNo sentinels.\n",
+        )
+        .unwrap();
+
+        let mut tier_file = make_brain_file(vec![], vec![], Focus::default());
+        tier_file.repo = "core".to_string();
+        let tier_src = StateSource {
+            repo_slug: "core".to_string(),
+            abs_path: tmp.path().join("core/planning/state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![(tier_src, tier_file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_repos(&[("repo-a", "core")]);
+
+        let plan = plan_tier_rollups(&files, &graph, &config);
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "no action expected when sentinels are absent; got {}",
+            plan.actions.len()
+        );
+        let warn = plan
+            .diagnostics
+            .iter()
+            .find(|d| d.locator == "W_EMIT_NO_SENTINEL");
+        assert!(
+            warn.is_some(),
+            "expected W_EMIT_NO_SENTINEL diagnostic; got none"
+        );
+    }
+
+    #[test]
+    fn tier_rollup_missing_file_warns_no_action() {
+        use mev::brain::emit::plan_tier_rollups;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // No status.md written at all.
+
+        let mut tier_file = make_brain_file(vec![], vec![], Focus::default());
+        tier_file.repo = "core".to_string();
+        let tier_src = StateSource {
+            repo_slug: "core".to_string(),
+            abs_path: tmp.path().join("core/planning/state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![(tier_src, tier_file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_repos(&[("repo-a", "core")]);
+
+        let plan = plan_tier_rollups(&files, &graph, &config);
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "no action expected when status.md is missing; got {}",
+            plan.actions.len()
+        );
+        let warn = plan
+            .diagnostics
+            .iter()
+            .find(|d| d.locator == "W_EMIT_NO_SENTINEL");
+        assert!(
+            warn.is_some(),
+            "expected W_EMIT_NO_SENTINEL diagnostic; got none"
+        );
+    }
+
+    #[test]
+    fn tier_rollup_hq_root_is_skipped() {
+        use mev::brain::emit::plan_tier_rollups;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // HQ root's own state.json -- repo "hq" matches no declared tier, so
+        // tier_scope_for resolves TierScope::All and this planner must skip it
+        // entirely (no action, no diagnostic) -- MV.4.C's plan_hq_board owns it.
+        let hq_status_path = tmp.path().join("planning/status.md");
+        std::fs::create_dir_all(hq_status_path.parent().unwrap()).unwrap();
+        std::fs::write(&hq_status_path, status_doc_with_sentinel()).unwrap();
+
+        let hq_file = make_brain_file(vec![], vec![], Focus::default());
+        let hq_src = StateSource {
+            repo_slug: "hq".to_string(),
+            abs_path: tmp.path().join("planning/state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![(hq_src, hq_file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_repos(&[("repo-a", "core")]);
+
+        let plan = plan_tier_rollups(&files, &graph, &config);
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "HQ root (TierScope::All) must never be targeted; got {}",
+            plan.actions.len()
+        );
+        assert!(
+            plan.diagnostics.is_empty(),
+            "no diagnostics expected for the skipped HQ root; got: {:?}",
+            plan.diagnostics
+        );
+    }
+
+    #[test]
+    fn tier_rollup_fixed_point_no_action_on_second_pass() {
+        use mev::brain::emit::plan_tier_rollups;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let status_path = tmp.path().join("core/planning/status.md");
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(&status_path, status_doc_with_sentinel()).unwrap();
+
+        let leaf_tracks = vec![Track {
+            title: "P".to_string(),
+            blocks: vec![track_block(
+                "RA.1.A",
+                "Repo A block",
+                Some("in_progress"),
+                Some(1),
+                vec![],
+            )],
+        }];
+        let leaf_file = make_leaf_file("repo-a", leaf_tracks, Focus::default());
+        let leaf_src = StateSource {
+            repo_slug: "repo-a".to_string(),
+            abs_path: PathBuf::from("/fake/repo-a/planning/state.json"),
+            expected_kind: "project",
+        };
+
+        let mut tier_file = make_brain_file(vec![], vec![], Focus::default());
+        tier_file.repo = "core".to_string();
+        let tier_src = StateSource {
+            repo_slug: "core".to_string(),
+            abs_path: tmp.path().join("core/planning/state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![(leaf_src, leaf_file), (tier_src, tier_file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_repos(&[("repo-a", "core")]);
+
+        // First pass produces an action; write it to disk.
+        let plan1 = plan_tier_rollups(&files, &graph, &config);
+        assert_eq!(
+            plan1.actions.len(),
+            1,
+            "first pass should produce an action"
+        );
+        std::fs::write(&status_path, &plan1.actions[0].new_content).unwrap();
+
+        // Second pass over the already-correct content: no action.
+        let plan2 = plan_tier_rollups(&files, &graph, &config);
+        assert_eq!(
+            plan2.actions.len(),
+            0,
+            "second pass (fixed point) should produce no action; got {}",
+            plan2.actions.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // apply_plan
     // -----------------------------------------------------------------------
 

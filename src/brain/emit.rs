@@ -19,8 +19,8 @@ use thiserror::Error;
 
 use crate::brain::config::BrainConfig;
 use crate::brain::state::{
-    Block, BlockedBy, Focus, StateFile, StateGraph, StateSource, derive_brain_focus,
-    derive_cross_repo, derive_focus, derive_rollup, tier_scope_for,
+    Block, BlockedBy, Focus, RepoRollup, StateFile, StateGraph, StateSource, TierScope,
+    derive_brain_focus, derive_cross_repo, derive_focus, derive_rollup, tier_scope_for,
 };
 
 // ---------------------------------------------------------------------------
@@ -759,6 +759,130 @@ pub fn plan_project_caches(
                 new_content,
                 note: format!("update project cache for '{}'", src.repo_slug),
             });
+        }
+    }
+
+    plan
+}
+
+// ---------------------------------------------------------------------------
+// plan_tier_rollups
+// ---------------------------------------------------------------------------
+
+/// Render the tier-rollup table body for a tier's rolled-up repo rows.
+///
+/// Columns: `Repo | Now | Next | Blocked`. Each cell joins its blocks as
+/// `` `id` — title `` (comma-separated), or the literal `none` when the
+/// section is empty. This is the table body [`plan_tier_rollups`] splices
+/// into a tier's `status.md`'s [`markers::TIER_ROLLUP`] sentinel.
+fn render_tier_rollup_table(rollups: &[RepoRollup]) -> String {
+    let summarize = |blocks: &[Block]| -> String {
+        if blocks.is_empty() {
+            "none".to_string()
+        } else {
+            blocks
+                .iter()
+                .map(|b| format!("`{}` — {}", b.id, b.title))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+
+    let mut rows: Vec<String> = Vec::new();
+    rows.push("| Repo | Now | Next | Blocked |".to_string());
+    rows.push("|------|-----|------|---------|".to_string());
+
+    for rollup in rollups {
+        rows.push(format!(
+            "| {} | {} | {} | {} |",
+            rollup.repo,
+            summarize(&rollup.now),
+            summarize(&rollup.next),
+            summarize(&rollup.blocked)
+        ));
+    }
+
+    rows.join("\n")
+}
+
+/// Plan the tier-rollup splice into each tier sub-brain's sibling `status.md`.
+///
+/// For every loaded `kind == "brain"` file whose [`tier_scope_for`] resolves to
+/// [`TierScope::Tier`] (i.e. every tier sub-brain — the HQ root, whose `repo`
+/// matches no declared tier and resolves to [`TierScope::All`], is out of
+/// scope here; its cross-repo view is `MV.4.C`'s `plan_hq_board`), derives the
+/// tier-scoped rollup rows via [`derive_rollup`] (fed the tier's own current
+/// `repos[]` as the non-destructive `existing` baseline) and renders them via
+/// [`render_tier_rollup_table`].
+///
+/// The target doc is `<tier's state.json parent>/status.md` — the same
+/// state-file-relative resolution [`plan_master_plan_tables`] uses for
+/// `master-plan.md`. If it exists and carries the [`markers::TIER_ROLLUP`]
+/// sentinels, the rendered table is spliced in and an [`EmitAction`] is added
+/// only when the resulting content differs from the original (fixed-point
+/// property). A missing `status.md`, or one lacking the sentinels, produces a
+/// `W_EMIT_NO_SENTINEL` warning diagnostic and no write — this planner never
+/// splices into arbitrary prose.
+pub fn plan_tier_rollups(
+    files: &[(StateSource, StateFile)],
+    graph: &StateGraph,
+    config: &BrainConfig,
+) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+
+    for (src, file) in files {
+        if file.kind != "brain" {
+            continue;
+        }
+        let scope = tier_scope_for(file, config);
+        let tier_name = match &scope {
+            TierScope::Tier(t) => t.clone(),
+            TierScope::All => continue,
+        };
+
+        let Some(planning_dir) = src.abs_path.parent() else {
+            continue;
+        };
+        let status_path = planning_dir.join("status.md");
+
+        let original = match std::fs::read_to_string(&status_path) {
+            Ok(s) => s,
+            Err(_) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &status_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "no status.md beside tier '{tier_name}' state.json; skipping \
+                         tier-rollup emit"
+                    ),
+                ));
+                continue;
+            }
+        };
+
+        let rollups = derive_rollup(&scope, config, &file.repos, graph, files);
+        let table = render_tier_rollup_table(&rollups);
+
+        match splice_generated(&original, markers::TIER_ROLLUP, &table) {
+            Ok(new_content) => {
+                if new_content != original {
+                    plan.actions.push(EmitAction {
+                        path: status_path,
+                        new_content,
+                        note: format!("update tier rollup for '{tier_name}'"),
+                    });
+                }
+            }
+            Err(_) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &status_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "status.md for tier '{tier_name}' has no <!-- BEGIN \
+                         generated:tier-rollup --> sentinels; skipping"
+                    ),
+                ));
+            }
         }
     }
 
