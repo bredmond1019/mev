@@ -2,10 +2,10 @@
   "spec_slug": "4.A-emit-foundation",
   "branch": "4.A-emit-foundation-flow",
   "started_at": "2026-07-04T02:00:53Z",
-  "updated_at": "2026-07-04T02:04:37Z",
+  "updated_at": "2026-07-04T02:08:13Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/4.A-emit-foundation-flow",
   "status": "running",
-  "current_task": 2,
+  "current_task": 3,
   "tasks": {
     "1": {
       "status": "passed",
@@ -33,6 +33,23 @@
       "decisions": [
         "Placed global_status_map immediately after render_wave_table (before splice_generated) since it's the cross-file counterpart to render_wave_table's same-file status map, keeping related logic co-located.",
         "Added the new tests as a separate `task2_global_status_map` test module reusing the existing make_src/make_leaf/block helpers already defined at the top of tests/brain_emit.rs, matching the file's existing per-task module convention."
+      ],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/4.A-emit-foundation-flow/src/brain/emit.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/4.A-emit-foundation-flow/tests/brain_emit.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "3": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "render_wave_table now takes a global status map and resolves cross-repo depends_on edges against it (closed dep -> open, open/absent dep -> blocked), fixing the previous always-unmet conservative bug; plan_master_plan_tables builds and threads the map via global_status_map(files).",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Kept the `graph: &StateGraph` parameter on render_wave_table unchanged (still unused, `let _ = graph;`) per the spec's note that graph-param handling stays as-is; cross-repo resolution goes entirely through the new `global_status` map argument instead.",
+        "Updated all 7 existing render_wave_table call sites in tests/brain_emit.rs to pass an empty HashMap (no behavior change for same-repo-only fixtures), then added 3 new dedicated tests for the cross-repo closed/open/absent cases rather than retrofitting the existing tests."
       ],
       "files_changed": [
         "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/4.A-emit-foundation-flow/src/brain/emit.rs",
@@ -105,13 +122,29 @@
         "filesReadKb": null,
         "inTokEst": 570,
         "outTok": 3033
+      },
+      {
+        "label": "implement-3-1",
+        "model": "sonnet",
+        "promptTokEst": 968,
+        "filesReadKb": null,
+        "inTokEst": 968,
+        "outTok": 9233
+      },
+      {
+        "label": "test-3-1",
+        "model": "haiku",
+        "promptTokEst": 570,
+        "filesReadKb": null,
+        "inTokEst": 570,
+        "outTok": 2013
       }
     ],
     "total": {
-      "promptTokEst": 4092,
+      "promptTokEst": 5630,
       "filesReadKb": 0,
-      "inTokEst": 4092,
-      "outTok": 25272
+      "inTokEst": 5630,
+      "outTok": 36518
     }
   }
 }
