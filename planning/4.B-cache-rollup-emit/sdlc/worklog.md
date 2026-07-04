@@ -13,3 +13,8 @@ What: Added pub fn plan_tier_rollups (+ render_tier_rollup_table helper) in src/
 Decisions: Target doc for a tier rollup is resolved as '<tier state.json parent>/status.md' — sibling-to-state-file resolution, mirroring plan_master_plan_tables's master-plan.md resolution — since brain.toml's [[repos]] entries carry no per-tier rollup-doc field (only project cache_doc).; plan_tier_rollups iterates kind=="brain" files and skips any whose tier_scope_for resolves to TierScope::All (the HQ root) with no diagnostic, since that view is MV.4.C's plan_hq_board responsibility, not this planner's.; Rendered tier-rollup table columns: Repo | Now | Next | Blocked, each cell formatted as comma-joined `id` — title pairs or the literal 'none', matching render_focus_line's summarize convention from plan_project_caches.
 Validated: gating checks (fast tripwire)
 ```
+
+## Task 3 — PASSED (1 attempt)
+What: Confirmed all four gated checks pass (cargo fmt --check, cargo clippy -D warnings, cargo test, cargo build --release) for the plan_project_caches/plan_tier_rollups work from tasks 1-2; no code changes were needed for this validation-only task.
+Decisions: Task 3 is purely a validation gate with no files/acceptance_criteria of its own; since the working tree was already clean after tasks 1-2 and all four validation commands passed, no commit was made.
+Validated: gating checks (fast tripwire)
