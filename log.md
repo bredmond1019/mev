@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-04T02:21:44Z"
+timestamp: "2026-07-04T09:04:10Z"
 ---
 
 # Log — mev
@@ -16,6 +16,14 @@ timestamp: "2026-07-04T02:21:44Z"
 *Append-only working log. One dated entry per session. Newest entries at the top.*
 
 ---
+
+## [2026-07-04]
+
+### Close-out: 4.B-cache-rollup-emit
+
+- **What:** Ran `/close-out --clean-worktree` for `4.B-cache-rollup-emit` following its `/sdlc-flow` run (3 tasks, PASS, PR #16 opened, not yet merged). Re-verified all four harness gates (`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` — 312 tests, `cargo build --release`) plus the emoji gate, all green. Coverage scan found no blocking gaps (test file ~3x the size of the changed source, covers all new public functions `plan_project_caches`/`plan_tier_rollups`). Docs audit found `docs/architecture.md` already fully documents both functions (patched in-flow by `sdlc-flow`'s own docs stage) — no STALE or MISSING items, no doc changes made this session. Hand-edited this worktree's `planning/state.json` authored `tracks[]`: `MV.4.A` and `MV.4.B` flipped `open` → `closed` (both are in fact done; the file hadn't been synced since `4.A` merged). Attempted `mev emit-state --write` from the worktree per protocol; confirmed it resolves `brain.toml`'s `[[repos]]` entry for `mev` to the canonical `core/mev` path (main checkout), so it regenerated the main checkout's `state.json`/derived tables, not this worktree's — the main checkout stayed git-clean afterward and this worktree's own diff was unchanged. This worktree's derived `focus` section remains stale and will self-correct once the branch merges to main and `emit-state --write` runs there; not hand-edited.
+- **Why:** Standard close-out gate before merging `4.B-cache-rollup-emit` — confirm gates/coverage/docs are actually green (not just claimed) and reconcile the state tracker before handing the branch off for merge, per the `/close-out` protocol.
+- **Refs:** PR #16 (open); `core/planning/state-sync-loop/master-plan.md` (MV.4.A → {B,C} → E spine); prior entry below (`4.B-cache-rollup-emit` implementation, PASS).
 
 ## [run: 2026-07-04]
 
