@@ -595,6 +595,177 @@ pub fn plan_master_plan_tables(files: &[(StateSource, StateFile)], graph: &State
 }
 
 // ---------------------------------------------------------------------------
+// plan_project_caches
+// ---------------------------------------------------------------------------
+
+/// Render the one-line derived focus headline for a project-kind repo.
+///
+/// Format: `**Current focus:** <now>. Next: <next>. Blocked: <blocked>.` where each
+/// section joins its blocks as `` `id` — title `` (comma-separated), or the literal
+/// `none` when the section is empty. This is the line [`plan_project_caches`]
+/// splices into a project cache doc's [`markers::PROJECT_CACHE`] sentinel.
+fn render_focus_line(
+    src: &StateSource,
+    file: &StateFile,
+    graph: &StateGraph,
+    files: &[(StateSource, StateFile)],
+) -> String {
+    let focus = derived_focus_for(src, file, graph, files);
+
+    let summarize = |blocks: &[Block]| -> String {
+        if blocks.is_empty() {
+            "none".to_string()
+        } else {
+            blocks
+                .iter()
+                .map(|b| format!("`{}` — {}", b.id, b.title))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+
+    format!(
+        "**Current focus:** {}. Next: {}. Blocked: {}.",
+        summarize(&focus.now),
+        summarize(&focus.next),
+        summarize(&focus.blocked)
+    )
+}
+
+/// Reconcile the `synced_from` scalar in `original`'s OKF frontmatter to `new_value`.
+///
+/// Locates the leading `---`-fenced frontmatter block (the opening fence must be the
+/// document's first line). If a `synced_from:` line already exists inside the block,
+/// its value is replaced in place; otherwise a new `synced_from:` line is appended at
+/// the end of the block (before the closing fence). The value is always emitted
+/// double-quoted (matching this codebase's existing hand-authored `synced_from`
+/// docs), with `\` and `"` escaped.
+///
+/// When `original` has no leading frontmatter fence, or the fence is never closed,
+/// `original` is returned unchanged — this function never invents a frontmatter
+/// block into a document that lacks one.
+fn reconcile_synced_from(original: &str, new_value: &str) -> String {
+    let lines: Vec<&str> = original.lines().collect();
+    if lines.first().map(|l| l.trim()) != Some("---") {
+        return original.to_string();
+    }
+    let Some(end_idx) = lines[1..]
+        .iter()
+        .position(|l| l.trim() == "---")
+        .map(|i| i + 1)
+    else {
+        return original.to_string();
+    };
+
+    let escaped = new_value.replace('\\', "\\\\").replace('"', "\\\"");
+    let new_line = format!("synced_from: \"{escaped}\"");
+
+    let mut fm_lines: Vec<String> = lines[1..end_idx].iter().map(|s| s.to_string()).collect();
+    match fm_lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("synced_from:"))
+    {
+        Some(pos) => fm_lines[pos] = new_line,
+        None => fm_lines.push(new_line),
+    }
+
+    let mut result_lines: Vec<String> = Vec::with_capacity(lines.len() + 1);
+    result_lines.push(lines[0].to_string());
+    result_lines.extend(fm_lines);
+    result_lines.extend(lines[end_idx..].iter().map(|s| s.to_string()));
+
+    let trailing_newline = original.ends_with('\n');
+    let mut result = result_lines.join("\n");
+    if trailing_newline {
+        result.push('\n');
+    }
+    result
+}
+
+/// Plan the project-cache splice for each project-kind repo's `docs/projects/<slug>.md`
+/// (or whatever path its `brain.toml` `[[repos]]` entry names as `cache_doc`).
+///
+/// For each loaded file with `kind == "project"`, looks up its `brain.toml`
+/// `[[repos]]` entry by `repo_slug` and resolves `root.join(&entry.cache_doc)`
+/// (the same resolution `check_sync` uses). If the target doc exists and carries
+/// the [`markers::PROJECT_CACHE`] sentinels, splices in the rendered
+/// [`render_focus_line`] headline and reconciles the doc's OKF frontmatter
+/// `synced_from` field to the child file's `updated` watermark (see
+/// [`reconcile_synced_from`]). An [`EmitAction`] is added only when the resulting
+/// content differs from the original (fixed-point property).
+///
+/// A missing target doc, or one lacking the sentinels, produces a
+/// `W_EMIT_NO_SENTINEL` warning diagnostic and no write — this planner never
+/// splices into arbitrary prose. A repo with no matching `[[repos]]` entry, or
+/// whose entry has a blank `cache_doc`, is silently skipped (nothing to target).
+pub fn plan_project_caches(
+    root: &std::path::Path,
+    files: &[(StateSource, StateFile)],
+    graph: &StateGraph,
+    config: &BrainConfig,
+) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+
+    for (src, file) in files {
+        if file.kind != "project" {
+            continue;
+        }
+        let Some(entry) = config.repos.iter().find(|r| r.slug == src.repo_slug) else {
+            continue;
+        };
+        if entry.cache_doc.trim().is_empty() {
+            continue;
+        }
+        let cache_path = root.join(&entry.cache_doc);
+
+        let original = match std::fs::read_to_string(&cache_path) {
+            Ok(s) => s,
+            Err(_) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &cache_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "no project-cache doc for '{}' at '{}'; skipping cache emit",
+                        src.repo_slug, entry.cache_doc
+                    ),
+                ));
+                continue;
+            }
+        };
+
+        let focus_line = render_focus_line(src, file, graph, files);
+
+        let spliced = match splice_generated(&original, markers::PROJECT_CACHE, &focus_line) {
+            Ok(c) => c,
+            Err(_) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &cache_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "project-cache doc for '{}' has no <!-- BEGIN generated:project-cache \
+                         --> sentinels; skipping",
+                        src.repo_slug
+                    ),
+                ));
+                continue;
+            }
+        };
+
+        let new_content = reconcile_synced_from(&spliced, &file.updated);
+
+        if new_content != original {
+            plan.actions.push(EmitAction {
+                path: cache_path,
+                new_content,
+                note: format!("update project cache for '{}'", src.repo_slug),
+            });
+        }
+    }
+
+    plan
+}
+
+// ---------------------------------------------------------------------------
 // apply_plan
 // ---------------------------------------------------------------------------
 
