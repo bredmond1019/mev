@@ -1,0 +1,86 @@
+{
+  "spec_slug": "4.B-cache-rollup-emit",
+  "branch": "4.B-cache-rollup-emit-flow",
+  "started_at": "2026-07-04T08:40:51Z",
+  "updated_at": "2026-07-04T08:40:51Z",
+  "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/4.B-cache-rollup-emit-flow",
+  "status": "running",
+  "current_task": 1,
+  "tasks": {
+    "1": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added pub fn plan_project_caches (src/brain/emit.rs) which splices a derived focus-line into each project-kind repo's docs/projects/<slug>.md project-cache sentinel and reconciles its synced_from watermark, with fixed-point + W_EMIT_NO_SENTINEL behaviour; covered by 5 new integration tests in tests/brain_emit.rs.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Resolved the target cache doc path via root.join(entry.cache_doc) from brain.toml's [[repos]] (same convention check_sync uses), rather than hardcoding 'docs/projects/<slug>.md' — real brain.toml entries already vary (e.g. README.md for the HQ root, index.md for tier sub-brains), and this keeps plan_project_caches consistent with that existing resolution pattern.",
+        "Gave plan_project_caches an explicit root: &Path parameter rather than deriving brain root from files/config, since lib.rs's emit_state already carries root in scope for MV.4.E to pass through later — avoids a fragile 'find the HQ file and strip two path components' heuristic.",
+        "Designed a new '**Current focus:** ... Next: ... Blocked: ...' one-line format for the project-cache sentinel (no prior convention existed); documented in render_focus_line's doc comment.",
+        "synced_from reconciliation is a separate line-based splice (reconcile_synced_from) rather than routing through okf_core::serialize_frontmatter, since that serializer deliberately never emits synced_from (per its doc comment) — reconcile_synced_from edits/inserts just that one YAML line in place, preserving all other frontmatter and prose verbatim."
+      ],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/4.B-cache-rollup-emit-flow/src/brain/emit.rs",
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/4.B-cache-rollup-emit-flow/tests/brain_emit.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    }
+  },
+  "review": {
+    "verdict": null,
+    "findings": [],
+    "attempts": 0
+  },
+  "docs": {
+    "changed": [],
+    "created": []
+  },
+  "bail_reason": null,
+  "pr": {
+    "url": null,
+    "number": null
+  },
+  "tokens": {
+    "stages": [
+      {
+        "label": "worktree-setup",
+        "model": "haiku",
+        "promptTokEst": 774,
+        "filesReadKb": null,
+        "inTokEst": 774,
+        "outTok": 8311
+      },
+      {
+        "label": "enumerate",
+        "model": "haiku",
+        "promptTokEst": 248,
+        "filesReadKb": null,
+        "inTokEst": 248,
+        "outTok": 482
+      },
+      {
+        "label": "implement-1-1",
+        "model": "sonnet",
+        "promptTokEst": 976,
+        "filesReadKb": null,
+        "inTokEst": 976,
+        "outTok": 27308
+      },
+      {
+        "label": "test-1-1",
+        "model": "haiku",
+        "promptTokEst": 574,
+        "filesReadKb": null,
+        "inTokEst": 574,
+        "outTok": 1828
+      }
+    ],
+    "total": {
+      "promptTokEst": 2572,
+      "filesReadKb": 0,
+      "inTokEst": 2572,
+      "outTok": 37929
+    }
+  }
+}
