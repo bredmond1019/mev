@@ -200,7 +200,8 @@ fn render_wave_table_includes_header_and_sep() {
     // We only need the file and repo_slug for render_wave_table.
     let _ = src;
 
-    let table = render_wave_table("repo", &file, &graph);
+    let global_status = std::collections::HashMap::new();
+    let table = render_wave_table("repo", &file, &graph, &global_status);
     assert!(
         table.contains("| Wave | Block | Title | Status | Depends on |"),
         "missing header row; got:\n{table}"
@@ -225,7 +226,8 @@ fn render_wave_table_open_block_with_unmet_dep_shows_blocked() {
         }],
     );
     let graph = empty_graph();
-    let table = render_wave_table("repo", &file, &graph);
+    let global_status = std::collections::HashMap::new();
+    let table = render_wave_table("repo", &file, &graph, &global_status);
 
     // B's row should show "blocked".
     let b_row = table
@@ -249,7 +251,8 @@ fn render_wave_table_open_ready_block_shows_open() {
         }],
     );
     let graph = empty_graph();
-    let table = render_wave_table("repo", &file, &graph);
+    let global_status = std::collections::HashMap::new();
+    let table = render_wave_table("repo", &file, &graph, &global_status);
 
     let a_row = table
         .lines()
@@ -271,7 +274,8 @@ fn render_wave_table_closed_block_shows_closed() {
         }],
     );
     let graph = empty_graph();
-    let table = render_wave_table("repo", &file, &graph);
+    let global_status = std::collections::HashMap::new();
+    let table = render_wave_table("repo", &file, &graph, &global_status);
 
     let x_row = table
         .lines()
@@ -293,7 +297,8 @@ fn render_wave_table_no_wave_shows_em_dash() {
         }],
     );
     let graph = empty_graph();
-    let table = render_wave_table("repo", &file, &graph);
+    let global_status = std::collections::HashMap::new();
+    let table = render_wave_table("repo", &file, &graph, &global_status);
 
     let y_row = table
         .lines()
@@ -321,7 +326,8 @@ fn render_wave_table_depends_on_column_lists_deps() {
         }],
     );
     let graph = empty_graph();
-    let table = render_wave_table("repo", &file, &graph);
+    let global_status = std::collections::HashMap::new();
+    let table = render_wave_table("repo", &file, &graph, &global_status);
 
     let b_row = table
         .lines()
@@ -351,7 +357,8 @@ fn render_wave_table_wave_order_respected_in_rows() {
         }],
     );
     let graph = empty_graph();
-    let table = render_wave_table("repo", &file, &graph);
+    let global_status = std::collections::HashMap::new();
+    let table = render_wave_table("repo", &file, &graph, &global_status);
 
     let lines: Vec<&str> = table.lines().collect();
     let early_idx = lines
@@ -365,6 +372,104 @@ fn render_wave_table_wave_order_respected_in_rows() {
     assert!(
         early_idx < late_idx,
         "Early (wave 1) should appear before Late (wave 2)"
+    );
+}
+
+#[test]
+fn render_wave_table_cross_repo_closed_dep_shows_open() {
+    // Block B (in "repo") depends on "other:X", which is CLOSED in the global map.
+    let file = make_leaf(
+        "repo",
+        vec![Track {
+            title: "P".to_string(),
+            blocks: vec![block_with_dep(
+                "B",
+                "Block B",
+                Some("open"),
+                Some(1),
+                "other",
+                "X",
+            )],
+        }],
+    );
+    let graph = empty_graph();
+    let mut global_status = std::collections::HashMap::new();
+    global_status.insert("other:X".to_string(), Some("closed".to_string()));
+
+    let table = render_wave_table("repo", &file, &graph, &global_status);
+
+    let b_row = table
+        .lines()
+        .find(|l| l.contains("| B |"))
+        .unwrap_or_else(|| panic!("no row for B in:\n{table}"));
+    assert!(
+        b_row.contains("| open |"),
+        "expected 'open' (dep resolved as met via closed cross-repo status) in B's row; got: {b_row}"
+    );
+}
+
+#[test]
+fn render_wave_table_cross_repo_open_dep_shows_blocked() {
+    // Block B (in "repo") depends on "other:X", which is OPEN (not closed) in the global map.
+    let file = make_leaf(
+        "repo",
+        vec![Track {
+            title: "P".to_string(),
+            blocks: vec![block_with_dep(
+                "B",
+                "Block B",
+                Some("open"),
+                Some(1),
+                "other",
+                "X",
+            )],
+        }],
+    );
+    let graph = empty_graph();
+    let mut global_status = std::collections::HashMap::new();
+    global_status.insert("other:X".to_string(), Some("open".to_string()));
+
+    let table = render_wave_table("repo", &file, &graph, &global_status);
+
+    let b_row = table
+        .lines()
+        .find(|l| l.contains("| B |"))
+        .unwrap_or_else(|| panic!("no row for B in:\n{table}"));
+    assert!(
+        b_row.contains("blocked"),
+        "expected 'blocked' (cross-repo dep still open) in B's row; got: {b_row}"
+    );
+}
+
+#[test]
+fn render_wave_table_cross_repo_absent_dep_shows_blocked() {
+    // Block B depends on "other:X", which is absent from the global map entirely.
+    let file = make_leaf(
+        "repo",
+        vec![Track {
+            title: "P".to_string(),
+            blocks: vec![block_with_dep(
+                "B",
+                "Block B",
+                Some("open"),
+                Some(1),
+                "other",
+                "X",
+            )],
+        }],
+    );
+    let graph = empty_graph();
+    let global_status = std::collections::HashMap::new();
+
+    let table = render_wave_table("repo", &file, &graph, &global_status);
+
+    let b_row = table
+        .lines()
+        .find(|l| l.contains("| B |"))
+        .unwrap_or_else(|| panic!("no row for B in:\n{table}"));
+    assert!(
+        b_row.contains("blocked"),
+        "expected 'blocked' (cross-repo dep absent from global map) in B's row; got: {b_row}"
     );
 }
 
