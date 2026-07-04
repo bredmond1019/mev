@@ -2,9 +2,9 @@
   "spec_slug": "4.C-hq-board-emit",
   "branch": "4.C-hq-board-emit-flow",
   "started_at": "2026-07-04T09:27:41Z",
-  "updated_at": "2026-07-04T09:34:50Z",
+  "updated_at": "2026-07-04T09:38:08Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/4.C-hq-board-emit-flow",
-  "status": "running",
+  "status": "docs",
   "current_task": 3,
   "tasks": {
     "1": {
@@ -58,12 +58,14 @@
     }
   },
   "review": {
-    "verdict": null,
+    "verdict": "PASS",
     "findings": [],
-    "attempts": 0
+    "attempts": 1
   },
   "docs": {
-    "changed": [],
+    "changed": [
+      "docs/architecture.md"
+    ],
     "created": []
   },
   "bail_reason": null,
@@ -136,13 +138,29 @@
         "filesReadKb": null,
         "inTokEst": 566,
         "outTok": 2535
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 970,
+        "filesReadKb": null,
+        "inTokEst": 970,
+        "outTok": 3706
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 788,
+        "filesReadKb": null,
+        "inTokEst": 788,
+        "outTok": 4231
       }
     ],
     "total": {
-      "promptTokEst": 5588,
+      "promptTokEst": 7346,
       "filesReadKb": 0,
-      "inTokEst": 5588,
-      "outTok": 43196
+      "inTokEst": 7346,
+      "outTok": 51133
     }
   }
 }

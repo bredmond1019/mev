@@ -14,3 +14,6 @@ Validated: gating checks (fast tripwire)
 What: Validated 4.C-hq-board-emit: cargo fmt --check, cargo clippy -- -D warnings, cargo test (76 tests incl. task2_plan_hq_board suite), and cargo build --release all pass with no code changes needed.
 Decisions: Task 3 is validation-only per tasks.json (files: []); no source changes made, no commit created since working tree was already clean and all checks passed
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: docs/architecture.md
