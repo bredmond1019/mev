@@ -24,6 +24,34 @@ use crate::brain::state::{
 };
 
 // ---------------------------------------------------------------------------
+// Generated-region marker constants
+// ---------------------------------------------------------------------------
+
+/// Named constants for the `<!-- BEGIN generated:{marker} -->` / `<!-- END
+/// generated:{marker} -->` sentinel markers used across the state-sync-loop
+/// status generators.
+///
+/// [`WAVE_TABLE`] is used by [`plan_master_plan_tables`] today; the remaining
+/// constants name the markers `MV.4.B`/`MV.4.C` target (project caches, tier
+/// rollups, and the HQ board) so every generator references a single shared
+/// source of truth instead of ad-hoc string literals.
+pub mod markers {
+    /// Marker for the per-repo wave-order roadmap table spliced into a
+    /// repo's `master-plan.md`.
+    pub const WAVE_TABLE: &str = "wave-table";
+
+    /// Marker for a project's synced status cache (`docs/projects/<slug>.md`
+    /// in the brain, or the equivalent per-tier cache).
+    pub const PROJECT_CACHE: &str = "project-cache";
+
+    /// Marker for a tier's rolled-up status summary.
+    pub const TIER_ROLLUP: &str = "tier-rollup";
+
+    /// Marker for the cross-repo HQ status board.
+    pub const HQ_BOARD: &str = "hq-board";
+}
+
+// ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
 
@@ -508,7 +536,7 @@ pub fn plan_master_plan_tables(files: &[(StateSource, StateFile)], graph: &State
 
         let table = render_wave_table(&src.repo_slug, file, graph);
 
-        match splice_generated(&original, "wave-table", &table) {
+        match splice_generated(&original, markers::WAVE_TABLE, &table) {
             Ok(new_content) => {
                 if new_content != original {
                     plan.actions.push(EmitAction {

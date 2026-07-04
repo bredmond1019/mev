@@ -11,7 +11,7 @@
 //!   8. `splice_generated` returns `MissingSentinel` when the BEGIN sentinel is absent.
 //!   9. `splice_generated` returns `MissingSentinel` when BEGIN is present but END is absent.
 
-use mev::brain::emit::{render_wave_table, splice_generated, wave_order};
+use mev::brain::emit::{markers, render_wave_table, splice_generated, wave_order};
 use mev::brain::state::{BlockedBy, StateFile, StateGraph, StateSource, Track, TrackBlock};
 use std::path::PathBuf;
 
@@ -1989,5 +1989,60 @@ heading = "Repo P"
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task 1 (MV.4.A) — generated-marker name constants
+// ---------------------------------------------------------------------------
+
+mod task1_markers {
+    use super::*;
+
+    #[test]
+    fn marker_constants_have_expected_values() {
+        assert_eq!(markers::WAVE_TABLE, "wave-table");
+        assert_eq!(markers::PROJECT_CACHE, "project-cache");
+        assert_eq!(markers::TIER_ROLLUP, "tier-rollup");
+        assert_eq!(markers::HQ_BOARD, "hq-board");
+    }
+
+    #[test]
+    fn splice_generated_works_with_wave_table_constant() {
+        let original = format!(
+            "before\n<!-- BEGIN generated:{m} -->\nold\n<!-- END generated:{m} -->\nafter\n",
+            m = markers::WAVE_TABLE
+        );
+        let result = splice_generated(&original, markers::WAVE_TABLE, "new-table").unwrap();
+        let expected = format!(
+            "before\n<!-- BEGIN generated:{m} -->\nnew-table\n<!-- END generated:{m} -->\nafter\n",
+            m = markers::WAVE_TABLE
+        );
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn splice_generated_works_with_each_marker_constant() {
+        for marker in [
+            markers::WAVE_TABLE,
+            markers::PROJECT_CACHE,
+            markers::TIER_ROLLUP,
+            markers::HQ_BOARD,
+        ] {
+            let original = format!(
+                "<!-- BEGIN generated:{marker} -->\nstale\n<!-- END generated:{marker} -->\n"
+            );
+            let result = splice_generated(&original, marker, "fresh").unwrap();
+            assert!(
+                result.contains("fresh"),
+                "marker '{marker}' should splice successfully"
+            );
+            // Idempotent: re-splicing with the same content yields the same result.
+            let result2 = splice_generated(&result, marker, "fresh").unwrap();
+            assert_eq!(
+                result, result2,
+                "splice for marker '{marker}' must be idempotent"
+            );
+        }
     }
 }
