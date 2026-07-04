@@ -2,9 +2,9 @@
   "spec_slug": "4.C-hq-board-emit",
   "branch": "4.C-hq-board-emit-flow",
   "started_at": "2026-07-04T09:27:41Z",
-  "updated_at": "2026-07-04T09:38:08Z",
+  "updated_at": "2026-07-04T09:41:12Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/4.C-hq-board-emit-flow",
-  "status": "docs",
+  "status": "done",
   "current_task": 3,
   "tasks": {
     "1": {
@@ -154,13 +154,21 @@
         "filesReadKb": null,
         "inTokEst": 788,
         "outTok": 4231
+      },
+      {
+        "label": "wrap-up",
+        "model": "sonnet",
+        "promptTokEst": 797,
+        "filesReadKb": null,
+        "inTokEst": 797,
+        "outTok": 11090
       }
     ],
     "total": {
-      "promptTokEst": 7346,
+      "promptTokEst": 8143,
       "filesReadKb": 0,
-      "inTokEst": 7346,
-      "outTok": 51133
+      "inTokEst": 8143,
+      "outTok": 62223
     }
   }
 }
