@@ -1,0 +1,52 @@
+[
+  {
+    "task_id": 1,
+    "title": "Add is_linked_worktree() helper",
+    "description": "In src/brain/config.rs, next to find_brain_root, add `pub fn is_linked_worktree(path: &Path) -> bool`. Implement via two `git -C <path> rev-parse` subprocess calls: `--git-dir` and `--git-common-dir`. Canonicalize both (joining onto `path` first if the git output is relative) and return true iff they differ AND both commands succeeded. Any git invocation failure (not a repo, git missing from PATH, git errors) must return false (fail open) rather than propagating an error — this function is a best-effort safety check, not a hard requirement, and must not break any of the many existing tests that use a bare `tempfile::tempdir()` (no `git init`) as a brain root. Add the unit tests described in the spec's Testing Strategy (main-tree repo -> false, linked worktree of that repo -> true, non-git tempdir -> false) inside config.rs's existing #[cfg(test)] module.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/config.rs"],
+    "dependsOn": []
+  },
+  {
+    "task_id": 2,
+    "title": "Gate EmitState --write on is_linked_worktree",
+    "description": "In src/main.rs's `Command::EmitState { path, write }` arm (~line 274), before calling `find_brain_root(&path)`, add: if `write` is true and `mev::brain::config::is_linked_worktree(&path)` is true, print a clear eprintln! error naming the resolved `path` and stating that `--write` must be run from the main working tree (not a linked git worktree) because emit-state resolves every repo's derived-file paths from brain.toml, not CWD, then `return ExitCode::FAILURE` immediately (mirroring the existing eprintln!+FAILURE pattern used two lines below for the find_brain_root Err case in the same match arm) without writing any files. When `write` is false (dry-run) or the path is not a linked worktree, behavior is completely unchanged. Update the `EmitState` variant's doc comment (the \"Diagnostic codes\" list, ~lines 113-118) to document the new `E_EMIT_LINKED_WORKTREE` code alongside `E_CONFIG_NOT_FOUND`/`E_EMIT_WRITE_FAILED`.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/main.rs"],
+    "dependsOn": [1]
+  },
+  {
+    "task_id": 3,
+    "title": "CLI-level test coverage for the refusal",
+    "description": "Add a test exercising the actual CLI binary (or the EmitState match-arm logic directly if main.rs's command handling isn't otherwise unit-testable in this crate's existing test setup -- check how other EmitState-adjacent behavior is tested today, e.g. src/brain/config.rs or a tests/ integration file, and follow the same convention) that: (a) builds a real git repo with a linked worktree via `git worktree add`, (b) runs emit-state --write with CWD set to the worktree path, and asserts non-zero exit / no files written / stderr mentions the worktree path, (c) runs emit-state (no --write) with the same CWD and asserts success unchanged, (d) runs emit-state --write from the main tree of that same repo and asserts it behaves exactly as it did before this ticket (regression guard).",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/main.rs"],
+    "dependsOn": [2]
+  },
+  {
+    "task_id": 4,
+    "title": "Document the new behavior in core/mev/docs/cli.md",
+    "description": "Update the `emit-state` section of core/mev/docs/cli.md to describe the new refusal: --write exits non-zero with E_EMIT_LINKED_WORKTREE when invoked from inside a linked git worktree, dry-run is unaffected, and the recommended fix is to run --write from the main working tree. Keep it short and consistent with how the other diagnostic codes (E_CONFIG_NOT_FOUND, E_EMIT_WRITE_FAILED, W_EMIT_NO_SENTINEL) are already documented there.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["docs/cli.md"],
+    "dependsOn": [2]
+  },
+  {
+    "task_id": 5,
+    "title": "Validate",
+    "description": "Run the Validation Commands listed in tasks.md and confirm all pass: cargo fmt --check, cargo clippy -- -D warnings, cargo test, cargo build --release.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": [],
+    "dependsOn": [1, 2, 3, 4]
+  }
+]

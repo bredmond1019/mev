@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-04T11:47:55Z"
+timestamp: "2026-07-04T15:42:51Z"
 ---
 
 # Log — mev
@@ -16,6 +16,32 @@ timestamp: "2026-07-04T11:47:55Z"
 *Append-only working log. One dated entry per session. Newest entries at the top.*
 
 ---
+
+## [2026-07-04]
+
+### `update-write-state-in-trees` — guard emit-state --write against linked worktrees
+- **What:** Ran `/sdlc-task update-write-state-in-trees` in place on `main` (5/5 tasks, all passed).
+  Added `is_linked_worktree(path: &Path) -> bool` to `src/brain/config.rs` (compares canonicalized
+  `git rev-parse --git-dir`/`--git-common-dir`, fails open to `false` on any git error or non-repo
+  path); gated `Command::EmitState { path, write }` in `src/main.rs` to refuse with a new
+  `E_EMIT_LINKED_WORKTREE` diagnostic and non-zero exit when `--write` is invoked from inside a
+  linked worktree, leaving dry-run and main-tree behavior unchanged; added CLI-level test coverage
+  (`tests/brain_emit.rs`) covering the refusal, the dry-run pass-through, and a main-tree regression
+  guard; documented the new code in `docs/cli.md`'s `emit-state` section. All four harness gates
+  green. Committed directly to `main` (`66cfd1a`..`957b4f1`). Also merged PR #18
+  (`4.E-emit-state-wiring`, carried over from the prior session) and ran `mev emit-state --write`
+  from the main checkout to regenerate the brain-wide derived views — flipped
+  `MV.ticket.update-write-state-in-trees` to `closed` in `planning/state.json` first so the focus
+  derivation picked it up; `focus` is now empty (no open mev-tracked work).
+- **Why:** Live investigation in the agentic-portfolio brain traced a mysterious "reverting" of
+  uncommitted `state.json` edits to `emit-state --write` always resolving every repo's derived-file
+  paths from `brain.toml` (never CWD) — so running it from a linked `trees/<slug>` worktree silently
+  clobbered the *main* checkout's files with no git operation involved. Concurrent `sdlc-flow`/
+  `sdlc-block` worktrees calling `emit-state --write` (via `/log-work` and `sdlc-block.js`) turned
+  this into a last-writer-wins race on shared files. Refusing from a worktree is the correct fix —
+  a worktree's local state isn't the right input for regenerating shared derived surfaces anyway.
+- **Refs:** `planning/update-write-state-in-trees/tasks.md`; PR #18 (merged 2026-07-04T12:52:52Z);
+  `planning/handoff.md` (now consumed, to be deleted).
 
 ## [run: 2026-07-04]
 
