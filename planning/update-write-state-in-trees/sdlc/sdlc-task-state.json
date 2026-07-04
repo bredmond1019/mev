@@ -1,0 +1,204 @@
+{
+  "spec_slug": "update-write-state-in-trees",
+  "mode": "in-place",
+  "branch": "main",
+  "started_at": "2026-07-04T15:26:27Z",
+  "updated_at": "2026-07-04T15:36:58Z",
+  "worktree_path": "",
+  "status": "done",
+  "current_task": 5,
+  "tasks_run": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "tasks": {
+    "1": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added is_linked_worktree(path) helper in src/brain/config.rs that detects linked git worktrees via divergent `git rev-parse --git-dir`/`--git-common-dir`, failing open (false) on any git invocation error, with 3 new unit tests (main tree, linked worktree, non-git tempdir).",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Implemented run_git_rev_parse as a private helper shared by both rev-parse calls to avoid duplicating Command::new(\"git\") invocation/parsing logic",
+        "Path resolution joins relative git output onto the input path before canonicalizing, per spec instructions",
+        "Confirmed pre-existing cargo clippy --all-targets failures (ptr_arg in tests/brain_okf.rs and src/brain/okf.rs, type_complexity in src/brain/state.rs) exist on main before this change (verified via git stash) and are unrelated to Task 1's scope (src/brain/config.rs only) — not fixed here since Task 5 (Validate) and later tasks own the full validation gate"
+      ],
+      "files_changed": [
+        "src/brain/config.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "EmitState --write now refuses to run (exits FAILURE, writes nothing) when CWD is a linked git worktree via is_linked_worktree(), before find_brain_root is called; dry-run and main-tree behavior unchanged; doc comment updated with new E_EMIT_LINKED_WORKTREE code.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Guard placed as the very first statement in the EmitState match arm, before find_brain_root, exactly as specified, so the check uses the raw unresolved CLI path arg rather than the resolved brain root",
+        "No new tests added in this task since it's a pure control-flow guard using the already-tested is_linked_worktree helper (task 1) and CLI-level test coverage is explicitly task 3's scope per tasks.json"
+      ],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/src/main.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "3": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added CLI-level integration tests (real mev binary + real git worktree) covering emit-state --write refusal from a linked worktree, unaffected dry-run, and unchanged --write behavior from the main tree.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Followed the existing tests/brain_emit.rs module convention (mod-scoped helpers, CARGO_BIN_EXE_mev spawning) already used by other task modules in the same file rather than creating a new test file.",
+        "Passed the resolved worktree/main-repo path as the CLI path argument (in addition to setting current_dir) so stderr assertions can reliably match the printed path.",
+        "Left the unrelated pre-existing planning/state.json working-tree drift out of this commit since it's outside Task 3 scope."
+      ],
+      "files_changed": [
+        "tests/brain_emit.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "4": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "docs/cli.md now documents the E_EMIT_LINKED_WORKTREE refusal for emit-state --write, matching the existing diagnostic-code table style.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Left the pre-existing uncommitted planning/state.json unicode-escaping diff untouched/unstaged since it is unrelated to Task 4's scope (docs-only change)."
+      ],
+      "files_changed": [
+        "/Users/brandon/Dev/agentic-portfolio/core/mev/docs/cli.md"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "5": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Ran and confirmed all Validation Commands pass: cargo fmt --check, cargo clippy -- -D warnings, cargo test (317+ tests across all suites, 0 failed), and cargo build --release, all succeeding cleanly for the update-write-state-in-trees ticket.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Task 5 is validation-only per its spec (no files listed) — made no source changes and therefore no new commit; work from tasks 1-4 was already committed on this branch (66cfd1a, 3aa04db, 7b151eb, 957b4f1)."
+      ],
+      "files_changed": [],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    }
+  },
+  "bail_reason": null,
+  "tokens": {
+    "stages": [
+      {
+        "label": "setup",
+        "model": "haiku",
+        "promptTokEst": 567,
+        "filesReadKb": null,
+        "inTokEst": 567,
+        "outTok": 2893
+      },
+      {
+        "label": "enumerate",
+        "model": "haiku",
+        "promptTokEst": 228,
+        "filesReadKb": null,
+        "inTokEst": 228,
+        "outTok": 647
+      },
+      {
+        "label": "implement-1-1",
+        "model": "sonnet",
+        "promptTokEst": 1069,
+        "filesReadKb": 34.8,
+        "inTokEst": 9978,
+        "outTok": 5164
+      },
+      {
+        "label": "test-1-1",
+        "model": "haiku",
+        "promptTokEst": 501,
+        "filesReadKb": null,
+        "inTokEst": 501,
+        "outTok": 1765
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 1069,
+        "filesReadKb": 18.5,
+        "inTokEst": 5805,
+        "outTok": 2576
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 501,
+        "filesReadKb": null,
+        "inTokEst": 501,
+        "outTok": 2252
+      },
+      {
+        "label": "implement-3-1",
+        "model": "sonnet",
+        "promptTokEst": 1069,
+        "filesReadKb": 30,
+        "inTokEst": 8749,
+        "outTok": 9882
+      },
+      {
+        "label": "test-3-1",
+        "model": "haiku",
+        "promptTokEst": 501,
+        "filesReadKb": null,
+        "inTokEst": 501,
+        "outTok": 2104
+      },
+      {
+        "label": "implement-4-1",
+        "model": "sonnet",
+        "promptTokEst": 1069,
+        "filesReadKb": 21.8,
+        "inTokEst": 6650,
+        "outTok": 3303
+      },
+      {
+        "label": "test-4-1",
+        "model": "haiku",
+        "promptTokEst": 501,
+        "filesReadKb": null,
+        "inTokEst": 501,
+        "outTok": 1855
+      },
+      {
+        "label": "implement-5-1",
+        "model": "sonnet",
+        "promptTokEst": 1069,
+        "filesReadKb": 14.5,
+        "inTokEst": 4781,
+        "outTok": 1648
+      },
+      {
+        "label": "test-5-1",
+        "model": "haiku",
+        "promptTokEst": 501,
+        "filesReadKb": null,
+        "inTokEst": 501,
+        "outTok": 1899
+      }
+    ],
+    "total": {
+      "promptTokEst": 8645,
+      "filesReadKb": 119.6,
+      "inTokEst": 39263,
+      "outTok": 35988
+    }
+  }
+}
