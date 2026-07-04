@@ -541,6 +541,15 @@ The other three planners use their own markers in the same document types: `proj
 | `W_EMIT_NO_SENTINEL` | Warning | A target document is missing its marker's sentinel pair (`wave-table`, `project-cache`, `tier-rollup`, or `hq-board`); file skipped |
 | `E_EMIT_WRITE_FAILED` | Error | IO error writing a file; causes exit 1 |
 | `E_CONFIG_NOT_FOUND` | Error | `brain.toml` could not be located by walking up from `path`; causes exit 1 |
+| `E_EMIT_LINKED_WORKTREE` | Error | `--write` invoked from inside a linked git worktree; causes exit 1 |
+
+`--write` refuses to run when `path` resolves to a linked git worktree (e.g. `trees/<slug>/` under a
+repo that already has its own main working tree) — `emit-state` resolves every repo's derived-file
+paths from `brain.toml`, not from CWD, so writing from a worktree would silently regenerate the
+**main checkout's** files instead of the worktree's own copy. The command prints an error naming
+the worktree path and exits non-zero (`E_EMIT_LINKED_WORKTREE`) without writing anything. Dry-run
+(no `--write`) is read-only and is never gated — it still succeeds from inside a worktree. Run
+`--write` from the repo's main working tree instead.
 
 **Examples:**
 
