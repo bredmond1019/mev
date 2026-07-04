@@ -116,6 +116,8 @@ enum Command {
     ///   W_EMIT_NO_SENTINEL   — master-plan.md missing sentinel pair; skipped
     ///   E_EMIT_WRITE_FAILED  — IO error writing a file (exit 1)
     ///   E_CONFIG_NOT_FOUND   — brain.toml could not be located (exit 1)
+    ///   E_EMIT_LINKED_WORKTREE — --write invoked from inside a linked git worktree; refused
+    ///                            before brain.toml resolution (exit 1). Dry-run is unaffected.
     EmitState {
         /// Path to search from when locating brain.toml (walks up to find it).
         /// Defaults to the current directory.
@@ -272,6 +274,13 @@ fn main() -> ExitCode {
             }
         }
         Command::EmitState { path, write } => {
+            if write && mev::brain::config::is_linked_worktree(&path) {
+                eprintln!(
+                    "error: refusing to run emit-state --write from inside a linked git worktree ({}) — emit-state resolves every repo's derived-file paths from brain.toml, not CWD, so writing from a worktree would silently regenerate the MAIN checkout's files instead of the worktree's own copy. Run `mev emit-state --write` from the main working tree instead.",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,
                 Err(e) => {
