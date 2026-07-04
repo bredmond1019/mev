@@ -25,3 +25,6 @@ Patched: docs/architecture.md
 
 ## Wrap-up — PASS
 Next: Phase 4 (state-sync-loop) is fully closed with 4.E-emit-state-wiring shipped PASS. Next: pick the next phase/spec per core/planning/state-sync-loop/master-plan.md and mev's own planning/master-plan.md (e.g. resuming Phase 1 MV.1.D/E, or the out-of-repo orchestrator follow-up to load_brain_edges.py).
+
+## PR
+https://github.com/bredmond1019/mev/pull/18
