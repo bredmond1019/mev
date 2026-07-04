@@ -12,7 +12,7 @@ related: [state-sync-loop-master-plan, 4.A-emit-foundation, master-plan, status,
 
 # Task Spec — Phase 4, Block MV.4.C (HQ Operating Board generator)
 
-**Status:** Not started · **Last run:** never
+**Status:** Done · **Last run:** 2026-07-04 (PASS, 3 tasks)
 
 ## Goal
 Add the `plan_hq_board` emit planner: render a NOW/NEXT/BLOCKED Operating Board from the brain's
