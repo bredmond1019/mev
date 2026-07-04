@@ -1,0 +1,6 @@
+# Worklog — 4.C-hq-board-emit
+
+## Task 1 — PASSED (1 attempt)
+What: Added pure render_hq_board(focus, edges) -> String in src/brain/emit.rs, rendering NOW/NEXT/BLOCKED sections as repo:id — title lines with cross_repo-edge/blocked_by annotations, plus a task1_render_hq_board test module in tests/brain_emit.rs covering rendering, ordering, edge-note annotation, what-fallback, external deps, multi-blocker joins, no-trailing-newline, and empty-focus cases.
+Decisions: Empty NOW/NEXT/BLOCKED sections render a literal `_none_` line rather than being omitted, keeping the three headings always present regardless of which sections have content.; render_hq_board preserves the input Focus vector order rather than re-sorting — derive_brain_focus already establishes deterministic ordering, so the renderer stays a pure pass-through.; For a Block-type blocked_by dependency, a matching cross_repo[] edge's note takes precedence over the dependency's own `what` gloss; if neither is present the bare `repo:id` target is rendered with no parenthetical.; Multiple blocked_by entries on one block are rendered comma-joined inside a single `(blocked by ...)` parenthetical.
+Validated: gating checks (fast tripwire)
