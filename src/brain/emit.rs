@@ -6,6 +6,8 @@
 //! - [`EmitError`] — error type for sentinel-related failures.
 //! - [`wave_order`] — all block keys (`"repo:id"`) sorted by `wave` ascending.
 //! - [`render_wave_table`] — Markdown table of a repo's blocks in wave order.
+//! - [`render_hq_board`] — NOW/NEXT/BLOCKED Operating Board Markdown from a
+//!   brain-derived [`Focus`] + `cross_repo[]` edges.
 //! - [`splice_generated`] — idempotent sentinel-splice into an existing Markdown
 //!   document.
 //!
@@ -19,8 +21,8 @@ use thiserror::Error;
 
 use crate::brain::config::BrainConfig;
 use crate::brain::state::{
-    Block, BlockedBy, Focus, RepoRollup, StateFile, StateGraph, StateSource, TierScope,
-    derive_brain_focus, derive_cross_repo, derive_focus, derive_rollup, tier_scope_for,
+    Block, BlockedBy, CrossRepoEdge, Focus, RepoRollup, StateFile, StateGraph, StateSource,
+    TierScope, derive_brain_focus, derive_cross_repo, derive_focus, derive_rollup, tier_scope_for,
 };
 
 // ---------------------------------------------------------------------------
@@ -255,6 +257,112 @@ pub fn global_status_map(files: &[(StateSource, StateFile)]) -> HashMap<String, 
         }
     }
     map
+}
+
+// ---------------------------------------------------------------------------
+// render_hq_board — pure NOW/NEXT/BLOCKED Operating Board renderer
+// ---------------------------------------------------------------------------
+
+/// Render the brain-derived [`Focus`] + `cross_repo[]` edges as the HQ
+/// Operating Board Markdown (`## NOW` / `## NEXT` / `## BLOCKED`).
+///
+/// Each section lists its repo-tagged blocks as `repo:id — title`, in the
+/// order they appear in `focus` (callers — [`crate::brain::state::derive_brain_focus`]
+/// — already establish a stable, deterministic order; this renderer does not
+/// re-sort). An empty section renders a single `_none_` line rather than being
+/// omitted, so the section headings are always present and the output shape
+/// never depends on which sections happen to be non-empty.
+///
+/// `BLOCKED` entries are annotated with what they're waiting on: each
+/// `blocked_by` dependency renders as `repo:id` (a `Block` dependency) or
+/// `external:<what>` (an `External` dependency). When a `Block` dependency
+/// matches a `cross_repo[]` edge (`edge.from == {repo, id}` of the blocked
+/// block and `edge.to == {repo, id}` of the dependency), the edge's `note` is
+/// appended in parentheses; otherwise the dependency's own `what` gloss is
+/// used if present. Multiple dependencies are joined with `, `.
+///
+/// Rendered without a trailing newline, matching the [`render_wave_table`]
+/// convention; callers that embed it inside a document own any surrounding
+/// blank lines.
+pub fn render_hq_board(focus: &Focus, edges: &[CrossRepoEdge]) -> String {
+    let sections = [
+        render_hq_board_section("NOW", &focus.now, edges),
+        render_hq_board_section("NEXT", &focus.next, edges),
+        render_hq_board_section("BLOCKED", &focus.blocked, edges),
+    ];
+    sections.join("\n\n")
+}
+
+/// Render one `## {heading}` section of the Operating Board for `blocks`.
+fn render_hq_board_section(heading: &str, blocks: &[Block], edges: &[CrossRepoEdge]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!("## {heading}"));
+
+    if blocks.is_empty() {
+        lines.push("_none_".to_string());
+    } else {
+        for block in blocks {
+            lines.push(format!("- {}", render_hq_board_line(block, edges)));
+        }
+    }
+
+    lines.join("\n")
+}
+
+/// Render a single Operating Board line for `block`: `repo:id — title`,
+/// annotated with `(blocked by ...)` when `block.blocked_by` is non-empty.
+fn render_hq_board_line(block: &Block, edges: &[CrossRepoEdge]) -> String {
+    let repo = block.repo.as_deref().unwrap_or("");
+    let mut line = format!("{repo}:{} — {}", block.id, block.title);
+
+    if !block.blocked_by.is_empty() {
+        let annotations: Vec<String> = block
+            .blocked_by
+            .iter()
+            .map(|dep| render_hq_board_blocker(repo, &block.id, dep, edges))
+            .collect();
+        line.push_str(&format!(" (blocked by {})", annotations.join(", ")));
+    }
+
+    line
+}
+
+/// Render one `blocked_by` dependency of the block `{from_repo}:{from_id}` as
+/// its Operating Board annotation.
+fn render_hq_board_blocker(
+    from_repo: &str,
+    from_id: &str,
+    dep: &BlockedBy,
+    edges: &[CrossRepoEdge],
+) -> String {
+    match dep {
+        BlockedBy::External { what } => format!("external:{what}"),
+        BlockedBy::Block {
+            repo: dep_repo,
+            id: dep_id,
+            what,
+        } => {
+            let target = format!("{dep_repo}:{dep_id}");
+
+            // Prefer the matching cross_repo[] edge's note (the resolved,
+            // brain-level gloss); fall back to the dependency's own `what`.
+            let note = edges
+                .iter()
+                .find(|e| {
+                    e.from.repo == from_repo
+                        && e.from.id == from_id
+                        && e.to.repo == *dep_repo
+                        && e.to.id == *dep_id
+                })
+                .and_then(|e| e.note.clone())
+                .or_else(|| what.clone());
+
+            match note {
+                Some(note) => format!("{target} ({note})"),
+                None => target,
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

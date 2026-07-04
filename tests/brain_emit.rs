@@ -2786,3 +2786,241 @@ mod task2_global_status_map {
         assert!(map.is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// render_hq_board tests (Task 1, MV.4.C)
+// ---------------------------------------------------------------------------
+
+mod task1_render_hq_board {
+    use mev::brain::emit::render_hq_board;
+    use mev::brain::state::{Block, BlockedBy, CrossRepoEdge, Endpoint, Focus};
+
+    /// Build a repo-tagged `Block` with no `blocked_by` entries (NOW/NEXT shape).
+    fn tagged_block(repo: &str, id: &str, title: &str) -> Block {
+        Block {
+            id: id.to_string(),
+            title: title.to_string(),
+            status: None,
+            note: None,
+            repo: Some(repo.to_string()),
+            blocked_by: Vec::new(),
+        }
+    }
+
+    /// Build a repo-tagged `Block` with the given `blocked_by` entries (BLOCKED shape).
+    fn blocked_block(repo: &str, id: &str, title: &str, blocked_by: Vec<BlockedBy>) -> Block {
+        Block {
+            id: id.to_string(),
+            title: title.to_string(),
+            status: None,
+            note: None,
+            repo: Some(repo.to_string()),
+            blocked_by,
+        }
+    }
+
+    fn cross_repo_edge(
+        from_repo: &str,
+        from_id: &str,
+        to_repo: &str,
+        to_id: &str,
+        note: Option<&str>,
+    ) -> CrossRepoEdge {
+        CrossRepoEdge {
+            from: Endpoint {
+                repo: from_repo.to_string(),
+                id: from_id.to_string(),
+            },
+            to: Endpoint {
+                repo: to_repo.to_string(),
+                id: to_id.to_string(),
+            },
+            note: note.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn renders_now_next_blocked_sections_with_repo_tagged_lines() {
+        let focus = Focus {
+            now: vec![tagged_block("core", "A", "Block A")],
+            next: vec![tagged_block("bastion", "B", "Block B")],
+            blocked: vec![],
+        };
+
+        let rendered = render_hq_board(&focus, &[]);
+
+        let expected = "## NOW\n\
+- core:A — Block A\n\
+\n\
+## NEXT\n\
+- bastion:B — Block B\n\
+\n\
+## BLOCKED\n\
+_none_";
+
+        assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn multi_repo_ordering_preserves_focus_order_across_sections() {
+        let focus = Focus {
+            now: vec![
+                tagged_block("bastion", "X", "Bastion X"),
+                tagged_block("core", "Y", "Core Y"),
+            ],
+            next: vec![],
+            blocked: vec![],
+        };
+
+        let rendered = render_hq_board(&focus, &[]);
+
+        // NOW must list bastion:X before core:Y — the renderer preserves the
+        // caller-supplied (already-deterministic) order, it never re-sorts.
+        let now_idx = rendered.find("- bastion:X").unwrap();
+        let core_idx = rendered.find("- core:Y").unwrap();
+        assert!(now_idx < core_idx);
+    }
+
+    #[test]
+    fn blocked_entry_annotated_by_matching_cross_repo_edge_note() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![blocked_block(
+                "mev",
+                "C",
+                "Block C",
+                vec![BlockedBy::Block {
+                    repo: "core".to_string(),
+                    id: "D".to_string(),
+                    what: None,
+                }],
+            )],
+        };
+        let edges = vec![cross_repo_edge(
+            "mev",
+            "C",
+            "core",
+            "D",
+            Some("waiting on schema freeze"),
+        )];
+
+        let rendered = render_hq_board(&focus, &edges);
+
+        assert!(rendered.contains(
+            "## BLOCKED\n- mev:C — Block C (blocked by core:D (waiting on schema freeze))"
+        ));
+    }
+
+    #[test]
+    fn blocked_entry_falls_back_to_dep_what_when_no_edge_matches() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![blocked_block(
+                "mev",
+                "C",
+                "Block C",
+                vec![BlockedBy::Block {
+                    repo: "core".to_string(),
+                    id: "D".to_string(),
+                    what: Some("needs the shared schema".to_string()),
+                }],
+            )],
+        };
+
+        // No cross_repo[] edges supplied — the dependency's own `what` is used.
+        let rendered = render_hq_board(&focus, &[]);
+
+        assert!(
+            rendered.contains("- mev:C — Block C (blocked by core:D (needs the shared schema))")
+        );
+    }
+
+    #[test]
+    fn blocked_entry_external_dependency_renders_without_edge_lookup() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![blocked_block(
+                "mev",
+                "E",
+                "Block E",
+                vec![BlockedBy::External {
+                    what: "waiting on hardware".to_string(),
+                }],
+            )],
+        };
+
+        let rendered = render_hq_board(&focus, &[]);
+
+        assert!(rendered.contains("- mev:E — Block E (blocked by external:waiting on hardware)"));
+    }
+
+    #[test]
+    fn blocked_entry_with_no_matching_note_renders_bare_target() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![blocked_block(
+                "mev",
+                "F",
+                "Block F",
+                vec![BlockedBy::Block {
+                    repo: "core".to_string(),
+                    id: "G".to_string(),
+                    what: None,
+                }],
+            )],
+        };
+
+        let rendered = render_hq_board(&focus, &[]);
+
+        assert!(rendered.contains("- mev:F — Block F (blocked by core:G)"));
+    }
+
+    #[test]
+    fn multiple_blockers_on_one_block_are_comma_joined() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![blocked_block(
+                "mev",
+                "H",
+                "Block H",
+                vec![
+                    BlockedBy::Block {
+                        repo: "core".to_string(),
+                        id: "I".to_string(),
+                        what: None,
+                    },
+                    BlockedBy::External {
+                        what: "budget approval".to_string(),
+                    },
+                ],
+            )],
+        };
+
+        let rendered = render_hq_board(&focus, &[]);
+
+        assert!(
+            rendered.contains("- mev:H — Block H (blocked by core:I, external:budget approval)")
+        );
+    }
+
+    #[test]
+    fn rendered_board_has_no_trailing_newline() {
+        let focus = Focus::default();
+        let rendered = render_hq_board(&focus, &[]);
+        assert!(!rendered.ends_with('\n'));
+    }
+
+    #[test]
+    fn empty_focus_renders_none_in_all_three_sections() {
+        let focus = Focus::default();
+        let rendered = render_hq_board(&focus, &[]);
+
+        let expected = "## NOW\n_none_\n\n## NEXT\n_none_\n\n## BLOCKED\n_none_";
+        assert_eq!(rendered, expected);
+    }
+}
