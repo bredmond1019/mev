@@ -3773,3 +3773,252 @@ mod task2_plan_hq_board {
         assert_eq!(markers::HQ_BOARD, "hq-board");
     }
 }
+
+// ---------------------------------------------------------------------------
+// update-write-state-in-trees Task 3 — CLI-level coverage for the
+// `emit-state --write` linked-worktree refusal.
+//
+// Exercises the real `mev` binary against a real git repo with a linked
+// worktree (`git worktree add`):
+//   (a) `emit-state --write` from inside the worktree -> non-zero exit, no
+//       files written, stderr names the worktree path.
+//   (b) `emit-state` (no --write, dry-run) from the same worktree -> exit 0,
+//       unaffected by the guard.
+//   (c) `emit-state --write` from the main tree of that same repo -> exit 0,
+//       files written (regression guard: unchanged behavior).
+// ---------------------------------------------------------------------------
+
+mod task3_cli_worktree_guard {
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("mev-emit-state-cli-guard-{tag}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_file(root: &Path, rel: &str, content: &str) {
+        let target = root.join(rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&target, content.as_bytes()).unwrap();
+    }
+
+    /// Write a minimal `brain.toml` that registers a single leaf repo (alpha).
+    fn write_brain_toml(root: &Path) {
+        let toml = r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "alpha"
+tier = "primary"
+repo_path = "repos/alpha"
+status_file = "repos/alpha/planning/status.md"
+cache_doc = "docs/projects/alpha.md"
+heading = "Alpha"
+"#;
+        fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
+    }
+
+    /// Write an already-consistent alpha leaf state.json (no drift) so a
+    /// clean `emit_state` run produces zero errors and is well-formed for a
+    /// regression comparison.
+    fn write_alpha_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "alpha",
+            "kind": "project",
+            "updated": "2026-07-04",
+            "focus": {
+                "now": [{ "id": "AL.1.A", "title": "Alpha block A", "status": "in_progress" }],
+                "next": [],
+                "blocked": []
+            },
+            "tracks": [
+                {
+                    "title": "Phase 1",
+                    "blocks": [
+                        { "id": "AL.1.A", "title": "Alpha block A", "status": "in_progress" },
+                        { "id": "AL.1.B", "title": "Alpha block B", "status": "open" }
+                    ]
+                }
+            ]
+        });
+        write_file(
+            root,
+            "repos/alpha/planning/state.json",
+            &serde_json::to_string_pretty(&state).unwrap(),
+        );
+    }
+
+    /// Write a stale brain-level state.json (HQ) so `emit_state` has real
+    /// work to do (W_EMIT_DRY_RUN / I_EMIT_WROTE diagnostics get produced).
+    fn write_brain_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "hq",
+            "kind": "brain",
+            "updated": "2026-06-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "repos": [
+                { "repo": "alpha", "now": [], "next": [], "blocked": [] }
+            ],
+            "cross_repo": []
+        });
+        write_file(
+            root,
+            "planning/state.json",
+            &serde_json::to_string_pretty(&state).unwrap(),
+        );
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("failed to spawn git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed in {}: {}",
+            args,
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Build a real git repo (with an initial commit) plus a linked worktree,
+    /// and a `brain.toml` fixture with real derived-state files at the main
+    /// repo root. Returns (main_repo_path, worktree_path).
+    fn build_repo_with_worktree(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let parent = temp_dir(tag);
+        let main_repo = parent.join("main");
+        fs::create_dir_all(&main_repo).unwrap();
+
+        write_brain_toml(&main_repo);
+        write_brain_state(&main_repo);
+        write_alpha_state(&main_repo);
+
+        run_git(&main_repo, &["init", "-q"]);
+        run_git(&main_repo, &["config", "user.email", "test@example.com"]);
+        run_git(&main_repo, &["config", "user.name", "Test"]);
+        run_git(&main_repo, &["add", "."]);
+        run_git(&main_repo, &["commit", "-q", "-m", "initial commit"]);
+
+        let worktree_path = parent.join("wt");
+        run_git(
+            &main_repo,
+            &[
+                "worktree",
+                "add",
+                worktree_path.to_str().expect("utf8 path"),
+            ],
+        );
+
+        (main_repo, worktree_path)
+    }
+
+    #[test]
+    fn write_from_linked_worktree_is_refused() {
+        let (_main_repo, worktree_path) = build_repo_with_worktree("refused");
+
+        let alpha_state_path = worktree_path.join("repos/alpha/planning/state.json");
+        let brain_state_path = worktree_path.join("planning/state.json");
+        let alpha_before = fs::read(&alpha_state_path).unwrap();
+        let brain_before = fs::read(&brain_state_path).unwrap();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_mev"))
+            .args(["emit-state", "--write"])
+            .arg(&worktree_path)
+            .current_dir(&worktree_path)
+            .output()
+            .expect("failed to spawn mev binary");
+
+        assert!(
+            !output.status.success(),
+            "emit-state --write from a linked worktree must exit non-zero; status: {:?}",
+            output.status
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(worktree_path.file_name().unwrap().to_str().unwrap())
+                || stderr.contains(worktree_path.to_str().unwrap()),
+            "stderr must name the worktree path; stderr: {stderr}"
+        );
+
+        // No files written.
+        assert_eq!(
+            fs::read(&alpha_state_path).unwrap(),
+            alpha_before,
+            "alpha state.json must be unchanged when --write is refused"
+        );
+        assert_eq!(
+            fs::read(&brain_state_path).unwrap(),
+            brain_before,
+            "brain state.json must be unchanged when --write is refused"
+        );
+
+        let _ = fs::remove_dir_all(worktree_path.parent().unwrap());
+    }
+
+    #[test]
+    fn dry_run_from_linked_worktree_still_succeeds() {
+        let (_main_repo, worktree_path) = build_repo_with_worktree("dry-run-ok");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_mev"))
+            .args(["emit-state"])
+            .arg(&worktree_path)
+            .current_dir(&worktree_path)
+            .output()
+            .expect("failed to spawn mev binary");
+
+        assert!(
+            output.status.success(),
+            "dry-run emit-state from a linked worktree must still succeed; status: {:?}, stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let _ = fs::remove_dir_all(worktree_path.parent().unwrap());
+    }
+
+    #[test]
+    fn write_from_main_tree_is_unchanged_regression() {
+        let (main_repo, worktree_path) = build_repo_with_worktree("main-tree-ok");
+
+        let brain_state_path = main_repo.join("planning/state.json");
+        let brain_before: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&brain_state_path).unwrap()).unwrap();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_mev"))
+            .args(["emit-state", "--write"])
+            .arg(&main_repo)
+            .current_dir(&main_repo)
+            .output()
+            .expect("failed to spawn mev binary");
+
+        assert!(
+            output.status.success(),
+            "emit-state --write from the main tree must still succeed; status: {:?}, stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let brain_after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&brain_state_path).unwrap()).unwrap();
+        assert_ne!(
+            brain_before, brain_after,
+            "main-tree --write must have applied the derived-view update (regression: no-op means the guard broke the normal path)"
+        );
+
+        let _ = fs::remove_dir_all(worktree_path.parent().unwrap());
+    }
+}
