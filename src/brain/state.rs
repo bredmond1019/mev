@@ -3290,11 +3290,14 @@ mod tests {
     // Task 3 — ready_order tests
     // -----------------------------------------------------------------------
 
+    /// One `(id, status, wave, depends_on)` block spec for [`make_ready_pair`] fixtures.
+    type ReadyBlockSpec<'a> = (&'a str, Option<&'a str>, Option<i64>, Vec<BlockedBy>);
+
     /// Build a minimal (StateSource, StateFile) pair for ready_order testing.
     fn make_ready_pair(
         dir: &std::path::Path,
         repo: &str,
-        blocks: &[(&str, Option<&str>, Option<i64>, Vec<BlockedBy>)],
+        blocks: &[ReadyBlockSpec],
     ) -> (StateSource, StateFile) {
         // blocks: (id, status, wave, depends_on)
         let track_blocks: Vec<TrackBlock> = blocks

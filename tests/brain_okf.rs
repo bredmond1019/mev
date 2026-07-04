@@ -8,7 +8,7 @@
 //! Tests load the standard fixture from `tests/fixtures/brain.toml` via
 //! `fixture_config()` so vocabulary lookups resolve correctly.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mev::ContentValidator;
 use mev::brain::config::{BrainConfig, load_brain_config};
@@ -25,7 +25,7 @@ fn temp_dir(suffix: &str) -> PathBuf {
     dir
 }
 
-fn write_md(dir: &PathBuf, name: &str, content: &str) -> MdFile {
+fn write_md(dir: &Path, name: &str, content: &str) -> MdFile {
     let path = dir.join(name);
     std::fs::write(&path, content).unwrap();
     MdFile {
