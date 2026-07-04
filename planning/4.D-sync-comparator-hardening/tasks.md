@@ -12,7 +12,7 @@ related: [state-sync-loop-master-plan, master-plan, status, D29-mev-brain-valida
 
 # Task Spec — Phase 4, Block MV.4.D (--sync comparator hardening)
 
-**Status:** Not started · **Last run:** never
+**Status:** Done · **Last run:** 2026-07-04
 
 ## Goal
 Harden `validate-brain --sync`'s watermark comparator so it compares parsed UTC **instants** (never
