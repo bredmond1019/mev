@@ -229,6 +229,35 @@ pub fn render_wave_table(repo_slug: &str, file: &StateFile, graph: &StateGraph) 
 }
 
 // ---------------------------------------------------------------------------
+// global_status_map — cross-file "repo:id" → authored status
+// ---------------------------------------------------------------------------
+
+/// Build a global `"{repo_slug}:{block_id}" → authored status` map across
+/// **every** loaded state file, not just one repo.
+///
+/// This is the cross-file status lookup [`render_wave_table`] lacks today (it
+/// only ever sees one repo's [`StateFile`]): callers that need to resolve a
+/// cross-repo `depends_on` edge — e.g. "is `core:X` closed?" — can look it up
+/// here regardless of which file `core:X` was declared in.
+///
+/// Keys are namespaced with `src.repo_slug` so blocks with the same `id` in
+/// different repos never collide. The value is the block's authored
+/// `status` field verbatim (`None` when absent — callers decide the default,
+/// e.g. `open`).
+pub fn global_status_map(files: &[(StateSource, StateFile)]) -> HashMap<String, Option<String>> {
+    let mut map = HashMap::new();
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let key = format!("{}:{}", src.repo_slug, block.id);
+                map.insert(key, block.status.clone());
+            }
+        }
+    }
+    map
+}
+
+// ---------------------------------------------------------------------------
 // splice_generated — sentinel-aware idempotent splice
 // ---------------------------------------------------------------------------
 
