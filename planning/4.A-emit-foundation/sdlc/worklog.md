@@ -14,3 +14,7 @@ Validated: gating checks (fast tripwire)
 What: render_wave_table now takes a global status map and resolves cross-repo depends_on edges against it (closed dep -> open, open/absent dep -> blocked), fixing the previous always-unmet conservative bug; plan_master_plan_tables builds and threads the map via global_status_map(files).
 Decisions: Kept the `graph: &StateGraph` parameter on render_wave_table unchanged (still unused, `let _ = graph;`) per the spec's note that graph-param handling stays as-is; cross-repo resolution goes entirely through the new `global_status` map argument instead.; Updated all 7 existing render_wave_table call sites in tests/brain_emit.rs to pass an empty HashMap (no behavior change for same-repo-only fixtures), then added 3 new dedicated tests for the cross-repo closed/open/absent cases rather than retrofitting the existing tests.
 Validated: gating checks (fast tripwire)
+
+## Task 4 — PASSED (1 attempt)
+What: Task 4 (validate) confirmed all four gated checks pass: cargo fmt --check, cargo clippy -- -D warnings, cargo test (all suites incl. brain_emit), and cargo build --release — no code changes needed.
+Validated: gating checks (fast tripwire)
