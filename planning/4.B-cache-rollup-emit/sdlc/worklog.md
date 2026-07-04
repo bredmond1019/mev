@@ -18,3 +18,8 @@ Validated: gating checks (fast tripwire)
 What: Confirmed all four gated checks pass (cargo fmt --check, cargo clippy -D warnings, cargo test, cargo build --release) for the plan_project_caches/plan_tier_rollups work from tasks 1-2; no code changes were needed for this validation-only task.
 Decisions: Task 3 is purely a validation gate with no files/acceptance_criteria of its own; since the working tree was already clean after tasks 1-2 and all four validation commands passed, no commit was made.
 Validated: gating checks (fast tripwire)
+
+```
+## Docs
+Patched: docs/architecture.md
+```

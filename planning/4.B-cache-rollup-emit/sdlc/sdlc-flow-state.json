@@ -2,9 +2,9 @@
   "spec_slug": "4.B-cache-rollup-emit",
   "branch": "4.B-cache-rollup-emit-flow",
   "started_at": "2026-07-04T08:40:51Z",
-  "updated_at": "2026-07-04T08:50:05Z",
+  "updated_at": "2026-07-04T08:53:01Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/4.B-cache-rollup-emit-flow",
-  "status": "running",
+  "status": "docs",
   "current_task": 3,
   "tasks": {
     "1": {
@@ -59,12 +59,14 @@
     }
   },
   "review": {
-    "verdict": null,
+    "verdict": "PASS",
     "findings": [],
-    "attempts": 0
+    "attempts": 1
   },
   "docs": {
-    "changed": [],
+    "changed": [
+      "docs/architecture.md"
+    ],
     "created": []
   },
   "bail_reason": null,
@@ -137,13 +139,29 @@
         "filesReadKb": null,
         "inTokEst": 574,
         "outTok": 2768
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 984,
+        "filesReadKb": null,
+        "inTokEst": 984,
+        "outTok": 2863
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 799,
+        "filesReadKb": null,
+        "inTokEst": 799,
+        "outTok": 4104
       }
     ],
     "total": {
-      "promptTokEst": 5672,
+      "promptTokEst": 7455,
       "filesReadKb": 0,
-      "inTokEst": 5672,
-      "outTok": 68974
+      "inTokEst": 7455,
+      "outTok": 75941
     }
   }
 }
