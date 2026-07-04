@@ -17,6 +17,22 @@ timestamp: "2026-07-04T02:21:44Z"
 
 ---
 
+## [run: 2026-07-04]
+
+Shipped `4.B-cache-rollup-emit` (Phase 4, state-sync-loop Wave 2) across 3 tasks, final verdict PASS. Task 1 added `pub fn plan_project_caches` (`src/brain/emit.rs`), which splices a derived focus-line (new `render_focus_line` helper, format `**Current focus:** ... Next: ... Blocked: ...`) into each project-kind repo's `docs/projects/<slug>.md` project-cache sentinel and reconciles its `synced_from` watermark via a separate line-based splice (`reconcile_synced_from`) rather than routing through `okf_core::serialize_frontmatter` (which deliberately never emits `synced_from`), preserving all other frontmatter/prose verbatim; target-doc path resolved via `root.join(entry.cache_doc)` from `brain.toml`'s `[[repos]]` (matching `check_sync`'s existing convention, since real entries vary — e.g. `README.md` for the HQ root); 5 new integration tests. Task 2 added `pub fn plan_tier_rollups` (+ `render_tier_rollup_table` helper), resolving each tier rollup doc as `<tier state.json parent>/status.md` (sibling-to-state-file, mirroring `plan_master_plan_tables`'s resolution), splicing `derive_rollup`'s tier-scoped rows into `markers::TIER_ROLLUP`, and skipping any tier whose `tier_scope_for` resolves to `TierScope::All` (the HQ root — MV.4.C's `plan_hq_board` responsibility) with no diagnostic; rendered columns `Repo | Now | Next | Blocked`. Task 3 confirmed all four harness gates green (`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `cargo build --release`) with no code changes needed. Final review verdict: PASS. Neither planner is wired into `emit_state` — that remains `MV.4.E`'s job. This is Wave 2 of the state-sync-loop spine (`MV.4.A → {B,C} → E`). Next: `MV.4.C` (HQ board) or `MV.4.E` (spine terminus, once `MV.4.C` also lands).
+
+```
+6633959 chore: flow state — docs
+18b4baa docs: update docs for 4.B-cache-rollup-emit
+882431c chore: flow state — task 3 passed
+b468302 chore: flow state — task 2 passed
+38b6533 feat: implement 4.B-cache-rollup-emit-task2
+22a1b1a chore: flow state — task 1 passed
+300859d feat: implement 4.B-cache-rollup-emit-task1
+```
+
+---
+
 ## [run: 2026-07-03]
 
 Shipped `4.A-emit-foundation` (Phase 4, state-sync-loop Wave 1) across 4 tasks, final verdict PASS. Task 1 added named generated-marker constants to `src/brain/emit.rs` — a `pub mod markers { pub const ... }` grouping (`WAVE_TABLE`, `PROJECT_CACHE`, `TIER_ROLLUP`, `HQ_BOARD`) — and updated `plan_master_plan_tables` to reference `markers::WAVE_TABLE` instead of the hardcoded `"wave-table"` string literal; no behavioural change. Task 2 added a pure `global_status_map(files)` helper (placed immediately after `render_wave_table`) that maps every loaded state file's `tracks[].blocks[]` to authored status keyed `"{repo_slug}:{block_id}"` across all repos, with 4 new unit tests covering multi-repo namespacing, no-collision, absent-status→`None`, and empty input. Task 3 threaded that map into `render_wave_table`, fixing the previously always-unmet cross-repo `depends_on` bug: a block depending on a closed cross-repo block now resolves `open` instead of `blocked` (absent/open cross-repo deps still render `blocked`); same-repo derivation and the unused `graph: &StateGraph` parameter were left unchanged per the spec; `plan_master_plan_tables` now builds the map via `global_status_map(files)` and threads it through; 7 existing `render_wave_table` call sites updated to pass an empty map (no behavior change for same-repo fixtures) plus 3 new cross-repo closed/open/absent tests. Task 4 confirmed all four harness gates green (`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `cargo build --release`) with no code changes needed. Final review verdict: PASS. This is Wave 1 of the state-sync-loop initiative's spine (`MV.4.A → {B,C} → E`) and unblocks `MV.4.B` (project caches + tier rollups) and `MV.4.C` (HQ board). Next: `MV.4.B` or `MV.4.C` per `core/planning/state-sync-loop/master-plan.md`.
