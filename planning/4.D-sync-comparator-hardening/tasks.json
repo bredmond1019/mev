@@ -1,0 +1,32 @@
+[
+  {
+    "task_id": 1,
+    "title": "Harden check_sync comparator to an explicit instant comparison + document the invariant",
+    "description": "In src/brain/sync.rs, change check_sync's watermark comparison (~line 211, currently `if source_dt != cache_dt`) to compare explicit UTC instants — e.g. `source_dt.to_utc() != cache_dt.to_utc()` or a `.timestamp()`/`.timestamp_nanos_opt()`-based compare — so the instant semantics are legible and cannot be silently regressed into a raw-string/offset-sensitive compare. Add a doc comment above the comparison stating the invariant: watermarks are compared as instants, so a `-03:00` and a `Z` watermark denoting the same moment are in sync (no E_SYNC_DRIFT). Do not change the E_SYNC_DRIFT message, the symmetric `!=` semantics, or any other branch — this is a behaviour-preserving hardening for the already-passing cases.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/sync.rs"],
+    "dependsOn": []
+  },
+  {
+    "task_id": 2,
+    "title": "Add cross-offset regression tests for the drift comparator",
+    "description": "In src/brain/sync.rs's inline `#[cfg(test)] mod tests`, add regression tests (reusing the existing status_md_with_timestamp / cache_md_with_synced_from helpers) for the offset-mismatch cases the current suite lacks: (1) status timestamp `2026-06-27T00:00:00Z` vs cache synced_from `2026-06-26T21:00:00-03:00` (SAME instant, different offset) produces NO E_SYNC_DRIFT / empty diagnostics; (2) a `Z` vs `-03:00` pair denoting DIFFERENT instants produces exactly one E_SYNC_DRIFT. Keep the existing tests untouched and passing. Depends on task 1 (both edit src/brain/sync.rs; also asserts task 1's documented instant invariant).",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/sync.rs"],
+    "dependsOn": [1]
+  },
+  {
+    "task_id": 3,
+    "title": "Validate",
+    "description": "Run the Validation Commands listed in tasks.md and confirm all pass.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": [],
+    "dependsOn": [1, 2]
+  }
+]
