@@ -17,6 +17,23 @@ timestamp: "2026-07-03T18:30:00Z"
 
 ---
 
+## [run: 2026-07-03]
+
+Shipped `4.A-emit-foundation` (Phase 4, state-sync-loop Wave 1) across 4 tasks, final verdict PASS. Task 1 added named generated-marker constants to `src/brain/emit.rs` — a `pub mod markers { pub const ... }` grouping (`WAVE_TABLE`, `PROJECT_CACHE`, `TIER_ROLLUP`, `HQ_BOARD`) — and updated `plan_master_plan_tables` to reference `markers::WAVE_TABLE` instead of the hardcoded `"wave-table"` string literal; no behavioural change. Task 2 added a pure `global_status_map(files)` helper (placed immediately after `render_wave_table`) that maps every loaded state file's `tracks[].blocks[]` to authored status keyed `"{repo_slug}:{block_id}"` across all repos, with 4 new unit tests covering multi-repo namespacing, no-collision, absent-status→`None`, and empty input. Task 3 threaded that map into `render_wave_table`, fixing the previously always-unmet cross-repo `depends_on` bug: a block depending on a closed cross-repo block now resolves `open` instead of `blocked` (absent/open cross-repo deps still render `blocked`); same-repo derivation and the unused `graph: &StateGraph` parameter were left unchanged per the spec; `plan_master_plan_tables` now builds the map via `global_status_map(files)` and threads it through; 7 existing `render_wave_table` call sites updated to pass an empty map (no behavior change for same-repo fixtures) plus 3 new cross-repo closed/open/absent tests. Task 4 confirmed all four harness gates green (`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `cargo build --release`) with no code changes needed. Final review verdict: PASS. This is Wave 1 of the state-sync-loop initiative's spine (`MV.4.A → {B,C} → E`) and unblocks `MV.4.B` (project caches + tier rollups) and `MV.4.C` (HQ board). Next: `MV.4.B` or `MV.4.C` per `core/planning/state-sync-loop/master-plan.md`.
+
+```
+780cb2b docs: update docs for 4.A-emit-foundation
+9e07fc4 chore: flow state — task 4 passed
+551e0e5 chore: flow state — task 3 passed
+c07b102 feat: implement 4.A-emit-foundation-task3
+8777f69 chore: flow state — task 2 passed
+4ed69f2 feat: implement 4.A-emit-foundation-task2
+cb75878 chore: flow state — task 1 passed
+07006af feat: implement 4.A-emit-foundation-task1
+```
+
+---
+
 ## [2026-07-03]
 
 ### ticket-ba15-12-okf-core-convergence wrap-up: PR merge, worktree/stash cleanup, state.json carryover resolved, handoff
