@@ -209,7 +209,7 @@
         {
           "id": "MV.4.E",
           "title": "Wire all planners into emit_state; preserve fixed-point; brain-wide ripple integration test (close-A-unblocks-B across every surface)",
-          "status": "open",
+          "status": "closed",
           "depends_on": [
             {
               "type": "block",
