@@ -11,7 +11,9 @@
 //!   8. `splice_generated` returns `MissingSentinel` when the BEGIN sentinel is absent.
 //!   9. `splice_generated` returns `MissingSentinel` when BEGIN is present but END is absent.
 
-use mev::brain::emit::{markers, render_wave_table, splice_generated, wave_order};
+use mev::brain::emit::{
+    global_status_map, markers, render_wave_table, splice_generated, wave_order,
+};
 use mev::brain::state::{BlockedBy, StateFile, StateGraph, StateSource, Track, TrackBlock};
 use std::path::PathBuf;
 
@@ -2044,5 +2046,102 @@ mod task1_markers {
                 "splice for marker '{marker}' must be idempotent"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// global_status_map tests — Task 2
+// ---------------------------------------------------------------------------
+
+mod task2_global_status_map {
+    use super::*;
+
+    #[test]
+    fn multi_repo_input_produces_correctly_namespaced_keys() {
+        let files = vec![
+            (
+                make_src("core"),
+                make_leaf(
+                    "core",
+                    vec![Track {
+                        title: "Phase 1".to_string(),
+                        blocks: vec![block("A", "Block A", Some("closed"), Some(1))],
+                    }],
+                ),
+            ),
+            (
+                make_src("mev"),
+                make_leaf(
+                    "mev",
+                    vec![Track {
+                        title: "Phase 1".to_string(),
+                        blocks: vec![block("A", "Block A (mev)", Some("open"), Some(1))],
+                    }],
+                ),
+            ),
+        ];
+
+        let map = global_status_map(&files);
+
+        assert_eq!(map.get("core:A"), Some(&Some("closed".to_string())));
+        assert_eq!(map.get("mev:A"), Some(&Some("open".to_string())));
+    }
+
+    #[test]
+    fn keys_from_different_repos_do_not_collide() {
+        let files = vec![
+            (
+                make_src("core"),
+                make_leaf(
+                    "core",
+                    vec![Track {
+                        title: "Phase 1".to_string(),
+                        blocks: vec![block("X", "Core X", Some("closed"), None)],
+                    }],
+                ),
+            ),
+            (
+                make_src("bastion"),
+                make_leaf(
+                    "bastion",
+                    vec![Track {
+                        title: "Phase 1".to_string(),
+                        blocks: vec![block("X", "Bastion X", Some("in_progress"), None)],
+                    }],
+                ),
+            ),
+        ];
+
+        let map = global_status_map(&files);
+
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("core:X"), Some(&Some("closed".to_string())));
+        assert_eq!(map.get("bastion:X"), Some(&Some("in_progress".to_string())));
+        assert_ne!(map.get("core:X"), map.get("bastion:X"));
+    }
+
+    #[test]
+    fn block_with_absent_status_maps_to_none() {
+        let files = vec![(
+            make_src("mev"),
+            make_leaf(
+                "mev",
+                vec![Track {
+                    title: "Phase 1".to_string(),
+                    blocks: vec![block("NOSTATUS", "No status block", None, Some(2))],
+                }],
+            ),
+        )];
+
+        let map = global_status_map(&files);
+
+        assert_eq!(map.get("mev:NOSTATUS"), Some(&None));
+    }
+
+    #[test]
+    fn empty_files_produce_empty_map() {
+        let files: Vec<(mev::brain::state::StateSource, StateFile)> = vec![];
+        let map = global_status_map(&files);
+        assert!(map.is_empty());
     }
 }
