@@ -2,9 +2,9 @@
   "spec_slug": "4.B-cache-rollup-emit",
   "branch": "4.B-cache-rollup-emit-flow",
   "started_at": "2026-07-04T08:40:51Z",
-  "updated_at": "2026-07-04T08:53:01Z",
+  "updated_at": "2026-07-04T08:55:27Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/4.B-cache-rollup-emit-flow",
-  "status": "docs",
+  "status": "done",
   "current_task": 3,
   "tasks": {
     "1": {
@@ -155,13 +155,21 @@
         "filesReadKb": null,
         "inTokEst": 799,
         "outTok": 4104
+      },
+      {
+        "label": "wrap-up",
+        "model": "sonnet",
+        "promptTokEst": 815,
+        "filesReadKb": null,
+        "inTokEst": 815,
+        "outTok": 8284
       }
     ],
     "total": {
-      "promptTokEst": 7455,
+      "promptTokEst": 8270,
       "filesReadKb": 0,
-      "inTokEst": 7455,
-      "outTok": 75941
+      "inTokEst": 8270,
+      "outTok": 84225
     }
   }
 }

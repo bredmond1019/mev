@@ -23,3 +23,6 @@ Validated: gating checks (fast tripwire)
 ## Docs
 Patched: docs/architecture.md
 ```
+
+## Wrap-up — PASS
+Next: MV.4.C (HQ board) or MV.4.E (spine terminus, wires MV.4.B + MV.4.C planners into emit_state) per core/planning/state-sync-loop/master-plan.md
