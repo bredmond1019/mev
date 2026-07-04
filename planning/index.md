@@ -64,7 +64,8 @@ at the top; only pipeline state lives under `sdlc/`.
 | `4.A-emit-foundation/` | `MV.4.A` (state-sync-loop) — emit foundation: generated-marker name constants, global `repo:id→status` map helper, and the `render_wave_table` cross-repo `blocked` bug fix that `MV.4.B/C` build on | Done (4 tasks, PASS) |
 | `4.B-cache-rollup-emit/` | `MV.4.B` (state-sync-loop) — `plan_project_caches` + `plan_tier_rollups` generators: splice each project's focus-line + `synced_from` into its `docs/projects/<slug>.md` project-cache sentinel, and tier rollup rows into the tier-rollup sentinel | Done (3 tasks, PASS) |
 | `4.C-hq-board-emit/` | `MV.4.C` (state-sync-loop) — `plan_hq_board`: render a NOW/NEXT/BLOCKED Operating Board from brain `focus` + `cross_repo[]` and splice into the `hq-board` sentinel (pulls `bastion status`/Block V into mev) | Done (3 tasks, PASS) |
-| `4.D-sync-comparator-hardening/` | `MV.4.D` (state-sync-loop) — harden `validate-brain --sync`'s watermark comparator to an explicit instant compare + close the `-03:00` vs `Z` offset-mismatch test gap | Active — spec decomposed; ready to run (`/sdlc-run 4.D-sync-comparator-hardening`) |
+| `4.D-sync-comparator-hardening/` | `MV.4.D` (state-sync-loop) — harden `validate-brain --sync`'s watermark comparator to an explicit instant compare + close the `-03:00` vs `Z` offset-mismatch test gap | Done (full spec, PASS) |
+| `4.E-emit-state-wiring/` | `MV.4.E` (state-sync-loop, spine terminus) — wire `plan_project_caches`/`plan_tier_rollups`/`plan_hq_board` into `emit_state`, preserve the fixed-point, and add a brain-wide close-A-unblocks-B ripple integration test across every generated surface | Active — spec decomposed; ready to run (`/sdlc-flow 4.E-emit-state-wiring`) |
 
 ## Archived Concept Folders
 

@@ -1,0 +1,42 @@
+[
+  {
+    "task_id": 1,
+    "title": "Wire the three planners into emit_state",
+    "description": "In src/lib.rs::emit_state, extend the `use brain::emit::{...}` import to include `plan_project_caches`, `plan_tier_rollups`, `plan_hq_board`. After the existing step 4 (which builds `state_plan` and `mp_plan`), build the three additional plans: `plan_project_caches(root, &loaded, &graph, &config)`, `plan_tier_rollups(&loaded, &graph, &config)`, `plan_hq_board(&loaded, &graph, &config)`. In step 5, `apply_plan(&plan, write)` each of the five plans and extend `report.diagnostics` with all five diagnostic vectors, in a stable order (state, master-plan, project-caches, tier-rollups, hq-board). Update the `emit_state` doc comment (~line 460) to name all generated surfaces: leaf `focus`, brain `repos[]`/`cross_repo[]`/`focus` rollup, master-plan wave tables, project caches, tier rollups, and the HQ Operating Board. Do not change any planner's signature or behaviour — this is pure wiring.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/lib.rs"],
+    "dependsOn": []
+  },
+  {
+    "task_id": 2,
+    "title": "Brain-wide close-A-unblocks-B ripple integration test",
+    "description": "Add a new `mod mv4e_ripple` test module to tests/brain_emit.rs. Build a temp-dir fixture corpus with: a `brain.toml` registering an HQ brain, one tier sub-brain, and >=2 leaf project repos (each with a `cache_doc`); an HQ `planning/state.json` (kind:\"brain\", TierScope::All) beside a `status.md` carrying the HQ_BOARD sentinel; a tier `state.json` beside a `status.md` carrying the TIER_ROLLUP sentinel; leaf project `state.json` files (kind:\"project\") whose `tracks[]` encode a cross-repo dependency (repo B's block `depends_on` repo A's block) and whose `docs/projects/<slug>.md` caches carry the PROJECT_CACHE sentinel; a `master-plan.md` with the WAVE_TABLE sentinel. Test 1: with A's block open, emit once and confirm B's block renders blocked / A absent from NEXT. Then flip A's block to `closed`, run `emit_state(&dir, true)` ONCE, and assert the ripple landed in every surface — A's leaf cache focus line updated + `synced_from` reconciled, the tier rollup row updated, the HQ board moved B from BLOCKED to NEXT (and A out), B's leaf `state.json` `focus` no longer blocked, and the master-plan wave/status cell reflects A closed. Test 2 (fixed-point): run `emit_state(&dir, true)` a second time over the emitted corpus and assert zero `I_EMIT_WROTE` diagnostics (no further changes). Reuse the fixture-construction helpers already used by the existing `task4_tier_scoping_integration` module where practical.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["tests/brain_emit.rs"],
+    "dependsOn": [1]
+  },
+  {
+    "task_id": 3,
+    "title": "Update docs/cli.md emit-state section",
+    "description": "In docs/cli.md §`emit-state` (~line 488), update the prose so the command's list of generated surfaces includes the three newly wired ones: project-cache focus lines + `synced_from` watermarks (`docs/projects/<slug>.md`), tier rollup tables (tier sub-brain `status.md`), and the HQ Operating Board NOW/NEXT/BLOCKED (HQ `status.md`) — alongside the existing leaf `focus`, brain rollup, and master-plan wave tables. Keep the existing fixed-point / `validate-brain --state` cross-reference accurate (the whole emit remains the fixed point of the drift checks). Do not touch other sections of the file.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["docs/cli.md"],
+    "dependsOn": [1]
+  },
+  {
+    "task_id": 4,
+    "title": "Validate",
+    "description": "Run the Validation Commands listed in tasks.md and confirm all pass: cargo fmt --check, cargo clippy -- -D warnings, cargo test, cargo build --release.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": [],
+    "dependsOn": [1, 2, 3]
+  }
+]
