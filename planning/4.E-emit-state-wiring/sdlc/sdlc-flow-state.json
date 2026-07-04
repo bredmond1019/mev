@@ -2,10 +2,10 @@
   "spec_slug": "4.E-emit-state-wiring",
   "branch": "4.E-emit-state-wiring-flow",
   "started_at": "2026-07-04T11:23:49Z",
-  "updated_at": "2026-07-04T11:23:49Z",
+  "updated_at": "2026-07-04T11:30:03Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/4.E-emit-state-wiring-flow",
   "status": "running",
-  "current_task": 1,
+  "current_task": 2,
   "tasks": {
     "1": {
       "status": "passed",
@@ -19,6 +19,23 @@
       ],
       "files_changed": [
         "src/lib.rs"
+      ],
+      "commit": "",
+      "validated": "gating checks (fast tripwire)"
+    },
+    "2": {
+      "status": "passed",
+      "attempts": 1,
+      "summary": "Added a new mv4e_ripple integration test module in tests/brain_emit.rs proving a single emit_state(&dir, true) call ripples a close-A-unblocks-B cross-repo dependency change across every generated surface (leaf state.json focus, leaf project-cache doc + synced_from, tier rollup table, HQ operating board NOW/NEXT/BLOCKED, and master-plan wave table), plus a fixed-point check that a second pass over the emitted corpus is byte-identical with zero I_EMIT_WROTE diagnostics.",
+      "issues": [],
+      "fixes": [],
+      "decisions": [
+        "Built a real on-disk fixture (brain.toml + HQ + one tier sub-brain + two leaf project repos) rather than the in-memory (StateSource, StateFile) vectors used by the per-planner unit tests, since emit_state reads brain.toml/state.json/status.md/master-plan.md/cache docs directly from disk.",
+        "Modeled the ripple as repo-a's block RA.1.A going in_progress -> closed, with repo-b's block RB.1.A depending cross-repo on it; before the flip RB.1.A renders blocked (HQ board BLOCKED, wave table 'blocked', leaf focus.blocked), after the flip it renders open/next everywhere and RA.1.A drops out of all HQ board sections (closed blocks appear nowhere).",
+        "Reused the fixture-construction style (temp_dir/write_file/write_json helpers) from the existing task4_tier_scoping_integration module for consistency, scoped to a new mv4e_ripple module."
+      ],
+      "files_changed": [
+        "tests/brain_emit.rs"
       ],
       "commit": "",
       "validated": "gating checks (fast tripwire)"
@@ -71,13 +88,29 @@
         "filesReadKb": null,
         "inTokEst": 574,
         "outTok": 1844
+      },
+      {
+        "label": "implement-2-1",
+        "model": "sonnet",
+        "promptTokEst": 976,
+        "filesReadKb": null,
+        "inTokEst": 976,
+        "outTok": 21812
+      },
+      {
+        "label": "test-2-1",
+        "model": "haiku",
+        "promptTokEst": 574,
+        "filesReadKb": null,
+        "inTokEst": 574,
+        "outTok": 1820
       }
     ],
     "total": {
-      "promptTokEst": 2572,
+      "promptTokEst": 4122,
       "filesReadKb": 0,
-      "inTokEst": 2572,
-      "outTok": 12820
+      "inTokEst": 4122,
+      "outTok": 36452
     }
   }
 }
