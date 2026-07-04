@@ -42,7 +42,7 @@ pub(crate) fn parse_watermark(s: &str) -> Result<DateTime<chrono::FixedOffset>, 
 /// Used for **both** the source `status_file` (reads `timestamp`) and the brain
 /// cache `cache_doc` (reads `synced_from`).
 #[derive(Debug, Deserialize)]
-struct WatermarkFrontmatter {
+pub(crate) struct WatermarkFrontmatter {
     /// Source watermark: the `timestamp` scalar in a sub-repo's `status_file`.
     #[serde(default)]
     pub timestamp: Option<String>,
@@ -61,7 +61,11 @@ struct WatermarkFrontmatter {
 /// Returns `Ok(WatermarkFrontmatter)` on success, or an `Err(String)` describing the
 /// failure (file not readable, no frontmatter block, or parse error).  The caller is
 /// responsible for translating the error into the appropriate [`Diagnostic`].
-fn read_watermark(path: &Path) -> Result<WatermarkFrontmatter, String> {
+///
+/// `pub(crate)` so [`crate::brain::emit::plan_project_caches`] can read the same
+/// `timestamp` scalar this module's `check_sync` validates against, instead of a
+/// different (and differently-formatted) freshness field.
+pub(crate) fn read_watermark(path: &Path) -> Result<WatermarkFrontmatter, String> {
     let contents = std::fs::read_to_string(path)
         .map_err(|e| format!("could not read {}: {e}", path.display()))?;
 
