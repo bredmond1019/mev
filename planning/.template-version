@@ -1,4 +1,4 @@
 template: base-template
-commit: c873305f25f22cb79692cd9461e7c863d2170968
+commit: e2be17bf406424b95ebc32fa0670dc26c6a67cb3
 generated: 2026-06-18
-synced: 2026-07-04 — fix: don't abort enumerate-blocks when planFormatOk is omitted
+synced: 2026-07-04 — fix: pin gap-check/pr-open to sonnet, harden state.json sync, final emit-state refresh
