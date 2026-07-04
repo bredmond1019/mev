@@ -2636,6 +2636,420 @@ heading = "Repo P"
 }
 
 // ---------------------------------------------------------------------------
+// MV.4.E — brain-wide close-A-unblocks-B ripple integration test.
+//
+// Builds a multi-repo fixture corpus (HQ brain + one tier sub-brain + two leaf
+// project repos) where repo-b's block depends cross-repo on repo-a's block,
+// and every generated surface (leaf state.json focus, leaf project-cache doc,
+// tier rollup table, HQ operating board, master-plan wave table) is wired to
+// a sentinel-bearing document. Flipping repo-a's block from `in_progress` to
+// `closed` and running `emit_state` once must ripple the change through every
+// one of those surfaces in a single pass, and a second pass must be a no-op
+// (the fixed-point property MV.4.B/C/D already guarantee per-surface).
+// ---------------------------------------------------------------------------
+
+mod mv4e_ripple {
+    use std::fs;
+    use std::path::Path;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("mev-mv4e-ripple-{tag}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_file(root: &Path, rel: &str, content: &str) {
+        let target = root.join(rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&target, content.as_bytes()).unwrap();
+    }
+
+    fn write_json(root: &Path, rel: &str, value: &serde_json::Value) {
+        write_file(root, rel, &serde_json::to_string_pretty(value).unwrap());
+    }
+
+    /// `brain.toml` registering one tier ("core") with two leaf project repos
+    /// (repo-a, repo-b), each with a project-cache doc.
+    fn write_brain_toml(root: &Path) {
+        let toml = r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "repo-a"
+tier = "core"
+repo_path = "repos/repo-a"
+status_file = "repos/repo-a/planning/status.md"
+cache_doc = "docs/projects/repo-a.md"
+heading = "Repo A"
+
+[[repos]]
+slug = "repo-b"
+tier = "core"
+repo_path = "repos/repo-b"
+status_file = "repos/repo-b/planning/status.md"
+cache_doc = "docs/projects/repo-b.md"
+heading = "Repo B"
+"#;
+        fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
+    }
+
+    /// HQ brain `planning/state.json` (kind:"brain", repo "hq" matches no
+    /// declared tier -> TierScope::All) pointing at the "core" tier sub-brain.
+    fn write_hq_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "hq",
+            "kind": "brain",
+            "updated": "2026-07-01",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "repos": [],
+            "cross_repo": [],
+            "tiers": [
+                { "tier": "core", "rollup": "core/planning/state.json", "summary": null }
+            ]
+        });
+        write_json(root, "planning/state.json", &state);
+    }
+
+    /// HQ `status.md` carrying the HQ_BOARD sentinel (OKF-fronted).
+    fn write_hq_status_md(root: &Path) {
+        let doc = "---\n\
+                    type: ProjectStatus\n\
+                    title: HQ status\n\
+                    description: HQ operating board fixture.\n\
+                    ---\n\n\
+                    # HQ Status\n\n\
+                    <!-- BEGIN generated:hq-board -->\n\
+                    <!-- END generated:hq-board -->\n";
+        write_file(root, "planning/status.md", doc);
+    }
+
+    /// The "core" tier sub-brain's own `planning/state.json`.
+    fn write_core_tier_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "core",
+            "kind": "brain",
+            "updated": "2026-07-01",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "repos": [],
+            "cross_repo": []
+        });
+        write_json(root, "core/planning/state.json", &state);
+    }
+
+    /// The "core" tier sub-brain's `status.md` carrying the TIER_ROLLUP sentinel.
+    fn write_core_status_md(root: &Path) {
+        let doc = "---\n\
+                    type: ProjectStatus\n\
+                    title: Core tier status\n\
+                    description: Core tier rollup fixture.\n\
+                    ---\n\n\
+                    # Core Tier Status\n\n\
+                    <!-- BEGIN generated:tier-rollup -->\n\
+                    <!-- END generated:tier-rollup -->\n";
+        write_file(root, "core/planning/status.md", doc);
+    }
+
+    /// A leaf project repo's `planning/state.json`, with a single track/block.
+    fn write_leaf_state(
+        root: &Path,
+        repo: &str,
+        block_id: &str,
+        title: &str,
+        status: &str,
+        depends_on: &serde_json::Value,
+    ) {
+        let state = serde_json::json!({
+            "repo": repo,
+            "kind": "project",
+            "updated": "2026-07-01",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "tracks": [
+                {
+                    "title": "Phase 1",
+                    "blocks": [
+                        {
+                            "id": block_id,
+                            "title": title,
+                            "status": status,
+                            "depends_on": depends_on,
+                            "wave": 1
+                        }
+                    ]
+                }
+            ]
+        });
+        write_json(root, &format!("repos/{repo}/planning/state.json"), &state);
+    }
+
+    /// A leaf project repo's `master-plan.md`, carrying the WAVE_TABLE sentinel.
+    fn write_leaf_master_plan(root: &Path, repo: &str) {
+        let doc = format!(
+            "---\n\
+             type: Plan\n\
+             title: {repo} master plan\n\
+             description: Wave table fixture for {repo}.\n\
+             ---\n\n\
+             # Master Plan\n\n\
+             <!-- BEGIN generated:wave-table -->\n\
+             <!-- END generated:wave-table -->\n"
+        );
+        write_file(root, &format!("repos/{repo}/planning/master-plan.md"), &doc);
+    }
+
+    /// A leaf project repo's brain cache doc, carrying the PROJECT_CACHE sentinel.
+    fn write_project_cache_doc(root: &Path, repo: &str) {
+        let doc = format!(
+            "---\n\
+             type: ProjectStatus\n\
+             title: {repo} cache\n\
+             description: Project cache fixture for {repo}.\n\
+             ---\n\n\
+             # {repo}\n\n\
+             <!-- BEGIN generated:project-cache -->\n\
+             <!-- END generated:project-cache -->\n"
+        );
+        write_file(root, &format!("docs/projects/{repo}.md"), &doc);
+    }
+
+    /// Full fixture corpus: brain.toml + HQ (state.json + status.md) + core
+    /// tier (state.json + status.md) + repo-a/repo-b (state.json +
+    /// master-plan.md + project-cache doc). repo-b's block `RB.1.A` depends
+    /// cross-repo on repo-a's block `RA.1.A`.
+    ///
+    /// `a_status` controls repo-a's block's authored status, so the caller
+    /// can build the "before" (`in_progress`) and "after" (`closed`) fixture
+    /// states without duplicating the rest of the corpus.
+    fn write_corpus(root: &Path, a_status: &str) {
+        write_brain_toml(root);
+        write_hq_state(root);
+        write_hq_status_md(root);
+        write_core_tier_state(root);
+        write_core_status_md(root);
+
+        write_leaf_state(
+            root,
+            "repo-a",
+            "RA.1.A",
+            "Repo A block",
+            a_status,
+            &serde_json::json!([]),
+        );
+        write_leaf_master_plan(root, "repo-a");
+        write_project_cache_doc(root, "repo-a");
+
+        write_leaf_state(
+            root,
+            "repo-b",
+            "RB.1.A",
+            "Repo B block",
+            "open",
+            &serde_json::json!([{ "type": "block", "repo": "repo-a", "id": "RA.1.A" }]),
+        );
+        write_leaf_master_plan(root, "repo-b");
+        write_project_cache_doc(root, "repo-b");
+    }
+
+    fn read(root: &Path, rel: &str) -> String {
+        fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("failed to read {rel}: {e}"))
+    }
+
+    fn read_json(root: &Path, rel: &str) -> serde_json::Value {
+        serde_json::from_str(&read(root, rel)).unwrap_or_else(|e| panic!("bad json {rel}: {e}"))
+    }
+
+    #[test]
+    fn close_a_unblocks_b_ripples_across_every_surface() {
+        let dir = temp_dir("close-a-unblocks-b");
+
+        // --- Before: repo-a's block is in_progress; repo-b's block is open
+        // and depends on it, so it must render as blocked everywhere. ---
+        write_corpus(&dir, "in_progress");
+
+        let report_before = mev::emit_state(&dir, true).expect("first emit should not error");
+        let unexpected_errors: Vec<_> = report_before
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == mev::Severity::Error)
+            .collect();
+        assert!(
+            unexpected_errors.is_empty(),
+            "fixture emit should have no errors; got: {unexpected_errors:#?}"
+        );
+
+        let repo_b_master_plan_before = read(&dir, "repos/repo-b/planning/master-plan.md");
+        assert!(
+            repo_b_master_plan_before
+                .contains("| RB.1.A | Repo B block | blocked | repo-a:RA.1.A |"),
+            "repo-b's wave table must render RB.1.A as blocked before the flip; got:\n{repo_b_master_plan_before}"
+        );
+
+        let hq_board_before = read(&dir, "planning/status.md");
+        assert!(
+            hq_board_before.contains("- repo-a:RA.1.A — Repo A block"),
+            "HQ board must list repo-a's in_progress block in NOW before the flip; got:\n{hq_board_before}"
+        );
+        assert!(
+            hq_board_before.contains("- repo-b:RB.1.A — Repo B block (blocked by repo-a:RA.1.A)"),
+            "HQ board must list repo-b's block as BLOCKED before the flip; got:\n{hq_board_before}"
+        );
+        let now_idx = hq_board_before.find("## NOW").unwrap();
+        let next_idx = hq_board_before.find("## NEXT").unwrap();
+        let now_section = &hq_board_before[now_idx..next_idx];
+        assert!(
+            !now_section.contains("repo-a:RA.1.A")
+                || now_section.contains("- repo-a:RA.1.A — Repo A block"),
+            "sanity: repo-a's block should be in NOW, not NEXT, before the flip"
+        );
+        assert!(
+            !hq_board_before.contains("- repo-a:RA.1.A")
+                || hq_board_before.find("- repo-a:RA.1.A").unwrap() < next_idx,
+            "repo-a's block must not appear in NEXT before the flip"
+        );
+
+        // --- Flip: close repo-a's block, rewriting only its state.json. ---
+        write_leaf_state(
+            &dir,
+            "repo-a",
+            "RA.1.A",
+            "Repo A block",
+            "closed",
+            &serde_json::json!([]),
+        );
+
+        let report_after = mev::emit_state(&dir, true).expect("second emit should not error");
+        let unexpected_errors: Vec<_> = report_after
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == mev::Severity::Error)
+            .collect();
+        assert!(
+            unexpected_errors.is_empty(),
+            "post-flip emit should have no errors; got: {unexpected_errors:#?}"
+        );
+
+        // 1. repo-a's leaf cache: focus line updated, synced_from reconciled.
+        let repo_a_cache = read(&dir, "docs/projects/repo-a.md");
+        assert!(
+            repo_a_cache.contains("**Current focus:** none. Next: none. Blocked: none."),
+            "repo-a's project cache must reflect the closed block (empty focus); got:\n{repo_a_cache}"
+        );
+        assert!(
+            repo_a_cache.contains("synced_from:"),
+            "repo-a's project cache must have a reconciled synced_from watermark; got:\n{repo_a_cache}"
+        );
+
+        // 2. repo-b's leaf cache: focus line now shows RB.1.A as ready (`next`).
+        let repo_b_cache = read(&dir, "docs/projects/repo-b.md");
+        assert!(
+            repo_b_cache.contains("Next: `RB.1.A` — Repo B block."),
+            "repo-b's project cache must show RB.1.A as next once unblocked; got:\n{repo_b_cache}"
+        );
+
+        // 3. Tier rollup row (core/planning/status.md) reflects both repos.
+        let tier_rollup = read(&dir, "core/planning/status.md");
+        assert!(
+            tier_rollup.contains("| repo-a |"),
+            "tier rollup must contain a repo-a row; got:\n{tier_rollup}"
+        );
+        assert!(
+            tier_rollup.contains("`RB.1.A` — Repo B block"),
+            "tier rollup's repo-b row must list RB.1.A once unblocked; got:\n{tier_rollup}"
+        );
+
+        // 4. HQ board: B moved from BLOCKED to NEXT, A dropped out entirely
+        // (closed blocks appear in no section).
+        let hq_board_after = read(&dir, "planning/status.md");
+        assert!(
+            !hq_board_after.contains("repo-a:RA.1.A"),
+            "closed repo-a block must no longer appear anywhere on the HQ board; got:\n{hq_board_after}"
+        );
+        assert!(
+            !hq_board_after.contains("- repo-b:RB.1.A — Repo B block (blocked"),
+            "repo-b's block must no longer render as BLOCKED on the HQ board; got:\n{hq_board_after}"
+        );
+        assert!(
+            hq_board_after.contains("- repo-b:RB.1.A — Repo B block"),
+            "repo-b's block must appear (unblocked) on the HQ board; got:\n{hq_board_after}"
+        );
+        let next_idx_after = hq_board_after.find("## NEXT").unwrap();
+        let blocked_idx_after = hq_board_after.find("## BLOCKED").unwrap();
+        let next_section_after = &hq_board_after[next_idx_after..blocked_idx_after];
+        assert!(
+            next_section_after.contains("repo-b:RB.1.A"),
+            "repo-b's block must be listed under NEXT on the HQ board; got:\n{hq_board_after}"
+        );
+
+        // 5. repo-b's own leaf state.json `focus` no longer shows RB.1.A blocked.
+        let repo_b_state = read_json(&dir, "repos/repo-b/planning/state.json");
+        let blocked = repo_b_state["focus"]["blocked"].as_array().unwrap();
+        assert!(
+            !blocked.iter().any(|b| b["id"].as_str() == Some("RB.1.A")),
+            "repo-b's derived focus.blocked must no longer contain RB.1.A; got: {blocked:?}"
+        );
+        let next = repo_b_state["focus"]["next"].as_array().unwrap();
+        assert!(
+            next.iter().any(|b| b["id"].as_str() == Some("RB.1.A")),
+            "repo-b's derived focus.next must contain RB.1.A once unblocked; got: {next:?}"
+        );
+
+        // 6. The master-plan wave/status cell for RB.1.A reflects the unblock.
+        let repo_b_master_plan_after = read(&dir, "repos/repo-b/planning/master-plan.md");
+        assert!(
+            repo_b_master_plan_after.contains("| RB.1.A | Repo B block | open | repo-a:RA.1.A |"),
+            "repo-b's wave table must render RB.1.A as open once repo-a is closed; got:\n{repo_b_master_plan_after}"
+        );
+
+        // --- Fixed point: a second write over the emitted corpus is a no-op. ---
+        let snapshot: Vec<(std::path::PathBuf, Vec<u8>)> = [
+            "planning/state.json",
+            "planning/status.md",
+            "core/planning/state.json",
+            "core/planning/status.md",
+            "repos/repo-a/planning/state.json",
+            "repos/repo-a/planning/master-plan.md",
+            "repos/repo-b/planning/state.json",
+            "repos/repo-b/planning/master-plan.md",
+            "docs/projects/repo-a.md",
+            "docs/projects/repo-b.md",
+        ]
+        .iter()
+        .map(|rel| (dir.join(rel), fs::read(dir.join(rel)).unwrap()))
+        .collect();
+
+        let report_fixed_point =
+            mev::emit_state(&dir, true).expect("fixed-point emit should not error");
+        let wrote: Vec<_> = report_fixed_point
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "I_EMIT_WROTE")
+            .collect();
+        assert!(
+            wrote.is_empty(),
+            "second write over the emitted corpus must be a no-op; got: {wrote:#?}"
+        );
+
+        for (path, before) in &snapshot {
+            let after = fs::read(path).unwrap();
+            assert_eq!(
+                &after,
+                before,
+                "{} must be byte-identical after the fixed-point pass",
+                path.display()
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Task 1 (MV.4.A) — generated-marker name constants
 // ---------------------------------------------------------------------------
 
