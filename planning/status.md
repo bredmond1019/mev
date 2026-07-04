@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-07-04T11:15:00Z"
+timestamp: "2026-07-04T15:30:00Z"
 now: "4.D-sync-comparator-hardening shipped (PASS, full spec). check_sync's watermark comparison hardened to explicit UTC-instant compare (.to_utc()), doc comment stating the invariant, 2 new offset-mismatch regression tests, docs/cli.md patched. Next: MV.4.E (spine terminus, wires MV.4.B + MV.4.C into emit_state)."
 next: "MV.4.E (spine terminus, wires MV.4.B + MV.4.C into emit_state) — state-sync-loop Phase 4"
 blocked: []

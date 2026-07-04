@@ -6,31 +6,15 @@
     "now": [],
     "next": [
       {
-        "id": "MV.4.D",
-        "title": "validate-brain --sync timestamp comparator hardening (parse to instant, never string-compare -03:00 vs Z)",
+        "id": "MV.4.E",
+        "title": "Wire all planners into emit_state; preserve fixed-point; brain-wide ripple integration test (close-A-unblocks-B across every surface)",
         "status": null,
         "note": null,
         "repo": null,
         "blocked_by": []
       }
     ],
-    "blocked": [
-      {
-        "id": "MV.4.E",
-        "title": "Wire all planners into emit_state; preserve fixed-point; brain-wide ripple integration test (close-A-unblocks-B across every surface)",
-        "status": null,
-        "note": null,
-        "repo": null,
-        "blocked_by": [
-          {
-            "type": "block",
-            "repo": "mev",
-            "id": "MV.4.D",
-            "what": null
-          }
-        ]
-      }
-    ]
+    "blocked": []
   },
   "tracks": [
     {
@@ -187,7 +171,7 @@
         {
           "id": "MV.4.D",
           "title": "validate-brain --sync timestamp comparator hardening (parse to instant, never string-compare -03:00 vs Z)",
-          "status": "open",
+          "status": "closed",
           "depends_on": [],
           "wave": 40,
           "origin": null
