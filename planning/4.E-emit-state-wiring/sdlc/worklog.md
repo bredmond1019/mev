@@ -14,3 +14,8 @@ Validated: gating checks (fast tripwire)
 What: docs/cli.md's emit-state section now documents the three newly wired surfaces (project caches, tier rollups, HQ board), their sentinel markers, and the extended sentinel-contract/diagnostic-table prose.
 Decisions: Generalized the sentinel-contract prose to name all four markers (wave-table, project-cache, tier-rollup, hq-board) rather than duplicating four near-identical code blocks, keeping the existing wave-table example as the illustrative one.; Left the Diagnostic codes table's W_EMIT_NO_SENTINEL row generalized to list all four sentinel names rather than restricting it to master-plan.md only.
 Validated: gating checks (fast tripwire)
+
+## Task 4 — PASSED (1 attempt)
+What: Ran the full validation suite (cargo fmt --check, cargo clippy -- -D warnings, cargo test, cargo build --release) — all four gates passed with no fixes needed.
+Decisions: Task 4 is validation-only per its spec description; since all gates passed with a clean working tree, no commit was made (nothing to commit).
+Validated: gating checks (fast tripwire)
