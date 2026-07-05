@@ -4263,6 +4263,342 @@ mod task2_plan_hq_board {
 }
 
 // ---------------------------------------------------------------------------
+// plan_unified_board — I/O-level coverage for the unified priority board
+// splice (MV.6.B). Mirrors task2_plan_hq_board's shape, targeting the
+// separate `unified-board` sentinel and `today`-parameterized DUE-SOON.
+// ---------------------------------------------------------------------------
+
+mod task2_plan_unified_board {
+    use mev::brain::config::{BrainConfig, RepoEntry};
+    use mev::brain::emit::{markers, plan_unified_board};
+    use mev::brain::state::{
+        BlockedBy, Focus, RepoRollup, StateFile, StateSource, Track, TrackBlock, build_state_graph,
+    };
+    use std::path::PathBuf;
+
+    fn config_with_repos(entries: &[(&str, &str)]) -> BrainConfig {
+        BrainConfig {
+            repos: entries
+                .iter()
+                .map(|(slug, tier)| RepoEntry {
+                    slug: slug.to_string(),
+                    tier: tier.to_string(),
+                    repo_path: String::new(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                })
+                .collect(),
+            ..BrainConfig::default()
+        }
+    }
+
+    fn track_block(
+        id: &str,
+        title: &str,
+        status: Option<&str>,
+        wave: Option<i64>,
+        deps: Vec<BlockedBy>,
+    ) -> TrackBlock {
+        TrackBlock {
+            due: None,
+            priority: None,
+            sdlc_workflow: None,
+            model: None,
+            id: id.to_string(),
+            title: title.to_string(),
+            status: status.map(|s| s.to_string()),
+            depends_on: deps,
+            wave,
+            origin: None,
+        }
+    }
+
+    fn make_leaf_file(repo: &str, tracks: Vec<Track>, focus: Focus) -> StateFile {
+        StateFile {
+            repo: repo.to_string(),
+            kind: "project".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus,
+            tracks,
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+            carryover: vec![],
+        }
+    }
+
+    fn make_brain_file(
+        repos: Vec<RepoRollup>,
+        cross_repo: Vec<mev::brain::state::CrossRepoEdge>,
+        focus: Focus,
+    ) -> StateFile {
+        StateFile {
+            repo: "hq".to_string(),
+            kind: "brain".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus,
+            tracks: vec![],
+            repos,
+            cross_repo,
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+            carryover: vec![],
+        }
+    }
+
+    fn board_doc_with_sentinel() -> String {
+        "---\n\
+         type: ProjectStatus\n\
+         title: HQ status\n\
+         description: Test HQ status doc.\n\
+         ---\n\n\
+         # Status\n\n\
+         Narrative before.\n\n\
+         <!-- BEGIN generated:unified-board -->\n\
+         <!-- END generated:unified-board -->\n\n\
+         Narrative after.\n"
+            .to_string()
+    }
+
+    fn today() -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, 7, 5).unwrap()
+    }
+
+    #[test]
+    fn unified_board_splice_produces_expected_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let status_path = tmp.path().join("planning/status.md");
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(&status_path, board_doc_with_sentinel()).unwrap();
+
+        let leaf_tracks = vec![Track {
+            title: "P".to_string(),
+            blocks: vec![track_block(
+                "RA.1.A",
+                "Repo A block",
+                Some("in_progress"),
+                Some(1),
+                vec![],
+            )],
+        }];
+        let leaf_file = make_leaf_file("repo-a", leaf_tracks, Focus::default());
+        let leaf_src = StateSource {
+            repo_slug: "repo-a".to_string(),
+            abs_path: PathBuf::from("/fake/repo-a/planning/state.json"),
+            expected_kind: "project",
+        };
+
+        let hq_file = make_brain_file(vec![], vec![], Focus::default());
+        let hq_src = StateSource {
+            repo_slug: "hq".to_string(),
+            abs_path: status_path.parent().unwrap().join("state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![(leaf_src, leaf_file), (hq_src, hq_file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_repos(&[("repo-a", "core")]);
+
+        let plan = plan_unified_board(&files, &graph, &config, today());
+
+        assert_eq!(
+            plan.actions.len(),
+            1,
+            "expected one action; got {}",
+            plan.actions.len()
+        );
+        let action = &plan.actions[0];
+        assert_eq!(action.path, status_path);
+        assert!(
+            action.new_content.contains("Narrative before."),
+            "narrative before sentinel was lost"
+        );
+        assert!(
+            action.new_content.contains("Narrative after."),
+            "narrative after sentinel was lost"
+        );
+        assert!(
+            action
+                .new_content
+                .contains("[ENG] repo-a:RA.1.A — Repo A block"),
+            "unified board missing derived, tagged NOW entry: {}",
+            action.new_content
+        );
+        assert!(
+            action.new_content.contains("## DUE-SOON"),
+            "unified board missing DUE-SOON heading: {}",
+            action.new_content
+        );
+    }
+
+    #[test]
+    fn unified_board_missing_sentinel_warns_no_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        let status_path = tmp.path().join("planning/status.md");
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &status_path,
+            "---\ntype: ProjectStatus\n---\n\n# Status\n\nNo sentinels.\n",
+        )
+        .unwrap();
+
+        let hq_file = make_brain_file(vec![], vec![], Focus::default());
+        let hq_src = StateSource {
+            repo_slug: "hq".to_string(),
+            abs_path: status_path.parent().unwrap().join("state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![(hq_src, hq_file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_repos(&[("repo-a", "core")]);
+
+        let plan = plan_unified_board(&files, &graph, &config, today());
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "no action expected when sentinels are absent; got {}",
+            plan.actions.len()
+        );
+        let warn = plan
+            .diagnostics
+            .iter()
+            .find(|d| d.locator == "W_EMIT_NO_SENTINEL");
+        assert!(
+            warn.is_some(),
+            "expected W_EMIT_NO_SENTINEL diagnostic; got none"
+        );
+    }
+
+    #[test]
+    fn unified_board_missing_file_warns_no_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No status.md written at all.
+
+        let hq_file = make_brain_file(vec![], vec![], Focus::default());
+        let hq_src = StateSource {
+            repo_slug: "hq".to_string(),
+            abs_path: tmp.path().join("planning/state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![(hq_src, hq_file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_repos(&[("repo-a", "core")]);
+
+        let plan = plan_unified_board(&files, &graph, &config, today());
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "no action expected when status.md is missing; got {}",
+            plan.actions.len()
+        );
+        let warn = plan
+            .diagnostics
+            .iter()
+            .find(|d| d.locator == "W_EMIT_NO_SENTINEL");
+        assert!(
+            warn.is_some(),
+            "expected W_EMIT_NO_SENTINEL diagnostic; got none"
+        );
+    }
+
+    #[test]
+    fn unified_board_tier_sub_brain_is_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let status_path = tmp.path().join("core/planning/status.md");
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(&status_path, board_doc_with_sentinel()).unwrap();
+
+        let mut tier_file = make_brain_file(vec![], vec![], Focus::default());
+        tier_file.repo = "core".to_string();
+        let tier_src = StateSource {
+            repo_slug: "core".to_string(),
+            abs_path: tmp.path().join("core/planning/state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![(tier_src, tier_file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_repos(&[("repo-a", "core")]);
+
+        let plan = plan_unified_board(&files, &graph, &config, today());
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "tier sub-brain must never be targeted by plan_unified_board; got {}",
+            plan.actions.len()
+        );
+        assert!(
+            plan.diagnostics.is_empty(),
+            "no diagnostics expected for the skipped tier sub-brain; got: {:?}",
+            plan.diagnostics
+        );
+    }
+
+    #[test]
+    fn unified_board_fixed_point_no_action_on_second_pass() {
+        let tmp = tempfile::tempdir().unwrap();
+        let status_path = tmp.path().join("planning/status.md");
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(&status_path, board_doc_with_sentinel()).unwrap();
+
+        let leaf_tracks = vec![Track {
+            title: "P".to_string(),
+            blocks: vec![track_block(
+                "RA.1.A",
+                "Repo A block",
+                Some("in_progress"),
+                Some(1),
+                vec![],
+            )],
+        }];
+        let leaf_file = make_leaf_file("repo-a", leaf_tracks, Focus::default());
+        let leaf_src = StateSource {
+            repo_slug: "repo-a".to_string(),
+            abs_path: PathBuf::from("/fake/repo-a/planning/state.json"),
+            expected_kind: "project",
+        };
+
+        let hq_file = make_brain_file(vec![], vec![], Focus::default());
+        let hq_src = StateSource {
+            repo_slug: "hq".to_string(),
+            abs_path: status_path.parent().unwrap().join("state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![(leaf_src, leaf_file), (hq_src, hq_file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_repos(&[("repo-a", "core")]);
+
+        let plan = plan_unified_board(&files, &graph, &config, today());
+        assert_eq!(plan.actions.len(), 1);
+        std::fs::write(&status_path, &plan.actions[0].new_content).unwrap();
+
+        let plan2 = plan_unified_board(&files, &graph, &config, today());
+        assert_eq!(
+            plan2.actions.len(),
+            0,
+            "expected fixed-point no-action on second pass; got {}",
+            plan2.actions.len()
+        );
+        assert!(plan2.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn unified_board_marker_constant_matches_sentinel() {
+        assert_eq!(markers::UNIFIED_BOARD, "unified-board");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // update-write-state-in-trees Task 3 — CLI-level coverage for the
 // `emit-state --write` linked-worktree refusal.
 //
