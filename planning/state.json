@@ -4,12 +4,21 @@
   "updated": "2026-07-04",
   "focus": {
     "now": [],
-    "next": [],
+    "next": [
+      {
+        "id": "MV.5.A",
+        "title": "Status Frontmatter Reconciler",
+        "status": null,
+        "note": null,
+        "repo": null,
+        "blocked_by": []
+      }
+    ],
     "blocked": []
   },
   "tracks": [
     {
-      "title": "Phase 3 \u2014 Brain graph",
+      "title": "Phase 3 — Brain graph",
       "blocks": [
         {
           "id": "MV.3.J",
@@ -37,7 +46,7 @@
         },
         {
           "id": "MV.3.P2",
-          "title": "State-graph expansion validation (v2 schema \u2014 depends_on DAG, cycle detection, focus drift)",
+          "title": "State-graph expansion validation (v2 schema — depends_on DAG, cycle detection, focus drift)",
           "status": "closed",
           "depends_on": [
             {
@@ -52,7 +61,7 @@
         },
         {
           "id": "MV.3.L",
-          "title": "Structural coverage (index.md \u2194 dir)",
+          "title": "Structural coverage (index.md ↔ dir)",
           "status": "closed",
           "depends_on": [],
           "wave": 4,
@@ -61,11 +70,11 @@
       ]
     },
     {
-      "title": "Phase 3B \u2014 Manifest + graph emit",
+      "title": "Phase 3B — Manifest + graph emit",
       "blocks": [
         {
           "id": "MV.3B.Q",
-          "title": "Manifest emit \u2014 validated corpus list for index_brain.py",
+          "title": "Manifest emit — validated corpus list for index_brain.py",
           "status": "closed",
           "depends_on": [],
           "wave": 4,
@@ -73,7 +82,7 @@
         },
         {
           "id": "MV.3B.R",
-          "title": "Graph emit \u2192 Postgres edges table + structural query surface",
+          "title": "Graph emit → Postgres edges table + structural query surface",
           "status": "closed",
           "depends_on": [
             {
@@ -133,7 +142,7 @@
         },
         {
           "id": "MV.3B.V",
-          "title": "One graph resolver \u2014 emit-graph ships resolved edges (target_node_id/target_doc_id)",
+          "title": "One graph resolver — emit-graph ships resolved edges (target_node_id/target_doc_id)",
           "status": "closed",
           "depends_on": [
             {
@@ -149,11 +158,11 @@
       ]
     },
     {
-      "title": "Phase 4 \u2014 Status-surface generators (state-sync-loop)",
+      "title": "Phase 4 — Status-surface generators (state-sync-loop)",
       "blocks": [
         {
           "id": "MV.4.A",
-          "title": "Emit foundation: marker-aware splice_generated + generated-marker constants; global repo:id\u2192status map; fix render_wave_table cross-repo blocked bug; unit tests",
+          "title": "Emit foundation: marker-aware splice_generated + generated-marker constants; global repo:id→status map; fix render_wave_table cross-repo blocked bug; unit tests",
           "status": "closed",
           "depends_on": [],
           "wave": 40,
@@ -169,14 +178,14 @@
         },
         {
           "id": "MV.4.B",
-          "title": "plan_project_caches + plan_tier_rollups generators \u2014 write cache focus-line + synced_from, and tier rollup rows, into sentinel regions",
+          "title": "plan_project_caches + plan_tier_rollups generators — write cache focus-line + synced_from, and tier rollup rows, into sentinel regions",
           "status": "closed",
           "depends_on": [
             {
               "type": "block",
               "repo": "mev",
               "id": "MV.4.A",
-              "what": "reuses the marker-aware splice + repo:id\u2192status map from the emit foundation"
+              "what": "reuses the marker-aware splice + repo:id→status map from the emit foundation"
             }
           ],
           "wave": 41,
@@ -184,14 +193,14 @@
         },
         {
           "id": "MV.4.C",
-          "title": "plan_hq_board \u2014 generate NOW/NEXT/BLOCKED Operating Board from brain focus + cross_repo[] (pulls bastion status / Block V into mev)",
+          "title": "plan_hq_board — generate NOW/NEXT/BLOCKED Operating Board from brain focus + cross_repo[] (pulls bastion status / Block V into mev)",
           "status": "closed",
           "depends_on": [
             {
               "type": "block",
               "repo": "mev",
               "id": "MV.4.A",
-              "what": "reuses the marker-aware splice + repo:id\u2192status map from the emit foundation"
+              "what": "reuses the marker-aware splice + repo:id→status map from the emit foundation"
             }
           ],
           "wave": 41,
@@ -235,6 +244,19 @@
           "status": "closed",
           "depends_on": [],
           "wave": 43,
+          "origin": null
+        }
+      ]
+    },
+    {
+      "title": "plan-state-yaml-drift",
+      "blocks": [
+        {
+          "id": "MV.5.A",
+          "title": "Status Frontmatter Reconciler",
+          "status": "open",
+          "depends_on": [],
+          "wave": 50,
           "origin": null
         }
       ]
