@@ -3644,6 +3644,286 @@ _none_";
 }
 
 // ---------------------------------------------------------------------------
+// render_unified_board tests (Task 2, MV.6.B)
+// ---------------------------------------------------------------------------
+
+mod task2_render_unified_board {
+    use mev::brain::config::{BrainConfig, RepoEntry};
+    use mev::brain::emit::render_unified_board;
+    use mev::brain::state::{Block, BlockedBy, CrossRepoEdge, Endpoint, Focus};
+
+    fn config_with_repos(entries: &[(&str, &str)]) -> BrainConfig {
+        BrainConfig {
+            repos: entries
+                .iter()
+                .map(|(slug, tier)| RepoEntry {
+                    slug: slug.to_string(),
+                    tier: tier.to_string(),
+                    repo_path: String::new(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                })
+                .collect(),
+            ..BrainConfig::default()
+        }
+    }
+
+    /// Build a repo-tagged `Block` with an optional priority/due (NOW/NEXT shape).
+    fn tagged_block(
+        repo: &str,
+        id: &str,
+        title: &str,
+        priority: Option<u8>,
+        due: Option<&str>,
+    ) -> Block {
+        Block {
+            due: due.map(|s| s.to_string()),
+            priority,
+            id: id.to_string(),
+            title: title.to_string(),
+            status: None,
+            note: None,
+            repo: Some(repo.to_string()),
+            blocked_by: Vec::new(),
+        }
+    }
+
+    fn blocked_block(
+        repo: &str,
+        id: &str,
+        title: &str,
+        priority: Option<u8>,
+        due: Option<&str>,
+        blocked_by: Vec<BlockedBy>,
+    ) -> Block {
+        Block {
+            due: due.map(|s| s.to_string()),
+            priority,
+            id: id.to_string(),
+            title: title.to_string(),
+            status: None,
+            note: None,
+            repo: Some(repo.to_string()),
+            blocked_by,
+        }
+    }
+
+    fn today() -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, 7, 5).expect("valid date")
+    }
+
+    #[test]
+    fn tags_business_tier_biz_and_other_tiers_eng() {
+        let config = config_with_repos(&[("business", "business"), ("mev", "engine")]);
+        let focus = Focus {
+            now: vec![
+                tagged_block("business", "BR.1", "Biz block", None, None),
+                tagged_block("mev", "MV.1", "Eng block", None, None),
+            ],
+            next: vec![],
+            blocked: vec![],
+        };
+
+        let rendered = render_unified_board(&focus, &[], &config, today());
+
+        assert!(rendered.contains("- [BIZ] business:BR.1 — Biz block"));
+        assert!(rendered.contains("- [ENG] mev:MV.1 — Eng block"));
+    }
+
+    #[test]
+    fn unrecognised_repo_slug_defaults_to_eng() {
+        let config = config_with_repos(&[]);
+        let focus = Focus {
+            now: vec![tagged_block("mystery", "X.1", "Unknown", None, None)],
+            next: vec![],
+            blocked: vec![],
+        };
+
+        let rendered = render_unified_board(&focus, &[], &config, today());
+
+        assert!(rendered.contains("- [ENG] mystery:X.1 — Unknown"));
+    }
+
+    #[test]
+    fn next_orders_p1_business_block_above_p2_engineering_block() {
+        let config = config_with_repos(&[("business", "business"), ("mev", "engine")]);
+        let focus = Focus {
+            now: vec![],
+            next: vec![
+                tagged_block("mev", "MV.2", "Eng P2", Some(2), None),
+                tagged_block("business", "BR.2", "Biz P1", Some(1), None),
+            ],
+            blocked: vec![],
+        };
+
+        let rendered = render_unified_board(&focus, &[], &config, today());
+
+        let biz_idx = rendered.find("BR.2").unwrap();
+        let eng_idx = rendered.find("MV.2").unwrap();
+        assert!(
+            biz_idx < eng_idx,
+            "expected P1 business block before P2 engineering block:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn next_orders_by_priority_then_due_then_preserves_wave_order_as_tiebreak() {
+        let config = config_with_repos(&[("mev", "engine")]);
+        let focus = Focus {
+            now: vec![],
+            next: vec![
+                // Same priority; B has an earlier due date so it should sort first.
+                tagged_block("mev", "A", "Later due", Some(1), Some("2026-08-01")),
+                tagged_block("mev", "B", "Earlier due", Some(1), Some("2026-07-10")),
+                // No priority/due at all — sorts last, but preserves relative
+                // (wave) order against other None-priority entries.
+                tagged_block("mev", "C", "No priority first", None, None),
+                tagged_block("mev", "D", "No priority second", None, None),
+            ],
+            blocked: vec![],
+        };
+
+        let rendered = render_unified_board(&focus, &[], &config, today());
+
+        let idx_b = rendered.find("mev:B").unwrap();
+        let idx_a = rendered.find("mev:A").unwrap();
+        let idx_c = rendered.find("mev:C").unwrap();
+        let idx_d = rendered.find("mev:D").unwrap();
+
+        assert!(idx_b < idx_a, "earlier due should sort first:\n{rendered}");
+        assert!(
+            idx_a < idx_c,
+            "prioritised blocks sort before unprioritised:\n{rendered}"
+        );
+        assert!(
+            idx_c < idx_d,
+            "wave (input) order preserved as tiebreak among unprioritised blocks:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn due_soon_includes_in_window_and_overdue_excludes_far_future_and_dateless() {
+        let config = config_with_repos(&[("mev", "engine")]);
+        let focus = Focus {
+            now: vec![tagged_block(
+                "mev",
+                "SOON",
+                "Due soon",
+                None,
+                Some("2026-07-12"), // 7 days out — within the 14-day window
+            )],
+            next: vec![
+                tagged_block("mev", "OVERDUE", "Overdue", None, Some("2026-06-20")),
+                tagged_block("mev", "FAR", "Far future", None, Some("2027-01-01")),
+                tagged_block("mev", "NODATE", "No date", None, None),
+            ],
+            blocked: vec![],
+        };
+
+        let rendered = render_unified_board(&focus, &[], &config, today());
+        let due_soon_section = rendered
+            .split("## DUE-SOON")
+            .nth(1)
+            .expect("DUE-SOON section");
+
+        assert!(due_soon_section.contains("mev:SOON"));
+        assert!(due_soon_section.contains("mev:OVERDUE"));
+        assert!(due_soon_section.contains("(overdue)"));
+        assert!(!due_soon_section.contains("mev:FAR"));
+        assert!(!due_soon_section.contains("mev:NODATE"));
+    }
+
+    #[test]
+    fn due_soon_sorted_by_date_ascending_overdue_first() {
+        let config = config_with_repos(&[("mev", "engine")]);
+        let focus = Focus {
+            now: vec![tagged_block(
+                "mev",
+                "LATER",
+                "Later",
+                None,
+                Some("2026-07-15"),
+            )],
+            next: vec![tagged_block(
+                "mev",
+                "EARLIER",
+                "Earlier",
+                None,
+                Some("2026-06-01"),
+            )],
+            blocked: vec![],
+        };
+
+        let rendered = render_unified_board(&focus, &[], &config, today());
+        let due_soon_section = rendered
+            .split("## DUE-SOON")
+            .nth(1)
+            .expect("DUE-SOON section");
+
+        let earlier_idx = due_soon_section.find("mev:EARLIER").unwrap();
+        let later_idx = due_soon_section.find("mev:LATER").unwrap();
+        assert!(earlier_idx < later_idx);
+    }
+
+    #[test]
+    fn blocked_by_annotation_reused_from_hq_board_helper() {
+        let config = config_with_repos(&[("mev", "engine")]);
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![blocked_block(
+                "mev",
+                "C",
+                "Block C",
+                None,
+                None,
+                vec![BlockedBy::Block {
+                    repo: "core".to_string(),
+                    id: "D".to_string(),
+                    what: None,
+                }],
+            )],
+        };
+        let edges = vec![CrossRepoEdge {
+            from: Endpoint {
+                repo: "mev".to_string(),
+                id: "C".to_string(),
+            },
+            to: Endpoint {
+                repo: "core".to_string(),
+                id: "D".to_string(),
+            },
+            note: Some("waiting on schema freeze".to_string()),
+        }];
+
+        let rendered = render_unified_board(&focus, &edges, &config, today());
+
+        assert!(
+            rendered
+                .contains("- [ENG] mev:C — Block C (blocked by core:D (waiting on schema freeze))")
+        );
+    }
+
+    #[test]
+    fn empty_focus_renders_none_in_all_four_sections() {
+        let config = config_with_repos(&[]);
+        let rendered = render_unified_board(&Focus::default(), &[], &config, today());
+
+        let expected =
+            "## NOW\n_none_\n\n## NEXT\n_none_\n\n## BLOCKED\n_none_\n\n## DUE-SOON\n_none_";
+        assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn rendered_board_has_no_trailing_newline() {
+        let config = config_with_repos(&[]);
+        let rendered = render_unified_board(&Focus::default(), &[], &config, today());
+        assert!(!rendered.ends_with('\n'));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // plan_hq_board tests (Task 2, MV.4.C)
 // ---------------------------------------------------------------------------
 
