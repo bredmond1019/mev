@@ -1572,22 +1572,32 @@ pub fn derive_brain_focus(
 
         let derived = derive_focus(src, file, graph, files);
 
-        // Build a title lookup from this child's tracks[].
-        let mut title_map: std::collections::HashMap<String, String> =
+        // Build a title/priority/due lookup from this child's tracks[].
+        let mut title_map: std::collections::HashMap<String, (String, Option<u8>, Option<String>)> =
             std::collections::HashMap::new();
         for track in &file.tracks {
             for block in &track.blocks {
-                title_map.insert(block.id.clone(), block.title.clone());
+                title_map.insert(
+                    block.id.clone(),
+                    (block.title.clone(), block.priority, block.due.clone()),
+                );
             }
         }
-        let title_of = |id: &str| title_map.get(id).cloned().unwrap_or_default();
+        let title_of = |id: &str| {
+            title_map
+                .get(id)
+                .map(|(t, ..)| t.clone())
+                .unwrap_or_default()
+        };
+        let priority_of = |id: &str| title_map.get(id).and_then(|(_, p, _)| *p);
+        let due_of = |id: &str| title_map.get(id).and_then(|(_, _, d)| d.clone());
 
         for id in &derived.now {
             let key = (entry.slug.clone(), id.clone());
             if seen_now.insert(key) {
                 now.push(Block {
-                    due: None,
-                    priority: None,
+                    due: due_of(id),
+                    priority: priority_of(id),
                     id: id.clone(),
                     title: title_of(id),
                     status: Some("in_progress".to_string()),
@@ -1602,8 +1612,8 @@ pub fn derive_brain_focus(
             let key = (entry.slug.clone(), id.clone());
             if seen_next.insert(key) {
                 next.push(Block {
-                    due: None,
-                    priority: None,
+                    due: due_of(id),
+                    priority: priority_of(id),
                     id: id.clone(),
                     title: title_of(id),
                     status: None,
@@ -1618,8 +1628,8 @@ pub fn derive_brain_focus(
             let key = (entry.slug.clone(), id.clone());
             if seen_blocked.insert(key) {
                 blocked.push(Block {
-                    due: None,
-                    priority: None,
+                    due: due_of(id),
+                    priority: priority_of(id),
                     id: id.clone(),
                     title: title_of(id),
                     status: None,
@@ -4898,6 +4908,45 @@ mod tests {
 
         assert_eq!(focus.now.len(), 1);
         assert_eq!(focus.now[0].repo.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn derive_brain_focus_carries_priority_and_due_from_source_block() {
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let json = r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": {
+    "now": [{ "id": "AL.1.A", "title": "Work", "status": "in_progress" }],
+    "next": [{ "id": "AL.1.B", "title": "Next work" }],
+    "blocked": []
+  },
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [
+      { "id": "AL.1.A", "title": "Work", "status": "in_progress", "priority": 1, "due": "2026-07-10" },
+      { "id": "AL.1.B", "title": "Next work", "priority": 2 }
+    ]
+  }]
+}"#;
+        let pair_alpha = make_pair(dir.path(), "alpha-state.json", "project", json);
+        let files = vec![pair_alpha];
+
+        let focus = derive_brain_focus(&scope, &config, &StateGraph::default(), &files);
+
+        assert_eq!(focus.now.len(), 1);
+        assert_eq!(focus.now[0].priority, Some(1));
+        assert_eq!(focus.now[0].due.as_deref(), Some("2026-07-10"));
+
+        assert_eq!(focus.next.len(), 1);
+        assert_eq!(focus.next[0].priority, Some(2));
+        assert_eq!(
+            focus.next[0].due, None,
+            "block with no due date must carry None, not a fabricated value"
+        );
     }
 
     #[test]

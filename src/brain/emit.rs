@@ -467,14 +467,22 @@ impl EmitPlan {
 // Private helpers
 // ---------------------------------------------------------------------------
 
-/// Map every `tracks[].blocks[]` id in one file to its `(title, authored status)`.
-fn id_index(file: &StateFile) -> HashMap<String, (String, Option<String>)> {
+/// A `tracks[].blocks[]` entry's title, authored status, priority, and due date.
+type BlockIndexEntry = (String, Option<String>, Option<u8>, Option<String>);
+
+/// Map every `tracks[].blocks[]` id in one file to its [`BlockIndexEntry`].
+fn id_index(file: &StateFile) -> HashMap<String, BlockIndexEntry> {
     let mut map = HashMap::new();
     for track in &file.tracks {
         for block in &track.blocks {
             map.insert(
                 block.id.clone(),
-                (block.title.clone(), block.status.clone()),
+                (
+                    block.title.clone(),
+                    block.status.clone(),
+                    block.priority,
+                    block.due.clone(),
+                ),
             );
         }
     }
@@ -482,7 +490,8 @@ fn id_index(file: &StateFile) -> HashMap<String, (String, Option<String>)> {
 }
 
 /// Call [`derive_focus`] and rehydrate the returned id lists into a [`Focus`] struct,
-/// filling titles from this file's `tracks[]`.
+/// filling titles (and `priority`/`due`, when present on the source block) from this
+/// file's `tracks[]`.
 fn derived_focus_for(
     src: &StateSource,
     file: &StateFile,
@@ -491,14 +500,16 @@ fn derived_focus_for(
 ) -> Focus {
     let idx = id_index(file);
     let d = derive_focus(src, file, graph, files);
-    let title_of = |id: &str| idx.get(id).map(|(t, _)| t.clone()).unwrap_or_default();
+    let title_of = |id: &str| idx.get(id).map(|(t, ..)| t.clone()).unwrap_or_default();
+    let priority_of = |id: &str| idx.get(id).and_then(|(_, _, p, _)| *p);
+    let due_of = |id: &str| idx.get(id).and_then(|(_, _, _, d)| d.clone());
 
     let now = d
         .now
         .iter()
         .map(|id| Block {
-            due: None,
-            priority: None,
+            due: due_of(id),
+            priority: priority_of(id),
             id: id.clone(),
             title: title_of(id),
             status: Some("in_progress".to_string()),
@@ -512,8 +523,8 @@ fn derived_focus_for(
         .next
         .iter()
         .map(|id| Block {
-            due: None,
-            priority: None,
+            due: due_of(id),
+            priority: priority_of(id),
             id: id.clone(),
             title: title_of(id),
             status: None,
@@ -527,8 +538,8 @@ fn derived_focus_for(
         .blocked
         .iter()
         .map(|(id, unmet)| Block {
-            due: None,
-            priority: None,
+            due: due_of(id),
+            priority: priority_of(id),
             id: id.clone(),
             title: title_of(id),
             status: None,
