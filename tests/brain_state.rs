@@ -1256,3 +1256,63 @@ fn derive_rollup_stubs_when_only_a_brain_file_matches_the_slug() {
     assert!(rollups[0].next.is_empty());
     assert!(rollups[0].blocked.is_empty());
 }
+
+#[test]
+fn field_policy_integration() {
+    let root = temp_dir("field-policy");
+    write_brain_toml(&root);
+    write_hq_brain_state(&root);
+
+    let alpha = serde_json::json!({
+        "repo": "alpha",
+        "kind": "project",
+        "updated": "2026-06-29",
+        "focus": {
+            "now": [{ "id": "AL.1.A", "title": "Alpha block A", "status": "in_progress" }],
+            "next": [],
+            "blocked": []
+        },
+        "tracks": [
+            {
+                "title": "Phase 1",
+                "blocks": [
+                    {
+                        "id": "AL.1.A",
+                        "title": "Alpha block A",
+                        "status": "in_progress",
+                        "priority": 4,
+                        "due": "Q3",
+                        "sdlc_workflow": "pipeline",
+                        "model": "gpt"
+                    }
+                ]
+            }
+        ]
+    });
+    write_json(&root, "repos/alpha/planning/state.json", &alpha);
+    write_beta_state(&root);
+
+    let report = mev::validate_brain_state(&root).unwrap();
+
+    let has_prio = report
+        .diagnostics
+        .iter()
+        .any(|d| d.locator == "E_STATE_PRIORITY_RANGE");
+    let has_due = report
+        .diagnostics
+        .iter()
+        .any(|d| d.locator == "E_STATE_DUE_FORMAT");
+    let has_wf = report
+        .diagnostics
+        .iter()
+        .any(|d| d.locator == "E_STATE_SDLC_WORKFLOW_ENUM");
+    let has_model = report
+        .diagnostics
+        .iter()
+        .any(|d| d.locator == "E_STATE_MODEL_ENUM");
+
+    assert!(has_prio, "missing E_STATE_PRIORITY_RANGE");
+    assert!(has_due, "missing E_STATE_DUE_FORMAT");
+    assert!(has_wf, "missing E_STATE_SDLC_WORKFLOW_ENUM");
+    assert!(has_model, "missing E_STATE_MODEL_ENUM");
+}

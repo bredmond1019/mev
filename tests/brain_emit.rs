@@ -50,6 +50,10 @@ fn make_leaf(repo: &str, tracks: Vec<Track>) -> StateFile {
 /// Build a `TrackBlock` with a given wave and no deps.
 fn block(id: &str, title: &str, status: Option<&str>, wave: Option<i64>) -> TrackBlock {
     TrackBlock {
+        due: None,
+        priority: None,
+        sdlc_workflow: None,
+        model: None,
         id: id.to_string(),
         title: title.to_string(),
         status: status.map(|s| s.to_string()),
@@ -69,6 +73,10 @@ fn block_with_dep(
     dep_id: &str,
 ) -> TrackBlock {
     TrackBlock {
+        due: None,
+        priority: None,
+        sdlc_workflow: None,
+        model: None,
         id: id.to_string(),
         title: title.to_string(),
         status: status.map(|s| s.to_string()),
@@ -637,6 +645,10 @@ mod task3_planners {
         deps: Vec<BlockedBy>,
     ) -> TrackBlock {
         TrackBlock {
+            due: None,
+            priority: None,
+            sdlc_workflow: None,
+            model: None,
             id: id.to_string(),
             title: title.to_string(),
             status: status.map(|s| s.to_string()),
@@ -685,6 +697,8 @@ mod task3_planners {
     fn focus_with_now(block_id: &str, title: &str) -> Focus {
         Focus {
             now: vec![Block {
+                due: None,
+                priority: None,
                 id: block_id.to_string(),
                 title: title.to_string(),
                 status: Some("in_progress".to_string()),
@@ -766,6 +780,8 @@ mod task3_planners {
         // Pre-derive the correct focus.
         let correct_focus = Focus {
             now: vec![Block {
+                due: None,
+                priority: None,
                 id: "B".to_string(),
                 title: "Block B".to_string(),
                 status: Some("in_progress".to_string()),
@@ -3322,6 +3338,8 @@ mod task1_render_hq_board {
     /// Build a repo-tagged `Block` with no `blocked_by` entries (NOW/NEXT shape).
     fn tagged_block(repo: &str, id: &str, title: &str) -> Block {
         Block {
+            due: None,
+            priority: None,
             id: id.to_string(),
             title: title.to_string(),
             status: None,
@@ -3334,6 +3352,8 @@ mod task1_render_hq_board {
     /// Build a repo-tagged `Block` with the given `blocked_by` entries (BLOCKED shape).
     fn blocked_block(repo: &str, id: &str, title: &str, blocked_by: Vec<BlockedBy>) -> Block {
         Block {
+            due: None,
+            priority: None,
             id: id.to_string(),
             title: title.to_string(),
             status: None,
@@ -3586,6 +3606,10 @@ mod task2_plan_hq_board {
         deps: Vec<BlockedBy>,
     ) -> TrackBlock {
         TrackBlock {
+            due: None,
+            priority: None,
+            sdlc_workflow: None,
+            model: None,
             id: id.to_string(),
             title: title.to_string(),
             status: status.map(|s| s.to_string()),
@@ -4152,6 +4176,8 @@ mod task_yaml_frontmatter_drift_tests {
                         # Body\n";
         let focus = Focus {
             now: vec![Block {
+                due: None,
+                priority: None,
                 id: "1".into(),
                 title: "One".into(),
                 status: None,
@@ -4207,6 +4233,10 @@ mod task_yaml_frontmatter_drift_tests {
             tracks: vec![Track {
                 title: "P".to_string(),
                 blocks: vec![TrackBlock {
+                    due: None,
+                    priority: None,
+                    sdlc_workflow: None,
+                    model: None,
                     id: "B1".into(),
                     title: "Block One".into(),
                     status: Some("in_progress".into()),

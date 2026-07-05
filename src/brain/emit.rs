@@ -497,6 +497,8 @@ fn derived_focus_for(
         .now
         .iter()
         .map(|id| Block {
+            due: None,
+            priority: None,
             id: id.clone(),
             title: title_of(id),
             status: Some("in_progress".to_string()),
@@ -510,6 +512,8 @@ fn derived_focus_for(
         .next
         .iter()
         .map(|id| Block {
+            due: None,
+            priority: None,
             id: id.clone(),
             title: title_of(id),
             status: None,
@@ -523,6 +527,8 @@ fn derived_focus_for(
         .blocked
         .iter()
         .map(|(id, unmet)| Block {
+            due: None,
+            priority: None,
             id: id.clone(),
             title: title_of(id),
             status: None,
