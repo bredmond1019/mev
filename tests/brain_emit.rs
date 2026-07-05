@@ -768,6 +768,80 @@ mod task3_planners {
     }
 
     #[test]
+    fn leaf_focus_carries_priority_and_due_from_tracks() {
+        // "A" is in_progress with priority/due set; "B" is next with only priority set.
+        let tracks = vec![Track {
+            title: "Phase 1".to_string(),
+            blocks: vec![
+                TrackBlock {
+                    due: Some("2026-07-10".to_string()),
+                    priority: Some(1),
+                    sdlc_workflow: None,
+                    model: None,
+                    id: "A".to_string(),
+                    title: "Block A".to_string(),
+                    status: Some("in_progress".to_string()),
+                    depends_on: vec![],
+                    wave: Some(1),
+                    origin: None,
+                },
+                TrackBlock {
+                    due: None,
+                    priority: Some(2),
+                    sdlc_workflow: None,
+                    model: None,
+                    id: "B".to_string(),
+                    title: "Block B".to_string(),
+                    status: None,
+                    depends_on: vec![],
+                    wave: Some(2),
+                    origin: None,
+                },
+            ],
+        }];
+        let file = make_leaf_file("myrepo", tracks, Focus::default());
+        let src = StateSource {
+            repo_slug: "myrepo".to_string(),
+            abs_path: PathBuf::from("/fake/myrepo/planning/state.json"),
+            expected_kind: "project",
+        };
+        let files = vec![(src.clone(), file)];
+        let graph = build_state_graph(&files);
+        let config = config_with_repos(&[("myrepo", "core")]);
+
+        let plan = plan_state_json(&files, &graph, &config);
+
+        let action = plan
+            .actions
+            .iter()
+            .find(|a| a.path == src.abs_path)
+            .expect("expected an action regenerating focus from tracks");
+        let derived: StateFile =
+            serde_json::from_str(&action.new_content).expect("new_content must be valid JSON");
+
+        let now_a = derived
+            .focus
+            .now
+            .iter()
+            .find(|b| b.id == "A")
+            .expect("A must be in focus.now");
+        assert_eq!(now_a.priority, Some(1));
+        assert_eq!(now_a.due.as_deref(), Some("2026-07-10"));
+
+        let next_b = derived
+            .focus
+            .next
+            .iter()
+            .find(|b| b.id == "B")
+            .expect("B must be in focus.next");
+        assert_eq!(next_b.priority, Some(2));
+        assert_eq!(
+            next_b.due, None,
+            "block with no source due date must carry None, not a fabricated value"
+        );
+    }
+
+    #[test]
     fn fixed_point_no_action() {
         // A leaf whose stored focus already matches the derivation → no action.
         let tracks = vec![Track {
