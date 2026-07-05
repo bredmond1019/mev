@@ -790,6 +790,83 @@ fn reconcile_synced_from(original: &str, new_value: &str) -> String {
     result
 }
 
+/// Reconcile the `now`, `next`, and `blocked` scalars in `original`'s OKF frontmatter
+/// to match the provided `focus`.
+///
+/// Locates the leading `---`-fenced frontmatter block. For each scalar:
+/// - if the queue is empty, the value is the literal `[]`.
+/// - otherwise, the value is a double-quoted string joining the blocks in that queue
+///   (e.g., `"repo:id — title"`), with `\` and `"` escaped.
+///
+/// If a line for the key exists, it is replaced; if not, it is appended before the
+/// closing fence.
+///
+/// Returns `original` unchanged if no frontmatter block is found.
+pub fn reconcile_status_scalars(original: &str, focus: &Focus) -> String {
+    let lines: Vec<&str> = original.lines().collect();
+    if lines.first().map(|l| l.trim()) != Some("---") {
+        return original.to_string();
+    }
+    let Some(end_idx) = lines[1..]
+        .iter()
+        .position(|l| l.trim() == "---")
+        .map(|i| i + 1)
+    else {
+        return original.to_string();
+    };
+
+    let mut fm_lines: Vec<String> = lines[1..end_idx].iter().map(|s| s.to_string()).collect();
+
+    let format_queue = |blocks: &[Block]| -> String {
+        if blocks.is_empty() {
+            "[]".to_string()
+        } else {
+            let joined = blocks
+                .iter()
+                .map(|b| {
+                    if let Some(repo) = &b.repo {
+                        format!("{repo}:{} — {}", b.id, b.title)
+                    } else {
+                        format!("{} — {}", b.id, b.title)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let escaped = joined.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"{escaped}\"")
+        }
+    };
+
+    let updates = [
+        ("now:", format_queue(&focus.now)),
+        ("next:", format_queue(&focus.next)),
+        ("blocked:", format_queue(&focus.blocked)),
+    ];
+
+    for (key, val) in updates {
+        let new_line = format!("{key} {val}");
+        match fm_lines
+            .iter()
+            .position(|l| l.trim_start().starts_with(key))
+        {
+            Some(pos) => fm_lines[pos] = new_line,
+            None => fm_lines.push(new_line),
+        }
+    }
+
+    let mut result_lines: Vec<String> = Vec::with_capacity(lines.len() + 1);
+    result_lines.push(lines[0].to_string());
+    result_lines.extend(fm_lines);
+    result_lines.extend(lines[end_idx..].iter().map(|s| s.to_string()));
+
+    let trailing_newline = original.ends_with('\n');
+    let mut result = result_lines.join("\n");
+    if trailing_newline {
+        result.push('\n');
+    }
+    result
+}
+
 /// Plan the project-cache splice for each project-kind repo's `docs/projects/<slug>.md`
 /// (or whatever path its `brain.toml` `[[repos]]` entry names as `cache_doc`).
 ///
@@ -1103,6 +1180,76 @@ pub fn plan_hq_board(
                     ),
                 ));
             }
+        }
+    }
+
+    plan
+}
+
+// ---------------------------------------------------------------------------
+// plan_status_frontmatter
+// ---------------------------------------------------------------------------
+
+/// Plan the YAML frontmatter status scalars splice (`now`, `next`, `blocked`).
+///
+/// For each loaded state file, derives its focus. Then resolves its `status.md`
+/// path: checks `status_file` in the corresponding `brain.toml` `[[repos]]` entry
+/// (resolved relative to `root`), or falls back to `status.md` in the same
+/// directory as the `state.json`. If the file exists, applies `reconcile_status_scalars`.
+///
+/// If the output differs from the original, adds an [`EmitAction`] to write it.
+pub fn plan_status_frontmatter(
+    root: &std::path::Path,
+    files: &[(StateSource, StateFile)],
+    graph: &StateGraph,
+    config: &BrainConfig,
+) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+
+    for (src, file) in files {
+        let focus = if file.kind == "project" {
+            derived_focus_for(src, file, graph, files)
+        } else if file.kind == "brain" {
+            let scope = tier_scope_for(file, config);
+            derive_brain_focus(&scope, config, graph, files)
+        } else {
+            continue;
+        };
+
+        let status_path = if let Some(entry) = config.repos.iter().find(|r| r.slug == src.repo_slug)
+        {
+            if !entry.status_file.trim().is_empty() {
+                root.join(entry.status_file.trim())
+            } else {
+                src.abs_path.parent().unwrap().join("status.md")
+            }
+        } else {
+            src.abs_path.parent().unwrap().join("status.md")
+        };
+
+        if !status_path.exists() {
+            continue;
+        }
+
+        let original = match std::fs::read_to_string(&status_path) {
+            Ok(s) => s,
+            Err(_) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &status_path,
+                    "W_EMIT_IO_ERROR",
+                    format!("could not read status file for '{}'", src.repo_slug),
+                ));
+                continue;
+            }
+        };
+
+        let new_content = reconcile_status_scalars(&original, &focus);
+        if new_content != original {
+            plan.actions.push(EmitAction {
+                path: status_path,
+                new_content,
+                note: format!("update status frontmatter for '{}'", src.repo_slug),
+            });
         }
     }
 
