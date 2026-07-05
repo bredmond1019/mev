@@ -147,6 +147,10 @@ When `--state` is passed, `mev` runs the full OKF schema pass first, then append
 | `E_STATE_AUTHORED_BLOCKED` | Error | A `tracks[].blocks[].status` is `"blocked"` — `blocked` is derived, not authored |
 | `E_STATE_STATUS_INCONSISTENT` | Error | A `closed` block has a `type:block` `depends_on` target that is not `closed` |
 | `E_STATE_DANGLING_PROMOTION` | Error | A `status:"promoted"` backlog node's `block` pointer resolves to no `tracks[]` node |
+| `E_STATE_PRIORITY_RANGE` | Error | A `priority` value is not in 0..=3 |
+| `E_STATE_DUE_FORMAT` | Error | A `due` value is not a valid YYYY-MM-DD date |
+| `E_STATE_SDLC_WORKFLOW_ENUM` | Error | An `sdlc_workflow` value is not in `{none, patch, task, run, flow}` |
+| `E_STATE_MODEL_ENUM` | Error | A `model` value is not in `{sonnet, gemini-pro, gemini-flash, either}` |
 | `W_STATE_FOCUS_DRIFT` | Warning | Stored `focus` disagrees with the derivation from `tracks[]`; exit code is unchanged |
 
 #### `--structure` — structural `index.md` coverage check
