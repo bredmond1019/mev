@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-05T17:17:11Z"
+timestamp: "2026-07-05T21:30:00Z"
 ---
 
 # Log — mev
@@ -18,6 +18,23 @@ timestamp: "2026-07-05T17:17:11Z"
 ---
 
 ## [2026-07-05]
+
+### `6.B-generate-hq-board-flow` — close-out: coverage-gap fix + state reconciliation
+- **What:** Closed out `6.B-generate-hq-board-flow` (MV.6.B, unified priority board). Found and
+  fixed a blocking test-coverage gap: `plan_unified_board` had zero tests despite being new public
+  API wired into `emit_state` — added 6 tests mirroring the `plan_hq_board` suite (splice, missing
+  sentinel, missing file, tier-skip, fixed-point, marker constant). All four harness gates
+  (fmt/clippy/test/build) pass; code review clean; docs already current. Marked `MV.6.B` `closed`
+  in `planning/state.json` (was drifted from `status.md`).
+- **Why:** Close-out review surfaced the gap between "new public API wired into the emit pipeline"
+  and "covered by tests," which the standing rule (every behaviour change ships with tests) requires
+  closing before merge.
+- **Refs:** `planning/state.json` (`MV.6.B`), `planning/handoff.md` (carryover), `core/Cargo.toml` (D44)
+- Added a known-issue carryover: `core/Cargo.toml`'s new unified workspace (D44) breaks `cargo`
+  commands run from inside any `core/*/trees/*` worktree; `workspace.exclude` does not fix it — the
+  verified workaround is a local, never-committed empty `[workspace]` table in the worktree's own
+  `Cargo.toml`. `mev emit-state --write` correctly refused to run from this linked worktree
+  (`E_EMIT_LINKED_WORKTREE`) — brain-wide regeneration is deferred to a run from `main` after merge.
 
 ### `6.B-generate-hq-board` — carry priority/due through focus + unified HQ board region
 - **What:** Ran `/sdlc-flow 6.B-generate-hq-board` to completion (6/6 tasks passed, review PASS). Task 1
