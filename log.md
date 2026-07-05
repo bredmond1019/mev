@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-05T21:30:00Z"
+timestamp: "2026-07-05T22:10:00Z"
 ---
 
 # Log — mev
@@ -18,6 +18,25 @@ timestamp: "2026-07-05T21:30:00Z"
 ---
 
 ## [2026-07-05]
+
+### D44 worktree-validation break — root cause confirmed, fix deferred
+- **What:** Investigated the `core/Cargo.toml` D44 worktree-validation break carried over from the
+  prior close-out (`core-cargo-workspace-breaks-worktree-validation`). Root cause confirmed by direct
+  testing: `workspace.exclude` cannot carve an exception out of a path nested inside an
+  already-declared member's own directory — a sibling scratch crate excludes cleanly, but the
+  identical crate nested one level inside `bastion/` fails regardless of exclude pattern (literal or
+  glob). This is a hard Cargo limitation, not a syntax error. Two real fix options identified, neither
+  implemented — deferred to a fresh session per user request: (1) relocate SDLC worktrees for the four
+  core-tier Rust repos to a sibling path like `core/.worktrees/<repo>/<branch>`, which requires editing
+  the shared `.claude/workflows/*.js` worktree-creation logic; (2) keep `trees/` nested and formalize
+  the manual empty-`[workspace]`-table shim into an automated wrapper. Also ran
+  `mev emit-state --write` from `main` (deferred from the prior close-out session) — succeeded,
+  unblocked `MV.7.A`, and populated the unified-board region at the HQ root for the first time.
+- **Why:** The prior close-out session left this as an open known-issue carryover; this session's job
+  was to pin down the actual mechanism before committing to either fix, and to run the deferred
+  brain-wide `emit-state` regeneration now that `main` had the merged changes.
+- **Refs:** `planning/handoff.md` (full investigation + both fix options), `core/Cargo.toml` (D44),
+  `.claude/workflows/*.js` (worktree-creation logic, fix option 1)
 
 ### `6.B-generate-hq-board-flow` — close-out: coverage-gap fix + state reconciliation
 - **What:** Closed out `6.B-generate-hq-board-flow` (MV.6.B, unified priority board). Found and
