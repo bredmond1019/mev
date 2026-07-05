@@ -4628,3 +4628,290 @@ mod task_yaml_frontmatter_drift_tests {
         assert!(action.new_content.contains("now: \"B1 — Block One\""));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Task 4 (MV.6.B) — unified board integration test: HQ brain fixture with a
+// business-tier repo and an engineering-tier repo, exercised end to end
+// through `mev::emit_state`. Asserts [BIZ]/[ENG] tagging, NEXT priority/due
+// ordering, DUE-SOON windowing, and fixed-point idempotence on a second pass.
+// ---------------------------------------------------------------------------
+
+mod task4_unified_board_integration {
+    use std::fs;
+    use std::path::Path;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("mev-unified-board-{tag}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_file(root: &Path, rel: &str, content: &str) {
+        let target = root.join(rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&target, content.as_bytes()).unwrap();
+    }
+
+    fn write_json(root: &Path, rel: &str, value: &serde_json::Value) {
+        write_file(root, rel, &serde_json::to_string_pretty(value).unwrap());
+    }
+
+    /// `brain.toml` registering one business-tier repo and one engineering-tier
+    /// repo (no tier sub-brains — `derive_brain_focus` at `TierScope::All`
+    /// unions every `[[repos]]` entry directly regardless of declared tiers).
+    fn write_brain_toml(root: &Path) {
+        let toml = r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "biz-repo"
+tier = "business"
+repo_path = "repos/biz-repo"
+status_file = "repos/biz-repo/planning/status.md"
+cache_doc = "docs/projects/biz-repo.md"
+heading = "Biz Repo"
+
+[[repos]]
+slug = "eng-repo"
+tier = "engine"
+repo_path = "repos/eng-repo"
+status_file = "repos/eng-repo/planning/status.md"
+cache_doc = "docs/projects/eng-repo.md"
+heading = "Eng Repo"
+"#;
+        fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
+    }
+
+    /// HQ brain `planning/state.json` (`repo: "hq"` matches no declared tier,
+    /// so `tier_scope_for` resolves it to `TierScope::All`).
+    fn write_hq_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "hq",
+            "kind": "brain",
+            "updated": "2026-07-05",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "repos": [],
+            "cross_repo": []
+        });
+        write_json(root, "planning/state.json", &state);
+    }
+
+    /// HQ `status.md` carrying the `unified-board` sentinel (OKF-fronted).
+    fn write_hq_status_md(root: &Path) {
+        let doc = "---\n\
+                    type: ProjectStatus\n\
+                    title: HQ status\n\
+                    description: HQ unified board fixture.\n\
+                    ---\n\n\
+                    # HQ Status\n\n\
+                    <!-- BEGIN generated:unified-board -->\n\
+                    <!-- END generated:unified-board -->\n";
+        write_file(root, "planning/status.md", doc);
+    }
+
+    /// The business-tier repo's `planning/state.json`: a single ready (`open`,
+    /// no unmet deps) `priority: 1` block with no `due`, so it lands in NEXT.
+    fn write_biz_repo_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "biz-repo",
+            "kind": "project",
+            "updated": "2026-07-05",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "tracks": [
+                {
+                    "title": "Phase 1",
+                    "blocks": [
+                        {
+                            "id": "BR.1",
+                            "title": "Biz P1 block",
+                            "status": "open",
+                            "depends_on": [],
+                            "wave": 1,
+                            "priority": 1,
+                            "due": null
+                        }
+                    ]
+                }
+            ]
+        });
+        write_json(root, "repos/biz-repo/planning/state.json", &state);
+    }
+
+    /// The engineering-tier repo's `planning/state.json`: a `priority: 2`
+    /// ready block (NEXT — must sort below the business `priority: 1` block),
+    /// plus three `in_progress` (NOW) blocks exercising DUE-SOON: one due
+    /// within the 14-day window, one overdue, and one far in the future
+    /// (excluded from DUE-SOON).
+    fn write_eng_repo_state(root: &Path, due_soon: &str, overdue: &str, far_future: &str) {
+        let state = serde_json::json!({
+            "repo": "eng-repo",
+            "kind": "project",
+            "updated": "2026-07-05",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "tracks": [
+                {
+                    "title": "Phase 1",
+                    "blocks": [
+                        {
+                            "id": "MV.1",
+                            "title": "Eng P2 block",
+                            "status": "open",
+                            "depends_on": [],
+                            "wave": 1,
+                            "priority": 2,
+                            "due": null
+                        },
+                        {
+                            "id": "MV.2",
+                            "title": "Eng due-soon block",
+                            "status": "in_progress",
+                            "depends_on": [],
+                            "wave": 1,
+                            "due": due_soon
+                        },
+                        {
+                            "id": "MV.3",
+                            "title": "Eng overdue block",
+                            "status": "in_progress",
+                            "depends_on": [],
+                            "wave": 2,
+                            "due": overdue
+                        },
+                        {
+                            "id": "MV.4",
+                            "title": "Eng far-future block",
+                            "status": "in_progress",
+                            "depends_on": [],
+                            "wave": 3,
+                            "due": far_future
+                        }
+                    ]
+                }
+            ]
+        });
+        write_json(root, "repos/eng-repo/planning/state.json", &state);
+    }
+
+    fn read(root: &Path, rel: &str) -> String {
+        fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("failed to read {rel}: {e}"))
+    }
+
+    #[test]
+    fn unified_board_emit_tags_orders_and_is_a_fixed_point() {
+        let dir = temp_dir("emit");
+
+        // Anchor due dates to "today" so the DUE-SOON window assertions are
+        // stable regardless of the real current date.
+        let today = chrono::Local::now().date_naive();
+        let due_soon = (today + chrono::Duration::days(5))
+            .format("%Y-%m-%d")
+            .to_string();
+        let overdue = (today - chrono::Duration::days(10))
+            .format("%Y-%m-%d")
+            .to_string();
+        let far_future = (today + chrono::Duration::days(400))
+            .format("%Y-%m-%d")
+            .to_string();
+
+        write_brain_toml(&dir);
+        write_hq_state(&dir);
+        write_hq_status_md(&dir);
+        write_biz_repo_state(&dir);
+        write_eng_repo_state(&dir, &due_soon, &overdue, &far_future);
+
+        let report = mev::emit_state(&dir, true).expect("emit should not error");
+        let unexpected_errors: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == mev::Severity::Error)
+            .collect();
+        assert!(
+            unexpected_errors.is_empty(),
+            "fixture emit should have no errors; got: {unexpected_errors:#?}"
+        );
+
+        let status_after = read(&dir, "planning/status.md");
+        let board = status_after
+            .split("<!-- BEGIN generated:unified-board -->")
+            .nth(1)
+            .and_then(|s| s.split("<!-- END generated:unified-board -->").next())
+            .expect("unified-board region must be present");
+
+        // --- [BIZ]/[ENG] tagging. ---
+        assert!(
+            board.contains("[BIZ] biz-repo:BR.1"),
+            "business-tier repo's block must be tagged [BIZ]; got:\n{board}"
+        );
+        assert!(
+            board.contains("[ENG] eng-repo:MV.1"),
+            "engineering-tier repo's block must be tagged [ENG]; got:\n{board}"
+        );
+
+        // --- NEXT ordering: P1 business block sorts above P2 eng block. ---
+        let next_idx = board.find("## NEXT").unwrap();
+        let blocked_idx = board.find("## BLOCKED").unwrap();
+        let next_section = &board[next_idx..blocked_idx];
+        let biz_pos = next_section
+            .find("biz-repo:BR.1")
+            .expect("BR.1 must appear in NEXT");
+        let eng_pos = next_section
+            .find("eng-repo:MV.1")
+            .expect("MV.1 must appear in NEXT");
+        assert!(
+            biz_pos < eng_pos,
+            "P1 business block must sort above P2 engineering block in NEXT; got:\n{next_section}"
+        );
+
+        // --- DUE-SOON: in-window + overdue included, far-future excluded. ---
+        let due_soon_section = board
+            .split("## DUE-SOON")
+            .nth(1)
+            .expect("DUE-SOON section must be present");
+        assert!(
+            due_soon_section.contains("eng-repo:MV.2"),
+            "in-window due block must be listed in DUE-SOON; got:\n{due_soon_section}"
+        );
+        assert!(
+            due_soon_section.contains("eng-repo:MV.3"),
+            "overdue block must be listed in DUE-SOON; got:\n{due_soon_section}"
+        );
+        assert!(
+            due_soon_section.contains("(overdue)"),
+            "overdue block must be surfaced louder with an (overdue) marker; got:\n{due_soon_section}"
+        );
+        assert!(
+            !due_soon_section.contains("eng-repo:MV.4"),
+            "far-future due block must be excluded from DUE-SOON; got:\n{due_soon_section}"
+        );
+
+        // --- Fixed point: a second emit over the already-derived corpus must
+        // be a no-op, and the unified-board region byte-identical. ---
+        let snapshot = fs::read(dir.join("planning/status.md")).unwrap();
+
+        let report_second = mev::emit_state(&dir, true).expect("second emit should not error");
+        let wrote: Vec<_> = report_second
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "I_EMIT_WROTE")
+            .collect();
+        assert!(
+            wrote.is_empty(),
+            "second emit over the already-derived corpus must be a no-op; got: {wrote:#?}"
+        );
+
+        let after_second = fs::read(dir.join("planning/status.md")).unwrap();
+        assert_eq!(
+            after_second, snapshot,
+            "planning/status.md must be byte-identical after the fixed-point pass"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
