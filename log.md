@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-05T22:10:00Z"
+timestamp: "2026-07-05T22:25:42Z"
 ---
 
 # Log — mev
@@ -18,6 +18,33 @@ timestamp: "2026-07-05T22:10:00Z"
 ---
 
 ## [2026-07-05]
+
+### D44 core Cargo workspace REMOVED (D45) — worktree-validation break resolved
+- **What:** Resolved the `core-cargo-workspace-breaks-worktree-validation` carryover by **removing
+  the workspace outright** rather than adding shim/relocation machinery. Re-verified the root cause
+  empirically (bug reproduces; `workspace.exclude` cannot carve a path out of a member's own directory
+  — tested `mev/trees`, `mev/trees/<pkg>`, `mev/trees/*`, all fail with the same "believes it's in a
+  workspace" error). Then assessed the workspace's actual payoff and found it mostly unrealized: no
+  automation runs `cargo test --workspace` (every core repo's `harness.json` runs plain
+  `cargo test`/`clippy`/`build` from its own dir); `mev` + `claude-code-rs` already carried their own
+  `Cargo.lock` so the "single lock" invariant wasn't even true; and shared `core/target/` is forfeited
+  in worktrees under any candidate fix anyway. Deleted `core/Cargo.toml` + `core/Cargo.lock`. Verified
+  all four members (`bastion`, `okf-core`, `mev`, `claude-code-rs`) resolve **standalone** via unchanged
+  path-deps, and a nested `core/<member>/trees/<branch>` package now builds — the break is gone with
+  **zero tooling changes** (worktrees nest exactly as the shared `.claude/workflows/*` engines already
+  create them). mev gates green standalone: fmt PASS, clippy `-D warnings` clean, 567 tests 0 failed,
+  release build OK. Authored `docs/decisions/D45` (supersedes D44's workspace clause **only** — the
+  okf-core promotion to a first-class repo and the rest of D44 stand); updated `.gitignore`,
+  `core/README.md`, `core/planning/core-rust-workspace/notes.md`, and the decisions index;
+  `bastion` + `okf-core` regenerated their own standalone locks. Cleared the carryover, consumed the
+  handoff.
+- **Why:** The prior session left the fix as a deferred user decision. Investigation this session showed
+  `exclude` cannot fix a nested-under-member path (no cheap third option), and that the workspace's
+  benefits were largely latent while it permanently broke the primary dev workflow (nested SDLC
+  worktrees) for all four core-tier Rust repos. Removal was the lowest-complexity resolution that keeps
+  every functional property (path-dep coupling) intact.
+- **Refs:** `docs/decisions/D45-revert-core-cargo-workspace.md`, `docs/decisions/D44-core-cargo-workspace.md`,
+  `core/planning/core-rust-workspace/notes.md`.
 
 ### D44 worktree-validation break — root cause confirmed, fix deferred
 - **What:** Investigated the `core/Cargo.toml` D44 worktree-validation break carried over from the
