@@ -8,15 +8,15 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-07-05T17:17:11Z"
+timestamp: "2026-07-05T21:16:33Z"
 now: []
-next: "MV.5.A — Status Frontmatter Reconciler, MV.6.B — Emit HQ board sections + parse OKF board schema"
+next: "MV.5.A — Status Frontmatter Reconciler, MV.7.A — Effective-priority inheritance"
 blocked: "MV.7.A — Effective-priority inheritance"
 ---
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-07-05 — `6.A-validate-new-fields` shipped, all tests passed, and block validation is fully implemented (priority, due, sdlc_workflow, model). Integration tests and diagnostic docs (`docs/cli.md`) are up to date. Next up: MV.6.B and MV.7.A.
+**Last updated:** 2026-07-05 — `6.B-generate-hq-board` shipped, full spec (6 tasks), PASS. Derived focus `Block`s now carry `priority`/`due` through both rehydration paths (`derived_focus_for`, `derive_brain_focus`), and `mev emit-state` renders a new unified `unified-board` region (NOW/NEXT/BLOCKED/DUE-SOON) unioning business + engineering blocks, each tagged `[BIZ]`/`[ENG]` by source-repo tier, with `NEXT` sorted `(priority asc, due asc, wave asc)` and DUE-SOON covering the 14-day window (overdue included). Next up: MV.5.A and MV.7.A.
 
 **Previous:** `4.E-emit-state-wiring` (Phase 4, state-sync-loop spine terminus) shipped, full spec, PASS (4 tasks). Task 1 wired all five planners into `emit_state` (`src/lib.rs`): `plan_state_json`, `plan_master_plan_tables`, `plan_project_caches`, `plan_tier_rollups`, `plan_hq_board`, each applied via `apply_plan` in that stable order, with the doc comment naming all five generated surfaces. Task 2 added a `mv4e_ripple` integration test module in `tests/brain_emit.rs` proving a single `emit_state(&dir, true)` call ripples a close-A-unblocks-B cross-repo dependency change across every surface (leaf `focus`, leaf project-cache doc + `synced_from`, tier rollup table, HQ board NOW/NEXT/BLOCKED, master-plan wave table), plus a fixed-point check (second pass byte-identical, zero `I_EMIT_WROTE`). Task 3 patched `docs/cli.md`'s `emit-state` section to document the three newly wired surfaces and generalized the sentinel-contract prose to name all four markers. Task 4 confirmed all four harness gates green with no code changes needed. Final review verdict: PASS. This closes Phase 4 (state-sync-loop) entirely — the spine `MV.4.A → {B,C,D} → E` is fully Done.
 

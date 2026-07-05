@@ -12,7 +12,7 @@ related: [master-plan, spec-6a-validate-new-fields, statify-business-master-plan
 
 # Task Spec — Phase 6, Block MV.6.B
 
-**Status:** Not started · **Last run:** never
+**Status:** Done · **Last run:** 2026-07-05 — 6/6 tasks passed, review PASS
 
 ## Goal
 Carry `priority`/`due` onto the derived focus `Block`s and extend `mev emit-state` with one unified
