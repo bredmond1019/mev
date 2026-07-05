@@ -1,0 +1,62 @@
+[
+  {
+    "task_id": 1,
+    "title": "Carry priority/due onto derived focus Blocks",
+    "description": "Part 1 (carry-through). In both places a focus `Block` is rehydrated from a `TrackBlock` id, copy the source block's `priority` and `due` onto the constructed `Block` (they are currently hardcoded `None`): (a) `src/brain/emit.rs::derived_focus_for` (~emit.rs:497, the now/next/blocked map closures) and (b) `src/brain/state.rs::derive_brain_focus` (~state.rs:1544, its now/next/blocked loops). In each, extend the existing per-child `title_map`/`id_index` lookup so it also carries `(priority, due)` from each `tracks[].blocks[]` entry (e.g. map id -> &TrackBlock, or id -> (title, priority, due)), and set `priority`/`due` on the `Block` from it. Leave `derive_rollup`'s Block construction alone (out of scope — no board consumer). Add/extend #[cfg(test)] unit tests in both files asserting the derived now/next/blocked Blocks carry the source priority/due (and remain None when the source block omits them).",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/emit.rs", "src/brain/state.rs"],
+    "dependsOn": []
+  },
+  {
+    "task_id": 2,
+    "title": "render_unified_board + UNIFIED_BOARD marker",
+    "description": "Part 2 (renderer). In `src/brain/emit.rs`: add `markers::UNIFIED_BOARD = \"unified-board\"` alongside the existing marker constants. Add a pure `pub fn render_unified_board(focus: &Focus, edges: &[CrossRepoEdge], config: &BrainConfig, today: chrono::NaiveDate) -> String` that renders four sections — NOW, NEXT, BLOCKED, DUE-SOON — over the unified `focus` (the union produced by `derive_brain_focus` at TierScope::All, whose Blocks now carry priority/due from Task 1 and a `repo` slug). Each row: `[BIZ]`/`[ENG] repo:id — title`, reusing the existing blocked-by annotation helper where blocked_by is present. Tag derivation: look up the Block's `repo` slug in `config.repos`; tier `\"business\"` -> `[BIZ]`, any other tier -> `[ENG]`. NEXT ordering: stable-sort the `next` list by `(priority asc with None last, due asc with None last)` — the list is already wave-ordered, so wave is the implicit tertiary key; parse `due` as `%Y-%m-%d` for comparison, treating unparseable/absent due as last. DUE-SOON: from the union of now+next+blocked, list blocks whose `due` parses and is <= `today + 14 days` (include overdue, i.e. due < today, and surface them louder e.g. an `(overdue)` marker); render without a trailing newline (match `render_hq_board`/`render_wave_table` convention). Add unit tests: [BIZ]/[ENG] tagging by tier; NEXT orders a P1 business block above a P2 eng block (and priority before due before wave); DUE-SOON includes an in-window block and an overdue block and excludes a far-future / dateless one.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/emit.rs"],
+    "dependsOn": [1]
+  },
+  {
+    "task_id": 3,
+    "title": "plan_unified_board + wire into emit_state",
+    "description": "In `src/brain/emit.rs`: add `pub fn plan_unified_board(loaded, graph, config, today) -> EmitPlan` mirroring `plan_hq_board` — for each loaded `kind == \"brain\"` file whose `tier_scope_for(...) == TierScope::All` (the HQ root, sibling `status.md`), build the union focus via `derive_brain_focus(&TierScope::All, config, graph, files)` and the edges via `derive_cross_repo(files)`, render with `render_unified_board(...)`, and splice into the `markers::UNIFIED_BOARD` sentinel using the same `splice_generated` / fixed-point / `W_EMIT_NO_SENTINEL` semantics as `plan_hq_board`. In `src/lib.rs::emit_state` (~line 492): import `plan_unified_board`, call it after `plan_hq_board` passing `chrono::Local::now().date_naive()` as `today`, and `apply_plan` its result in the stable order after `hq_board_plan`; extend the doc-comment list of generated surfaces to name the unified board. Do not alter `plan_hq_board` or the other planners.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/emit.rs", "src/lib.rs"],
+    "dependsOn": [2]
+  },
+  {
+    "task_id": 4,
+    "title": "Integration test: unified board emit",
+    "description": "In `tests/brain_emit.rs` add an integration test over a temp brain fixture (a `brain.toml` registering a `business`-tier repo and at least one non-business/eng-tier repo, plus their leaf `planning/state.json` files with `priority`/`due` on some blocks, and an HQ brain `status.md` carrying the `<!-- BEGIN generated:unified-board -->` / `<!-- END generated:unified-board -->` sentinel). Drive `mev::emit_state(&root, true)` and assert: the unified region is populated; rows are tagged `[BIZ]` for the business-tier repo and `[ENG]` otherwise; NEXT orders a P1 business block above a P2 eng block; DUE-SOON includes an in-window block and an overdue block; and a second `emit_state` pass is byte-identical (fixed point). Mirror the fixture-harness pattern already used by the `mv4e_ripple` / hq-board tests in this file. If DUE-SOON's reference date makes the fixture time-sensitive, choose fixture `due` values relative to a far-future/far-past anchor so the window assertions are stable regardless of the real current date.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["tests/brain_emit.rs"],
+    "dependsOn": [3]
+  },
+  {
+    "task_id": 5,
+    "title": "Add unified-board sentinel to HQ status.md",
+    "description": "Add the `<!-- BEGIN generated:unified-board -->` / `<!-- END generated:unified-board -->` sentinel region to `../../planning/status.md` (the HQ Operating Board host, two tiers up from this repo — see the tasks.md cross-repo Note), near the existing `hq-board` sentinel region but as a distinct block, with a short human heading above it (e.g. `## ▶ Unified Priority Board — engineering + business, by priority & due`). This is the host the live `mev emit-state --write` populates; leave the existing `hq-board` region and all surrounding narrative untouched.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["../../planning/status.md"],
+    "dependsOn": [3]
+  },
+  {
+    "task_id": 6,
+    "title": "Validate",
+    "description": "Run the Validation Commands listed in tasks.md and confirm all pass: cargo fmt --check, cargo clippy -- -D warnings, cargo test, cargo build --release.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": [],
+    "dependsOn": [1, 2, 3, 4, 5]
+  }
+]
