@@ -2,9 +2,9 @@
   "spec_slug": "6.B-generate-hq-board",
   "branch": "6.B-generate-hq-board-flow",
   "started_at": "2026-07-05T20:39:28Z",
-  "updated_at": "2026-07-05T21:09:51Z",
+  "updated_at": "2026-07-05T21:16:33Z",
   "worktree_path": "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/6.B-generate-hq-board-flow",
-  "status": "running",
+  "status": "docs",
   "current_task": 6,
   "tasks": {
     "1": {
@@ -116,12 +116,15 @@
     }
   },
   "review": {
-    "verdict": null,
+    "verdict": "PASS",
     "findings": [],
-    "attempts": 0
+    "attempts": 1
   },
   "docs": {
-    "changed": [],
+    "changed": [
+      "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/6.B-generate-hq-board-flow/docs/architecture.md",
+      "/Users/brandon/Dev/agentic-portfolio/core/mev/trees/6.B-generate-hq-board-flow/docs/cli.md"
+    ],
     "created": []
   },
   "bail_reason": null,
@@ -242,13 +245,29 @@
         "filesReadKb": null,
         "inTokEst": 574,
         "outTok": 4543
+      },
+      {
+        "label": "review-1",
+        "model": "sonnet",
+        "promptTokEst": 986,
+        "filesReadKb": null,
+        "inTokEst": 986,
+        "outTok": 7903
+      },
+      {
+        "label": "docs",
+        "model": "sonnet",
+        "promptTokEst": 799,
+        "filesReadKb": null,
+        "inTokEst": 799,
+        "outTok": 11229
       }
     ],
     "total": {
-      "promptTokEst": 10322,
+      "promptTokEst": 12107,
       "filesReadKb": 0,
-      "inTokEst": 10322,
-      "outTok": 121620
+      "inTokEst": 12107,
+      "outTok": 140752
     }
   }
 }

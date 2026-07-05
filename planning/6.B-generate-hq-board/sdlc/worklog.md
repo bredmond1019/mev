@@ -29,3 +29,6 @@ Validated: gating checks (fast tripwire)
 What: Ran and confirmed all four spec validation commands (cargo fmt --check, cargo clippy -- -D warnings, cargo test, cargo build --release) pass on the 6.B-generate-hq-board branch after Tasks 1-5.
 Decisions: Used the same local-only workaround documented by Tasks 1-4 (temporarily appending an empty [workspace] table to Cargo.toml to escape the outer core/ Cargo workspace nesting so cargo commands resolve, then reverting it before finishing) since this worktree lives at core/mev/trees/6.B-generate-hq-board-flow which the outer core/Cargo.toml workspace neither lists as a member nor excludes; the trees/okf-core symlink needed for the ../okf-core path dependency was already present.; Task 6 is validation-only (files: [] in tasks.json); no source/test files were changed and Cargo.toml diff is empty after the revert, so no commit was made for this task.
 Validated: gating checks (fast tripwire)
+
+## Docs
+Patched: /Users/brandon/Dev/agentic-portfolio/core/mev/trees/6.B-generate-hq-board-flow/docs/architecture.md, /Users/brandon/Dev/agentic-portfolio/core/mev/trees/6.B-generate-hq-board-flow/docs/cli.md
