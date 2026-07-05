@@ -493,7 +493,7 @@ mev emit-graph | jq '{nodes: (.nodes|length), edges: (.edges|length), leaves: (.
 
 Regenerate all derived views in the Brain corpus from the authored `tracks[]` DAG and write them in place (with `--write`) or report what would change (dry-run, without `--write`).
 
-`mev emit-state` is the **single derivation engine** that `/log-work` shells out to for regenerating leaf `focus` fields, the brain `repos[]` / `cross_repo[]` rollup, brain `focus`, the master-plan wave/dependency tables, the per-project cache docs (focus line + `synced_from` watermark), the tier sub-brain rollup tables, and the HQ Operating Board. Because the validator's `check_focus_drift` and `check_rollup` share the same `derive_focus` / `derive_rollup` functions, running `mev emit-state --write` followed by `mev validate-brain --state` on the same corpus will report zero `W_STATE_FOCUS_DRIFT` and zero `W_STATE_ROLLUP_DRIFT` — the emit is, by construction, the fixed point of the drift check across every generated surface.
+`mev emit-state` is the **single derivation engine** that `/log-work` shells out to for regenerating leaf `focus` fields, the brain `repos[]` / `cross_repo[]` rollup, brain `focus`, the master-plan wave/dependency tables, the per-project cache docs (focus line + `synced_from` watermark), the tier sub-brain rollup tables, the HQ Operating Board, and the HQ unified priority board. Because the validator's `check_focus_drift` and `check_rollup` share the same `derive_focus` / `derive_rollup` functions, running `mev emit-state --write` followed by `mev validate-brain --state` on the same corpus will report zero `W_STATE_FOCUS_DRIFT` and zero `W_STATE_ROLLUP_DRIFT` — the emit is, by construction, the fixed point of the drift check across every generated surface.
 
 ```bash
 mev emit-state [--write] [path]
@@ -515,9 +515,10 @@ mev emit-state [--write] [path]
 - **Project-cache docs** (`docs/projects/<slug>.md`, one per leaf project repo): splices the derived focus headline into the `<!-- BEGIN generated:project-cache -->` / `<!-- END generated:project-cache -->` sentinels and reconciles the doc's OKF frontmatter `synced_from` field to the child `state.json`'s `updated` watermark. A repo with no matching `[[repos]]` entry, or whose entry has a blank `cache_doc`, is silently skipped (nothing to target).
 - **Tier rollup tables** (each tier sub-brain's sibling `status.md`): splices a rendered per-repo now/next/blocked rollup table into the `<!-- BEGIN generated:tier-rollup -->` / `<!-- END generated:tier-rollup -->` sentinels. Only brain files scoped to a single tier (`tier_scope_for` resolves to `TierScope::Tier`) are targeted — the HQ root (`TierScope::All`) is skipped by this planner.
 - **HQ Operating Board** (the HQ brain's `status.md`): splices a rendered NOW/NEXT/BLOCKED board across every registered repo into the `<!-- BEGIN generated:hq-board -->` / `<!-- END generated:hq-board -->` sentinels.
+- **HQ unified priority board** (the same HQ brain's `status.md`, independent sentinel region): splices a priority-ranked NOW/NEXT/BLOCKED/DUE-SOON board into the `<!-- BEGIN generated:unified-board -->` / `<!-- END generated:unified-board -->` sentinels. Rows are tagged `[BIZ]`/`[ENG]` by the source repo's configured tier; `NEXT` is stably re-sorted by `(priority asc, due asc)` (absent values last, wave order as the implicit tiebreak); `DUE-SOON` lists blocks due within 14 days (overdue included and annotated) sorted by due date ascending.
 - **Portfolio `state.json`** (`kind == "portfolio"`): not regenerated at all (no `focus` to derive — these are terminal repos), and skipped entirely by the wave-table splice pass — no `master-plan.md` is expected, so no `W_EMIT_NO_SENTINEL` is raised for these repos.
 
-All three of the project-cache, tier-rollup, and HQ-board planners share the same fixed-point and sentinel-safety guarantees as the wave-table splice: a target document missing its sentinel pair produces a `W_EMIT_NO_SENTINEL` warning and is left untouched, and re-running the emit over already-emitted content produces no further `EmitAction`/`I_EMIT_WROTE`.
+All of the project-cache, tier-rollup, HQ-board, and unified-board planners share the same fixed-point and sentinel-safety guarantees as the wave-table splice: a target document missing its sentinel pair produces a `W_EMIT_NO_SENTINEL` warning and is left untouched, and re-running the emit over already-emitted content produces no further `EmitAction`/`I_EMIT_WROTE`.
 
 #### Sentinel contract
 
@@ -531,7 +532,7 @@ Every planner splices into its own named marker, using the same `<!-- BEGIN gene
 <!-- END generated:wave-table -->
 ```
 
-The other three planners use their own markers in the same document types: `project-cache` (leaf `docs/projects/<slug>.md`), `tier-rollup` (tier sub-brain `status.md`), and `hq-board` (HQ `status.md`).
+The other planners use their own markers in the same document types: `project-cache` (leaf `docs/projects/<slug>.md`), `tier-rollup` (tier sub-brain `status.md`), `hq-board` (HQ `status.md`), and `unified-board` (the same HQ `status.md`, an independent sentinel region alongside `hq-board`).
 
 - Both `BEGIN` and `END` sentinels must be present and balanced; a missing or unbalanced pair causes a `W_EMIT_NO_SENTINEL` warning and the file is skipped — sentinels are never invented into arbitrary prose.
 - Re-splicing an already-emitted table is idempotent.
@@ -542,7 +543,7 @@ The other three planners use their own markers in the same document types: `proj
 |---|---|---|
 | `W_EMIT_DRY_RUN` | Warning | Planned action (dry-run only; no file written) |
 | `I_EMIT_WROTE` | Warning | File written (`--write` mode) |
-| `W_EMIT_NO_SENTINEL` | Warning | A target document is missing its marker's sentinel pair (`wave-table`, `project-cache`, `tier-rollup`, or `hq-board`); file skipped |
+| `W_EMIT_NO_SENTINEL` | Warning | A target document is missing its marker's sentinel pair (`wave-table`, `project-cache`, `tier-rollup`, `hq-board`, or `unified-board`); file skipped |
 | `E_EMIT_WRITE_FAILED` | Error | IO error writing a file; causes exit 1 |
 | `E_CONFIG_NOT_FOUND` | Error | `brain.toml` could not be located by walking up from `path`; causes exit 1 |
 | `E_EMIT_LINKED_WORKTREE` | Error | `--write` invoked from inside a linked git worktree; causes exit 1 |
