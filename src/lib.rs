@@ -478,6 +478,10 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
 ///   sentinels).
 /// - [`brain::emit::plan_hq_board`] — splices the NOW/NEXT/BLOCKED Operating Board into
 ///   the HQ brain's `status.md` (`<!-- BEGIN generated:hq-board -->` sentinels).
+/// - [`brain::emit::plan_unified_board`] — splices the priority-ranked
+///   NOW/NEXT/BLOCKED/DUE-SOON unified board (unioning engineering + business blocks,
+///   tagged `[BIZ]`/`[ENG]`) into the HQ brain's `status.md`
+///   (`<!-- BEGIN generated:unified-board -->` sentinels; `MV.6.B`).
 ///
 /// When `write` is `false` (default), the function is a **dry-run**: no files are
 /// written and each planned action is reported as a `W_EMIT_DRY_RUN` diagnostic.
@@ -493,7 +497,7 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     use brain::config::find_brain_config;
     use brain::emit::{
         apply_plan, plan_hq_board, plan_master_plan_tables, plan_project_caches, plan_state_json,
-        plan_status_frontmatter, plan_tier_rollups,
+        plan_status_frontmatter, plan_tier_rollups, plan_unified_board,
     };
     use brain::state::{StateLoadError, build_state_graph, discover_state_files, load_state};
 
@@ -550,13 +554,16 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     let project_caches_plan = plan_project_caches(root, &loaded, &graph, &config);
     let tier_rollups_plan = plan_tier_rollups(&loaded, &graph, &config);
     let hq_board_plan = plan_hq_board(&loaded, &graph, &config);
+    let unified_board_plan =
+        plan_unified_board(&loaded, &graph, &config, chrono::Local::now().date_naive());
 
-    // 5. Apply all five plans (write or dry-run), in a stable order.
+    // 5. Apply all plans (write or dry-run), in a stable order.
     let state_diags = apply_plan(&state_plan, write);
     let mp_diags = apply_plan(&mp_plan, write);
     let project_caches_diags = apply_plan(&project_caches_plan, write);
     let tier_rollups_diags = apply_plan(&tier_rollups_plan, write);
     let hq_board_diags = apply_plan(&hq_board_plan, write);
+    let unified_board_diags = apply_plan(&unified_board_plan, write);
 
     // 6. Run and apply the YAML frontmatter planner last so it sees the updated markdown in write mode.
     let status_fm_plan = plan_status_frontmatter(root, &loaded, &graph, &config);
@@ -567,6 +574,7 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     report.diagnostics.extend(project_caches_diags);
     report.diagnostics.extend(tier_rollups_diags);
     report.diagnostics.extend(hq_board_diags);
+    report.diagnostics.extend(unified_board_diags);
     report.diagnostics.extend(status_fm_diags);
 
     Ok(report)

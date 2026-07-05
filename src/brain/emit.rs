@@ -1387,6 +1387,87 @@ pub fn plan_hq_board(
 }
 
 // ---------------------------------------------------------------------------
+// plan_unified_board
+// ---------------------------------------------------------------------------
+
+/// Plan the unified priority-ranked NOW/NEXT/BLOCKED/DUE-SOON board splice
+/// into the HQ brain's sibling `status.md` (`MV.6.B`).
+///
+/// Mirrors [`plan_hq_board`] exactly, but targets the separate
+/// [`markers::UNIFIED_BOARD`] sentinel and renders via
+/// [`render_unified_board`], which additionally tags each row `[BIZ]`/`[ENG]`
+/// by source-repo tier and adds the DUE-SOON section (evaluated against
+/// `today`). The [`markers::HQ_BOARD`] region and every other planner are
+/// untouched — this is an independent sentinel in the same document.
+pub fn plan_unified_board(
+    files: &[(StateSource, StateFile)],
+    graph: &StateGraph,
+    config: &BrainConfig,
+    today: chrono::NaiveDate,
+) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+
+    for (src, file) in files {
+        if file.kind != "brain" {
+            continue;
+        }
+        let scope = tier_scope_for(file, config);
+        if !matches!(scope, TierScope::All) {
+            continue; // tier sub-brains have no unified board; HQ root only
+        }
+
+        let Some(planning_dir) = src.abs_path.parent() else {
+            continue;
+        };
+        let board_path = planning_dir.join("status.md");
+
+        let original = match std::fs::read_to_string(&board_path) {
+            Ok(s) => s,
+            Err(_) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &board_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "no status.md beside HQ '{}' state.json; skipping unified-board emit",
+                        src.repo_slug
+                    ),
+                ));
+                continue;
+            }
+        };
+
+        let focus = derive_brain_focus(&scope, config, graph, files);
+        let edges = derive_cross_repo(files);
+        let board = render_unified_board(&focus, &edges, config, today);
+
+        match splice_generated(&original, markers::UNIFIED_BOARD, &board) {
+            Ok(new_content) => {
+                if new_content != original {
+                    plan.actions.push(EmitAction {
+                        path: board_path,
+                        new_content,
+                        note: format!("update unified priority board for '{}'", src.repo_slug),
+                    });
+                }
+            }
+            Err(_) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &board_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "status.md for HQ '{}' has no <!-- BEGIN generated:unified-board --> \
+                         sentinels; skipping",
+                        src.repo_slug
+                    ),
+                ));
+            }
+        }
+    }
+
+    plan
+}
+
+// ---------------------------------------------------------------------------
 // plan_status_frontmatter
 // ---------------------------------------------------------------------------
 
