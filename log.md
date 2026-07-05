@@ -19,6 +19,40 @@ timestamp: "2026-07-05T17:17:11Z"
 
 ## [2026-07-05]
 
+### `6.B-generate-hq-board` — carry priority/due through focus + unified HQ board region
+- **What:** Ran `/sdlc-flow 6.B-generate-hq-board` to completion (6/6 tasks passed, review PASS). Task 1
+  fixed both derived-focus rehydration paths — `emit.rs::derived_focus_for` and
+  `state.rs::derive_brain_focus` — to copy the source `TrackBlock`'s `priority`/`due` onto the
+  constructed `Block` instead of hardcoding `None` (introduced `BlockIndexEntry` type alias in
+  `emit.rs` to satisfy `clippy::type_complexity`). Task 2 added `markers::UNIFIED_BOARD` and a pure
+  `render_unified_board(focus, edges, config, today)` rendering NOW/NEXT/BLOCKED/DUE-SOON sections
+  tagged `[BIZ]`/`[ENG]` by source-repo tier, with `NEXT` stably re-sorted by `(priority asc, due asc)`
+  (wave implicit tiebreak) and DUE-SOON (due ≤ today+14d, overdue included) sorted by due ascending.
+  Task 3 added `plan_unified_board` (mirroring `plan_hq_board`) and wired it into `emit_state`
+  (`src/lib.rs`) after `plan_hq_board`, using `chrono::Local::now().date_naive()` as the reference
+  date. Task 4 added an end-to-end integration test driving `emit_state` over a business+engineering
+  fixture, asserting tagging, priority-based ordering, DUE-SOON window behavior, and fixed-point
+  idempotence. Task 5 added the `unified-board` sentinel region to the HQ root
+  `../../planning/status.md` (applied directly in the main company-brain checkout, outside the mev
+  worktree — no mev-repo commit for this task). Task 6 confirmed all four harness gates green
+  (fmt, clippy `-D warnings`, test, release build). Final review verdict: PASS. The existing
+  `hq-board` sentinel, per-domain lanes, and `/biz-status` are unchanged. This closes out
+  `6.B-generate-hq-board` in full.
+- **Why:** Second step of operationalizing the Statify Business roadmap inside `mev` — gives the HQ
+  brain a single priority-ranked board unioning business and engineering blocks, per
+  `core/planning/statify-business/master-plan.md` (D43).
+- **Refs:** `planning/6.B-generate-hq-board/spec.md`, `planning/master-plan.md`.
+  ```
+  7dcbb94 chore: flow state — docs
+  1bdd8de docs: update docs for 6.B-generate-hq-board
+  3d949ed chore: flow state — task 6 passed
+  2c630ad chore: flow state — task 5 passed
+  ae4ea5e chore: flow state — task 4 passed
+  6b460fd feat: implement 6.B-generate-hq-board-task4
+  a7864d7 chore: flow state — task 3 passed
+  b8d26a2 feat: implement 6.B-generate-hq-board-task3
+  ```
+
 ### `6.A-validate-new-fields` — implement validation for new block fields
 - **What:** Ran `/sdlc-task 6.A-validate-new-fields` to completion (all tasks passed). Implemented validation for the four new optional `Block` / `TrackBlock` fields (`priority`, `due`, `sdlc_workflow`, `model`) inside `src/brain/state.rs`. Added tests verifying `priority` range (0..=3), `due` format (YYYY-MM-DD), and `sdlc_workflow`/`model` enums, resulting in 4 new diagnostic codes (`E_STATE_PRIORITY_RANGE`, `E_STATE_DUE_FORMAT`, `E_STATE_SDLC_WORKFLOW_ENUM`, `E_STATE_MODEL_ENUM`). Refactored struct initializers in tests and the CLI to support the new fields explicitly. Added integration tests to `tests/brain_state.rs` and patched `docs/cli.md` with the new codes. Reconciled `MV.6.A` to `closed` in `planning/state.json`. All four harness gates (fmt, clippy, test, build) and the emoji gate passed cleanly.
 - **Why:** This is the first step (Block MV.6.A) in operationalizing the Statify Business roadmap inside `mev`, introducing these fields to the state graph ahead of generating the unified HQ board region (MV.6.B).
