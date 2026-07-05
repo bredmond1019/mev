@@ -25,6 +25,10 @@
 //! - `W_STATE_ROLLUP_DRIFT` — brain `repos[]` headline drifted from child `focus`.
 //! - `W_STATE_FOCUS_DRIFT` — a leaf file's `focus` snapshot has drifted from the tracks[] derivation.
 //! - `W_STATE_FILE_MISSING` — a registered repo has no `planning/state.json`.
+//! - `E_STATE_PRIORITY_RANGE` — a `priority` value is not in 0..=3.
+//! - `E_STATE_DUE_FORMAT` — a `due` value is not a valid YYYY-MM-DD date.
+//! - `E_STATE_SDLC_WORKFLOW_ENUM` — an `sdlc_workflow` value ∉ {none,patch,task,run,flow}.
+//! - `E_STATE_MODEL_ENUM` — a `model` value ∉ {sonnet,gemini-pro,gemini-flash,either}.
 
 use std::path::Path;
 #[cfg(test)]
@@ -451,6 +455,72 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                                 .join(", ")
                         ),
                     ));
+                }
+            }
+        }
+    }
+
+    diags
+}
+
+// ---------------------------------------------------------------------------
+
+/// Run policy checks on the four newly-introduced optional block fields.
+pub fn check_field_policy(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let path = &src.abs_path;
+
+    for track in &file.tracks {
+        for block in &track.blocks {
+            if let Some(priority) = block.priority
+                && priority > 3
+            {
+                diags.push(Diagnostic::error(
+                    path,
+                    "E_STATE_PRIORITY_RANGE",
+                    format!(
+                        "block '{}' has out-of-range priority {}; must be 0..=3",
+                        block.id, priority
+                    ),
+                ));
+            }
+
+            if let Some(ref due) = block.due
+                && chrono::NaiveDate::parse_from_str(due, "%Y-%m-%d").is_err()
+            {
+                diags.push(Diagnostic::error(
+                    path,
+                    "E_STATE_DUE_FORMAT",
+                    format!(
+                        "block '{}' has malformed due date '{}'; must be YYYY-MM-DD",
+                        block.id, due
+                    ),
+                ));
+            }
+
+            if let Some(ref wf) = block.sdlc_workflow {
+                match wf.as_str() {
+                    "none" | "patch" | "task" | "run" | "flow" => {}
+                    _ => {
+                        diags.push(Diagnostic::error(
+                            path,
+                            "E_STATE_SDLC_WORKFLOW_ENUM",
+                            format!("block '{}' has invalid sdlc_workflow '{}'; must be one of {{none, patch, task, run, flow}}", block.id, wf),
+                        ));
+                    }
+                }
+            }
+
+            if let Some(ref model) = block.model {
+                match model.as_str() {
+                    "sonnet" | "gemini-pro" | "gemini-flash" | "either" => {}
+                    _ => {
+                        diags.push(Diagnostic::error(
+                            path,
+                            "E_STATE_MODEL_ENUM",
+                            format!("block '{}' has invalid model '{}'; must be one of {{sonnet, gemini-pro, gemini-flash, either}}", block.id, model),
+                        ));
+                    }
                 }
             }
         }
@@ -1389,6 +1459,8 @@ pub fn derive_rollup(
                     .now
                     .iter()
                     .map(|id| Block {
+                        due: None,
+                        priority: None,
                         id: id.clone(),
                         title: title_of(id),
                         status: Some("in_progress".to_string()),
@@ -1402,6 +1474,8 @@ pub fn derive_rollup(
                     .next
                     .iter()
                     .map(|id| Block {
+                        due: None,
+                        priority: None,
                         id: id.clone(),
                         title: title_of(id),
                         status: None,
@@ -1415,6 +1489,8 @@ pub fn derive_rollup(
                     .blocked
                     .iter()
                     .map(|(id, unmet)| Block {
+                        due: None,
+                        priority: None,
                         id: id.clone(),
                         title: title_of(id),
                         status: None,
@@ -1510,6 +1586,8 @@ pub fn derive_brain_focus(
             let key = (entry.slug.clone(), id.clone());
             if seen_now.insert(key) {
                 now.push(Block {
+                    due: None,
+                    priority: None,
                     id: id.clone(),
                     title: title_of(id),
                     status: Some("in_progress".to_string()),
@@ -1524,6 +1602,8 @@ pub fn derive_brain_focus(
             let key = (entry.slug.clone(), id.clone());
             if seen_next.insert(key) {
                 next.push(Block {
+                    due: None,
+                    priority: None,
                     id: id.clone(),
                     title: title_of(id),
                     status: None,
@@ -1538,6 +1618,8 @@ pub fn derive_brain_focus(
             let key = (entry.slug.clone(), id.clone());
             if seen_blocked.insert(key) {
                 blocked.push(Block {
+                    due: None,
+                    priority: None,
                     id: id.clone(),
                     title: title_of(id),
                     status: None,
@@ -1573,7 +1655,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Minimal leaf state.json (mev / bastion / orchestrator shape).
-    fn leaf_json(repo: &str) -> String {
+    pub(crate) fn leaf_json(repo: &str) -> String {
         format!(
             r#"{{
   "repo": "{repo}",
@@ -3317,6 +3399,7 @@ mod tests {
         let track_blocks: Vec<TrackBlock> = blocks
             .iter()
             .map(|(id, status, wave, deps)| TrackBlock {
+                due: None, priority: None, sdlc_workflow: None, model: None,
                 id: id.to_string(),
                 title: id.to_string(),
                 status: status.map(|s| s.to_string()),
@@ -3593,6 +3676,7 @@ mod tests {
         let track_blocks: Vec<TrackBlock> = blocks
             .iter()
             .map(|(id, status, deps)| TrackBlock {
+                due: None, priority: None, sdlc_workflow: None, model: None,
                 id: id.to_string(),
                 title: id.to_string(),
                 status: status.map(|s| s.to_string()),
@@ -3889,6 +3973,7 @@ mod tests {
         // The origin back-pointer is structural metadata — the integrity check validates
         // that the block exists in tracks[], not that it carries an origin field.
         let real_block = TrackBlock {
+            due: None, priority: None, sdlc_workflow: None, model: None,
             id: "MV.3.P2".to_string(),
             title: "P2 block".to_string(),
             status: Some("in_progress".to_string()),
@@ -3964,6 +4049,8 @@ mod tests {
         let make_blocks = |ids: &[&str]| -> Vec<Block> {
             ids.iter()
                 .map(|id| Block {
+                    due: None,
+                    priority: None,
                     id: id.to_string(),
                     title: "placeholder".to_string(),
                     status: None,
@@ -4005,6 +4092,8 @@ mod tests {
         let make_blocks = |ids: &[&str], with_status: bool| -> Vec<Block> {
             ids.iter()
                 .map(|id| Block {
+                    due: None,
+                    priority: None,
                     id: id.to_string(),
                     title: "placeholder".to_string(),
                     status: if with_status {
@@ -4148,6 +4237,7 @@ mod tests {
         let track_blocks: Vec<TrackBlock> = blocks
             .iter()
             .map(|(id, status, deps)| TrackBlock {
+                due: None, priority: None, sdlc_workflow: None, model: None,
                 id: id.to_string(),
                 title: id.to_string(),
                 status: status.map(|s| s.to_string()),
@@ -4160,6 +4250,8 @@ mod tests {
         let make_focus_blocks = |ids: &[&str]| -> Vec<Block> {
             ids.iter()
                 .map(|id| Block {
+                    due: None,
+                    priority: None,
                     id: id.to_string(),
                     title: "placeholder".to_string(),
                     status: None,
@@ -4361,6 +4453,7 @@ mod tests {
             updated: "2026-06-30".to_string(),
             focus: Focus {
                 now: vec![Block {
+                    due: None, priority: None,
                     id: "BA.1.A".to_string(),
                     title: "something".to_string(),
                     status: Some("in_progress".to_string()),
@@ -4682,6 +4775,7 @@ mod tests {
             repo: "beta".to_string(),
             tier: None, // authored before tier was ever populated
             now: vec![Block {
+                due: None, priority: None,
                 id: "BE.1.A".to_string(),
                 title: "Hand-authored headline".to_string(),
                 status: Some("in_progress".to_string()),
@@ -4941,4 +5035,98 @@ fn carryover_schema_checks() {
 
     assert!(bad_kind, "Should flag bad kind");
     assert!(bad_scope, "Should flag malformed scope");
+}
+
+// --- check_field_policy tests ---
+
+#[cfg(test)]
+mod check_field_policy_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn run_field_policy(block: okf_core::TrackBlock) -> Vec<Diagnostic> {
+        let mut file: StateFile =
+            serde_json::from_str(tests::leaf_json("test_repo").as_str()).unwrap();
+        file.tracks[0].blocks[0] = block;
+        let src = StateSource {
+            repo_slug: "test_repo".to_string(),
+            abs_path: PathBuf::from("test.json"),
+            expected_kind: "project",
+        };
+        check_field_policy(&src, &file)
+    }
+
+    fn base_block() -> okf_core::TrackBlock {
+        okf_core::TrackBlock {
+            id: "B.1".to_string(),
+            title: "Test".to_string(),
+            status: Some("open".to_string()),
+            depends_on: vec![],
+            wave: None,
+            origin: None,
+            priority: None,
+            due: None,
+            sdlc_workflow: None,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn test_valid_all_none() {
+        assert!(run_field_policy(base_block()).is_empty());
+    }
+
+    #[test]
+    fn test_priority_range() {
+        let mut b = base_block();
+        b.priority = Some(0);
+        assert!(run_field_policy(b.clone()).is_empty());
+        b.priority = Some(3);
+        assert!(run_field_policy(b.clone()).is_empty());
+        b.priority = Some(4);
+        let diags = run_field_policy(b);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].locator, "E_STATE_PRIORITY_RANGE");
+    }
+
+    #[test]
+    fn test_due_format() {
+        let mut b = base_block();
+        b.due = Some("2026-06-18".to_string());
+        assert!(run_field_policy(b.clone()).is_empty());
+        b.due = Some("Q3".to_string());
+        let diags = run_field_policy(b.clone());
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].locator, "E_STATE_DUE_FORMAT");
+        b.due = Some("2026-13-99".to_string());
+        let diags = run_field_policy(b);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].locator, "E_STATE_DUE_FORMAT");
+    }
+
+    #[test]
+    fn test_sdlc_workflow() {
+        let mut b = base_block();
+        for val in ["none", "patch", "task", "run", "flow"] {
+            b.sdlc_workflow = Some(val.to_string());
+            assert!(run_field_policy(b.clone()).is_empty());
+        }
+        b.sdlc_workflow = Some("pipeline".to_string());
+        let diags = run_field_policy(b);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].locator, "E_STATE_SDLC_WORKFLOW_ENUM");
+    }
+
+    #[test]
+    fn test_model() {
+        let mut b = base_block();
+        for val in ["sonnet", "gemini-pro", "gemini-flash", "either"] {
+            b.model = Some(val.to_string());
+            assert!(run_field_policy(b.clone()).is_empty());
+        }
+        b.model = Some("gpt".to_string());
+        let diags = run_field_policy(b);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].locator, "E_STATE_MODEL_ENUM");
+    }
 }

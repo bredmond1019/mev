@@ -358,9 +358,9 @@ pub fn validate_brain_structure(root: &std::path::Path) -> anyhow::Result<Report
 pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     use brain::config::find_brain_config;
     use brain::state::{
-        StateLoadError, build_state_graph, check_backlog_integrity, check_focus_drift,
-        check_rollup, check_schema, check_state_graph, check_status_consistency, detect_cycles,
-        discover_state_files, load_state,
+        StateLoadError, build_state_graph, check_backlog_integrity, check_field_policy,
+        check_focus_drift, check_rollup, check_schema, check_state_graph, check_status_consistency,
+        detect_cycles, discover_state_files, load_state,
     };
     use std::collections::HashMap;
 
@@ -394,6 +394,7 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
                 // 3. Schema-ring checks on successfully-loaded files.
                 let schema_diags = check_schema(src, &file);
                 report.diagnostics.extend(schema_diags);
+                report.diagnostics.extend(check_field_policy(src, &file));
                 loaded.push((src.clone(), file));
             }
             Err(StateLoadError::Parse { .. }) => {

@@ -444,6 +444,119 @@ existence — applied across content types.
 
 ---
 
+## Phase 6 — Statify Business v1: priority & due fields
+
+> **Upstream prerequisite — okf-core `OK.1.A`.** The block structs (`TrackBlock`, `Block`) are defined in
+> the `okf-core` crate and only *re-exported* here (`src/brain/state.rs` → `pub use okf_core::{…}`). The
+> `priority`/`due`/`sdlc_workflow`/`model` fields are **added in okf-core (`OK.1.A`)**; the blocks below add
+> only the validation policy, the emit/board render, and the schema doc. Land + commit `OK.1.A` before
+> starting `MV.6.A` (mev depends on okf-core by path). Full cross-repo seam + design: the brain program
+> plan `planning/statify-business/master-plan.md` (governed by D43). See okf-core `planning/master-plan.md`
+> for `OK.1.A`.
+
+### MV.6.A — Validate the new fields + schema doc
+- **Target repo:** `mev` (core tier). **Depends on `OK.1.A`** (the fields must exist to validate them).
+- **What:** Add validation to `mev validate-brain --state` for the four fields `OK.1.A` introduced:
+  `priority` in 0–3 (`E_STATE_PRIORITY_RANGE`), `due` a valid ISO `YYYY-MM-DD` date (`E_STATE_DUE_FORMAT`),
+  `sdlc_workflow` ∈ {`none`,`patch`,`task`,`run`,`flow`} (`E_STATE_SDLC_WORKFLOW_ENUM`), and `model` ∈
+  {`sonnet`,`gemini-pro`,`gemini-flash`,`either`} (`E_STATE_MODEL_ENUM`). Document all four fields + the
+  money/deadline priority rubric + the model rule-of-thumb in the canonical schema doc. **The per-block
+  *rationale* (the "why this model/workflow") is NOT a state field — it stays in the plan markdown**
+  (narrative, per D36's graph-vs-narrative litmus). **No inheritance and no board change here** — this
+  block only makes the fields validate + be documented.
+- **Why:** okf-core defines the fields leniently (any string parses); mev is where policy lives, so the
+  allowed-set enforcement + error codes belong here alongside every other `E_STATE_*` guard. The routing
+  enums are validated here even though the board doesn't consume them yet — they're authored by BR.2.B and
+  queryable immediately.
+- **Files:**
+  - *Modified* `core/mev/src/brain/state.rs` and/or `core/mev/src/main.rs` (the `--state` check path) —
+    add the four guards + `E_STATE_*` error codes
+  - *Modified* `core/mev/tests/` state-validation test(s) — cover in/out-of-range priority, valid/invalid
+    due, and valid/invalid `sdlc_workflow`/`model` enum values
+  - *Modified* `core/planning/state-schema.md` (document all four fields incl. the P0–P3 rubric, the
+    model rule-of-thumb, the recurring-work exclusion, and the "a brain file may carry its own authored
+    `tracks[]`" precedent) + its `index.md` row if the scope changes
+- **Interfaces / shared surface:** validates the `OK.1.A` fields; the shared surface MV.6.B, the business
+  `BZ.1.A` track, and the plan commands in BR.2.B all lean on.
+- **Out of scope:** the struct fields themselves (okf-core `OK.1.A`); priority inheritance / effective-
+  priority (Phase 7, MV.7.A); the board emit view + carry-through (MV.6.B); board *columns* for
+  `model`/`sdlc_workflow` (deferred — no consumer yet); teaching the plan commands to author the routing
+  fields (BR.2.B); authoring any actual business blocks (BZ.1.A).
+- **Depends on:** okf-core `OK.1.A`.
+- **Acceptance criteria:**
+  - A block with `priority: 0..3`, a valid `due`, and valid `sdlc_workflow`/`model` values passes
+    `mev validate-brain --state`.
+  - `priority: 4` raises `E_STATE_PRIORITY_RANGE`; `due: "2026-13-99"` raises `E_STATE_DUE_FORMAT`;
+    `sdlc_workflow: "pipeline"` raises `E_STATE_SDLC_WORKFLOW_ENUM`; `model: "gpt"` raises `E_STATE_MODEL_ENUM`.
+  - `state-schema.md` documents all four fields with rubric + model rule-of-thumb; adding the doc updates
+    its `index.md` row.
+  - `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` all pass.
+
+### MV.6.B — Unified priority-ranked HQ board view + DUE-SOON lane
+- **Target repo:** `mev` (core tier).
+- **What:** Two parts. **(1) Carry-through:** in the focus-derivation step (`src/brain/emit.rs`, where a
+  focus `Block` is built from a `TrackBlock` id, ~`emit.rs:497`), copy `priority` + `due` from the source
+  `TrackBlock` onto the derived focus `Block` so `render_hq_board(&Focus)` can sort by them (this is the
+  plumbing `MV.6.A` deliberately left out; the `Block` fields were added in `OK.1.A`). **(2) Board:** extend
+  `mev emit-state` to generate one **unified region** on the HQ Operating Board that unions every repo's
+  blocks *including* the `business` track: a single NOW / NEXT / BLOCKED / **DUE-SOON** view, each row
+  tagged `[BIZ]` or `[ENG]` (derived from the source repo's tier). `NEXT` sorts by
+  `(priority asc, due asc, wave asc)`. `DUE-SOON` = open blocks whose `due` is within ~14 days (overdue
+  surfaces louder). Emit into a new sentinel region so it round-trips idempotently. The existing
+  per-domain lanes and `/biz-status` are **untouched** — this adds the missing unified lens.
+- **Why:** The operator already has two *separate* surfaces (`/biz-status`, `/prime`/board); the missing
+  piece is the single cross-domain, priority-ranked glance-view. This is the payoff block.
+- **Files:**
+  - *Modified* `core/mev/src/brain/emit.rs` (carry `priority`/`due` onto the derived focus `Block`; new
+    unified-region derivation + priority/due sort + DUE-SOON)
+  - *Modified* `core/mev/src/brain/` board-sentinel constants (add the new generated-region marker)
+  - *Modified* `core/mev/tests/` emit test(s) — assert ordering, `[BIZ]`/`[ENG]` tagging, DUE-SOON window
+  - *Modified* `planning/status.md` (the HQ Operating Board host — new sentinel region rendered by emit)
+- **Interfaces / shared surface:** consumes the `priority`/`due` fields (`OK.1.A`) validated by MV.6.A;
+  reuses the existing HQ-board sentinel/emit mechanism.
+- **Out of scope:** effective-priority inheritance (Phase 7) — v1 sorts by *raw* `priority`; retiring
+  `progress.md` (BR.2.A); authoring the business blocks (BZ.1.A); the `Block` field additions (`OK.1.A`)
+  and the validation (MV.6.A).
+- **Depends on:** MV.6.A (needs the fields validated); transitively okf-core `OK.1.A` (the
+  `Block.priority`/`due` fields it carries through).
+- **Acceptance criteria:**
+  - `mev emit-state --write` renders a unified region with business + engineering rows correctly tagged.
+  - `NEXT` is ordered by priority, then due, then wave; a P1 business block sorts above a P2 eng block.
+  - `DUE-SOON` lists open blocks with `due` within the window; an overdue open block is flagged.
+  - Re-running emit is idempotent (no diff churn); `cargo test` / `clippy -D warnings` / `fmt --check` pass.
+
+---
+
+## Phase 7 — Cross-domain inheritance (v2, forward-looking — NOT v1)
+
+### MV.7.A — Effective-priority inheritance (min-propagation through depends_on)
+- **Target repo:** `mev` (core tier). **Forward-looking:** author now while context is fresh; refine
+  Files when it becomes next.
+- **What:** Compute an **effective priority** per block by reverse-topological `min`-propagation over the
+  `depends_on` DAG: `effective(n) = min(own(n), min{ effective(m) : n ∈ depends_on(m) })`. A block that
+  gates a hotter (lower-number) block inherits that hotness and floats up. Feed `effective` into the
+  unified board's `NEXT` ordering (replacing raw `priority`). Cycle-safe (the DAG is already cycle-checked
+  by MV.3.P2).
+- **Why:** This is the "don't neglect the boring task that unblocks money" guardrail — an engineering
+  block that gates a P0 business block auto-floats to the top. Deferred out of v1 because it is the only
+  part that could balloon; visibility (Phases 0–2) delivers the core value without it.
+- **Files (provisional):**
+  - *Modified* `core/mev/src/brain/graph.rs` (reverse-topo effective-priority pass)
+  - *Modified* `core/mev/src/brain/emit.rs` (board `NEXT` sorts by `effective` not raw `priority`)
+  - *Modified* `core/mev/tests/` (inheritance across a business↔engineering edge; cycle safety)
+  - *Modified* `core/planning/state-schema.md` (document effective-priority derivation)
+- **Interfaces / shared surface:** consumes the `depends_on` DAG (D36) + `priority` (MV.6.A); changes the
+  board sort key (MV.6.B).
+- **Out of scope:** the active "you're building X but Y matters more" nudge (a later, separate block).
+- **Depends on:** MV.6.A; supersedes MV.6.B's raw-priority sort with effective-priority.
+- **Acceptance criteria (provisional):**
+  - An eng block that `depends_on`-gates a P0 business block shows effective priority P0 and sorts to the
+    top of the unified `NEXT`.
+  - A dependency cycle does not hang or panic the pass.
+  - `cargo test` / `clippy -D warnings` / `fmt --check` pass.
+
+---
+
 ## Quick Reference Sequence Table
 
 | Phase | Block | What | Why | Role in destination |
@@ -471,6 +584,19 @@ existence — applied across content types.
 | 3B | MV.3B.V | `emit-graph` ships resolved edges (`target_node_id`/`target_doc_id`) | One resolver — kill the Rust/Python semantic divergence OR.G exposed | Corpus engine output (D4); gates the embed pass |
 | 4 | — | Blog validation + code-block/link linting | Cover a fourth content type | Whole-tree coverage |
 | 5+ | — | `watch` (hot-reload) + `compile` (manifest.json) | Speed + precompiled index | Differentiating build |
+| 6 | MV.6.A | Validate the four fields (`E_STATE_*`) + schema doc *(fields added upstream in okf-core `OK.1.A`)* | The two fields everything else consumes | Engine foundation |
+| 6 | MV.6.B | Emit carry-through + unified priority-ranked board + DUE-SOON lane | The single cross-domain glance-view (the payoff) | Unified operating board |
+| 7 | MV.7.A | Effective-priority inheritance (v2) | Auto-floats eng work that unblocks money | Cross-domain priority float |
+
+---
+
+## Execution Guide — Model & Pipeline Routing
+
+| Block | Repo | SDLC pipeline | Model | Why |
+|---|---|---|---|---|
+| **MV.6.A** | mev | `/sdlc-flow` (or `/sdlc-task` if run lean) | **Either** (Sonnet or Gemini Pro) | Mechanical: 4 range/format/enum guards + `E_STATE_*` codes + tests + a schema-doc edit. Fields defined upstream in okf-core `OK.1.A` — land that first. Contained; cargo gates catch mistakes. |
+| **MV.6.B** | mev | `/sdlc-flow` | **Sonnet** | Hardest v1 block. Must match the existing sentinel/emit architecture precisely, union across repos, render idempotently. Codebase-convention-heavy → favor the stronger instruction-follower. |
+| **MV.7.A** | mev | `/sdlc-flow` | **Sonnet** | Graph algorithm (reverse-topo min-propagation + cycle safety). Subtle DAG correctness → trust the stronger reasoner. Deferred anyway. |
 
 ---
 
@@ -478,3 +604,4 @@ existence — applied across content types.
 off. Phase 2 (Brain OKF gate) is done; Phase 3 (Brain integrity) is the current priority — `MV.3.J-crawl`
 then `MV.3.J`, built with the D4 forward-compat constraints; Phase 3B (corpus engine outputs,
 D4) follows; `MV.1.D`–`MV.1.E` and Phase 4 resume after.*
+
