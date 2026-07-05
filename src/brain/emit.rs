@@ -8,6 +8,9 @@
 //! - [`render_wave_table`] — Markdown table of a repo's blocks in wave order.
 //! - [`render_hq_board`] — NOW/NEXT/BLOCKED Operating Board Markdown from a
 //!   brain-derived [`Focus`] + `cross_repo[]` edges.
+//! - [`render_unified_board`] — NOW/NEXT/BLOCKED/DUE-SOON unified priority
+//!   board unioning engineering + business blocks, tagged `[BIZ]`/`[ENG]`
+//!   (`MV.6.B`).
 //! - [`splice_generated`] — idempotent sentinel-splice into an existing Markdown
 //!   document.
 //!
@@ -51,6 +54,11 @@ pub mod markers {
 
     /// Marker for the cross-repo HQ status board.
     pub const HQ_BOARD: &str = "hq-board";
+
+    /// Marker for the unified priority-ranked NOW/NEXT/BLOCKED/DUE-SOON board
+    /// unioning engineering + business blocks (`MV.6.B`). Separate from
+    /// [`HQ_BOARD`], which stays untouched.
+    pub const UNIFIED_BOARD: &str = "unified-board";
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +371,181 @@ fn render_hq_board_blocker(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// render_unified_board — pure NOW/NEXT/BLOCKED/DUE-SOON unified renderer (MV.6.B)
+// ---------------------------------------------------------------------------
+
+/// Number of days ahead of `today` a block's `due` must fall within to be
+/// listed in the `DUE-SOON` section (overdue blocks are always included).
+const DUE_SOON_WINDOW_DAYS: i64 = 14;
+
+/// Render the unified, priority-ranked HQ board: `## NOW` / `## NEXT` /
+/// `## BLOCKED` / `## DUE-SOON` over the brain-wide union `focus` (produced by
+/// [`crate::brain::state::derive_brain_focus`] at
+/// [`crate::brain::state::TierScope::All`]), unioning every registered repo
+/// — including the business tier — tagged `[BIZ]`/`[ENG]`.
+///
+/// Tag derivation: a block's `repo` slug is looked up in `config.repos`; a
+/// match whose `tier == "business"` renders `[BIZ]`, everything else
+/// (including an unrecognised repo slug) renders `[ENG]`.
+///
+/// `NEXT` is stably re-sorted by `(priority asc, due asc)`, both with an
+/// absent value sorted last — since [`Focus::next`] is already wave-ordered,
+/// the stable sort keeps wave as the implicit tertiary key. `NOW`/`BLOCKED`
+/// preserve the caller-supplied order, matching [`render_hq_board`].
+///
+/// `DUE-SOON` lists every block from the now+next+blocked union whose `due`
+/// parses as `%Y-%m-%d` and is no later than `today + 14 days`, sorted by due
+/// date ascending (soonest/most-overdue first); a block whose `due` is before
+/// `today` is annotated `(overdue)`. Blocks with an absent or unparseable
+/// `due` are excluded.
+///
+/// Rendered without a trailing newline, matching the [`render_wave_table`] /
+/// [`render_hq_board`] convention; callers that embed it inside a document own
+/// any surrounding blank lines.
+pub fn render_unified_board(
+    focus: &Focus,
+    edges: &[CrossRepoEdge],
+    config: &BrainConfig,
+    today: chrono::NaiveDate,
+) -> String {
+    let next_sorted = sort_unified_board_next(&focus.next);
+
+    let sections = [
+        render_unified_board_section("NOW", &focus.now, edges, config),
+        render_unified_board_section("NEXT", &next_sorted, edges, config),
+        render_unified_board_section("BLOCKED", &focus.blocked, edges, config),
+        render_due_soon_section(focus, edges, config, today),
+    ];
+    sections.join("\n\n")
+}
+
+/// Parse a `Block::due` string (`%Y-%m-%d`) into a [`chrono::NaiveDate`];
+/// `None` for an absent or unparseable value.
+fn parse_due(due: &Option<String>) -> Option<chrono::NaiveDate> {
+    due.as_deref()
+        .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+}
+
+/// Look up a block's `[BIZ]`/`[ENG]` tag from its `repo` slug: `"business"`
+/// tier renders `[BIZ]`, any other tier (or an unrecognised slug) renders
+/// `[ENG]`.
+fn unified_board_tag(block: &Block, config: &BrainConfig) -> &'static str {
+    let repo = block.repo.as_deref().unwrap_or("");
+    let is_business = config
+        .repos
+        .iter()
+        .any(|r| r.slug == repo && r.tier == "business");
+    if is_business { "[BIZ]" } else { "[ENG]" }
+}
+
+/// Stably sort `next` by `(priority asc, due asc)`, both with an absent value
+/// sorted last. The input is already wave-ordered, so the stable sort keeps
+/// wave as the implicit tertiary key.
+fn sort_unified_board_next(next: &[Block]) -> Vec<Block> {
+    let mut sorted = next.to_vec();
+    sorted.sort_by(|a, b| {
+        let pa = a.priority.unwrap_or(u8::MAX);
+        let pb = b.priority.unwrap_or(u8::MAX);
+        pa.cmp(&pb)
+            .then_with(|| match (parse_due(&a.due), parse_due(&b.due)) {
+                (Some(da), Some(db)) => da.cmp(&db),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            })
+    });
+    sorted
+}
+
+/// Render one `## {heading}` section of the unified board for `blocks`.
+fn render_unified_board_section(
+    heading: &str,
+    blocks: &[Block],
+    edges: &[CrossRepoEdge],
+    config: &BrainConfig,
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!("## {heading}"));
+
+    if blocks.is_empty() {
+        lines.push("_none_".to_string());
+    } else {
+        for block in blocks {
+            lines.push(format!(
+                "- {}",
+                render_unified_board_line(block, edges, config)
+            ));
+        }
+    }
+
+    lines.join("\n")
+}
+
+/// Render a single unified board line for `block`: `[BIZ]|[ENG] repo:id — title`,
+/// annotated with `(blocked by ...)` when `block.blocked_by` is non-empty
+/// (reusing [`render_hq_board_blocker`]).
+fn render_unified_board_line(
+    block: &Block,
+    edges: &[CrossRepoEdge],
+    config: &BrainConfig,
+) -> String {
+    let tag = unified_board_tag(block, config);
+    let repo = block.repo.as_deref().unwrap_or("");
+    let mut line = format!("{tag} {repo}:{} — {}", block.id, block.title);
+
+    if !block.blocked_by.is_empty() {
+        let annotations: Vec<String> = block
+            .blocked_by
+            .iter()
+            .map(|dep| render_hq_board_blocker(repo, &block.id, dep, edges))
+            .collect();
+        line.push_str(&format!(" (blocked by {})", annotations.join(", ")));
+    }
+
+    line
+}
+
+/// Render the `## DUE-SOON` section: every block from the now+next+blocked
+/// union whose `due` parses and is `<= today + 14 days`, sorted by due date
+/// ascending (soonest/most-overdue first) and annotated `(overdue)` when
+/// `due < today`.
+fn render_due_soon_section(
+    focus: &Focus,
+    edges: &[CrossRepoEdge],
+    config: &BrainConfig,
+    today: chrono::NaiveDate,
+) -> String {
+    let window_end = today + chrono::Duration::days(DUE_SOON_WINDOW_DAYS);
+
+    let mut due_soon: Vec<(chrono::NaiveDate, &Block)> = focus
+        .now
+        .iter()
+        .chain(focus.next.iter())
+        .chain(focus.blocked.iter())
+        .filter_map(|block| parse_due(&block.due).map(|date| (date, block)))
+        .filter(|(date, _)| *date <= window_end)
+        .collect();
+    due_soon.sort_by_key(|(date, _)| *date);
+
+    let mut lines: Vec<String> = Vec::new();
+    lines.push("## DUE-SOON".to_string());
+
+    if due_soon.is_empty() {
+        lines.push("_none_".to_string());
+    } else {
+        for (date, block) in due_soon {
+            let mut line = render_unified_board_line(block, edges, config);
+            if date < today {
+                line.push_str(" (overdue)");
+            }
+            lines.push(format!("- {line}"));
+        }
+    }
+
+    lines.join("\n")
 }
 
 // ---------------------------------------------------------------------------
