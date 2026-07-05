@@ -1,0 +1,52 @@
+[
+  {
+    "task_id": 1,
+    "title": "Add check_field_policy + inline unit tests to state.rs",
+    "description": "In src/brain/state.rs add a new pure `pub fn check_field_policy(src: &StateSource, file: &StateFile) -> Vec<Diagnostic>` following the existing check_* shape. Iterate every `tracks[].blocks[]` TrackBlock and, for each field present (Option::Some only), emit: (1) `E_STATE_PRIORITY_RANGE` (error) when `priority` is not in 0..=3 — `u8` makes negatives impossible, so guard the upper bound; (2) `E_STATE_DUE_FORMAT` (error) when `due` fails `chrono::NaiveDate::parse_from_str(v, \"%Y-%m-%d\")` (chrono is already a dep — see src/brain/sync.rs; this rejects both bad calendar dates like \"2026-13-99\" and non-ISO strings like \"Q3\"); (3) `E_STATE_SDLC_WORKFLOW_ENUM` (error) when `sdlc_workflow` ∉ {none,patch,task,run,flow}; (4) `E_STATE_MODEL_ENUM` (error) when `model` ∉ {sonnet,gemini-pro,gemini-flash,either}. Each diagnostic message should name the block id and the offending value. Do NOT validate focus entries (derived). Add a rustdoc summary of the four codes to the module-level doc block that lists the other E_STATE_* codes. Add inline #[cfg(test)] unit tests in this file covering: valid block (no diags), priority 4, priority 0 and 3 (boundaries pass), due \"2026-13-99\", due \"Q3\", a valid due, sdlc_workflow \"pipeline\", each valid sdlc_workflow value, model \"gpt\", each valid model value, and all-None (no diags).",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/state.rs"],
+    "dependsOn": []
+  },
+  {
+    "task_id": 2,
+    "title": "Wire check_field_policy into validate_brain_state",
+    "description": "In src/lib.rs's `validate_brain_state` (~line 358), import `check_field_policy` in the `brain::state::{...}` use group and call it in the per-file loop alongside the other schema-ring checks (e.g. right after the `check_schema` call inside the load-success arm, or in a dedicated loop over `loaded`), extending `report.diagnostics` with its output for every loaded state file. Keep the existing ordering and behavior of all other checks unchanged.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/lib.rs"],
+    "dependsOn": [1]
+  },
+  {
+    "task_id": 3,
+    "title": "Integration tests through validate_brain_state",
+    "description": "In tests/brain_state.rs add integration tests that drive the four new guards end-to-end through a real `mev::validate_brain_state(root)` run (mirror the existing brain_state.rs fixture-harness pattern — a temp brain root with brain.toml + a leaf planning/state.json). Cover: a block with in-range priority/valid due/valid enums produces none of the new codes; `priority: 4` yields `E_STATE_PRIORITY_RANGE`; an invalid `due` yields `E_STATE_DUE_FORMAT`; `sdlc_workflow: \"pipeline\"` yields `E_STATE_SDLC_WORKFLOW_ENUM`; `model: \"gpt\"` yields `E_STATE_MODEL_ENUM`. Assert on the diagnostic codes present in the returned Report.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["tests/brain_state.rs"],
+    "dependsOn": [2]
+  },
+  {
+    "task_id": 4,
+    "title": "Document the four fields in state-schema.md (+ index row)",
+    "description": "Edit core/planning/state-schema.md (one tier up from this repo — see the tasks.md cross-repo Note) to document all four fields on the block object: `priority` with the P0–P3 rubric (0 = money/hard-deadline hottest … 3 = coldest) and the recurring-work exclusion; `due` as ISO YYYY-MM-DD; `sdlc_workflow` ∈ {none,patch,task,run,flow}; `model` ∈ {sonnet,gemini-pro,gemini-flash,either} with the model rule-of-thumb (when to prefer which). State that the per-block *rationale* stays in the plan markdown, not the state file (D36 graph-vs-narrative litmus), and note the precedent that a brain file may carry its own authored tracks[]. Name the four `E_STATE_*` codes mev raises. If this changes the scope described in core/planning/index.md's row for state-schema.md, update that row.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["../planning/state-schema.md", "../planning/index.md"],
+    "dependsOn": [1]
+  },
+  {
+    "task_id": 5,
+    "title": "Validate",
+    "description": "Run the Validation Commands listed in tasks.md and confirm all pass: cargo fmt --check, cargo clippy -- -D warnings, cargo test, cargo build --release.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": [],
+    "dependsOn": [1, 2, 3, 4]
+  }
+]

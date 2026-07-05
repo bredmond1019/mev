@@ -66,6 +66,7 @@ at the top; only pipeline state lives under `sdlc/`.
 | `4.C-hq-board-emit/` | `MV.4.C` (state-sync-loop) — `plan_hq_board`: render a NOW/NEXT/BLOCKED Operating Board from brain `focus` + `cross_repo[]` and splice into the `hq-board` sentinel (pulls `bastion status`/Block V into mev) | Done (3 tasks, PASS) |
 | `4.D-sync-comparator-hardening/` | `MV.4.D` (state-sync-loop) — harden `validate-brain --sync`'s watermark comparator to an explicit instant compare + close the `-03:00` vs `Z` offset-mismatch test gap | Done (full spec, PASS) |
 | `4.E-emit-state-wiring/` | `MV.4.E` (state-sync-loop, spine terminus) — wire `plan_project_caches`/`plan_tier_rollups`/`plan_hq_board` into `emit_state`, preserve the fixed-point, and add a brain-wide close-A-unblocks-B ripple integration test across every generated surface | Active — spec decomposed; ready to run (`/sdlc-flow 4.E-emit-state-wiring`) |
+| `6.A-validate-new-fields/` | `MV.6.A` (Statify Business v1) — add `mev validate-brain --state` policy checks for the four okf-core `OK.1.A` fields: `priority` range (`E_STATE_PRIORITY_RANGE`), `due` ISO date (`E_STATE_DUE_FORMAT`), `sdlc_workflow`/`model` enums (`E_STATE_SDLC_WORKFLOW_ENUM`/`E_STATE_MODEL_ENUM`), plus schema-doc coverage | Active — spec decomposed; ready to run |
 
 ## Archived Concept Folders
 
