@@ -32,3 +32,6 @@ Validated: gating checks (fast tripwire)
 
 ## Docs
 Patched: /Users/brandon/Dev/agentic-portfolio/core/mev/trees/6.B-generate-hq-board-flow/docs/architecture.md, /Users/brandon/Dev/agentic-portfolio/core/mev/trees/6.B-generate-hq-board-flow/docs/cli.md
+
+## Wrap-up — PASS
+Next: MV.5.A — Status Frontmatter Reconciler, and MV.7.A — Effective-priority inheritance
