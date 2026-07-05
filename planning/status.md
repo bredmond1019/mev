@@ -8,15 +8,15 @@ project: mev
 status: active
 keywords: [block progress, phase status, mev, Rust, validation]
 related: [master-plan, context]
-timestamp: "2026-07-04T15:42:51Z"
-now: "update-write-state-in-trees shipped (PASS, 5/5 tasks, in place on main). is_linked_worktree() added to src/brain/config.rs; emit-state --write now refuses (E_EMIT_LINKED_WORKTREE, non-zero exit) when CWD is inside a linked git worktree, leaving dry-run and main-tree behavior unchanged. PR #18 (4.E-emit-state-wiring) merged and emit-state --write run from the main checkout to regenerate brain-wide derived views."
-next: "No open mev-tracked work — focus is empty after this ticket closed. Pick the next phase/spec per master-plan.md, or the out-of-repo orchestrator follow-up (load_brain_edges.py reading mev's exported edge fields directly)."
-blocked: []
+timestamp: "2026-07-05T17:17:11Z"
+now: []
+next: "MV.5.A — Status Frontmatter Reconciler, MV.6.B — Emit HQ board sections + parse OKF board schema"
+blocked: "MV.7.A — Effective-priority inheritance"
 ---
 
 # STATUS — Current State & Progress
 
-**Last updated:** 2026-07-04 — `update-write-state-in-trees` ticket shipped, full spec, PASS (5/5 tasks), run in place on `main` via `/sdlc-task`. Added `is_linked_worktree(path: &Path) -> bool` to `src/brain/config.rs` (compares canonicalized `git rev-parse --git-dir`/`--git-common-dir`; fails open to `false` on any git error or non-repo path) and gated `Command::EmitState { path, write }` in `src/main.rs` to refuse with a new `E_EMIT_LINKED_WORKTREE` diagnostic + non-zero exit when `--write` runs from inside a linked git worktree — dry-run and main-tree behavior are unchanged. New CLI-level tests in `tests/brain_emit.rs` cover the refusal, the dry-run pass-through, and a main-tree regression guard. `docs/cli.md`'s `emit-state` section documents the new code. All four harness gates green. This closes the root cause traced in the prior session's investigation: `emit-state --write` always resolved every repo's derived-file paths from `brain.toml` (never CWD), so running it from a linked `trees/<slug>` worktree silently clobbered the main checkout's files — concurrent `sdlc-flow`/`sdlc-block` worktrees calling it via `/log-work`/`sdlc-block.js` turned this into a last-writer-wins race. Also: PR #18 (`4.E-emit-state-wiring`) merged, and `mev emit-state --write` run from the main checkout to regenerate brain-wide derived views after flipping this ticket's block to `closed` in `state.json` — `focus` is now empty (no open mev-tracked work).
+**Last updated:** 2026-07-05 — `6.A-validate-new-fields` shipped, all tests passed, and block validation is fully implemented (priority, due, sdlc_workflow, model). Integration tests and diagnostic docs (`docs/cli.md`) are up to date. Next up: MV.6.B and MV.7.A.
 
 **Previous:** `4.E-emit-state-wiring` (Phase 4, state-sync-loop spine terminus) shipped, full spec, PASS (4 tasks). Task 1 wired all five planners into `emit_state` (`src/lib.rs`): `plan_state_json`, `plan_master_plan_tables`, `plan_project_caches`, `plan_tier_rollups`, `plan_hq_board`, each applied via `apply_plan` in that stable order, with the doc comment naming all five generated surfaces. Task 2 added a `mv4e_ripple` integration test module in `tests/brain_emit.rs` proving a single `emit_state(&dir, true)` call ripples a close-A-unblocks-B cross-repo dependency change across every surface (leaf `focus`, leaf project-cache doc + `synced_from`, tier rollup table, HQ board NOW/NEXT/BLOCKED, master-plan wave table), plus a fixed-point check (second pass byte-identical, zero `I_EMIT_WROTE`). Task 3 patched `docs/cli.md`'s `emit-state` section to document the three newly wired surfaces and generalized the sentinel-contract prose to name all four markers. Task 4 confirmed all four harness gates green with no code changes needed. Final review verdict: PASS. This closes Phase 4 (state-sync-loop) entirely — the spine `MV.4.A → {B,C,D} → E` is fully Done.
 

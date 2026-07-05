@@ -3399,7 +3399,10 @@ mod tests {
         let track_blocks: Vec<TrackBlock> = blocks
             .iter()
             .map(|(id, status, wave, deps)| TrackBlock {
-                due: None, priority: None, sdlc_workflow: None, model: None,
+                due: None,
+                priority: None,
+                sdlc_workflow: None,
+                model: None,
                 id: id.to_string(),
                 title: id.to_string(),
                 status: status.map(|s| s.to_string()),
@@ -3676,7 +3679,10 @@ mod tests {
         let track_blocks: Vec<TrackBlock> = blocks
             .iter()
             .map(|(id, status, deps)| TrackBlock {
-                due: None, priority: None, sdlc_workflow: None, model: None,
+                due: None,
+                priority: None,
+                sdlc_workflow: None,
+                model: None,
                 id: id.to_string(),
                 title: id.to_string(),
                 status: status.map(|s| s.to_string()),
@@ -3973,7 +3979,10 @@ mod tests {
         // The origin back-pointer is structural metadata — the integrity check validates
         // that the block exists in tracks[], not that it carries an origin field.
         let real_block = TrackBlock {
-            due: None, priority: None, sdlc_workflow: None, model: None,
+            due: None,
+            priority: None,
+            sdlc_workflow: None,
+            model: None,
             id: "MV.3.P2".to_string(),
             title: "P2 block".to_string(),
             status: Some("in_progress".to_string()),
@@ -4237,7 +4246,10 @@ mod tests {
         let track_blocks: Vec<TrackBlock> = blocks
             .iter()
             .map(|(id, status, deps)| TrackBlock {
-                due: None, priority: None, sdlc_workflow: None, model: None,
+                due: None,
+                priority: None,
+                sdlc_workflow: None,
+                model: None,
                 id: id.to_string(),
                 title: id.to_string(),
                 status: status.map(|s| s.to_string()),
@@ -4453,7 +4465,8 @@ mod tests {
             updated: "2026-06-30".to_string(),
             focus: Focus {
                 now: vec![Block {
-                    due: None, priority: None,
+                    due: None,
+                    priority: None,
                     id: "BA.1.A".to_string(),
                     title: "something".to_string(),
                     status: Some("in_progress".to_string()),
@@ -4775,7 +4788,8 @@ mod tests {
             repo: "beta".to_string(),
             tier: None, // authored before tier was ever populated
             now: vec![Block {
-                due: None, priority: None,
+                due: None,
+                priority: None,
                 id: "BE.1.A".to_string(),
                 title: "Hand-authored headline".to_string(),
                 status: Some("in_progress".to_string()),

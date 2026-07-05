@@ -1,7 +1,7 @@
 {
   "repo": "mev",
   "kind": "project",
-  "updated": "2026-07-04",
+  "updated": "2026-07-05",
   "focus": {
     "now": [],
     "next": [
@@ -11,10 +11,40 @@
         "status": null,
         "note": null,
         "repo": null,
-        "blocked_by": []
+        "blocked_by": [],
+        "priority": null,
+        "due": null
+      },
+      {
+        "id": "MV.6.B",
+        "title": "Emit HQ board sections + parse OKF board schema",
+        "status": null,
+        "note": null,
+        "repo": null,
+        "blocked_by": [],
+        "priority": null,
+        "due": null
       }
     ],
-    "blocked": []
+    "blocked": [
+      {
+        "id": "MV.7.A",
+        "title": "Effective-priority inheritance",
+        "status": null,
+        "note": null,
+        "repo": null,
+        "blocked_by": [
+          {
+            "type": "block",
+            "repo": "mev",
+            "id": "MV.6.B",
+            "what": null
+          }
+        ],
+        "priority": null,
+        "due": null
+      }
+    ]
   },
   "tracks": [
     {
@@ -26,7 +56,11 @@
           "status": "closed",
           "depends_on": [],
           "wave": 1,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         },
         {
           "id": "MV.3.K",
@@ -34,7 +68,11 @@
           "status": "closed",
           "depends_on": [],
           "wave": 2,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         },
         {
           "id": "MV.3.P",
@@ -42,7 +80,11 @@
           "status": "closed",
           "depends_on": [],
           "wave": 2,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         },
         {
           "id": "MV.3.P2",
@@ -57,7 +99,11 @@
             }
           ],
           "wave": 3,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         },
         {
           "id": "MV.3.L",
@@ -65,7 +111,11 @@
           "status": "closed",
           "depends_on": [],
           "wave": 4,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         }
       ]
     },
@@ -78,7 +128,11 @@
           "status": "closed",
           "depends_on": [],
           "wave": 4,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         },
         {
           "id": "MV.3B.R",
@@ -93,7 +147,11 @@
             }
           ],
           "wave": 5,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         },
         {
           "id": "MV.3B.T",
@@ -108,7 +166,11 @@
             }
           ],
           "wave": 5,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         },
         {
           "id": "MV.3B.S",
@@ -123,7 +185,11 @@
             }
           ],
           "wave": 6,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         },
         {
           "id": "MV.3B.U",
@@ -138,7 +204,11 @@
             }
           ],
           "wave": 6,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         },
         {
           "id": "MV.3B.V",
@@ -153,7 +223,11 @@
             }
           ],
           "wave": 7,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         }
       ]
     },
@@ -166,7 +240,11 @@
           "status": "closed",
           "depends_on": [],
           "wave": 40,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         },
         {
           "id": "MV.4.D",
@@ -174,7 +252,11 @@
           "status": "closed",
           "depends_on": [],
           "wave": 40,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         },
         {
           "id": "MV.4.B",
@@ -189,7 +271,11 @@
             }
           ],
           "wave": 41,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         },
         {
           "id": "MV.4.C",
@@ -204,7 +290,11 @@
             }
           ],
           "wave": 41,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         },
         {
           "id": "MV.4.E",
@@ -231,7 +321,11 @@
             }
           ],
           "wave": 42,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         }
       ]
     },
@@ -244,7 +338,66 @@
           "status": "closed",
           "depends_on": [],
           "wave": 43,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
+        }
+      ]
+    },
+    {
+      "title": "Phase 6 — Statify Business",
+      "blocks": [
+        {
+          "id": "MV.6.A",
+          "title": "Validate the new fields + schema doc",
+          "status": "closed",
+          "depends_on": [],
+          "wave": 60,
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
+        },
+        {
+          "id": "MV.6.B",
+          "title": "Emit HQ board sections + parse OKF board schema",
+          "status": "open",
+          "depends_on": [
+            {
+              "type": "block",
+              "repo": "mev",
+              "id": "MV.6.A",
+              "what": null
+            }
+          ],
+          "wave": 61,
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
+        },
+        {
+          "id": "MV.7.A",
+          "title": "Effective-priority inheritance",
+          "status": "open",
+          "depends_on": [
+            {
+              "type": "block",
+              "repo": "mev",
+              "id": "MV.6.B",
+              "what": null
+            }
+          ],
+          "wave": 70,
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         }
       ]
     },
@@ -257,7 +410,11 @@
           "status": "open",
           "depends_on": [],
           "wave": 50,
-          "origin": null
+          "origin": null,
+          "priority": null,
+          "due": null,
+          "sdlc_workflow": null,
+          "model": null
         }
       ]
     }

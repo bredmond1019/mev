@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-04T15:42:51Z"
+timestamp: "2026-07-05T17:17:11Z"
 ---
 
 # Log — mev
@@ -16,6 +16,13 @@ timestamp: "2026-07-04T15:42:51Z"
 *Append-only working log. One dated entry per session. Newest entries at the top.*
 
 ---
+
+## [2026-07-05]
+
+### `6.A-validate-new-fields` — implement validation for new block fields
+- **What:** Ran `/sdlc-task 6.A-validate-new-fields` to completion (all tasks passed). Implemented validation for the four new optional `Block` / `TrackBlock` fields (`priority`, `due`, `sdlc_workflow`, `model`) inside `src/brain/state.rs`. Added tests verifying `priority` range (0..=3), `due` format (YYYY-MM-DD), and `sdlc_workflow`/`model` enums, resulting in 4 new diagnostic codes (`E_STATE_PRIORITY_RANGE`, `E_STATE_DUE_FORMAT`, `E_STATE_SDLC_WORKFLOW_ENUM`, `E_STATE_MODEL_ENUM`). Refactored struct initializers in tests and the CLI to support the new fields explicitly. Added integration tests to `tests/brain_state.rs` and patched `docs/cli.md` with the new codes. Reconciled `MV.6.A` to `closed` in `planning/state.json`. All four harness gates (fmt, clippy, test, build) and the emoji gate passed cleanly.
+- **Why:** This is the first step (Block MV.6.A) in operationalizing the Statify Business roadmap inside `mev`, introducing these fields to the state graph ahead of generating the unified HQ board region (MV.6.B).
+- **Refs:** `planning/master-plan.md`, `core/planning/state-schema.md`.
 
 ## [2026-07-04]
 
