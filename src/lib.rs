@@ -14,7 +14,8 @@ pub use brain::BrainValidator;
 pub use brain::crawl::{MdFile, crawl_brain};
 pub use brain::emit::{
     EmitAction, EmitError, EmitPlan, apply_plan, plan_master_plan_tables, plan_state_json,
-    render_wave_table, splice_generated, wave_order,
+    plan_status_frontmatter, reconcile_status_scalars, render_wave_table, splice_generated,
+    wave_order,
 };
 pub use brain::graph::{Graph, build_graph, check_graph};
 pub use brain::graph_emit::{GraphExport, build_graph_export};
@@ -491,7 +492,7 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     use brain::config::find_brain_config;
     use brain::emit::{
         apply_plan, plan_hq_board, plan_master_plan_tables, plan_project_caches, plan_state_json,
-        plan_tier_rollups,
+        plan_status_frontmatter, plan_tier_rollups,
     };
     use brain::state::{StateLoadError, build_state_graph, discover_state_files, load_state};
 
@@ -556,11 +557,16 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     let tier_rollups_diags = apply_plan(&tier_rollups_plan, write);
     let hq_board_diags = apply_plan(&hq_board_plan, write);
 
+    // 6. Run and apply the YAML frontmatter planner last so it sees the updated markdown in write mode.
+    let status_fm_plan = plan_status_frontmatter(root, &loaded, &graph, &config);
+    let status_fm_diags = apply_plan(&status_fm_plan, write);
+
     report.diagnostics.extend(state_diags);
     report.diagnostics.extend(mp_diags);
     report.diagnostics.extend(project_caches_diags);
     report.diagnostics.extend(tier_rollups_diags);
     report.diagnostics.extend(hq_board_diags);
+    report.diagnostics.extend(status_fm_diags);
 
     Ok(report)
 }

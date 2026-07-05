@@ -4132,3 +4132,115 @@ heading = "Alpha"
         let _ = fs::remove_dir_all(worktree_path.parent().unwrap());
     }
 }
+
+mod task_yaml_frontmatter_drift_tests {
+    use mev::brain::config::{BrainConfig, RepoEntry};
+    use mev::brain::emit::{plan_status_frontmatter, reconcile_status_scalars};
+    use mev::brain::state::{
+        Block, Focus, StateFile, StateSource, Track, TrackBlock, build_state_graph,
+    };
+    use std::path::PathBuf;
+
+    #[test]
+    fn reconcile_status_scalars_replaces_and_preserves() {
+        let original = "---\n\
+                        title: Foo\n\
+                        now: \"stale\"\n\
+                        next: \"stale\"\n\
+                        blocked: \"stale\"\n\
+                        ---\n\n\
+                        # Body\n";
+        let focus = Focus {
+            now: vec![Block {
+                id: "1".into(),
+                title: "One".into(),
+                status: None,
+                note: None,
+                repo: Some("core".into()),
+                blocked_by: vec![],
+            }],
+            next: vec![],
+            blocked: vec![],
+        };
+        let new_content = reconcile_status_scalars(original, &focus);
+        assert!(new_content.contains("now: \"core:1 — One\""));
+        assert!(new_content.contains("next: []"));
+        assert!(new_content.contains("blocked: []"));
+        assert!(!new_content.contains("stale"));
+        assert!(new_content.contains("# Body\n"));
+    }
+
+    #[test]
+    fn reconcile_status_scalars_appends_if_missing() {
+        let original = "---\n\
+                        title: Foo\n\
+                        ---\n\n\
+                        # Body\n";
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![],
+        };
+        let new_content = reconcile_status_scalars(original, &focus);
+        assert!(new_content.contains("now: []"));
+        assert!(new_content.contains("next: []"));
+        assert!(new_content.contains("blocked: []"));
+    }
+
+    #[test]
+    fn plan_status_frontmatter_emits_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("planning")).unwrap();
+        let status_path = tmp.path().join("planning/status.md");
+        std::fs::write(&status_path, "---\ntitle: test\n---\n").unwrap();
+
+        let src = StateSource {
+            repo_slug: "myrepo".to_string(),
+            abs_path: tmp.path().join("planning/state.json"),
+            expected_kind: "project",
+        };
+        let file = StateFile {
+            repo: "myrepo".to_string(),
+            kind: "project".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus: Focus::default(),
+            tracks: vec![Track {
+                title: "P".to_string(),
+                blocks: vec![TrackBlock {
+                    id: "B1".into(),
+                    title: "Block One".into(),
+                    status: Some("in_progress".into()),
+                    depends_on: vec![],
+                    wave: Some(1),
+                    origin: None,
+                }],
+            }],
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+            carryover: vec![],
+        };
+
+        let files = vec![(src, file)];
+        let graph = build_state_graph(&files);
+        let config = BrainConfig {
+            repos: vec![RepoEntry {
+                slug: "myrepo".to_string(),
+                tier: "core".to_string(),
+                repo_path: "".to_string(),
+                status_file: "".to_string(), // fallback to sibling
+                cache_doc: "".to_string(),
+                heading: "".to_string(),
+            }],
+            ..BrainConfig::default()
+        };
+
+        let plan = plan_status_frontmatter(tmp.path(), &files, &graph, &config);
+        assert_eq!(plan.actions.len(), 1);
+        let action = &plan.actions[0];
+        assert_eq!(action.path, status_path);
+        assert!(action.new_content.contains("now: \"B1 — Block One\""));
+    }
+}
