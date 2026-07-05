@@ -1,0 +1,42 @@
+[
+  {
+    "task_id": 1,
+    "title": "Implement reconcile_status_scalars helper",
+    "description": "Add a pure helper `reconcile_status_scalars(original: &str, focus: &Focus) -> String` to `src/brain/emit.rs`. It should locate the YAML frontmatter (between the first two `---` lines) and replace or append the `now`, `next`, and `blocked` keys. The value for each scalar should be a double-quoted string joining the blocks in that queue (e.g., `\"repo:id — title, repo2:id2 — title2\"`), or the literal `[]` if the queue is empty. Add unit tests in `tests/brain_emit.rs` (or inline if applicable) to verify replacement, addition, and preservation of surrounding content.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/emit.rs", "tests/brain_emit.rs"],
+    "dependsOn": []
+  },
+  {
+    "task_id": 2,
+    "title": "Implement plan_status_frontmatter planner",
+    "description": "Add `plan_status_frontmatter(files: &[(StateSource, StateFile)], graph: &StateGraph, config: &BrainConfig) -> EmitPlan` to `src/brain/emit.rs`. For each state file, use `derived_focus_for` (for project kind) or `derive_brain_focus` (for brain kind) to get its focus. Resolve its `status.md` path (use `status_file` from `brain.toml` via `config`, or fallback to sibling `status.md`). If the file exists, read its content, apply `reconcile_status_scalars`, and if the output differs, emit an `EmitAction` to overwrite the file. Add integration tests for this planner in `tests/brain_emit.rs`.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/brain/emit.rs", "tests/brain_emit.rs"],
+    "dependsOn": [1]
+  },
+  {
+    "task_id": 3,
+    "title": "Wire plan_status_frontmatter into emit_state",
+    "description": "In `src/lib.rs`, wire the new `plan_status_frontmatter` planner into the `emit_state` driver so it executes alongside `plan_state_json`, `plan_master_plan_tables`, etc. Apply the resulting plan via `apply_plan(&plan, write)`.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": ["src/lib.rs"],
+    "dependsOn": [2]
+  },
+  {
+    "task_id": 4,
+    "title": "Validate",
+    "description": "Run the Validation Commands listed below and confirm all pass.",
+    "acceptance_criteria": [],
+    "validation_commands": [],
+    "max_attempts": 3,
+    "files": [],
+    "dependsOn": [1, 2, 3]
+  }
+]
