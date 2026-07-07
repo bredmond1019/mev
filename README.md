@@ -12,6 +12,9 @@ related: [context, master-plan, status]
 
 # mev
 
+> **Built within the Bastion workspace.** This crate depends on `okf-core` via path dependency (`../okf-core`) and is not designed to build standalone. See the [bastion-os](https://github.com/bredmond1019/bastion-os) meta-repo for the full ecosystem.
+> Part of the **Bastion** ecosystem — see the [bastion-os](https://github.com/bredmond1019/bastion-os) front door for the full architecture.
+
 A Rust CLI tool (`mev`) that validates Markdown/MDX content across two consumers: **learn-ai** (frontmatter + struct validation for learn-agentic-ai.com) and **Bastion Brain** (OKF frontmatter validation for the company-brain RAG index). Machine-readable `--json` output lets the RAG indexer use `mev` as a pre-rebuild gate.
 
 ## Prerequisites
