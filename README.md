@@ -23,7 +23,7 @@ A Rust CLI tool (`mev`) that validates Markdown/MDX content across two consumers
 ## Setup
 
 ```bash
-git clone <this repo> && cd mev
+git clone https://github.com/bredmond1019/mev && cd mev
 cargo build --release    # produces target/release/mev
 ```
 
