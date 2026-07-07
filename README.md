@@ -104,6 +104,10 @@ See [`docs/cli.md`](docs/cli.md) for the full field reference.
 | [planning/status.md](planning/status.md) | Current progress |
 | [planning/harness.json](planning/harness.json) | SDLC validation/UI-test config (see `harness.examples.md`) |
 
+## Roadmap / Known limitations
+
+- **No known limitations.** A concurrent validation pipeline is an aspirational optimization only; the current static validator/compiler is correct and complete for the corpus it serves.
+
 ---
 
 *Initialized 2026-06-18 from `base-template` (commit `00ad2834e232d3243a3578132b02db01a7be40ab`).*
