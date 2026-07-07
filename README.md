@@ -102,10 +102,10 @@ See [`docs/cli.md`](docs/cli.md) for the full field reference.
 | [docs/architecture.md](docs/architecture.md) | Module map, `ContentValidator` trait, core types |
 | [docs/brain-toml.md](docs/brain-toml.md) | `brain.toml` config schema — `[vocab]`, `[crawl]`, `[[repos]]` |
 | [docs/okf-schema.md](docs/okf-schema.md) | OKF frontmatter fields, validation rules, diagnostic table |
-| [planning/context.md](planning/context.md) | Orientation + governing principles |
-| [planning/master-plan.md](planning/master-plan.md) | Strategy + phase specifications |
-| [planning/status.md](planning/status.md) | Current progress |
-| [planning/harness.json](planning/harness.json) | SDLC validation/UI-test config (see `harness.examples.md`) |
+| `planning/context.md` | Orientation + governing principles |
+| `planning/master-plan.md` | Strategy + phase specifications |
+| `planning/status.md` | Current progress |
+| `planning/harness.json` | SDLC validation/UI-test config (see `harness.examples.md`) |
 
 ## Roadmap / Known limitations
 
