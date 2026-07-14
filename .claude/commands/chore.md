@@ -8,7 +8,10 @@ $ARGUMENTS — description of the chore to plan.
 
 1. If `$ARGUMENTS` is not provided, stop and ask the user to describe the chore.
 2. Research the codebase: read `CLAUDE.md`, then any files directly relevant to the chore.
-3. Create a plan using the Plan Format below.
+3. Create a plan using the Plan Format below. Include decisions for SDLC workflow and Model.
+   - **SDLC workflow?** — `Yes (patch/task/run/flow)` or `No — <reason>`.
+   - **Model** — `Sonnet` | `Gemini Pro` | `Gemini Flash` | `Either`. Rule of thumb: Opus = reasoning/breakdown only; Sonnet = high-risk/complex; Gemini Pro = intermediate; Gemini Flash = simple.
+   - **Workflow & Model Rationale** — prose explaining the choices.
 4. Choose a short descriptive slug for the chore (e.g. `remove-k8s-secret`, `fix-devin-typos`, `update-stale-handles`).
    Determine this chore's Block ID: find this repo's `prefix` in `brain.toml` at the brain root
    (e.g. `BA`), then `<BlockID> = <Prefix>.chore.<slug>` (chores don't have a phase number — the
@@ -59,6 +62,9 @@ related: [<≥1 real doc_id>]   # required — never leave empty; else this file
 
 ## Metadata
 prompt: `{$ARGUMENTS}`
+sdlc_workflow: <none | patch | task | run | flow>
+model: <sonnet | gemini-pro | gemini-flash | either>
+rationale: <prose explaining the model and workflow choices>
 
 ## Chore Description
 <describe the chore in detail — what it is, why it matters, any known constraints>
@@ -102,6 +108,8 @@ After writing `tasks.md` + `tasks.json`, also register this chore's block in `pl
    - `id`: the chore's Block ID
    - `title`: the chore name
    - `status`: `"open"`
+   - `sdlc_workflow`: the block's chosen workflow (`none` | `patch` | `task` | `run` | `flow`)
+   - `model`: the block's chosen model (`sonnet` | `gemini-pro` | `gemini-flash` | `either`)
    - `wave`: default to one past this repo's current highest wave (chores queue behind roadmap work
      unless the user says it's urgent — ask before assigning an earlier wave)
    - `depends_on`: `[]` unless the chore explicitly names a prerequisite block, in which case

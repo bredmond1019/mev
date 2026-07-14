@@ -27,6 +27,9 @@ list), explicit Acceptance Criteria, and a Testing Strategy, feeding directly in
    relevant to the change.
 4. THINK HARD about scope before writing:
    - A ticket is a **single coherent unit** — one logical change, one set of tests.
+   - **SDLC workflow?** — `Yes (patch/task/run/flow)` or `No — <reason>`.
+   - **Model** — `Sonnet` | `Gemini Pro` | `Gemini Flash` | `Either`. Rule of thumb: Opus = reasoning/breakdown only; Sonnet = high-risk/complex; Gemini Pro = intermediate; Gemini Flash = simple.
+   - **Workflow & Model Rationale** — prose explaining the choices.
    - If the fix touches more than 3–4 files or needs its own sub-phases, it belongs in `/plan`.
    - Every task in `tasks.json` must name ≥1 concrete file in its `files[]` (the Validate task is
      exempt).
@@ -74,6 +77,9 @@ ticket ships with tests.
 prompt: `{$ARGUMENTS}`
 status: Not started
 last-run: never
+sdlc_workflow: <none | patch | task | run | flow>
+model: <sonnet | gemini-pro | gemini-flash | either>
+rationale: <prose explaining the model and workflow choices>
 
 ## Description
 <what is broken or missing and what the correct behavior should be; one concise paragraph>
@@ -128,6 +134,8 @@ standalone block, not one already sitting in `master-plan.md`.
    - `id`: the ticket's Block ID
    - `title`: the ticket name
    - `status`: `"open"`
+   - `sdlc_workflow`: the block's chosen workflow (`none` | `patch` | `task` | `run` | `flow`)
+   - `model`: the block's chosen model (`sonnet` | `gemini-pro` | `gemini-flash` | `either`)
    - `wave`: default to one past this repo's current highest wave (tickets queue behind roadmap work
      unless the user says it's urgent — ask before assigning an earlier wave)
    - `depends_on`: `[]` unless the ticket explicitly names a prerequisite block, in which case

@@ -148,6 +148,9 @@ it leans on. Every block uses the same skeleton:
 
 - **What** — the scope, in implementation terms.
 - **Why** — the motivation (keeps the generator from over- or under-scoping).
+- **SDLC workflow?** — `Yes (patch/task/run/flow)` or `No — <reason>`.
+- **Model** — `Sonnet` | `Gemini Pro` | `Gemini Flash` | `Either`. Rule of thumb: Opus = reasoning/breakdown only; Sonnet = high-risk/complex; Gemini Pro = intermediate; Gemini Flash = simple.
+- **Workflow & Model Rationale** — prose explaining the choices.
 - **Files** — *new* vs *modified*, named by path. Load-bearing: tasks sharing a file must be
   serialized (`dependsOn`) or append-only; tasks owning distinct files run in parallel. A block that
   doesn't name its files forces the generator to guess ownership.
@@ -182,6 +185,9 @@ those blocks).
 <!-- Example: ### BA.0.A — Foundation setup (no "Block" word in the heading — the ID is self-describing) -->
 - **What:** <scope in implementation terms — concrete enough to scope tasks>
 - **Why:** <why this block, why now in the sequence>
+- **SDLC workflow?:** <Yes (patch/task/run/flow) or No — reason>
+- **Model:** <Sonnet | Gemini Pro | Gemini Flash | Either>
+- **Workflow & Model Rationale:** <why this model and workflow were chosen>
 - **Files:**
   - *New* <path> (what it holds), …
   - *Modified* <path> (what changes), …
@@ -211,9 +217,9 @@ those blocks).
 
 ## Quick Reference Sequence Table
 
-| Phase | Block | What | Why | Role in destination |
-|---|---|---|---|---|
-| 0 | A | <short> | <short> | <short> |
+| Phase | Block | What | Why | SDLC workflow? | Model | Role in destination |
+|---|---|---|---|---|---|---|
+| 0 | A | <short> | <short> | <short> | <short> | <short> |
 
 ---
 
@@ -234,6 +240,8 @@ After writing/revising `master-plan.md`, register every block (new or changed) i
    - `id`: the block's canonical ID (e.g. `BA.0.A`)
    - `title`: the block's name
    - `status`: `"open"` — never hand-set `"blocked"` (that is a derived value, see the schema)
+   - `sdlc_workflow`: the block's chosen workflow (`none` | `patch` | `task` | `run` | `flow`). (Map 'No' to `none`, and 'Yes (task)' to `task`, etc.)
+   - `model`: the block's chosen model (`sonnet` | `gemini-pro` | `gemini-flash` | `either`).
    - `wave`: an integer execution-order rank. Default to `10 * <phase number>` (Phase 0 → `10`, Phase 1
      → `20`, …) so every block in a phase shares a wave and later phases sort after.
    - `depends_on`: one `{ "type": "block", "repo": "<this-repo-slug>", "id": "<ID>" }` entry per explicit
