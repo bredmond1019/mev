@@ -1542,6 +1542,8 @@ pub fn derive_rollup(
 /// Deduplicated by `(repo, id)` within each of `now`/`next`/`blocked`
 /// independently — the first occurrence wins.
 pub fn derive_brain_focus(
+    self_src: &StateSource,
+    self_file: &StateFile,
     scope: &TierScope,
     config: &BrainConfig,
     graph: &StateGraph,
@@ -1638,6 +1640,84 @@ pub fn derive_brain_focus(
                     blocked_by: unmet.clone(),
                 });
             }
+        }
+    }
+
+    // Facet A — dual-role folding: fold the brain file's OWN tracks[]-derived
+    // focus in as well (tagged with the self repo slug), deduped alongside the
+    // children via the same seen_* sets. A brain with empty own tracks[] folds
+    // nothing here (derive_focus short-circuits to DerivedFocus::default()),
+    // so this is a byte-identical no-op for the pure tier sub-brains.
+    let self_derived = derive_focus(self_src, self_file, graph, files);
+    let self_slug = &self_src.repo_slug;
+
+    // Build a title/priority/due lookup from the self file's own tracks[].
+    let mut self_title_map: std::collections::HashMap<
+        String,
+        (String, Option<u8>, Option<String>),
+    > = std::collections::HashMap::new();
+    for track in &self_file.tracks {
+        for block in &track.blocks {
+            self_title_map.insert(
+                block.id.clone(),
+                (block.title.clone(), block.priority, block.due.clone()),
+            );
+        }
+    }
+    let self_title_of = |id: &str| {
+        self_title_map
+            .get(id)
+            .map(|(t, ..)| t.clone())
+            .unwrap_or_default()
+    };
+    let self_priority_of = |id: &str| self_title_map.get(id).and_then(|(_, p, _)| *p);
+    let self_due_of = |id: &str| self_title_map.get(id).and_then(|(_, _, d)| d.clone());
+
+    for id in &self_derived.now {
+        let key = (self_slug.clone(), id.clone());
+        if seen_now.insert(key) {
+            now.push(Block {
+                due: self_due_of(id),
+                priority: self_priority_of(id),
+                id: id.clone(),
+                title: self_title_of(id),
+                status: Some("in_progress".to_string()),
+                note: None,
+                repo: Some(self_slug.clone()),
+                blocked_by: Vec::new(),
+            });
+        }
+    }
+
+    for id in &self_derived.next {
+        let key = (self_slug.clone(), id.clone());
+        if seen_next.insert(key) {
+            next.push(Block {
+                due: self_due_of(id),
+                priority: self_priority_of(id),
+                id: id.clone(),
+                title: self_title_of(id),
+                status: None,
+                note: None,
+                repo: Some(self_slug.clone()),
+                blocked_by: Vec::new(),
+            });
+        }
+    }
+
+    for (id, unmet) in &self_derived.blocked {
+        let key = (self_slug.clone(), id.clone());
+        if seen_blocked.insert(key) {
+            blocked.push(Block {
+                due: self_due_of(id),
+                priority: self_priority_of(id),
+                id: id.clone(),
+                title: self_title_of(id),
+                status: None,
+                note: None,
+                repo: Some(self_slug.clone()),
+                blocked_by: unmet.clone(),
+            });
         }
     }
 
