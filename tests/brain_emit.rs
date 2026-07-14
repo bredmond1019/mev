@@ -5101,7 +5101,6 @@ mod task_yaml_frontmatter_drift_tests {
     use mev::brain::state::{
         Block, Focus, StateFile, StateSource, Track, TrackBlock, build_state_graph,
     };
-    use std::path::PathBuf;
 
     #[test]
     fn reconcile_status_scalars_replaces_and_preserves() {
