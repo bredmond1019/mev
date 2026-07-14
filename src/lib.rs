@@ -497,8 +497,9 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
 pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report> {
     use brain::config::find_brain_config;
     use brain::emit::{
-        apply_plan, plan_hq_board, plan_master_plan_tables, plan_project_caches, plan_state_json,
-        plan_status_frontmatter, plan_tier_rollups, plan_unified_board,
+        apply_plan, plan_brain_cache_watermarks, plan_hq_board, plan_master_plan_tables,
+        plan_project_caches, plan_state_json, plan_status_frontmatter, plan_tier_rollups,
+        plan_unified_board,
     };
     use brain::state::{StateLoadError, build_state_graph, discover_state_files, load_state};
 
@@ -558,6 +559,7 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     let hq_board_plan = plan_hq_board(&loaded, &graph, &config);
     let unified_board_plan =
         plan_unified_board(&loaded, &graph, &config, chrono::Local::now().date_naive());
+    let brain_caches_plan = plan_brain_cache_watermarks(root, &loaded, &config);
 
     // 5. Apply all plans (write or dry-run), in a stable order.
     let state_diags = apply_plan(&state_plan, write);
@@ -566,6 +568,7 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     let tier_rollups_diags = apply_plan(&tier_rollups_plan, write);
     let hq_board_diags = apply_plan(&hq_board_plan, write);
     let unified_board_diags = apply_plan(&unified_board_plan, write);
+    let brain_caches_diags = apply_plan(&brain_caches_plan, write);
 
     // 6. Run and apply the YAML frontmatter planner last so it sees the updated markdown in write mode.
     let status_fm_plan = plan_status_frontmatter(root, &loaded, &graph, &config);
@@ -577,6 +580,7 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     report.diagnostics.extend(tier_rollups_diags);
     report.diagnostics.extend(hq_board_diags);
     report.diagnostics.extend(unified_board_diags);
+    report.diagnostics.extend(brain_caches_diags);
     report.diagnostics.extend(status_fm_diags);
 
     Ok(report)

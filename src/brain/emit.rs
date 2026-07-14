@@ -1175,6 +1175,79 @@ pub fn plan_project_caches(
 }
 
 // ---------------------------------------------------------------------------
+// plan_brain_cache_watermarks
+// ---------------------------------------------------------------------------
+
+/// Reconciles `synced_from` in the `cache_doc` for `kind == "brain"` files.
+pub fn plan_brain_cache_watermarks(
+    root: &std::path::Path,
+    files: &[(StateSource, StateFile)],
+    config: &BrainConfig,
+) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+
+    for (src, file) in files {
+        if file.kind != "brain" {
+            continue;
+        }
+        let Some(entry) = config.repos.iter().find(|r| r.slug == src.repo_slug) else {
+            continue;
+        };
+        if entry.cache_doc.trim().is_empty() {
+            continue;
+        }
+        let cache_path = root.join(&entry.cache_doc);
+
+        let original = match std::fs::read_to_string(&cache_path) {
+            Ok(s) => s,
+            Err(_) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &cache_path,
+                    "W_EMIT_IO_ERROR",
+                    format!(
+                        "could not read brain-cache doc for '{}' at '{}'; skipping cache emit",
+                        src.repo_slug, entry.cache_doc
+                    ),
+                ));
+                continue;
+            }
+        };
+
+        let status_path = root.join(&entry.status_file);
+        let timestamp = match crate::brain::sync::read_watermark(&status_path)
+            .ok()
+            .and_then(|fm| fm.timestamp)
+        {
+            Some(t) => t,
+            None => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &status_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "repo '{}': status_file '{}' has no readable 'timestamp' field; \
+                         skipping cache emit",
+                        src.repo_slug, entry.status_file
+                    ),
+                ));
+                continue;
+            }
+        };
+
+        let new_content = reconcile_synced_from(&original, &timestamp);
+
+        if new_content != original {
+            plan.actions.push(EmitAction {
+                path: cache_path,
+                new_content,
+                note: format!("update brain cache watermark for '{}'", src.repo_slug),
+            });
+        }
+    }
+
+    plan
+}
+
+// ---------------------------------------------------------------------------
 // plan_tier_rollups
 // ---------------------------------------------------------------------------
 
