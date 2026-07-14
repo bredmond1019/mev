@@ -1255,6 +1255,7 @@ pub fn derive_focus(
 pub fn check_focus_drift(
     src: &StateSource,
     file: &StateFile,
+    config: &BrainConfig,
     graph: &StateGraph,
     files: &[(StateSource, StateFile)],
 ) -> Vec<Diagnostic> {
@@ -1265,17 +1266,43 @@ pub fn check_focus_drift(
         return vec![];
     }
 
-    let derived = derive_focus(src, file, graph, files);
+    // Kind-aware expected derivation (Facet B): brain-kind files must be
+    // checked against the same derivation the writer used to emit their
+    // stored focus — `derive_brain_focus` (children-union + own tracks[]
+    // folding, Facet A) — not the bare per-file `derive_focus`, which only
+    // ever looks at the file's own tracks[] and can never agree with the
+    // writer's children-union for a brain with in-scope children. Project-
+    // kind files are unaffected and keep using `derive_focus` exactly as
+    // before.
+    let (derived_now_owned, derived_next_owned, derived_blocked_owned): (
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+    ) = if file.kind == "brain" {
+        let scope = tier_scope_for(file, config);
+        let derived = derive_brain_focus(src, file, &scope, config, graph, files);
+        (
+            derived.now.iter().map(|b| b.id.clone()).collect(),
+            derived.next.iter().map(|b| b.id.clone()).collect(),
+            derived.blocked.iter().map(|b| b.id.clone()).collect(),
+        )
+    } else {
+        let derived = derive_focus(src, file, graph, files);
+        (
+            derived.now.clone(),
+            derived.next.clone(),
+            derived.blocked.iter().map(|(id, _)| id.clone()).collect(),
+        )
+    };
+    let derived_now_str: HashSet<&str> = derived_now_owned.iter().map(|s| s.as_str()).collect();
+    let derived_next_str: HashSet<&str> = derived_next_owned.iter().map(|s| s.as_str()).collect();
+    let derived_blocked_str: HashSet<&str> =
+        derived_blocked_owned.iter().map(|s| s.as_str()).collect();
 
     // Compare stored focus to derived (block-id sets only).
     let stored_now: HashSet<&str> = file.focus.now.iter().map(|b| b.id.as_str()).collect();
     let stored_next: HashSet<&str> = file.focus.next.iter().map(|b| b.id.as_str()).collect();
     let stored_blocked: HashSet<&str> = file.focus.blocked.iter().map(|b| b.id.as_str()).collect();
-
-    let derived_now_str: HashSet<&str> = derived.now.iter().map(|s| s.as_str()).collect();
-    let derived_next_str: HashSet<&str> = derived.next.iter().map(|s| s.as_str()).collect();
-    let derived_blocked_str: HashSet<&str> =
-        derived.blocked.iter().map(|(id, _)| id.as_str()).collect();
 
     if stored_now == derived_now_str
         && stored_next == derived_next_str

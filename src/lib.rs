@@ -450,7 +450,7 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
 
     // 9. Focus-drift warnings (per file with tracks[]).
     for (src, file) in &loaded {
-        let drift_diags = check_focus_drift(src, file, &graph, &loaded);
+        let drift_diags = check_focus_drift(src, file, &config, &graph, &loaded);
         report.diagnostics.extend(drift_diags);
     }
 
