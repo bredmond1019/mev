@@ -5428,3 +5428,272 @@ heading = "Alpha"
         let _ = fs::remove_dir_all(&dir);
     }
 }
+
+// ---------------------------------------------------------------------------
+// state-load-error-surfacing task 3 — end-to-end proof (via the public
+// `validate_brain_state` entry point) that:
+// (a) a serde-schema violation surfaces the underlying serde detail
+//     (offending field/type + line:column) inside `E_STATE_MALFORMED_JSON`,
+//     rather than the old opaque fixed string (Facet 1); and
+// (b) a malformed HQ root no longer cascades into spurious
+//     `E_STATE_SCHEMA_BAD_KIND` on correctly-`kind:"brain"` tier sub-brains —
+//     exactly one detailed root `E_STATE_MALFORMED_JSON` plus the new
+//     `E_STATE_ROOT_LOAD_FAILED` degraded-classification diagnostic, and zero
+//     `E_STATE_SCHEMA_BAD_KIND` (Facet 2); with a regression check that a
+//     well-formed brain validates with no unexpected diagnostics.
+// ---------------------------------------------------------------------------
+
+mod task_state_load_error_surfacing {
+    use std::fs;
+    use std::path::Path;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("mev-state-load-error-{tag}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_file(root: &Path, rel: &str, content: &str) {
+        let target = root.join(rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&target, content.as_bytes()).unwrap();
+    }
+
+    fn write_json(root: &Path, rel: &str, value: &serde_json::Value) {
+        write_file(root, rel, &serde_json::to_string_pretty(value).unwrap());
+    }
+
+    /// `brain.toml` with two tier-container self-entries (`slug == repo_path`,
+    /// mirroring the real HQ shape: `core`, `side`) plus one ordinary leaf repo
+    /// (`alpha`, nested under `core`) — enough to exercise both the tier
+    /// rollup path and the leaf `[[repos]]` path.
+    fn write_brain_toml(root: &Path) {
+        let toml = r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "core"
+tier = "_root"
+repo_path = "core"
+status_file = "core/planning/status.md"
+cache_doc = "docs/projects/core.md"
+heading = "Core"
+
+[[repos]]
+slug = "side"
+tier = "_root"
+repo_path = "side"
+status_file = "side/planning/status.md"
+cache_doc = "docs/projects/side.md"
+heading = "Side"
+
+[[repos]]
+slug = "alpha"
+tier = "core"
+repo_path = "core/alpha"
+status_file = "core/alpha/planning/status.md"
+cache_doc = "docs/projects/alpha.md"
+heading = "Alpha"
+"#;
+        fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
+    }
+
+    /// The HQ root `planning/state.json`. When `malformed` is `true`, the
+    /// `carryover[].related` field is authored as bare slug strings instead of
+    /// the required `Vec<BlockedBy>` edge objects — the exact live data defect
+    /// this ticket was written against — which fails to deserialize with a
+    /// `serde_json::Error` (not just a JSON-syntax error).
+    fn write_root_state(root: &Path, malformed: bool) {
+        let related = if malformed {
+            serde_json::json!(["some-other-slug"])
+        } else {
+            serde_json::json!([])
+        };
+        let state = serde_json::json!({
+            "repo": "hq",
+            "kind": "brain",
+            "updated": "2026-06-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "repos": [],
+            "tiers": [
+                { "tier": "core", "rollup": "core/planning/state.json" },
+                { "tier": "side", "rollup": "side/planning/state.json" }
+            ],
+            "carryover": [
+                {
+                    "slug": "some-carryover",
+                    "scope": { "cross_repo": true },
+                    "kind": "deferred",
+                    "text": "a durable note",
+                    "related": related,
+                    "created": "2026-06-29"
+                }
+            ]
+        });
+        write_json(root, "planning/state.json", &state);
+    }
+
+    /// A tier sub-brain's own `planning/state.json` — correctly `kind:"brain"`.
+    fn write_tier_brain_state(root: &Path, rel: &str, repo: &str) {
+        let state = serde_json::json!({
+            "repo": repo,
+            "kind": "brain",
+            "updated": "2026-06-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "repos": []
+        });
+        write_json(root, rel, &state);
+    }
+
+    fn write_alpha_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "alpha",
+            "kind": "project",
+            "updated": "2026-06-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "tracks": [
+                {
+                    "title": "Phase 1",
+                    "blocks": [{ "id": "AL.1.A", "title": "Start", "status": "open" }]
+                }
+            ]
+        });
+        write_json(root, "core/alpha/planning/state.json", &state);
+    }
+
+    fn write_fixture(root: &Path, malformed_root: bool) {
+        write_brain_toml(root);
+        write_root_state(root, malformed_root);
+        write_tier_brain_state(root, "core/planning/state.json", "core");
+        write_tier_brain_state(root, "side/planning/state.json", "side");
+        write_alpha_state(root);
+    }
+
+    // -----------------------------------------------------------------------
+    // Facet 1 — the serde detail (offending field/type + line:column) must be
+    // present in the E_STATE_MALFORMED_JSON message, not just the old generic
+    // fixed string.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn malformed_root_error_includes_serde_detail() {
+        let dir = temp_dir("serde-detail");
+        write_fixture(&dir, true);
+
+        let report =
+            mev::validate_brain_state(&dir).expect("validate_brain_state should not error");
+
+        let malformed: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "E_STATE_MALFORMED_JSON")
+            .collect();
+        assert_eq!(
+            malformed.len(),
+            1,
+            "expected exactly one E_STATE_MALFORMED_JSON (the root); got: {:#?}",
+            report.diagnostics
+        );
+
+        let msg = &malformed[0].message;
+        assert!(
+            msg.contains("line") && msg.contains("column"),
+            "E_STATE_MALFORMED_JSON message must carry the serde error's line:column detail, \
+             not just the generic string; got: {msg:?}"
+        );
+        assert!(
+            msg.len() > "state.json is not valid JSON or does not match the expected schema".len(),
+            "message must be more than the old generic fixed string; got: {msg:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Facet 2 — a malformed root must not cascade into spurious
+    // E_STATE_SCHEMA_BAD_KIND on correctly kind:"brain" tier sub-brains;
+    // exactly one root E_STATE_MALFORMED_JSON + one E_STATE_ROOT_LOAD_FAILED
+    // is the whole story. Also proves the well-formed regression case: no
+    // unexpected diagnostics at all.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn well_formed_root_validates_clean_malformed_root_does_not_cascade() {
+        // Regression: a well-formed brain validates with no unexpected errors.
+        let clean_dir = temp_dir("cascade-clean");
+        write_fixture(&clean_dir, false);
+
+        let clean_report =
+            mev::validate_brain_state(&clean_dir).expect("validate_brain_state should not error");
+        let clean_errors: Vec<_> = clean_report
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == mev::Severity::Error)
+            .collect();
+        assert!(
+            clean_errors.is_empty(),
+            "well-formed brain must validate with zero errors; got: {clean_errors:#?}"
+        );
+        let clean_bad_kind: Vec<_> = clean_report
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_KIND")
+            .collect();
+        assert!(
+            clean_bad_kind.is_empty(),
+            "well-formed brain must have zero E_STATE_SCHEMA_BAD_KIND; got: {clean_bad_kind:#?}"
+        );
+        let _ = fs::remove_dir_all(&clean_dir);
+
+        // Facet 2: corrupt ONLY the root so it fails to parse.
+        let dir = temp_dir("cascade-malformed");
+        write_fixture(&dir, true);
+
+        let report =
+            mev::validate_brain_state(&dir).expect("validate_brain_state should not error");
+
+        let malformed: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "E_STATE_MALFORMED_JSON")
+            .collect();
+        assert_eq!(
+            malformed.len(),
+            1,
+            "exactly one detailed root E_STATE_MALFORMED_JSON expected; got: {:#?}",
+            report.diagnostics
+        );
+
+        let root_load_failed: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "E_STATE_ROOT_LOAD_FAILED")
+            .collect();
+        assert_eq!(
+            root_load_failed.len(),
+            1,
+            "expected exactly one degraded-classification diagnostic; got: {:#?}",
+            report.diagnostics
+        );
+
+        let bad_kind: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_KIND")
+            .collect();
+        assert!(
+            bad_kind.is_empty(),
+            "tier sub-brains must NOT cascade into E_STATE_SCHEMA_BAD_KIND when the root fails \
+             to load; got: {bad_kind:#?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
