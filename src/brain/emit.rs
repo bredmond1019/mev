@@ -1179,6 +1179,24 @@ pub fn plan_project_caches(
 // ---------------------------------------------------------------------------
 
 /// Reconciles `synced_from` in the `cache_doc` for `kind == "brain"` files.
+///
+/// Brain-kind repos (tier sub-brains, and dual-role nodes like `business`) have
+/// their own `docs/projects/<slug>.md`-style cache doc but no project-cache
+/// sentinel to splice a focus-line into (that's [`plan_project_caches`]'s
+/// job for `kind == "project"` repos) — this planner only reconciles the
+/// OKF frontmatter `synced_from` watermark to the repo's own `status_file`
+/// `timestamp`, the same field [`check_sync`](crate::brain::sync::check_sync)
+/// validates against (see [`reconcile_synced_from`]). An [`EmitAction`] is
+/// added only when the resulting content differs from the original
+/// (fixed-point property).
+///
+/// A repo with no matching `[[repos]]` entry, or whose entry has a blank
+/// `cache_doc`, is silently skipped (nothing to target). A missing/unreadable
+/// cache doc produces a `W_EMIT_IO_ERROR` warning and no write. If
+/// `status_file` can't be read or has no `timestamp` field, a
+/// `W_EMIT_NO_SENTINEL` warning is emitted and the write is skipped —
+/// `synced_from` is never reconciled to a value `check_sync` couldn't
+/// validate anyway.
 pub fn plan_brain_cache_watermarks(
     root: &std::path::Path,
     files: &[(StateSource, StateFile)],

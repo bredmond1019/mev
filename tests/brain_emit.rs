@@ -1615,6 +1615,254 @@ mod task3_planners {
     }
 
     // -----------------------------------------------------------------------
+    // plan_brain_cache_watermarks
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn brain_cache_watermark_reconciles_synced_from() {
+        use mev::brain::emit::plan_brain_cache_watermarks;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_rel = "docs/projects/mytier.md";
+        let cache_path = tmp.path().join(cache_rel);
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(&cache_path, cache_doc_with_sentinel("2026-01-01T00:00:00Z")).unwrap();
+
+        let status_rel = "mytier/planning/status.md";
+        let status_path = tmp.path().join(status_rel);
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &status_path,
+            status_file_with_timestamp("2026-07-04T02:21:44Z"),
+        )
+        .unwrap();
+
+        let file = make_brain_file(vec![], vec![], Focus::default());
+        let src = StateSource {
+            repo_slug: "mytier".to_string(),
+            abs_path: PathBuf::from("/fake/mytier/planning/state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![(src, file)];
+        let config = config_with_cache_and_status("mytier", "core", cache_rel, status_rel);
+
+        let plan = plan_brain_cache_watermarks(tmp.path(), &files, &config);
+
+        assert_eq!(
+            plan.actions.len(),
+            1,
+            "expected one action; got {}",
+            plan.actions.len()
+        );
+        let action = &plan.actions[0];
+        assert_eq!(action.path, cache_path);
+        assert!(
+            action
+                .new_content
+                .contains("synced_from: \"2026-07-04T02:21:44Z\""),
+            "synced_from watermark not reconciled to the status_file's timestamp: {}",
+            action.new_content
+        );
+        assert!(
+            !action.new_content.contains("2026-01-01T00:00:00Z"),
+            "stale synced_from watermark should not survive"
+        );
+    }
+
+    #[test]
+    fn brain_cache_missing_file_warns_no_action() {
+        use mev::brain::emit::plan_brain_cache_watermarks;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // No cache doc written at all.
+        let cache_rel = "docs/projects/mytier.md";
+
+        let file = make_brain_file(vec![], vec![], Focus::default());
+        let src = StateSource {
+            repo_slug: "mytier".to_string(),
+            abs_path: PathBuf::from("/fake/mytier/planning/state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![(src, file)];
+        let config = config_with_cache_doc("mytier", "core", cache_rel);
+
+        let plan = plan_brain_cache_watermarks(tmp.path(), &files, &config);
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "no action expected when the cache doc is missing; got {}",
+            plan.actions.len()
+        );
+        let warn = plan
+            .diagnostics
+            .iter()
+            .find(|d| d.locator == "W_EMIT_IO_ERROR");
+        assert!(
+            warn.is_some(),
+            "expected W_EMIT_IO_ERROR diagnostic; got: {:?}",
+            plan.diagnostics
+        );
+    }
+
+    #[test]
+    fn brain_cache_missing_timestamp_warns_no_action() {
+        use mev::brain::emit::plan_brain_cache_watermarks;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_rel = "docs/projects/mytier.md";
+        let cache_path = tmp.path().join(cache_rel);
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(&cache_path, cache_doc_with_sentinel("2026-01-01T00:00:00Z")).unwrap();
+
+        // status_file left blank in the config below, so read_watermark finds nothing.
+        let file = make_brain_file(vec![], vec![], Focus::default());
+        let src = StateSource {
+            repo_slug: "mytier".to_string(),
+            abs_path: PathBuf::from("/fake/mytier/planning/state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![(src, file)];
+        let config = config_with_cache_doc("mytier", "core", cache_rel);
+
+        let plan = plan_brain_cache_watermarks(tmp.path(), &files, &config);
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "no action expected when the status_file has no timestamp; got {}",
+            plan.actions.len()
+        );
+        let warn = plan
+            .diagnostics
+            .iter()
+            .find(|d| d.locator == "W_EMIT_NO_SENTINEL");
+        assert!(
+            warn.is_some(),
+            "expected W_EMIT_NO_SENTINEL diagnostic; got: {:?}",
+            plan.diagnostics
+        );
+    }
+
+    #[test]
+    fn brain_cache_non_brain_kind_is_skipped() {
+        use mev::brain::emit::plan_brain_cache_watermarks;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_rel = "docs/projects/myrepo.md";
+        let cache_path = tmp.path().join(cache_rel);
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(&cache_path, cache_doc_with_sentinel("2026-01-01T00:00:00Z")).unwrap();
+
+        let status_rel = "myrepo/planning/status.md";
+        let status_path = tmp.path().join(status_rel);
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &status_path,
+            status_file_with_timestamp("2026-07-04T02:21:44Z"),
+        )
+        .unwrap();
+
+        let file = make_leaf_file("myrepo", vec![], Focus::default());
+        let src = StateSource {
+            repo_slug: "myrepo".to_string(),
+            abs_path: PathBuf::from("/fake/myrepo/planning/state.json"),
+            expected_kind: "project",
+        };
+
+        let files = vec![(src, file)];
+        let config = config_with_cache_and_status("myrepo", "core", cache_rel, status_rel);
+
+        let plan = plan_brain_cache_watermarks(tmp.path(), &files, &config);
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "project-kind repos should never be targeted; got {}",
+            plan.actions.len()
+        );
+        assert!(
+            plan.diagnostics.is_empty(),
+            "no diagnostics expected for a skipped non-brain-kind repo; got: {:?}",
+            plan.diagnostics
+        );
+    }
+
+    #[test]
+    fn brain_cache_no_config_entry_is_skipped() {
+        use mev::brain::emit::plan_brain_cache_watermarks;
+
+        let file = make_brain_file(vec![], vec![], Focus::default());
+        let src = StateSource {
+            repo_slug: "mytier".to_string(),
+            abs_path: PathBuf::from("/fake/mytier/planning/state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![(src, file)];
+        let config = BrainConfig::default();
+
+        let plan = plan_brain_cache_watermarks(std::path::Path::new("/fake"), &files, &config);
+
+        assert_eq!(
+            plan.actions.len(),
+            0,
+            "no config entry for the repo should skip it silently; got {}",
+            plan.actions.len()
+        );
+        assert!(
+            plan.diagnostics.is_empty(),
+            "no diagnostics expected when there's no matching [[repos]] entry; got: {:?}",
+            plan.diagnostics
+        );
+    }
+
+    #[test]
+    fn brain_cache_watermark_second_pass_is_fixed_point() {
+        use mev::brain::emit::plan_brain_cache_watermarks;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_rel = "docs/projects/mytier.md";
+        let cache_path = tmp.path().join(cache_rel);
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(&cache_path, cache_doc_with_sentinel("2026-01-01T00:00:00Z")).unwrap();
+
+        let status_rel = "mytier/planning/status.md";
+        let status_path = tmp.path().join(status_rel);
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &status_path,
+            status_file_with_timestamp("2026-07-04T02:21:44Z"),
+        )
+        .unwrap();
+
+        let file = make_brain_file(vec![], vec![], Focus::default());
+        let src = StateSource {
+            repo_slug: "mytier".to_string(),
+            abs_path: PathBuf::from("/fake/mytier/planning/state.json"),
+            expected_kind: "brain",
+        };
+
+        let files = vec![(src, file)];
+        let config = config_with_cache_and_status("mytier", "core", cache_rel, status_rel);
+
+        let plan1 = plan_brain_cache_watermarks(tmp.path(), &files, &config);
+        assert_eq!(plan1.actions.len(), 1);
+        std::fs::write(&cache_path, &plan1.actions[0].new_content).unwrap();
+
+        let plan2 = plan_brain_cache_watermarks(tmp.path(), &files, &config);
+        assert_eq!(
+            plan2.actions.len(),
+            0,
+            "second pass (idempotent) should produce no action; got {}",
+            plan2.actions.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // plan_tier_rollups
     // -----------------------------------------------------------------------
 
