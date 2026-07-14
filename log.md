@@ -8,12 +8,33 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-05T22:25:42Z"
+timestamp: "2026-07-14T18:52:28Z"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## [2026-07-14]
+
+### MV.5.A tracker reconciliation — block was already shipped
+- **What:** A `/generate-tasks MV.5.A` request revealed that MV.5.A ("Status Frontmatter
+  Reconciler", the ad-hoc block in `planning/plan-state-yaml-drift/plan.md`) was **already fully
+  implemented and tested** — it landed in `46b2e4e` but the trackers were never reconciled, leaving
+  `state.json` `open`, `status.md` `next` listing it, and `tasks.md` "Not started." Confirmed the
+  deliverables exist and pass: `reconcile_status_scalars` (`src/brain/emit.rs:1005`),
+  `plan_status_frontmatter` (`src/brain/emit.rs:1573`), wired into `emit_state` (`src/lib.rs:574`),
+  3 green tests in `tests/brain_emit.rs`. Marked the block `closed` in `state.json`, ran
+  `mev emit-state --write` (0 errors — dropped MV.5.A from derived `focus`, leaving `MV.7.A`), flipped
+  `tasks.md` to Done, and removed an unused `PathBuf` import from the block's test module. All four
+  harness gates green (fmt, clippy `-D warnings`, 19 test binaries / 0 failures / 0 warnings, release).
+- **Why:** Shipped work left `open` in `state.json` is a recurring drift (this repo has hit it before
+  with engine-rs `state-json-block-status-stale` and the two tickets reconciled 2026-07-14). Closing
+  the gap keeps `focus` derivation and every generated surface honest, and prevents an SDLC engine from
+  being pointed at an already-done block.
+- **Refs:** `planning/plan-state-yaml-drift/plan.md` (MV.5.A), commit `46b2e4e`.
 
 ---
 
