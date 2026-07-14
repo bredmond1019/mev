@@ -1107,6 +1107,124 @@ fn detect_cycles_dfs<'a>(
 }
 
 // ---------------------------------------------------------------------------
+// Effective priority (reverse-topo min-propagation — MV.7.A)
+// ---------------------------------------------------------------------------
+
+/// Compute each block's **effective priority** by reverse-topological `min`-
+/// propagation over the `depends_on` DAG.
+///
+/// `effective(n) = min(own(n), min{ effective(m) : m depends_on n })` — a
+/// block's effective priority is the hottest (numerically lowest) priority
+/// among itself and every block that (transitively) depends on it. This lets
+/// an engineering block that gates a hot business block inherit that
+/// hotness, so it floats to the top of the unified board's `NEXT` ordering
+/// even though its own authored priority is cold or absent.
+///
+/// Keyed by canonical `"repo:id"` (matching [`StateNode::key`]). Own priority
+/// is read from `TrackBlock.priority` in `files` (mirroring the
+/// [`derive_focus`] status-map pattern); an absent own priority is treated as
+/// the lowest hotness (`u8::MAX`) so it never wins a `min` against a real
+/// priority.
+///
+/// Propagation walks the **reverse** `BlockedBy` adjacency (from a
+/// dependency node to its dependents), mirroring the forward-adjacency build
+/// in [`detect_cycles`]. The walk is memoized DFS with a recursion-stack
+/// guard: a node already on the stack short-circuits to its own priority
+/// instead of recursing again, so a `depends_on` cycle terminates
+/// deterministically without hanging or panicking — this pass does not
+/// assume `MV.3.P2` has already rejected cycles.
+///
+/// Only nodes whose effective value lands in the real priority range
+/// (`0..=3`) get a map entry; a node whose effective value stays `u8::MAX`
+/// (no own priority and no hotter dependent, transitively) is omitted, so
+/// callers that `.get(key).copied()` naturally treat it as absent and sort
+/// it last — matching how raw `Block.priority: None` sorted before this
+/// pass existed.
+pub fn effective_priorities(
+    graph: &StateGraph,
+    files: &[(StateSource, StateFile)],
+) -> std::collections::HashMap<String, u8> {
+    use std::collections::{HashMap, HashSet};
+
+    // Own priority per node key ("repo:id"); absent → u8::MAX (never wins a min).
+    let mut own: HashMap<String, u8> = HashMap::new();
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let key = format!("{}:{}", src.repo_slug, block.id);
+                own.insert(key, block.priority.unwrap_or(u8::MAX));
+            }
+        }
+    }
+    // Defensive: every graph node gets an own-priority entry even if it was
+    // somehow absent from `files` (keeps the DFS total over `graph.nodes`).
+    for node in &graph.nodes {
+        own.entry(node.key.clone()).or_insert(u8::MAX);
+    }
+
+    // Reverse adjacency: to_ref (dependency) → [from, ...] (its dependents).
+    // `from depends_on to_ref`, so propagating min *into* to_ref from its
+    // dependents' effective values is exactly "a block inherits the hotness
+    // of what it gates".
+    let mut reverse_adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    for node in &graph.nodes {
+        reverse_adj.entry(node.key.as_str()).or_default();
+    }
+    for edge in &graph.edges {
+        if edge.kind == StateEdgeKind::BlockedBy {
+            reverse_adj
+                .entry(edge.to_ref.as_str())
+                .or_default()
+                .push(edge.from.as_str());
+        }
+    }
+
+    let mut memo: HashMap<String, u8> = HashMap::new();
+    let mut on_stack: HashSet<String> = HashSet::new();
+
+    fn compute(
+        key: &str,
+        own: &HashMap<String, u8>,
+        reverse_adj: &HashMap<&str, Vec<&str>>,
+        memo: &mut HashMap<String, u8>,
+        on_stack: &mut HashSet<String>,
+    ) -> u8 {
+        if let Some(&v) = memo.get(key) {
+            return v;
+        }
+        let own_priority = own.get(key).copied().unwrap_or(u8::MAX);
+        // Cycle guard: `key` is already being computed further up this DFS
+        // path — short-circuit to its own priority instead of recursing
+        // again, so a `depends_on` cycle can't recurse forever.
+        if on_stack.contains(key) {
+            return own_priority;
+        }
+        on_stack.insert(key.to_string());
+
+        let mut best = own_priority;
+        if let Some(dependents) = reverse_adj.get(key) {
+            for dep in dependents {
+                let v = compute(dep, own, reverse_adj, memo, on_stack);
+                if v < best {
+                    best = v;
+                }
+            }
+        }
+
+        on_stack.remove(key);
+        memo.insert(key.to_string(), best);
+        best
+    }
+
+    let keys: Vec<String> = own.keys().cloned().collect();
+    for key in &keys {
+        compute(key, &own, &reverse_adj, &mut memo, &mut on_stack);
+    }
+
+    memo.into_iter().filter(|(_, v)| *v <= 3).collect()
+}
+
+// ---------------------------------------------------------------------------
 // Ready-order (reusable — MV.3B.T topo-emitter input)
 // ---------------------------------------------------------------------------
 
@@ -5680,6 +5798,152 @@ mod tests {
             next_matches, 1,
             "the (repo, id) pair authored by both self and a same-slug child must appear once, got: {:?}",
             focus.next
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // effective_priorities (MV.7.A) — reverse-topo min-propagation
+    // -----------------------------------------------------------------------
+
+    /// Build a leaf `(StateSource, StateFile)` with one track of blocks, each
+    /// `(id, priority)`, and `depends_on` edges declared inline as
+    /// `{type:"block", repo, id}` entries so [`build_state_graph`] can derive
+    /// the same graph the emit pipeline would see.
+    fn priority_pair(
+        dir: &std::path::Path,
+        repo: &str,
+        blocks: &[(&str, Option<u8>, &[(&str, &str)])],
+    ) -> (StateSource, StateFile) {
+        let block_json: Vec<String> = blocks
+            .iter()
+            .map(|(id, priority, deps)| {
+                let priority_field = match priority {
+                    Some(p) => format!(r#""priority": {p},"#),
+                    None => String::new(),
+                };
+                let deps_json: Vec<String> = deps
+                    .iter()
+                    .map(|(dep_repo, dep_id)| {
+                        format!(r#"{{"type": "block", "repo": "{dep_repo}", "id": "{dep_id}"}}"#)
+                    })
+                    .collect();
+                format!(
+                    r#"{{ "id": "{id}", "title": "{id}", {priority_field} "depends_on": [{}] }}"#,
+                    deps_json.join(", ")
+                )
+            })
+            .collect();
+        let json = format!(
+            r#"{{
+  "repo": "{repo}",
+  "kind": "project",
+  "updated": "2026-07-14",
+  "focus": {{ "now": [], "next": [], "blocked": [] }},
+  "tracks": [{{ "title": "Phase 1", "blocks": [{}] }}]
+}}"#,
+            block_json.join(", ")
+        );
+        make_pair(dir, &format!("{repo}-state.json"), "project", &json)
+    }
+
+    #[test]
+    fn effective_priorities_eng_block_gating_p0_business_block_inherits_p0() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // eng:E.1 gates biz:B.1 (P0): biz:B.1 depends_on eng:E.1 (B.1 cannot
+        // proceed until E.1 is done, so E.1 is what "gates" it).
+        let eng = priority_pair(dir.path(), "eng", &[("E.1", None, &[])]);
+        let biz = priority_pair(dir.path(), "biz", &[("B.1", Some(0), &[("eng", "E.1")])]);
+        let files = vec![eng, biz];
+        let graph = build_state_graph(&files);
+
+        let effective = effective_priorities(&graph, &files);
+
+        assert_eq!(
+            effective.get("eng:E.1").copied(),
+            Some(0),
+            "an eng block with no own priority that gates a P0 business block \
+             must inherit effective priority P0; got {effective:?}"
+        );
+        assert_eq!(effective.get("biz:B.1").copied(), Some(0));
+    }
+
+    #[test]
+    fn effective_priorities_propagates_min_across_two_hops() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // biz:B1 (P0) depends_on a:A1 depends_on a:A2 — two hops of gating:
+        // A1 directly gates B1, A2 gates A1 which gates B1.
+        let a = priority_pair(
+            dir.path(),
+            "a",
+            &[("A1", None, &[("a", "A2")]), ("A2", Some(3), &[])],
+        );
+        let biz = priority_pair(dir.path(), "biz", &[("B1", Some(0), &[("a", "A1")])]);
+        let files = vec![a, biz];
+        let graph = build_state_graph(&files);
+
+        let effective = effective_priorities(&graph, &files);
+
+        assert_eq!(
+            effective.get("a:A1").copied(),
+            Some(0),
+            "the direct gate must inherit P0 from its dependent"
+        );
+        assert_eq!(
+            effective.get("a:A2").copied(),
+            Some(0),
+            "the min must propagate two hops back to the root dependent"
+        );
+    }
+
+    #[test]
+    fn effective_priorities_block_with_no_hot_dependents_keeps_own_priority() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // solo:S has its own priority (2) and nothing depends on it.
+        let solo = priority_pair(dir.path(), "solo", &[("S", Some(2), &[])]);
+        let files = vec![solo];
+        let graph = build_state_graph(&files);
+
+        let effective = effective_priorities(&graph, &files);
+
+        assert_eq!(effective.get("solo:S").copied(), Some(2));
+    }
+
+    #[test]
+    fn effective_priorities_absent_own_priority_and_no_hot_dependents_is_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let solo = priority_pair(dir.path(), "solo", &[("S", None, &[])]);
+        let files = vec![solo];
+        let graph = build_state_graph(&files);
+
+        let effective = effective_priorities(&graph, &files);
+
+        assert!(
+            !effective.contains_key("solo:S"),
+            "a block with no own priority and no hot dependents must stay absent \
+             (sorts last), got {effective:?}"
+        );
+    }
+
+    #[test]
+    fn effective_priorities_cycle_terminates_without_hang_or_panic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // a:X depends_on b:Y, b:Y depends_on a:X — a two-node cycle.
+        let graph = make_cycle_graph(
+            dir.path(),
+            &[("a", "X"), ("b", "Y")],
+            &[("a:X", "b:Y"), ("b:Y", "a:X")],
+        );
+        let a = priority_pair(dir.path(), "a", &[("X", Some(1), &[])]);
+        let b = priority_pair(dir.path(), "b", &[("Y", Some(2), &[])]);
+        let files = vec![a, b];
+
+        // Must return promptly (no hang) and not panic; exact values are not
+        // load-bearing here, only that the pass terminates deterministically.
+        let effective = effective_priorities(&graph, &files);
+        let effective_again = effective_priorities(&graph, &files);
+        assert_eq!(
+            effective, effective_again,
+            "effective_priorities over a cyclic graph must be deterministic"
         );
     }
 }

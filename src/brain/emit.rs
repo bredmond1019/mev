@@ -25,7 +25,8 @@ use thiserror::Error;
 use crate::brain::config::BrainConfig;
 use crate::brain::state::{
     Block, BlockedBy, CrossRepoEdge, Focus, RepoRollup, StateFile, StateGraph, StateSource,
-    TierScope, derive_brain_focus, derive_cross_repo, derive_focus, derive_rollup, tier_scope_for,
+    TierScope, derive_brain_focus, derive_cross_repo, derive_focus, derive_rollup,
+    effective_priorities, tier_scope_for,
 };
 
 // ---------------------------------------------------------------------------
@@ -408,10 +409,11 @@ const DUE_SOON_WINDOW_DAYS: i64 = 14;
 pub fn render_unified_board(
     focus: &Focus,
     edges: &[CrossRepoEdge],
+    effective: &HashMap<String, u8>,
     config: &BrainConfig,
     today: chrono::NaiveDate,
 ) -> String {
-    let next_sorted = sort_unified_board_next(&focus.next);
+    let next_sorted = sort_unified_board_next(&focus.next, effective);
 
     let sections = [
         render_unified_board_section("NOW", &focus.now, edges, config),
@@ -441,14 +443,31 @@ fn unified_board_tag(block: &Block, config: &BrainConfig) -> &'static str {
     if is_business { "[BIZ]" } else { "[ENG]" }
 }
 
-/// Stably sort `next` by `(priority asc, due asc)`, both with an absent value
-/// sorted last. The input is already wave-ordered, so the stable sort keeps
-/// wave as the implicit tertiary key.
-fn sort_unified_board_next(next: &[Block]) -> Vec<Block> {
+/// Look up `block`'s effective priority (MV.7.A): the `effective_priorities`
+/// map (keyed `"repo:id"`) wins when present — it reflects reverse-topo
+/// `min`-propagation, so a block gating a hotter dependent floats up — and
+/// falls back to the block's own raw `priority` (absent → `u8::MAX`, sorts
+/// last) when the block has no entry in the map.
+fn effective_priority_for(block: &Block, effective: &HashMap<String, u8>) -> u8 {
+    let key = format!("{}:{}", block.repo.as_deref().unwrap_or(""), block.id);
+    effective
+        .get(&key)
+        .copied()
+        .or(block.priority)
+        .unwrap_or(u8::MAX)
+}
+
+/// Stably sort `next` by `(effective priority asc, due asc)`, both with an
+/// absent value sorted last. The input is already wave-ordered, so the
+/// stable sort keeps wave as the implicit tertiary key. `effective` is the
+/// [`effective_priorities`] map (MV.7.A) — an engineering block that gates a
+/// hotter dependent (via `depends_on`) sorts by that inherited hotness
+/// rather than its own raw priority.
+fn sort_unified_board_next(next: &[Block], effective: &HashMap<String, u8>) -> Vec<Block> {
     let mut sorted = next.to_vec();
     sorted.sort_by(|a, b| {
-        let pa = a.priority.unwrap_or(u8::MAX);
-        let pb = b.priority.unwrap_or(u8::MAX);
+        let pa = effective_priority_for(a, effective);
+        let pb = effective_priority_for(b, effective);
         pa.cmp(&pb)
             .then_with(|| match (parse_due(&a.due), parse_due(&b.due)) {
                 (Some(da), Some(db)) => da.cmp(&db),
@@ -1529,7 +1548,8 @@ pub fn plan_unified_board(
 
         let focus = derive_brain_focus(src, file, &scope, config, graph, files);
         let edges = derive_cross_repo(files);
-        let board = render_unified_board(&focus, &edges, config, today);
+        let effective = effective_priorities(graph, files);
+        let board = render_unified_board(&focus, &edges, &effective, config, today);
 
         match splice_generated(&original, markers::UNIFIED_BOARD, &board) {
             Ok(new_content) => {

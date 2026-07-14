@@ -3896,6 +3896,8 @@ _none_";
 // ---------------------------------------------------------------------------
 
 mod task2_render_unified_board {
+    use std::collections::HashMap;
+
     use mev::brain::config::{BrainConfig, RepoEntry};
     use mev::brain::emit::render_unified_board;
     use mev::brain::state::{Block, BlockedBy, CrossRepoEdge, Endpoint, Focus};
@@ -3973,7 +3975,7 @@ mod task2_render_unified_board {
             blocked: vec![],
         };
 
-        let rendered = render_unified_board(&focus, &[], &config, today());
+        let rendered = render_unified_board(&focus, &[], &HashMap::new(), &config, today());
 
         assert!(rendered.contains("- [BIZ] business:BR.1 — Biz block"));
         assert!(rendered.contains("- [ENG] mev:MV.1 — Eng block"));
@@ -3988,7 +3990,7 @@ mod task2_render_unified_board {
             blocked: vec![],
         };
 
-        let rendered = render_unified_board(&focus, &[], &config, today());
+        let rendered = render_unified_board(&focus, &[], &HashMap::new(), &config, today());
 
         assert!(rendered.contains("- [ENG] mystery:X.1 — Unknown"));
     }
@@ -4005,13 +4007,41 @@ mod task2_render_unified_board {
             blocked: vec![],
         };
 
-        let rendered = render_unified_board(&focus, &[], &config, today());
+        let rendered = render_unified_board(&focus, &[], &HashMap::new(), &config, today());
 
         let biz_idx = rendered.find("BR.2").unwrap();
         let eng_idx = rendered.find("MV.2").unwrap();
         assert!(
             biz_idx < eng_idx,
             "expected P1 business block before P2 engineering block:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn next_orders_by_effective_priority_when_provided_overriding_raw_priority() {
+        let config = config_with_repos(&[("mev", "engine")]);
+        let focus = Focus {
+            now: vec![],
+            next: vec![
+                // Own priority 2 (cold), but effective-priority map says P0
+                // (inherited from a hotter dependent it gates).
+                tagged_block("mev", "GATE", "Gates a P0 block", Some(2), None),
+                // Own priority 1, no entry in the effective map — falls back
+                // to its own raw priority.
+                tagged_block("mev", "SOLO", "No hot dependents", Some(1), None),
+            ],
+            blocked: vec![],
+        };
+        let mut effective = HashMap::new();
+        effective.insert("mev:GATE".to_string(), 0u8);
+
+        let rendered = render_unified_board(&focus, &[], &effective, &config, today());
+
+        let gate_idx = rendered.find("mev:GATE").unwrap();
+        let solo_idx = rendered.find("mev:SOLO").unwrap();
+        assert!(
+            gate_idx < solo_idx,
+            "effective priority (P0) must win over raw priority (P2) for sorting:\n{rendered}"
         );
     }
 
@@ -4032,7 +4062,7 @@ mod task2_render_unified_board {
             blocked: vec![],
         };
 
-        let rendered = render_unified_board(&focus, &[], &config, today());
+        let rendered = render_unified_board(&focus, &[], &HashMap::new(), &config, today());
 
         let idx_b = rendered.find("mev:B").unwrap();
         let idx_a = rendered.find("mev:A").unwrap();
@@ -4069,7 +4099,7 @@ mod task2_render_unified_board {
             blocked: vec![],
         };
 
-        let rendered = render_unified_board(&focus, &[], &config, today());
+        let rendered = render_unified_board(&focus, &[], &HashMap::new(), &config, today());
         let due_soon_section = rendered
             .split("## DUE-SOON")
             .nth(1)
@@ -4103,7 +4133,7 @@ mod task2_render_unified_board {
             blocked: vec![],
         };
 
-        let rendered = render_unified_board(&focus, &[], &config, today());
+        let rendered = render_unified_board(&focus, &[], &HashMap::new(), &config, today());
         let due_soon_section = rendered
             .split("## DUE-SOON")
             .nth(1)
@@ -4145,7 +4175,7 @@ mod task2_render_unified_board {
             note: Some("waiting on schema freeze".to_string()),
         }];
 
-        let rendered = render_unified_board(&focus, &edges, &config, today());
+        let rendered = render_unified_board(&focus, &edges, &HashMap::new(), &config, today());
 
         assert!(
             rendered
@@ -4156,7 +4186,8 @@ mod task2_render_unified_board {
     #[test]
     fn empty_focus_renders_none_in_all_four_sections() {
         let config = config_with_repos(&[]);
-        let rendered = render_unified_board(&Focus::default(), &[], &config, today());
+        let rendered =
+            render_unified_board(&Focus::default(), &[], &HashMap::new(), &config, today());
 
         let expected =
             "## NOW\n_none_\n\n## NEXT\n_none_\n\n## BLOCKED\n_none_\n\n## DUE-SOON\n_none_";
@@ -4166,7 +4197,8 @@ mod task2_render_unified_board {
     #[test]
     fn rendered_board_has_no_trailing_newline() {
         let config = config_with_repos(&[]);
-        let rendered = render_unified_board(&Focus::default(), &[], &config, today());
+        let rendered =
+            render_unified_board(&Focus::default(), &[], &HashMap::new(), &config, today());
         assert!(!rendered.ends_with('\n'));
     }
 }
@@ -5472,6 +5504,163 @@ heading = "Eng Repo"
         assert!(
             !due_soon_section.contains("eng-repo:MV.4"),
             "far-future due block must be excluded from DUE-SOON; got:\n{due_soon_section}"
+        );
+
+        // --- Fixed point: a second emit over the already-derived corpus must
+        // be a no-op, and the unified-board region byte-identical. ---
+        let snapshot = fs::read(dir.join("planning/status.md")).unwrap();
+
+        let report_second = mev::emit_state(&dir, true).expect("second emit should not error");
+        let wrote: Vec<_> = report_second
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "I_EMIT_WROTE")
+            .collect();
+        assert!(
+            wrote.is_empty(),
+            "second emit over the already-derived corpus must be a no-op; got: {wrote:#?}"
+        );
+
+        let after_second = fs::read(dir.join("planning/status.md")).unwrap();
+        assert_eq!(
+            after_second, snapshot,
+            "planning/status.md must be byte-identical after the fixed-point pass"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // MV.7.A — effective-priority inheritance: an engineering block that
+    // `depends_on`-gates a P0 business block must inherit that P0 hotness
+    // and float above an ungated P2 engineering block in NEXT, even though
+    // it carries no own priority.
+    // -----------------------------------------------------------------------
+
+    /// The business-tier repo's `planning/state.json` for the gating
+    /// fixture: a `priority: 0` (P0) block that `depends_on` the
+    /// engineering repo's gate block, so it lands in BLOCKED (its
+    /// dependency is still `open`, not `closed`) — but its P0 hotness must
+    /// still propagate backward onto the eng block that gates it.
+    fn write_biz_repo_state_gating(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "biz-repo",
+            "kind": "project",
+            "updated": "2026-07-05",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "tracks": [
+                {
+                    "title": "Phase 1",
+                    "blocks": [
+                        {
+                            "id": "BR.0",
+                            "title": "Biz P0 block gated by eng",
+                            "status": "open",
+                            "depends_on": [
+                                { "type": "block", "repo": "eng-repo", "id": "MV.0" }
+                            ],
+                            "wave": 1,
+                            "priority": 0,
+                            "due": null
+                        }
+                    ]
+                }
+            ]
+        });
+        write_json(root, "repos/biz-repo/planning/state.json", &state);
+    }
+
+    /// The engineering-tier repo's `planning/state.json` for the gating
+    /// fixture: `MV.0` is ready with no own priority and gates the P0
+    /// business block; `MV.1` is a ready `priority: 2` block with no hot
+    /// dependents. `MV.0` must sort above `MV.1` in NEXT once effective
+    /// (not raw) priority is the sort key.
+    fn write_eng_repo_state_gating(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "eng-repo",
+            "kind": "project",
+            "updated": "2026-07-05",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "tracks": [
+                {
+                    "title": "Phase 1",
+                    "blocks": [
+                        {
+                            "id": "MV.0",
+                            "title": "Eng gate block (no own priority)",
+                            "status": "open",
+                            "depends_on": [],
+                            "wave": 1,
+                            "due": null
+                        },
+                        {
+                            "id": "MV.1",
+                            "title": "Eng P2 block, no hot dependents",
+                            "status": "open",
+                            "depends_on": [],
+                            "wave": 2,
+                            "priority": 2,
+                            "due": null
+                        }
+                    ]
+                }
+            ]
+        });
+        write_json(root, "repos/eng-repo/planning/state.json", &state);
+    }
+
+    #[test]
+    fn unified_board_effective_priority_gating_floats_eng_block_and_is_idempotent() {
+        let dir = temp_dir("effective-priority");
+
+        write_brain_toml(&dir);
+        write_hq_state(&dir);
+        write_hq_status_md(&dir);
+        write_biz_repo_state_gating(&dir);
+        write_eng_repo_state_gating(&dir);
+
+        let report = mev::emit_state(&dir, true).expect("emit should not error");
+        let unexpected_errors: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == mev::Severity::Error)
+            .collect();
+        assert!(
+            unexpected_errors.is_empty(),
+            "fixture emit should have no errors; got: {unexpected_errors:#?}"
+        );
+
+        let status_after = read(&dir, "planning/status.md");
+        let board = status_after
+            .split("<!-- BEGIN generated:unified-board -->")
+            .nth(1)
+            .and_then(|s| s.split("<!-- END generated:unified-board -->").next())
+            .expect("unified-board region must be present");
+
+        let next_idx = board.find("## NEXT").unwrap();
+        let blocked_idx = board.find("## BLOCKED").unwrap();
+        let next_section = &board[next_idx..blocked_idx];
+
+        let gate_pos = next_section
+            .find("eng-repo:MV.0")
+            .expect("MV.0 (the P0 gate) must appear in NEXT");
+        let cold_pos = next_section
+            .find("eng-repo:MV.1")
+            .expect("MV.1 (cold, no hot dependents) must appear in NEXT");
+        assert!(
+            gate_pos < cold_pos,
+            "eng block gating a P0 business block must sort above a P2 eng \
+             block with no hot dependents; got:\n{next_section}"
+        );
+
+        // The gated business block itself is BLOCKED (its dependency is open,
+        // not closed) — confirms this is genuinely inherited hotness, not the
+        // business block's own priority leaking into NEXT.
+        let blocked_section = &board[blocked_idx..];
+        assert!(
+            blocked_section.contains("biz-repo:BR.0"),
+            "the P0 business block must be BLOCKED (its eng dependency is \
+             still open), not NEXT; got:\n{blocked_section}"
         );
 
         // --- Fixed point: a second emit over the already-derived corpus must
