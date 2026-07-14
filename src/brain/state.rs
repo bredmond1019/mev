@@ -2727,6 +2727,35 @@ mod tests {
         make_pair(dir, &format!("{repo}-state.json"), "brain", &json)
     }
 
+    /// Dual-role brain state.json: `kind: "brain"` that ALSO carries its own
+    /// `tracks[]` (one `in_progress` block and one `open` block with an unmet
+    /// external dep) — the fixture shape used to exercise Facet A's
+    /// self-folding and Facet B's kind-aware drift check.
+    fn dual_role_brain_pair(dir: &std::path::Path, repo: &str) -> (StateSource, StateFile) {
+        let json = format!(
+            r#"{{
+  "repo": "{repo}",
+  "kind": "brain",
+  "updated": "2026-06-29",
+  "focus": {{ "now": [], "next": [], "blocked": [] }},
+  "tracks": [{{
+    "title": "Own Track",
+    "blocks": [
+      {{ "id": "{repo_upper}.1.A", "title": "Own now work", "status": "in_progress" }},
+      {{
+        "id": "{repo_upper}.1.B",
+        "title": "Own blocked work",
+        "status": "open",
+        "depends_on": [{{ "type": "external", "what": "upstream dep" }}]
+      }}
+    ]
+  }}]
+}}"#,
+            repo_upper = repo.to_uppercase()
+        );
+        make_pair(dir, &format!("{repo}-state.json"), "brain", &json)
+    }
+
     /// Minimal leaf state.json with one tracks block and a clean focus.
     fn leaf_pair(dir: &std::path::Path, repo: &str, block_id: &str) -> (StateSource, StateFile) {
         let json = format!(
@@ -4704,6 +4733,146 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // check_focus_drift — Facet B: kind-aware validation for dual-role brains
+    // (brain-focus-dual-role-drift task 3/4)
+    // -----------------------------------------------------------------------
+
+    /// Build a dual-role `kind: "brain"` file (its own `tracks[]`: one
+    /// `in_progress` block "CO.1.A" and one `open`+external-dep block
+    /// "CO.1.B") plus one in-scope `kind: "project"` child ("alpha", one open
+    /// ready block "AL.1.A"), and a `BrainConfig` that scopes the self repo
+    /// ("core") to just that child's tier via [`tier_scope_for`].
+    fn dual_role_drift_fixture(
+        dir: &std::path::Path,
+        stored_now: &[&str],
+        stored_next: &[&str],
+        stored_blocked: &[&str],
+    ) -> (
+        BrainConfig,
+        (StateSource, StateFile),
+        Vec<(StateSource, StateFile)>,
+    ) {
+        let config = make_mixed_tier_config();
+
+        let alpha_json = r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [{ "id": "AL.1.A", "title": "Work" }], "blocked": [] },
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [{ "id": "AL.1.A", "title": "Work", "status": "open" }]
+  }]
+}"#;
+        let pair_alpha = make_pair(dir, "alpha-state.json", "project", alpha_json);
+
+        let make_block = |id: &str| Block {
+            due: None,
+            priority: None,
+            id: id.to_string(),
+            title: "placeholder".to_string(),
+            status: None,
+            note: None,
+            repo: None,
+            blocked_by: vec![],
+        };
+        let self_file = StateFile {
+            repo: "core".to_string(),
+            kind: "brain".to_string(),
+            updated: "2026-06-29".to_string(),
+            focus: Focus {
+                now: stored_now.iter().map(|id| make_block(id)).collect(),
+                next: stored_next.iter().map(|id| make_block(id)).collect(),
+                blocked: stored_blocked.iter().map(|id| make_block(id)).collect(),
+            },
+            tracks: vec![Track {
+                title: "Own Track".to_string(),
+                blocks: vec![
+                    TrackBlock {
+                        due: None,
+                        priority: None,
+                        sdlc_workflow: None,
+                        model: None,
+                        id: "CO.1.A".to_string(),
+                        title: "Own now work".to_string(),
+                        status: Some("in_progress".to_string()),
+                        depends_on: vec![],
+                        wave: None,
+                        origin: None,
+                    },
+                    TrackBlock {
+                        due: None,
+                        priority: None,
+                        sdlc_workflow: None,
+                        model: None,
+                        id: "CO.1.B".to_string(),
+                        title: "Own blocked work".to_string(),
+                        status: Some("open".to_string()),
+                        depends_on: vec![BlockedBy::External {
+                            what: "upstream dep".to_string(),
+                        }],
+                        wave: None,
+                        origin: None,
+                    },
+                ],
+            }],
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+            carryover: vec![],
+        };
+        let self_src = StateSource {
+            repo_slug: "core".to_string(),
+            abs_path: dir.join("core-state.json"),
+            expected_kind: "brain",
+        };
+
+        (config, (self_src, self_file), vec![pair_alpha])
+    }
+
+    #[test]
+    fn check_focus_drift_dual_role_brain_in_sync_produces_no_diagnostics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (config, (self_src, self_file), mut files) =
+            dual_role_drift_fixture(dir.path(), &["CO.1.A"], &["AL.1.A"], &["CO.1.B"]);
+        files.push((self_src.clone(), self_file.clone()));
+        let graph = build_state_graph(&files);
+
+        let diags = check_focus_drift(&self_src, &self_file, &config, &graph, &files);
+
+        assert!(
+            diags.is_empty(),
+            "dual-role brain stored focus matching derive_brain_focus (children ∪ own \
+             tracks[]) should produce no diagnostics, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_dual_role_brain_stale_still_warns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Stored focus is missing the self ready-now block "CO.1.A" — stale.
+        let (config, (self_src, self_file), mut files) =
+            dual_role_drift_fixture(dir.path(), &[], &["AL.1.A"], &["CO.1.B"]);
+        files.push((self_src.clone(), self_file.clone()));
+        let graph = build_state_graph(&files);
+
+        let diags = check_focus_drift(&self_src, &self_file, &config, &graph, &files);
+
+        let drifts: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_FOCUS_DRIFT")
+            .collect();
+        assert_eq!(
+            drifts.len(),
+            1,
+            "a dual-role brain whose stored focus is missing a now-ready self \
+             block must still warn, got: {diags:?}"
+        );
+    }
+
     #[test]
     fn state_graph_is_serializable() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5185,6 +5354,173 @@ mod tests {
                 ("beta".to_string(), "BE.1.A".to_string()),
             ],
             "duplicate (repo, id) entries must be deduped, config order preserved"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // derive_brain_focus — Facet A: dual-role self-tracks folding
+    // (brain-focus-dual-role-drift task 1/4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn derive_brain_focus_dual_role_folds_self_tracks_with_children() {
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Child: project-kind file with a single OPEN, dep-free block — ready,
+        // so it lands in `next` (not `now`).
+        let alpha_json = r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [{ "id": "AL.1.A", "title": "Work" }], "blocked": [] },
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [{ "id": "AL.1.A", "title": "Work", "status": "open" }]
+  }]
+}"#;
+        let pair_alpha = make_pair(dir.path(), "alpha-state.json", "project", alpha_json);
+        let files = vec![pair_alpha];
+        let (self_src, self_file) = dual_role_brain_pair(dir.path(), "core");
+
+        let focus = derive_brain_focus(
+            &self_src,
+            &self_file,
+            &scope,
+            &config,
+            &StateGraph::default(),
+            &files,
+        );
+
+        // Self's own in_progress block must surface in `now`, tagged with the
+        // self repo slug.
+        let now_pairs: Vec<(Option<&str>, &str)> = focus
+            .now
+            .iter()
+            .map(|b| (b.repo.as_deref(), b.id.as_str()))
+            .collect();
+        assert!(
+            now_pairs.contains(&(Some("core"), "CORE.1.A")),
+            "self ready-now block must be folded in, tagged with self slug, got: {now_pairs:?}"
+        );
+
+        // Child's own ready block must still surface in `next`, tagged with the
+        // child repo slug — self-folding must not crowd out children.
+        let next_pairs: Vec<(Option<&str>, &str)> = focus
+            .next
+            .iter()
+            .map(|b| (b.repo.as_deref(), b.id.as_str()))
+            .collect();
+        assert!(
+            next_pairs.contains(&(Some("alpha"), "AL.1.A")),
+            "child ready block must still appear in next, got: {next_pairs:?}"
+        );
+
+        // Self's own blocked (unmet external dep) block must surface in
+        // `blocked`, tagged with the self repo slug.
+        let blocked_pairs: Vec<(Option<&str>, &str)> = focus
+            .blocked
+            .iter()
+            .map(|b| (b.repo.as_deref(), b.id.as_str()))
+            .collect();
+        assert!(
+            blocked_pairs.contains(&(Some("core"), "CORE.1.B")),
+            "self blocked block must be folded in, tagged with self slug, got: {blocked_pairs:?}"
+        );
+    }
+
+    #[test]
+    fn derive_brain_focus_regression_pure_brain_empty_self_tracks_is_noop() {
+        // A brain with NO own tracks[] (the ordinary tier sub-brain shape) must
+        // derive an identical children-only union to the pre-Facet-A behaviour
+        // — self-folding is strictly additive and a no-op when self tracks[]
+        // is empty.
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair_alpha = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let pair_beta = leaf_pair(dir.path(), "beta", "BE.1.A");
+        let files = vec![pair_alpha, pair_beta];
+        let (self_src, self_file) = empty_brain_pair(dir.path(), "core");
+
+        let focus = derive_brain_focus(
+            &self_src,
+            &self_file,
+            &scope,
+            &config,
+            &StateGraph::default(),
+            &files,
+        );
+
+        let now_ids: Vec<&str> = focus.now.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(
+            now_ids,
+            vec!["AL.1.A", "BE.1.A"],
+            "empty self tracks[] must fold nothing — byte-identical children-only union"
+        );
+        assert!(
+            focus.now.iter().all(|b| b.repo.as_deref() != Some("core")),
+            "no block should be tagged with the self slug when self tracks[] is empty"
+        );
+    }
+
+    #[test]
+    fn derive_brain_focus_dedups_self_and_child_sharing_same_repo_and_id() {
+        // Contrived: the self file's repo slug collides with an in-scope
+        // child's slug (the same (repo, id) pair authored by both the self
+        // tracks[] and a "project"-kind child sharing that slug) — the pair
+        // must appear exactly once, not twice.
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Child: project-kind file for "alpha" with a ready (open) block
+        // "AL.1.A" — must land in `next`, same bucket the self track below
+        // targets, so the collision is exercised in the same bucket.
+        let alpha_json = r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [{ "id": "AL.1.A", "title": "Work" }], "blocked": [] },
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [{ "id": "AL.1.A", "title": "Work", "status": "open" }]
+  }]
+}"#;
+        let pair_alpha = make_pair(dir.path(), "alpha-state.json", "project", alpha_json);
+        let files = vec![pair_alpha];
+        // Self: brain-kind file whose OWN repo slug is also "alpha" and whose
+        // own tracks[] authors the exact same block id "AL.1.A".
+        let self_json = r#"{
+  "repo": "alpha",
+  "kind": "brain",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [{
+    "title": "Own Track",
+    "blocks": [{ "id": "AL.1.A", "title": "Work", "status": "open" }]
+  }]
+}"#;
+        let (self_src, self_file) =
+            make_pair(dir.path(), "alpha-brain-state.json", "brain", self_json);
+
+        let focus = derive_brain_focus(
+            &self_src,
+            &self_file,
+            &scope,
+            &config,
+            &StateGraph::default(),
+            &files,
+        );
+
+        let next_matches = focus
+            .next
+            .iter()
+            .filter(|b| b.repo.as_deref() == Some("alpha") && b.id == "AL.1.A")
+            .count();
+        assert_eq!(
+            next_matches, 1,
+            "the (repo, id) pair authored by both self and a same-slug child must appear once, got: {:?}",
+            focus.next
         );
     }
 }

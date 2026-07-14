@@ -5251,3 +5251,180 @@ heading = "Eng Repo"
         let _ = fs::remove_dir_all(&dir);
     }
 }
+
+// ---------------------------------------------------------------------------
+// brain-focus-dual-role-drift task 4 — end-to-end proof that the writer
+// (`emit_state`) and the validator (`validate_brain_state`'s
+// `check_focus_drift`) now agree for a dual-role brain (a `kind: "brain"`
+// file that also carries its own `tracks[]`).
+// ---------------------------------------------------------------------------
+
+mod task_dual_role_focus_drift_integration {
+    use std::fs;
+    use std::path::Path;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("mev-dual-role-drift-{tag}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_file(root: &Path, rel: &str, content: &str) {
+        let target = root.join(rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&target, content.as_bytes()).unwrap();
+    }
+
+    fn write_json(root: &Path, rel: &str, value: &serde_json::Value) {
+        write_file(root, rel, &serde_json::to_string_pretty(value).unwrap());
+    }
+
+    /// `brain.toml` with one `core`-tier child ("alpha"), so the root brain's
+    /// own `repo: "core"` slug scopes (via `tier_scope_for`) to just that tier
+    /// — the same dual-role shape as the live `business` brain.
+    fn write_brain_toml(root: &Path) {
+        let toml = r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "alpha"
+tier = "core"
+repo_path = "repos/alpha"
+status_file = "repos/alpha/planning/status.md"
+cache_doc = "docs/projects/alpha.md"
+heading = "Alpha"
+"#;
+        fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
+    }
+
+    /// The dual-role brain's own `planning/state.json`: `kind: "brain"`, own
+    /// `tracks[]` (one ready block `CO.1.A`), and a deliberately stale stored
+    /// `focus` (empty) — proving `emit_state --write` derives it correctly and
+    /// the validator then agrees.
+    fn write_core_brain_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "core",
+            "kind": "brain",
+            "updated": "2026-06-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "tracks": [
+                {
+                    "title": "Own Track",
+                    "blocks": [
+                        { "id": "CO.1.A", "title": "Core's own ready block", "status": "open" }
+                    ]
+                }
+            ],
+            "repos": [],
+            "cross_repo": []
+        });
+        write_json(root, "planning/state.json", &state);
+    }
+
+    /// One in-scope `project`-kind child with its own ready block.
+    fn write_alpha_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "alpha",
+            "kind": "project",
+            "updated": "2026-06-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "tracks": [
+                {
+                    "title": "Phase 1",
+                    "blocks": [
+                        { "id": "AL.1.A", "title": "Alpha's ready block", "status": "open" }
+                    ]
+                }
+            ]
+        });
+        write_json(root, "repos/alpha/planning/state.json", &state);
+    }
+
+    fn write_fixture(root: &Path) {
+        write_brain_toml(root);
+        write_core_brain_state(root);
+        write_alpha_state(root);
+    }
+
+    #[test]
+    fn emit_then_validate_dual_role_brain_produces_zero_focus_drift() {
+        let dir = temp_dir("zero-drift");
+        write_fixture(&dir);
+
+        // Write pass — this is what regenerates the brain's stored `focus`
+        // via `derive_brain_focus` (children ∪ own tracks[], Facet A).
+        let emit_report = mev::emit_state(&dir, true).expect("emit_state should not error");
+        let emit_errors: Vec<_> = emit_report
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == mev::Severity::Error)
+            .collect();
+        assert!(
+            emit_errors.is_empty(),
+            "emit_state over the dual-role fixture should have no errors; got: {emit_errors:#?}"
+        );
+
+        // The written focus must include BOTH the self ready block and the
+        // child's ready block — the whole point of Facet A.
+        let brain_after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("planning/state.json")).unwrap())
+                .unwrap();
+        let next_ids: Vec<&str> = brain_after["focus"]["next"]
+            .as_array()
+            .expect("focus.next must be an array")
+            .iter()
+            .map(|b| b["id"].as_str().unwrap())
+            .collect();
+        assert!(
+            next_ids.contains(&"CO.1.A"),
+            "core's own ready block must surface in the written focus.next; got: {next_ids:?}"
+        );
+        assert!(
+            next_ids.contains(&"AL.1.A"),
+            "alpha's ready block must surface in the written focus.next; got: {next_ids:?}"
+        );
+
+        // Validate pass — the validator (Facet B) must agree with what the
+        // writer just emitted: zero W_STATE_FOCUS_DRIFT.
+        let validate_report =
+            mev::validate_brain_state(&dir).expect("validate_brain_state should not error");
+        let drift: Vec<_> = validate_report
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "W_STATE_FOCUS_DRIFT")
+            .collect();
+        assert!(
+            drift.is_empty(),
+            "writer and validator must agree after emit_state --write; got: {drift:#?}"
+        );
+
+        // Fixed point — a second emit over the already-derived corpus must be
+        // a no-op (byte-identical planning/state.json).
+        let snapshot = fs::read(dir.join("planning/state.json")).unwrap();
+        let emit_report_2 =
+            mev::emit_state(&dir, true).expect("second emit_state should not error");
+        let wrote: Vec<_> = emit_report_2
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "I_EMIT_WROTE")
+            .collect();
+        assert!(
+            wrote.is_empty(),
+            "second emit over the already-derived dual-role corpus must be a no-op; got: {wrote:#?}"
+        );
+        let after_second = fs::read(dir.join("planning/state.json")).unwrap();
+        assert_eq!(
+            after_second, snapshot,
+            "planning/state.json must be byte-identical after the fixed-point pass"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
