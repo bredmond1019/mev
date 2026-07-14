@@ -767,7 +767,7 @@ pub fn plan_state_json(
                 let scope = tier_scope_for(file, config);
                 derived.repos = derive_rollup(&scope, config, &file.repos, graph, files);
                 derived.cross_repo = derive_cross_repo(files);
-                derived.focus = derive_brain_focus(&scope, config, graph, files);
+                derived.focus = derive_brain_focus(src, file, &scope, config, graph, files);
             }
             _ => continue, // unknown kind already flagged by check_schema
         }
@@ -1355,7 +1355,7 @@ pub fn plan_hq_board(
             }
         };
 
-        let focus = derive_brain_focus(&scope, config, graph, files);
+        let focus = derive_brain_focus(src, file, &scope, config, graph, files);
         let edges = derive_cross_repo(files);
         let board = render_hq_board(&focus, &edges);
 
@@ -1436,7 +1436,7 @@ pub fn plan_unified_board(
             }
         };
 
-        let focus = derive_brain_focus(&scope, config, graph, files);
+        let focus = derive_brain_focus(src, file, &scope, config, graph, files);
         let edges = derive_cross_repo(files);
         let board = render_unified_board(&focus, &edges, config, today);
 
@@ -1492,7 +1492,7 @@ pub fn plan_status_frontmatter(
             derived_focus_for(src, file, graph, files)
         } else if file.kind == "brain" {
             let scope = tier_scope_for(file, config);
-            derive_brain_focus(&scope, config, graph, files)
+            derive_brain_focus(src, file, &scope, config, graph, files)
         } else {
             continue;
         };

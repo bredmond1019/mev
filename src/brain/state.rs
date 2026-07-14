@@ -2683,6 +2683,23 @@ mod tests {
         (src, file)
     }
 
+    /// Minimal brain state.json with empty `tracks[]` — the brain's own
+    /// "self" derived focus is a no-op (`derive_focus` short-circuits to
+    /// `DerivedFocus::default()`), so callers can pass this pair as
+    /// `(self_src, self_file)` without perturbing the children-only assertions.
+    fn empty_brain_pair(dir: &std::path::Path, repo: &str) -> (StateSource, StateFile) {
+        let json = format!(
+            r#"{{
+  "repo": "{repo}",
+  "kind": "brain",
+  "updated": "2026-06-29",
+  "focus": {{ "now": [], "next": [], "blocked": [] }},
+  "tracks": []
+}}"#
+        );
+        make_pair(dir, &format!("{repo}-state.json"), "brain", &json)
+    }
+
     /// Minimal leaf state.json with one tracks block and a clean focus.
     fn leaf_pair(dir: &std::path::Path, repo: &str, block_id: &str) -> (StateSource, StateFile) {
         let json = format!(
@@ -4965,8 +4982,16 @@ mod tests {
         let pair_alpha = leaf_pair(dir.path(), "alpha", "AL.1.A");
         let pair_beta = leaf_pair(dir.path(), "beta", "BE.1.A");
         let files = vec![pair_alpha, pair_beta];
+        let (self_src, self_file) = empty_brain_pair(dir.path(), "core");
 
-        let focus = derive_brain_focus(&scope, &config, &StateGraph::default(), &files);
+        let focus = derive_brain_focus(
+            &self_src,
+            &self_file,
+            &scope,
+            &config,
+            &StateGraph::default(),
+            &files,
+        );
 
         let now_ids: Vec<&str> = focus.now.iter().map(|b| b.id.as_str()).collect();
         assert_eq!(
@@ -4983,8 +5008,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let pair_alpha = leaf_pair(dir.path(), "alpha", "AL.1.A");
         let files = vec![pair_alpha];
+        let (self_src, self_file) = empty_brain_pair(dir.path(), "core");
 
-        let focus = derive_brain_focus(&scope, &config, &StateGraph::default(), &files);
+        let focus = derive_brain_focus(
+            &self_src,
+            &self_file,
+            &scope,
+            &config,
+            &StateGraph::default(),
+            &files,
+        );
 
         assert_eq!(focus.now.len(), 1);
         assert_eq!(focus.now[0].repo.as_deref(), Some("alpha"));
@@ -5014,8 +5047,16 @@ mod tests {
 }"#;
         let pair_alpha = make_pair(dir.path(), "alpha-state.json", "project", json);
         let files = vec![pair_alpha];
+        let (self_src, self_file) = empty_brain_pair(dir.path(), "core");
 
-        let focus = derive_brain_focus(&scope, &config, &StateGraph::default(), &files);
+        let focus = derive_brain_focus(
+            &self_src,
+            &self_file,
+            &scope,
+            &config,
+            &StateGraph::default(),
+            &files,
+        );
 
         assert_eq!(focus.now.len(), 1);
         assert_eq!(focus.now[0].priority, Some(1));
@@ -5037,8 +5078,16 @@ mod tests {
         // gamma is portfolio-tier — out of scope for the core brain.
         let pair_gamma = leaf_pair(dir.path(), "gamma", "GA.1.A");
         let files = vec![pair_gamma];
+        let (self_src, self_file) = empty_brain_pair(dir.path(), "core");
 
-        let focus = derive_brain_focus(&scope, &config, &StateGraph::default(), &files);
+        let focus = derive_brain_focus(
+            &self_src,
+            &self_file,
+            &scope,
+            &config,
+            &StateGraph::default(),
+            &files,
+        );
 
         assert!(
             focus.now.is_empty(),
@@ -5086,8 +5135,11 @@ mod tests {
         let pair_alpha = leaf_pair(dir.path(), "alpha", "AL.1.A");
         let pair_beta = leaf_pair(dir.path(), "beta", "BE.1.A");
         let files = vec![pair_alpha, pair_beta];
+        let (self_src, self_file) = empty_brain_pair(dir.path(), "core");
 
         let focus = derive_brain_focus(
+            &self_src,
+            &self_file,
             &TierScope::Tier("core".to_string()),
             &config,
             &StateGraph::default(),
