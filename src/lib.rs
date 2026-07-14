@@ -397,12 +397,13 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
                 report.diagnostics.extend(check_field_policy(src, &file));
                 loaded.push((src.clone(), file));
             }
-            Err(StateLoadError::Parse { .. }) => {
+            Err(StateLoadError::Parse { source, .. }) => {
                 report.diagnostics.push(Diagnostic::error(
                     &src.abs_path,
                     "E_STATE_MALFORMED_JSON",
-                    "state.json is not valid JSON or does not match the expected schema"
-                        .to_string(),
+                    format!(
+                        "state.json is not valid JSON or does not match the expected schema: {source}"
+                    ),
                 ));
             }
             Err(StateLoadError::Io { source, .. }) => {
@@ -527,12 +528,13 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
             Ok(file) => {
                 loaded.push((src.clone(), file));
             }
-            Err(StateLoadError::Parse { .. }) => {
+            Err(StateLoadError::Parse { source, .. }) => {
                 report.diagnostics.push(Diagnostic::error(
                     &src.abs_path,
                     "E_STATE_MALFORMED_JSON",
-                    "state.json is not valid JSON or does not match the expected schema"
-                        .to_string(),
+                    format!(
+                        "state.json is not valid JSON or does not match the expected schema: {source}"
+                    ),
                 ));
             }
             Err(StateLoadError::Io { source, .. }) => {
