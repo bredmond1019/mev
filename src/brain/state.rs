@@ -1144,13 +1144,22 @@ pub struct DerivedFocus {
 
 /// Derive the expected `focus` from a file's `tracks[]`.
 ///
-/// This is the **single derivation** used by both [`check_focus_drift`] (the validator)
-/// and `mev emit-state` (the writer).  Because both call this function, the validator
-/// and the emitter cannot disagree — the emit is, by construction, the fixed point of
-/// the drift check.
+/// This is the **leaf derivation**, used directly for `kind == "project"` files by both
+/// [`check_focus_drift`] (the validator) and `mev emit-state` (the writer) — because both
+/// call this function for project-kind files, the validator and the emitter cannot disagree
+/// for that kind.
+///
+/// For `kind == "brain"` files the writer and validator instead use [`derive_brain_focus`],
+/// which computes the children-union (over each in-scope child's own `derive_focus`) folded
+/// with the brain file's **own** `tracks[]`-derived focus (via a `derive_focus` call on the
+/// brain file itself, for "dual-role" brains that also author their own tracks). So the
+/// single-derivation invariant holds per-kind: project files compare directly against
+/// `derive_focus`; brain files compare against `derive_brain_focus`, which itself calls
+/// `derive_focus` once per contributing source (self + each in-scope child) and unions the
+/// results.
 ///
 /// Returns an empty [`DerivedFocus`] for files with an empty `tracks[]` (the derivation
-/// is undefined when there is no roadmap catalog — typically brain files).
+/// is undefined when there is no roadmap catalog — typically trackless tier brain files).
 ///
 /// **Derivation rules:**
 /// - `now` — every `tracks[]` block with authored `status == "in_progress"`.
