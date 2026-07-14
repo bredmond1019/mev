@@ -4456,7 +4456,7 @@ mod tests {
         let files = vec![pair];
         let graph = build_state_graph(&files);
         let (src, file) = &files[0];
-        let diags = check_focus_drift(src, file, &graph, &files);
+        let diags = check_focus_drift(src, file, &BrainConfig::default(), &graph, &files);
 
         assert!(
             diags.is_empty(),
@@ -4479,7 +4479,7 @@ mod tests {
         let files = vec![pair];
         let graph = build_state_graph(&files);
         let (src, file) = &files[0];
-        let diags = check_focus_drift(src, file, &graph, &files);
+        let diags = check_focus_drift(src, file, &BrainConfig::default(), &graph, &files);
 
         let drifts: Vec<_> = diags
             .iter()
@@ -4513,7 +4513,7 @@ mod tests {
         let files = vec![pair];
         let graph = build_state_graph(&files);
         let (src, file) = &files[0];
-        let diags = check_focus_drift(src, file, &graph, &files);
+        let diags = check_focus_drift(src, file, &BrainConfig::default(), &graph, &files);
 
         let drifts: Vec<_> = diags
             .iter()
@@ -4548,7 +4548,7 @@ mod tests {
         let files = vec![pair];
         let graph = build_state_graph(&files);
         let (src, file) = &files[0];
-        let diags = check_focus_drift(src, file, &graph, &files);
+        let diags = check_focus_drift(src, file, &BrainConfig::default(), &graph, &files);
 
         let drifts: Vec<_> = diags
             .iter()
@@ -4575,7 +4575,7 @@ mod tests {
         let files = vec![pair];
         let graph = build_state_graph(&files);
         let (src, file) = &files[0];
-        let diags = check_focus_drift(src, file, &graph, &files);
+        let diags = check_focus_drift(src, file, &BrainConfig::default(), &graph, &files);
 
         // No errors should be emitted.
         let errors: Vec<_> = diags
@@ -4626,7 +4626,7 @@ mod tests {
         };
         let files = vec![(src.clone(), file.clone())];
         let graph = build_state_graph(&files);
-        let diags = check_focus_drift(&src, &file, &graph, &files);
+        let diags = check_focus_drift(&src, &file, &BrainConfig::default(), &graph, &files);
 
         assert!(
             diags.is_empty(),
@@ -4658,7 +4658,7 @@ mod tests {
         let files = vec![pair];
         let graph = build_state_graph(&files);
         let (src, file) = &files[0];
-        let diags = check_focus_drift(src, file, &graph, &files);
+        let diags = check_focus_drift(src, file, &BrainConfig::default(), &graph, &files);
 
         let drifts: Vec<_> = diags
             .iter()
@@ -4695,7 +4695,7 @@ mod tests {
         let files = vec![pair];
         let graph = build_state_graph(&files);
         let (src, file) = &files[0];
-        let diags = check_focus_drift(src, file, &graph, &files);
+        let diags = check_focus_drift(src, file, &BrainConfig::default(), &graph, &files);
 
         assert!(
             diags.is_empty(),

@@ -928,6 +928,7 @@ fn make_leaf_pair_in_memory(
 fn derive_focus_regression_check_focus_drift_still_passes_existing_fixtures() {
     // Regression guard: derive_focus on a fixture where stored focus matches derivation
     // should produce the correct derived values, and check_focus_drift should report no drift.
+    use mev::brain::config::BrainConfig;
     use mev::brain::state::{build_state_graph, check_focus_drift, derive_focus};
 
     let (src, file) = make_leaf_pair_in_memory(
@@ -957,7 +958,7 @@ fn derive_focus_regression_check_focus_drift_still_passes_existing_fixtures() {
     assert!(derived.blocked.is_empty());
 
     // check_focus_drift must report no drift (stored matches derivation).
-    let diags = check_focus_drift(&src, &file, &graph, &files);
+    let diags = check_focus_drift(&src, &file, &BrainConfig::default(), &graph, &files);
     assert!(
         diags.is_empty(),
         "check_focus_drift should report no drift for in-sync fixture, got: {diags:?}"
