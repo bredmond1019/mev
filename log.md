@@ -19,6 +19,47 @@ timestamp: "2026-07-14T18:52:28Z"
 
 ## [2026-07-14]
 
+### 7.A-effective-priority-inheritance shipped — full spec, PASS
+- **What:** Implemented `effective_priorities(graph, files) -> HashMap<String, u8>`
+  (`src/brain/state.rs`): a memoized, cycle-safe reverse-topological `min`-propagation over the
+  `depends_on` DAG — `effective(n) = min(own(n), min{ effective(m) : m depends_on n })`, keyed by
+  `"repo:id"`. On hitting a node already on the DFS recursion stack the pass returns that node's own
+  priority rather than re-recursing, guaranteeing termination on a cycle without hanging or
+  panicking. Threaded through the unified board's `NEXT` sort: `render_unified_board` gained an
+  `effective: &HashMap<String, u8>` parameter; `sort_unified_board_next` now sorts via a new
+  `effective_priority_for` helper (effective map → raw `priority` → `u8::MAX` fallback chain) instead
+  of raw `priority` directly; `plan_unified_board` computes the map once via
+  `effective_priorities(graph, files)` and passes it down. 5 new unit tests in `state.rs` (gating
+  inheritance, two-hop chain propagation, no-hotter-dependents, absent-priority, cycle termination)
+  plus 2 new integration tests in `tests/brain_emit.rs` (explicit-override sort behavior, and a full
+  `mev::emit_state` gating + idempotency proof); all 9 pre-existing `render_unified_board` call sites
+  updated for the new parameter. Docs patched: `docs/architecture.md` (`effective_priorities`,
+  `render_unified_board`, `plan_unified_board` rows) and `docs/cli.md` (`emit-state` unified-board
+  `NEXT` sort description); `core/planning/state-schema.md` was also edited (brain repo, one level
+  up) but correctly left uncommitted here — that's a separate brain-level commit.
+- **Review:** PASS on the first attempt — all acceptance criteria met, all four gating checks (fmt,
+  clippy `-D warnings`, cargo test, release build) green.
+- **Decisions:** reverse-adjacency direction confirmed against the spec's "gates" language (the
+  *dependency* node inherits its hottest *dependent*'s priority, i.e. `biz depends_on eng` means
+  `eng`'s effective value rises to match `biz`'s); `effective_priority_for`'s three-way fallback chain
+  keeps `render_unified_board` callable with an empty map for non-gating tests while degrading
+  gracefully to pre-MV.7.A sort behavior; cycle-guard returns the stuck node's own priority as a
+  deterministic tie-break rather than `u8::MAX` or a panic.
+- **Refs:** `planning/7.A-effective-priority-inheritance/tasks.md`; commits `5498ece` (impl),
+  `5f836ad` (docs). This closes Phase 7 (Priority inheritance) entirely.
+
+Next: no open mev-tracked spec — pick the next phase/block per `master-plan.md`.
+
+```
+5f836ad docs: update docs for 7.A-effective-priority-inheritance
+5498ece feat: implement 7.A-effective-priority-inheritance
+9beaccb docs: log MV.5.A tracker reconciliation
+d3fca28 test(brain-emit): remove unused PathBuf import
+80722d1 chore: sync harness command updates
+```
+
+---
+
 ### MV.5.A tracker reconciliation — block was already shipped
 - **What:** A `/generate-tasks MV.5.A` request revealed that MV.5.A ("Status Frontmatter
   Reconciler", the ad-hoc block in `planning/plan-state-yaml-drift/plan.md`) was **already fully
