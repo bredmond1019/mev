@@ -13,6 +13,11 @@
 //!
 //! Diagnostic locator codes emitted by later tasks that build on this foundation:
 //! - `E_STATE_MALFORMED_JSON` — file is not parseable JSON.
+//! - `E_STATE_ROOT_LOAD_FAILED` — the HQ root `state.json` exists but failed to
+//!   load/parse, so tier sub-brain classification falls back to `brain.toml`
+//!   (instead of the root's `tiers[]`) and may be incomplete. Emitted once,
+//!   alongside the root's own (detailed) `E_STATE_MALFORMED_JSON`, instead of
+//!   letting every tier sub-brain cascade into a spurious `E_STATE_SCHEMA_BAD_KIND`.
 //! - `E_STATE_SCHEMA_MISSING_FIELD` — a required key is absent.
 //! - `E_STATE_SCHEMA_BAD_KIND` — `kind` ∉ `{project, brain, portfolio}`.
 //! - `E_STATE_SCHEMA_BAD_STATUS` — a `status` value ∉ the enum.
@@ -64,14 +69,25 @@ pub use okf_core::{
 /// Returns `(sources, diagnostics)`:
 /// - `sources` — every file that exists, ready to be loaded.
 /// - `diagnostics` — one [`Diagnostic`] with locator `W_STATE_FILE_MISSING`
-///   per registered path that does not exist on disk (warning severity).
+///   per registered path that does not exist on disk (warning severity); plus,
+///   if the HQ root exists but fails to load, one `E_STATE_ROOT_LOAD_FAILED`
+///   (see point 2 below).
 ///
 /// Discovery strategy (per scoping decision 1 — cross-repo read mode):
 /// 1. HQ brain: `root/planning/state.json` (always expected; `kind:"brain"`).
 ///    If found, the file is loaded internally to enumerate `tiers[]` so that
 ///    tier sub-brain paths (`tiers[].rollup`) can be discovered.
 /// 2. Tier sub-brains: each `tiers[].rollup` path (relative to `root`) that is
-///    non-null is expected as a brain-kind file.
+///    non-null is expected as a brain-kind file. If the HQ root body failed to
+///    load (a parse error, distinct from the file simply not existing), the
+///    `tiers[]` list is unavailable — instead of silently letting every tier
+///    sub-brain fall through to the leaf loop below (step 3) and be
+///    mis-registered `kind:"project"` (a cascade of spurious
+///    `E_STATE_SCHEMA_BAD_KIND`), tier sub-brain paths are recovered from
+///    `brain.toml`'s tier-container self-entries (a `[[repos]]` entry whose
+///    `slug` equals its own `repo_path`) and registered `expected_kind:"brain"`
+///    directly, alongside one `E_STATE_ROOT_LOAD_FAILED` diagnostic noting the
+///    classification is degraded.
 /// 3. Leaf repos: each `[[repos]]` entry in `config` whose `repo_path` is not
 ///    `"."` (the HQ root itself) → `root/{repo_path}/planning/state.json`
 ///    (`kind:"project"`, or `kind:"portfolio"` when `tier == "portfolio"` —
@@ -122,6 +138,58 @@ pub fn discover_state_files(
                         format!(
                             "tier '{}': state.json not found at rollup path '{rollup}'",
                             tier_entry.tier
+                        ),
+                    ));
+                }
+            }
+        } else {
+            // Facet 2(a) (state-load-error-surfacing): the HQ root exists but
+            // failed to parse/deserialize, so `tiers[]` is unavailable and the
+            // loop above never ran. Without this arm, every tier sub-brain
+            // would fall through to the leaf `[[repos]]` loop below and be
+            // mis-registered `expected_kind: "project"`, firing a spurious
+            // `E_STATE_SCHEMA_BAD_KIND` per tier — masking the real, single
+            // cause (the root's own detailed `E_STATE_MALFORMED_JSON`, see
+            // `src/lib.rs`).
+            //
+            // Recover tier sub-brain paths from `brain.toml` instead of the
+            // (unavailable) `tiers[]`: a tier-container self-entry is a
+            // `[[repos]]` entry whose `slug` equals its own `repo_path`
+            // (mirrors the "tier container" definition in `tier_scope_for`,
+            // e.g. `slug = "core"`, `repo_path = "core"`). Register each such
+            // path directly as `expected_kind: "brain"` here so the leaf loop's
+            // existing "already discovered" skip-guard keeps it out of the
+            // `project` fallback.
+            diags.push(Diagnostic::warning(
+                hq_path.clone(),
+                "E_STATE_ROOT_LOAD_FAILED",
+                "HQ root planning/state.json could not be loaded; tier sub-brain classification is degraded (derived from brain.toml instead of tiers[]) and may be incomplete".to_string(),
+            ));
+
+            for repo in &config.repos {
+                if repo.repo_path == "." || repo.repo_path.is_empty() {
+                    continue;
+                }
+                if repo.slug != repo.repo_path {
+                    continue; // not a tier-container self-entry
+                }
+                let tier_path = root
+                    .join(&repo.repo_path)
+                    .join("planning")
+                    .join("state.json");
+                if tier_path.exists() {
+                    sources.push(StateSource {
+                        repo_slug: repo.slug.clone(),
+                        abs_path: tier_path,
+                        expected_kind: "brain",
+                    });
+                } else {
+                    diags.push(Diagnostic::warning(
+                        tier_path,
+                        "W_STATE_FILE_MISSING",
+                        format!(
+                            "tier '{}': state.json not found (derived from brain.toml; root failed to load)",
+                            repo.slug
                         ),
                     ));
                 }
@@ -2434,6 +2502,88 @@ mod tests {
 
         // HQ itself is in sources
         assert_eq!(sources.len(), 1, "only HQ brain should be in sources");
+    }
+
+    /// Facet 2 (state-load-error-surfacing): a malformed HQ root must not
+    /// cascade into tier sub-brains being mis-registered `expected_kind:
+    /// "project"`. Instead, tier paths are recovered from `brain.toml`'s
+    /// tier-container self-entries and registered `expected_kind: "brain"`,
+    /// alongside a single `E_STATE_ROOT_LOAD_FAILED` diagnostic.
+    #[test]
+    fn discover_recovers_tier_brains_from_config_when_root_fails_to_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        build_hq_fixture(dir.path());
+
+        // Corrupt only the HQ root so `load_state` fails (the file exists —
+        // this is a parse failure, not a missing file).
+        let hq_path = dir.path().join("planning").join("state.json");
+        std::fs::write(&hq_path, "{ not valid json").unwrap();
+
+        // `core` is a tier-container self-entry (slug == repo_path == "core"),
+        // matching the real `brain.toml` shape covered by
+        // `discover_dedupes_repo_entry_that_shadows_a_tier_rollup`.
+        use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
+        let config = BrainConfig {
+            vocab: VocabConfig::default(),
+            crawl: CrawlConfig::default(),
+            repos: vec![
+                RepoEntry {
+                    slug: "brain".to_string(),
+                    tier: "_root".to_string(),
+                    repo_path: ".".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "core".to_string(),
+                    tier: "_root".to_string(),
+                    repo_path: "core".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "alpha".to_string(),
+                    tier: "core".to_string(),
+                    repo_path: "core/alpha".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+            ],
+        };
+
+        let (sources, diags) = discover_state_files(dir.path(), &config);
+
+        // Exactly one degraded-classification diagnostic; no W_STATE_FILE_MISSING
+        // (every file on disk exists).
+        let root_load_failed: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_ROOT_LOAD_FAILED")
+            .collect();
+        assert_eq!(
+            root_load_failed.len(),
+            1,
+            "expected exactly one E_STATE_ROOT_LOAD_FAILED, got: {diags:?}"
+        );
+
+        // `core` must still be registered brain-kind, not cascaded to "project".
+        let core_src = sources
+            .iter()
+            .find(|s| s.repo_slug == "core")
+            .expect("core tier sub-brain should still be discovered");
+        assert_eq!(
+            core_src.expected_kind, "brain",
+            "core tier sub-brain must not cascade to expected_kind \"project\""
+        );
+
+        // `alpha` (a plain leaf repo) is unaffected.
+        let alpha_src = sources
+            .iter()
+            .find(|s| s.repo_slug == "alpha")
+            .expect("alpha leaf source should be discovered");
+        assert_eq!(alpha_src.expected_kind, "project");
     }
 
     // -----------------------------------------------------------------------
