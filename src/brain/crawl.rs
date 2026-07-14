@@ -288,29 +288,40 @@ pub(crate) fn is_ephemeral(file_name: &str) -> bool {
 pub fn crawl_corpus(root: &Path, config: &BrainConfig) -> (Corpus, Vec<Diagnostic>) {
     let mut entries = Vec::new();
     let mut diags = Vec::new();
+    // Dedup key = path relative to `root`. A file reachable from both the brain-root
+    // walk (pass 1) and a per-root planning walk (pass 2) — which is true whenever a
+    // registered repo's `planning/` is still a real directory (pre-vault-migration) —
+    // must be collected exactly once. walkdir roots descendant paths at the walk root
+    // it was given (even when that root is a symlink it followed), so the same file
+    // yields an identical `rel` from either pass and dedups cleanly.
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     let skip_dirs = &config.crawl.skip_dirs;
 
-    let iter = walkdir::WalkDir::new(root).into_iter().filter_entry(|e| {
-        // Always allow the root itself (depth 0).
+    // filter_entry closure shared by both walks: prune skip_dirs (name + path-style)
+    // relative to `root`. No nested-git pruning — unit-ownership bounds membership.
+    let dir_filter = |e: &walkdir::DirEntry| -> bool {
         if e.depth() == 0 {
             return true;
         }
-
-        // For directories: prune by skip_dirs (name-mode only — bare component at any depth).
         if e.file_type().is_dir() {
             let name = e.file_name().to_string_lossy();
-            // Compute relative path for path-style skip_dirs entries.
             let rel = e.path().strip_prefix(root).ok();
             if is_blocklisted_name(&name, rel, skip_dirs) {
                 return false;
             }
-            // No nested-git pruning: unit-ownership bounds membership.
         }
-
         true
-    });
+    };
 
+    // Pass 1 — the brain-root walk. Collects every corpus file reachable by walking
+    // from the HQ root, including any registered `planning/` still present as a real
+    // directory. `_planning/` vault containers are pruned here via skip_dirs so the
+    // vault's real bytes are not collected under the wrong (tier) scope — they are
+    // collected instead by pass 2 under the correct owning-repo scope, via the symlink.
+    let iter = walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_entry(&dir_filter);
     for entry in iter {
         let entry = match entry {
             Ok(e) => e,
@@ -319,83 +330,155 @@ pub fn crawl_corpus(root: &Path, config: &BrainConfig) -> (Corpus, Vec<Diagnosti
                 continue;
             }
         };
-
-        // Only collect files (not directories).
         if !entry.file_type().is_file() {
             continue;
         }
+        collect_corpus_file(
+            entry.path(),
+            root,
+            config,
+            &mut seen,
+            &mut entries,
+            &mut diags,
+        );
+    }
 
-        // Only collect `.md` files.
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+    // Pass 2 — manifest-driven per-root `planning/` walk. For every registered sub-repo
+    // (`repo_path != "."`), walk its `planning/` directory as its OWN walk root. walkdir
+    // follows a symlink passed as the walk root (`follow_root_links` defaults true) even
+    // though it will not follow interior symlinks — so this is what keeps a sub-repo's
+    // planning covered once it becomes a `planning -> ../_planning/<slug>` symlink after
+    // the vault migration. Deduped against pass 1, so it is correct whether `planning/`
+    // is still a real dir (dup, deduped) or already a symlink (pass 1 missed it entirely).
+    for repo in &config.repos {
+        let repo_path = repo.repo_path.trim();
+        if repo_path == "." || repo_path.is_empty() {
             continue;
         }
-
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-
-        // Drop ephemeral files (handoff.md, _-prefixed) before the membership test.
-        if is_ephemeral(file_name) {
+        let planning_dir = root.join(repo_path).join("planning");
+        if !planning_dir.exists() {
             continue;
         }
-
-        // Compute path relative to the HQ crawl root.
-        let rel = match path.strip_prefix(root) {
-            Ok(r) => r.to_path_buf(),
-            Err(_) => {
-                diags.push(Diagnostic::error(
-                    path,
-                    "",
-                    "could not compute relative path".to_string(),
-                ));
+        let iter = walkdir::WalkDir::new(&planning_dir)
+            .into_iter()
+            .filter_entry(&dir_filter);
+        for entry in iter {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    diags.push(Diagnostic::error(
+                        &planning_dir,
+                        "",
+                        format!("walk error: {e}"),
+                    ));
+                    continue;
+                }
+            };
+            if !entry.file_type().is_file() {
                 continue;
             }
-        };
-
-        // Resolve owning unit and compute the file's path relative to that unit's root.
-        let (scope, unit_repo_path) = crate::brain::scope::owning_unit(&rel, config);
-        let rel_unit = match rel_to_unit_root(&rel, &unit_repo_path) {
-            Some(r) => r,
-            None => {
-                // Unexpected prefix mismatch — emit a diagnostic and skip.
-                diags.push(Diagnostic::error(
-                    path,
-                    "",
-                    format!(
-                        "could not compute unit-relative path (unit repo_path '{unit_repo_path}')"
-                    ),
-                ));
-                continue;
-            }
-        };
-
-        // Apply corpus membership rule.
-        if !is_corpus_member(rel_unit) {
-            continue;
+            collect_corpus_file(
+                entry.path(),
+                root,
+                config,
+                &mut seen,
+                &mut entries,
+                &mut diags,
+            );
         }
-
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-
-        // D5 extract-once: parse frontmatter once here; callers (graph, manifest) use
-        // entry.metadata directly and never re-read the file for frontmatter.
-        let metadata = std::fs::read_to_string(path).ok().and_then(|contents| {
-            let yaml = extract_frontmatter(&contents)?;
-            serde_yaml::from_str::<OkfFrontmatter>(yaml).ok()
-        });
-
-        entries.push(CorpusEntry {
-            path: path.to_path_buf(),
-            rel,
-            stem,
-            scope,
-            metadata,
-        });
     }
 
     (Corpus { entries }, diags)
+}
+
+/// Test a single `.md` file for corpus membership and, if it qualifies, push a
+/// [`CorpusEntry`] for it. Shared by both walks in [`crawl_corpus`].
+///
+/// `seen` holds the root-relative paths already processed; a file whose `rel` is
+/// already present is silently skipped so a file reachable from both the brain-root
+/// walk and a per-root planning walk is collected exactly once (dedup is by `rel`,
+/// which is identical from either walk). Non-`.md`, ephemeral, and non-member files
+/// are dropped. Frontmatter is parsed once here (D5 extract-once).
+fn collect_corpus_file(
+    path: &Path,
+    root: &Path,
+    config: &BrainConfig,
+    seen: &mut std::collections::HashSet<PathBuf>,
+    entries: &mut Vec<CorpusEntry>,
+    diags: &mut Vec<Diagnostic>,
+) {
+    // Only `.md` files.
+    if path.extension().and_then(|e| e.to_str()) != Some("md") {
+        return;
+    }
+
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+    // Drop ephemeral files (handoff.md, _-prefixed) before the membership test.
+    if is_ephemeral(file_name) {
+        return;
+    }
+
+    // Compute path relative to the HQ crawl root.
+    let rel = match path.strip_prefix(root) {
+        Ok(r) => r.to_path_buf(),
+        Err(_) => {
+            diags.push(Diagnostic::error(
+                path,
+                "",
+                "could not compute relative path".to_string(),
+            ));
+            return;
+        }
+    };
+
+    // Dedup by root-relative path: process each file at most once across both walks.
+    // Insert before the membership/error branches so a file is never re-examined (and
+    // any diagnostic it raises is emitted at most once).
+    if !seen.insert(rel.clone()) {
+        return;
+    }
+
+    // Resolve owning unit and compute the file's path relative to that unit's root.
+    let (scope, unit_repo_path) = crate::brain::scope::owning_unit(&rel, config);
+    let rel_unit = match rel_to_unit_root(&rel, &unit_repo_path) {
+        Some(r) => r,
+        None => {
+            // Unexpected prefix mismatch — emit a diagnostic and skip.
+            diags.push(Diagnostic::error(
+                path,
+                "",
+                format!("could not compute unit-relative path (unit repo_path '{unit_repo_path}')"),
+            ));
+            return;
+        }
+    };
+
+    // Apply corpus membership rule.
+    if !is_corpus_member(rel_unit) {
+        return;
+    }
+
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    // D5 extract-once: parse frontmatter once here; callers (graph, manifest) use
+    // entry.metadata directly and never re-read the file for frontmatter.
+    let metadata = std::fs::read_to_string(path).ok().and_then(|contents| {
+        let yaml = extract_frontmatter(&contents)?;
+        serde_yaml::from_str::<OkfFrontmatter>(yaml).ok()
+    });
+
+    entries.push(CorpusEntry {
+        path: path.to_path_buf(),
+        rel,
+        stem,
+        scope,
+        metadata,
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -823,6 +906,122 @@ mod tests {
         assert!(
             !rels.iter().any(|r| r.contains("trees")),
             "trees/ subtree must be pruned by skip_dirs"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- crawl_corpus: per-root planning walk (vault + symlink migration) ---
+
+    /// brain (root) + one registered sub-repo at `sub`, with `_planning` skipped
+    /// (mirrors the production `brain.toml` after this plan lands).
+    fn brain_and_subrepo_config() -> crate::brain::config::BrainConfig {
+        use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
+        BrainConfig {
+            vocab: VocabConfig::default(),
+            crawl: CrawlConfig {
+                skip_dirs: vec![
+                    "target".to_string(),
+                    ".git".to_string(),
+                    "archive".to_string(),
+                    "_planning".to_string(),
+                ],
+            },
+            repos: vec![
+                RepoEntry {
+                    slug: "brain".to_string(),
+                    tier: "primary".to_string(),
+                    repo_path: ".".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "sub".to_string(),
+                    tier: "core".to_string(),
+                    repo_path: "sub".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn subrepo_real_planning_is_collected_once_with_slug_scope() {
+        // Pre-migration state: the sub-repo's planning/ is still a real directory. It is
+        // reachable from BOTH the brain-root walk (pass 1) and the per-root walk (pass 2);
+        // dedup must keep exactly one entry, scoped to the sub-repo slug.
+        let dir = std::env::temp_dir().join("mev-corpus-subrepo-real");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub/planning")).unwrap();
+        std::fs::write(dir.join("sub/planning/status.md"), b"").unwrap();
+
+        let cfg = brain_and_subrepo_config();
+        let (corpus, diags) = crawl_corpus(&dir, &cfg);
+        assert!(diags.is_empty(), "expected no diagnostics: {diags:?}");
+
+        let matches: Vec<&CorpusEntry> = corpus
+            .entries
+            .iter()
+            .filter(|e| e.rel == Path::new("sub/planning/status.md"))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "sub/planning/status.md must appear exactly once (deduped), got {}",
+            matches.len()
+        );
+        assert_eq!(
+            matches[0].scope, "sub",
+            "must be scoped to the sub-repo slug"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subrepo_symlinked_planning_is_followed_via_per_root_walk() {
+        // Post-migration state: the real bytes live in a skipped `_planning/` vault and
+        // `sub/planning` is a symlink into it. The brain-root walk (pass 1) will NOT follow
+        // the interior symlink and prunes the vault by name, so only the per-root walk
+        // (pass 2) recovers the file — under the sub-repo slug and at the symlinked rel.
+        let dir = std::env::temp_dir().join("mev-corpus-subrepo-symlink");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("_planning/sub")).unwrap();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("_planning/sub/status.md"), b"").unwrap();
+        // sub/planning -> ../_planning/sub  (relative, as the migration creates it)
+        std::os::unix::fs::symlink("../_planning/sub", dir.join("sub/planning")).unwrap();
+
+        let cfg = brain_and_subrepo_config();
+        let (corpus, diags) = crawl_corpus(&dir, &cfg);
+        assert!(diags.is_empty(), "expected no diagnostics: {diags:?}");
+
+        let matches: Vec<&CorpusEntry> = corpus
+            .entries
+            .iter()
+            .filter(|e| e.rel == Path::new("sub/planning/status.md"))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "symlinked planning file must be collected exactly once via the per-root walk"
+        );
+        assert_eq!(
+            matches[0].scope, "sub",
+            "must be scoped to the sub-repo slug"
+        );
+
+        // The vault's real path must NOT leak into the corpus under a `_planning/...` rel.
+        assert!(
+            !corpus
+                .entries
+                .iter()
+                .any(|e| e.rel.starts_with("_planning")),
+            "the _planning vault must be pruned from the brain-root walk"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
