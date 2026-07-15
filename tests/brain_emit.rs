@@ -618,6 +618,7 @@ mod task3_planners {
     /// [`derive_brain_focus`] in these tests.
     fn config_with_repos(entries: &[(&str, &str)]) -> BrainConfig {
         BrainConfig {
+            attention: Default::default(),
             repos: entries
                 .iter()
                 .map(|(slug, tier)| RepoEntry {
@@ -920,6 +921,7 @@ mod task3_planners {
             depends_on: vec![],
             block: None,
             notes: None,
+            ..Default::default()
         }];
         brain_file.tiers = vec![TierEntry {
             tier: "core".to_string(),
@@ -1266,6 +1268,7 @@ mod task3_planners {
         status_file: &str,
     ) -> BrainConfig {
         BrainConfig {
+            attention: Default::default(),
             repos: vec![RepoEntry {
                 slug: slug.to_string(),
                 tier: tier.to_string(),
@@ -3904,6 +3907,7 @@ mod task2_render_unified_board {
 
     fn config_with_repos(entries: &[(&str, &str)]) -> BrainConfig {
         BrainConfig {
+            attention: Default::default(),
             repos: entries
                 .iter()
                 .map(|(slug, tier)| RepoEntry {
@@ -4217,6 +4221,7 @@ mod task2_plan_hq_board {
 
     fn config_with_repos(entries: &[(&str, &str)]) -> BrainConfig {
         BrainConfig {
+            attention: Default::default(),
             repos: entries
                 .iter()
                 .map(|(slug, tier)| RepoEntry {
@@ -4558,6 +4563,7 @@ mod task2_plan_unified_board {
 
     fn config_with_repos(entries: &[(&str, &str)]) -> BrainConfig {
         BrainConfig {
+            attention: Default::default(),
             repos: entries
                 .iter()
                 .map(|(slug, tier)| RepoEntry {
@@ -5225,6 +5231,7 @@ mod task_yaml_frontmatter_drift_tests {
         let files = vec![(src, file)];
         let graph = build_state_graph(&files);
         let config = BrainConfig {
+            attention: Default::default(),
             repos: vec![RepoEntry {
                 slug: "myrepo".to_string(),
                 tier: "core".to_string(),
@@ -6131,5 +6138,329 @@ heading = "Alpha"
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+// ===========================================================================
+// Attention board (render_attention_section + plan_attention_board)
+// ===========================================================================
+mod attention_board {
+    use mev::brain::config::{AttentionThresholds, BrainConfig, RepoEntry};
+    use mev::brain::emit::{plan_attention_board, render_attention_section};
+    use mev::brain::state::{
+        Backlog, BacklogOrigin, Carryover, CarryoverScope, StateFile, StateSource,
+    };
+    use std::path::PathBuf;
+
+    fn day(s: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    fn carry(slug: &str, kind: &str, created: &str, repo: &str) -> Carryover {
+        Carryover {
+            slug: slug.to_string(),
+            scope: CarryoverScope {
+                repo: Some(repo.to_string()),
+                tier: None,
+                cross_repo: None,
+            },
+            kind: kind.to_string(),
+            text: format!("text for {slug}"),
+            related: vec![],
+            clears_when: None,
+            created: created.to_string(),
+            reviewed: None,
+            snoozed_until: None,
+        }
+    }
+
+    fn leaf(repo: &str, carryover: Vec<Carryover>) -> StateFile {
+        StateFile {
+            repo: repo.to_string(),
+            kind: "project".to_string(),
+            updated: "2026-07-15".to_string(),
+            focus: Default::default(),
+            tracks: vec![],
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: vec![],
+            carryover,
+        }
+    }
+
+    fn brain(repo: &str, backlog: Vec<Backlog>, carryover: Vec<Carryover>) -> StateFile {
+        StateFile {
+            repo: repo.to_string(),
+            kind: "brain".to_string(),
+            updated: "2026-07-15".to_string(),
+            focus: Default::default(),
+            tracks: vec![],
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog,
+            carryover,
+        }
+    }
+
+    fn repo_entry(slug: &str, tier: &str) -> RepoEntry {
+        RepoEntry {
+            slug: slug.to_string(),
+            tier: tier.to_string(),
+            repo_path: String::new(),
+            status_file: String::new(),
+            cache_doc: String::new(),
+            heading: String::new(),
+        }
+    }
+
+    fn sentinel_doc() -> String {
+        "# status\n\nbefore\n\n<!-- BEGIN generated:attention -->\n<!-- END generated:attention -->\n\nafter\n".to_string()
+    }
+
+    #[test]
+    fn render_section_lanes_and_snooze_and_capture() {
+        let today = day("2026-07-15");
+        let cfg = AttentionThresholds::default(); // deferred 5, backlog 7
+
+        // stale deferred (14d), fresh env (1d), snoozed deferred.
+        let stale = carry("old", "deferred", "2026-07-01", "mev");
+        let fresh = carry("new", "env", "2026-07-14", "mev");
+        let mut snoozed = carry("zzz", "deferred", "2026-07-01", "mev");
+        snoozed.snoozed_until = Some("2026-07-20".to_string());
+        let carryover = vec![
+            ("mev".to_string(), &stale),
+            ("mev".to_string(), &fresh),
+            ("mev".to_string(), &snoozed),
+        ];
+
+        // one plain aging backlog + one orphaned capture.
+        let mut idea = Backlog {
+            slug: "aged-idea".to_string(),
+            title: "Aged idea".to_string(),
+            repo: "mev".to_string(),
+            kind: "research".to_string(),
+            status: "idea".to_string(),
+            created: Some("2026-07-01".to_string()),
+            ..Default::default()
+        };
+        let mut cap = idea.clone();
+        cap.slug = "captured".to_string();
+        cap.origin = Some(BacklogOrigin {
+            kind: "capture".to_string(),
+            notes: Some("core/planning/captured/notes.md".to_string()),
+        });
+        idea.origin = Some(BacklogOrigin {
+            kind: "backlog".to_string(),
+            notes: None,
+        });
+        let backlog = vec![("mev".to_string(), &idea), ("mev".to_string(), &cap)];
+
+        let out = render_attention_section(&carryover, &backlog, today, &cfg);
+
+        assert!(out.contains("## Stale carryover"));
+        assert!(
+            out.contains("deferred old"),
+            "stale deferred should show: {out}"
+        );
+        assert!(!out.contains(" new "), "fresh env must be excluded: {out}");
+        assert!(!out.contains("zzz"), "snoozed must be excluded: {out}");
+        assert!(out.contains("## Aging backlog"));
+        assert!(out.contains("aged-idea"));
+        assert!(out.contains("## Orphaned captures"));
+        assert!(out.contains("captured"));
+        assert!(out.contains("core/planning/captured/notes.md"));
+        // capture must not be double-listed in the plain backlog lane
+        let aging_lane = out.split("## Orphaned captures").next().unwrap();
+        assert!(
+            !aging_lane.contains("captured"),
+            "capture leaked into backlog lane"
+        );
+    }
+
+    #[test]
+    fn render_section_empty_lanes_are_none() {
+        let out =
+            render_attention_section(&[], &[], day("2026-07-15"), &AttentionThresholds::default());
+        assert_eq!(
+            out.matches("_none_").count(),
+            3,
+            "all three lanes empty: {out}"
+        );
+    }
+
+    #[test]
+    fn plan_is_tier_scoped_across_hq_and_tiers() {
+        let tmp = tempfile::tempdir().unwrap();
+        // status.md for hq, core, side.
+        for rel in ["planning", "core/planning", "side/planning"] {
+            let dir = tmp.path().join(rel);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("status.md"), sentinel_doc()).unwrap();
+        }
+
+        let bastion = leaf(
+            "bastion",
+            vec![carry("cortex-rename", "deferred", "2026-07-01", "bastion")],
+        );
+        let amistad = leaf(
+            "amistad",
+            vec![carry("amistad-thing", "deferred", "2026-07-01", "amistad")],
+        );
+
+        // HQ backlog: a capture whose repo (bastion) is in the core tier.
+        let cap = Backlog {
+            slug: "tailscale-db".to_string(),
+            title: "Tailscale DB".to_string(),
+            repo: "bastion".to_string(),
+            kind: "research".to_string(),
+            status: "idea".to_string(),
+            created: Some("2026-07-01".to_string()),
+            origin: Some(BacklogOrigin {
+                kind: "capture".to_string(),
+                notes: Some("p/notes.md".to_string()),
+            }),
+            ..Default::default()
+        };
+        let hq = brain("hq", vec![cap], vec![]);
+        let core = brain("core", vec![], vec![]);
+        let side = brain("side", vec![], vec![]);
+
+        let src = |slug: &str, abs: PathBuf, kind: &'static str| StateSource {
+            repo_slug: slug.to_string(),
+            abs_path: abs,
+            expected_kind: kind,
+        };
+        let files = vec![
+            (
+                src(
+                    "bastion",
+                    PathBuf::from("/fake/bastion/planning/state.json"),
+                    "project",
+                ),
+                bastion,
+            ),
+            (
+                src(
+                    "amistad",
+                    PathBuf::from("/fake/amistad/planning/state.json"),
+                    "project",
+                ),
+                amistad,
+            ),
+            (
+                src("hq", tmp.path().join("planning/state.json"), "brain"),
+                hq,
+            ),
+            (
+                src("core", tmp.path().join("core/planning/state.json"), "brain"),
+                core,
+            ),
+            (
+                src("side", tmp.path().join("side/planning/state.json"), "brain"),
+                side,
+            ),
+        ];
+
+        let config = BrainConfig {
+            repos: vec![repo_entry("bastion", "core"), repo_entry("amistad", "side")],
+            ..Default::default()
+        };
+
+        let plan = plan_attention_board(&files, &config, day("2026-07-15"));
+
+        let by_path = |needle: &str| -> String {
+            plan.actions
+                .iter()
+                .find(|a| a.path.to_string_lossy().contains(needle))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no action for {needle}; actions: {:?}",
+                        plan.actions
+                            .iter()
+                            .map(|a| a.path.clone())
+                            .collect::<Vec<_>>()
+                    )
+                })
+                .new_content
+                .clone()
+        };
+
+        let hq_doc = by_path("/planning/status.md");
+        let core_doc = by_path("/core/planning/status.md");
+        let side_doc = by_path("/side/planning/status.md");
+
+        // HQ sees everything.
+        assert!(hq_doc.contains("cortex-rename"));
+        assert!(hq_doc.contains("amistad-thing"));
+        assert!(hq_doc.contains("tailscale-db"));
+
+        // Core sees only core-tier items.
+        assert!(
+            core_doc.contains("cortex-rename"),
+            "core board missing its carryover"
+        );
+        assert!(
+            core_doc.contains("tailscale-db"),
+            "core board missing its capture"
+        );
+        assert!(
+            !core_doc.contains("amistad-thing"),
+            "side item leaked into core board"
+        );
+
+        // Side sees only side-tier items.
+        assert!(side_doc.contains("amistad-thing"));
+        assert!(!side_doc.contains("cortex-rename"));
+        assert!(!side_doc.contains("tailscale-db"));
+
+        // Idempotency: apply core content back, re-plan, expect no core action.
+        std::fs::write(tmp.path().join("core/planning/status.md"), &core_doc).unwrap();
+        let plan2 = plan_attention_board(&files, &config, day("2026-07-15"));
+        assert!(
+            !plan2.actions.iter().any(|a| a
+                .path
+                .to_string_lossy()
+                .contains("/core/planning/status.md")),
+            "second pass should be idempotent for core"
+        );
+    }
+
+    #[test]
+    fn plan_missing_sentinel_warns_and_skips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("planning");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("status.md"), "# status\n\nno sentinels here\n").unwrap();
+
+        let hq = brain(
+            "hq",
+            vec![],
+            vec![carry("x", "deferred", "2026-07-01", "hq")],
+        );
+        let files = vec![(
+            StateSource {
+                repo_slug: "hq".to_string(),
+                abs_path: tmp.path().join("planning/state.json"),
+                expected_kind: "brain",
+            },
+            hq,
+        )];
+        let config = BrainConfig {
+            repos: vec![repo_entry("bastion", "core")],
+            ..Default::default()
+        };
+
+        let plan = plan_attention_board(&files, &config, day("2026-07-15"));
+        assert!(plan.actions.is_empty(), "no write without sentinels");
+        assert!(
+            plan.diagnostics
+                .iter()
+                .any(|d| d.locator == "W_EMIT_NO_SENTINEL"),
+            "missing sentinel must warn"
+        );
     }
 }

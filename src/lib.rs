@@ -358,9 +358,10 @@ pub fn validate_brain_structure(root: &std::path::Path) -> anyhow::Result<Report
 pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     use brain::config::find_brain_config;
     use brain::state::{
-        StateLoadError, build_state_graph, check_backlog_integrity, check_field_policy,
-        check_focus_drift, check_rollup, check_schema, check_state_graph, check_status_consistency,
-        detect_cycles, discover_state_files, load_state,
+        StateLoadError, build_state_graph, check_backlog_integrity, check_backlog_staleness,
+        check_carryover_staleness, check_field_policy, check_focus_drift, check_rollup,
+        check_schema, check_state_graph, check_status_consistency, detect_cycles,
+        discover_state_files, load_state,
     };
     use std::collections::HashMap;
 
@@ -455,6 +456,22 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
         report.diagnostics.extend(drift_diags);
     }
 
+    // 10. Attention staleness warnings — stale carryover (every file) + aging
+    //     HQ backlog. WARNING severity only (never flips exit code); malformed
+    //     dates are surfaced as E_STATE_DATE_FORMAT by check_schema above.
+    let today = chrono::Local::now().date_naive();
+    for (src, file) in &loaded {
+        report.diagnostics.extend(check_carryover_staleness(
+            src,
+            file,
+            today,
+            &config.attention,
+        ));
+        report
+            .diagnostics
+            .extend(check_backlog_staleness(src, file, today, &config.attention));
+    }
+
     Ok(report)
 }
 
@@ -497,9 +514,9 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
 pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report> {
     use brain::config::find_brain_config;
     use brain::emit::{
-        apply_plan, plan_brain_cache_watermarks, plan_hq_board, plan_master_plan_tables,
-        plan_project_caches, plan_state_json, plan_status_frontmatter, plan_tier_rollups,
-        plan_unified_board,
+        apply_plan, plan_attention_board, plan_brain_cache_watermarks, plan_hq_board,
+        plan_master_plan_tables, plan_project_caches, plan_state_json, plan_status_frontmatter,
+        plan_tier_rollups, plan_unified_board,
     };
     use brain::state::{StateLoadError, build_state_graph, discover_state_files, load_state};
 
@@ -557,17 +574,22 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     let project_caches_plan = plan_project_caches(root, &loaded, &graph, &config);
     let tier_rollups_plan = plan_tier_rollups(&loaded, &graph, &config);
     let hq_board_plan = plan_hq_board(&loaded, &graph, &config);
-    let unified_board_plan =
-        plan_unified_board(&loaded, &graph, &config, chrono::Local::now().date_naive());
+    let today = chrono::Local::now().date_naive();
+    let unified_board_plan = plan_unified_board(&loaded, &graph, &config, today);
+    let attention_plan = plan_attention_board(&loaded, &config, today);
     let brain_caches_plan = plan_brain_cache_watermarks(root, &loaded, &config);
 
-    // 5. Apply all plans (write or dry-run), in a stable order.
+    // 5. Apply all plans (write or dry-run), in a stable order. The attention
+    //    board writes to the same status.md files as the boards above but a
+    //    disjoint sentinel region; it must land before plan_status_frontmatter,
+    //    which re-reads those files in write mode.
     let state_diags = apply_plan(&state_plan, write);
     let mp_diags = apply_plan(&mp_plan, write);
     let project_caches_diags = apply_plan(&project_caches_plan, write);
     let tier_rollups_diags = apply_plan(&tier_rollups_plan, write);
     let hq_board_diags = apply_plan(&hq_board_plan, write);
     let unified_board_diags = apply_plan(&unified_board_plan, write);
+    let attention_diags = apply_plan(&attention_plan, write);
     let brain_caches_diags = apply_plan(&brain_caches_plan, write);
 
     // 6. Run and apply the YAML frontmatter planner last so it sees the updated markdown in write mode.
@@ -580,6 +602,7 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     report.diagnostics.extend(tier_rollups_diags);
     report.diagnostics.extend(hq_board_diags);
     report.diagnostics.extend(unified_board_diags);
+    report.diagnostics.extend(attention_diags);
     report.diagnostics.extend(brain_caches_diags);
     report.diagnostics.extend(status_fm_diags);
 

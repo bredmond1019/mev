@@ -24,9 +24,9 @@ use thiserror::Error;
 
 use crate::brain::config::BrainConfig;
 use crate::brain::state::{
-    Block, BlockedBy, CrossRepoEdge, Focus, RepoRollup, StateFile, StateGraph, StateSource,
-    TierScope, derive_brain_focus, derive_cross_repo, derive_focus, derive_rollup,
-    effective_priorities, tier_scope_for,
+    Backlog, Block, BlockedBy, Carryover, CrossRepoEdge, Focus, RepoRollup, StateFile, StateGraph,
+    StateSource, TierScope, backlog_stale_age, carryover_stale_age, derive_brain_focus,
+    derive_cross_repo, derive_focus, derive_rollup, effective_priorities, tier_scope_for,
 };
 
 // ---------------------------------------------------------------------------
@@ -60,6 +60,11 @@ pub mod markers {
     /// unioning engineering + business blocks (`MV.6.B`). Separate from
     /// [`HQ_BOARD`], which stays untouched.
     pub const UNIFIED_BOARD: &str = "unified-board";
+
+    /// Marker for the Attention board — stale carryover, aging backlog, and
+    /// orphaned captures. Emitted tier-scoped into every brain-level `status.md`
+    /// (HQ = all repos; each tier sub-brain = that tier's repos).
+    pub const ATTENTION: &str = "attention";
 }
 
 // ---------------------------------------------------------------------------
@@ -565,6 +570,112 @@ fn render_due_soon_section(
     }
 
     lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// render_attention_section — stale carryover / aging backlog / orphaned captures
+// ---------------------------------------------------------------------------
+
+/// One row on the Attention board: its source repo tag, computed age (days),
+/// and the rendered detail line.
+struct AttentionRow {
+    repo: String,
+    age: i64,
+    detail: String,
+}
+
+/// Truncate `text` to a single tidy line of at most `max` chars for a board row.
+fn attention_snippet(text: &str, max: usize) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() > max {
+        let truncated: String = one_line.chars().take(max).collect();
+        format!("{}…", truncated.trim_end())
+    } else {
+        one_line
+    }
+}
+
+/// Render one `## {heading}` Attention sub-lane from `rows` (already filtered to
+/// stale items). Rows are sorted oldest-first (largest age). Empty → `_none_`.
+fn render_attention_lane(heading: &str, mut rows: Vec<AttentionRow>) -> String {
+    rows.sort_by_key(|r| std::cmp::Reverse(r.age));
+    let mut lines = vec![format!("## {heading}")];
+    if rows.is_empty() {
+        lines.push("_none_".to_string());
+    } else {
+        for row in rows {
+            lines.push(format!("- [{}] {} — {}d", row.repo, row.detail, row.age));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Render the Attention board: three sub-lanes (Stale carryover / Aging backlog
+/// / Orphaned captures) built from the pre-scoped, repo-tagged inputs. Only
+/// items past their staleness threshold appear (the visible twin of the
+/// `W_STATE_*_STALE` warnings — same predicate). The `[<repo>]` tag is a
+/// separate axis from the unified board's `[BIZ]/[ENG]` tag.
+pub fn render_attention_section(
+    carryover: &[(String, &Carryover)],
+    backlog: &[(String, &Backlog)],
+    today: chrono::NaiveDate,
+    thresholds: &crate::brain::config::AttentionThresholds,
+) -> String {
+    let mut carry_rows: Vec<AttentionRow> = Vec::new();
+    for (repo, item) in carryover {
+        if let Some(age) = carryover_stale_age(item, today, thresholds) {
+            let clears = item
+                .clears_when
+                .as_deref()
+                .map(|c| format!(" (clears when: {})", attention_snippet(c, 60)))
+                .unwrap_or_default();
+            carry_rows.push(AttentionRow {
+                repo: repo.clone(),
+                age,
+                detail: format!(
+                    "{} {} — {}{}",
+                    item.kind,
+                    item.slug,
+                    attention_snippet(&item.text, 80),
+                    clears
+                ),
+            });
+        }
+    }
+
+    let mut backlog_rows: Vec<AttentionRow> = Vec::new();
+    let mut capture_rows: Vec<AttentionRow> = Vec::new();
+    for (repo, item) in backlog {
+        if let Some(age) = backlog_stale_age(item, today, thresholds) {
+            let is_capture = item.origin.as_ref().is_some_and(|o| o.kind == "capture");
+            if is_capture {
+                let notes = item
+                    .origin
+                    .as_ref()
+                    .and_then(|o| o.notes.as_deref())
+                    .or(item.notes.as_deref())
+                    .unwrap_or("(no notes path)");
+                capture_rows.push(AttentionRow {
+                    repo: repo.clone(),
+                    age,
+                    detail: format!("{} — {} — notes: {}", item.slug, item.title, notes),
+                });
+            } else {
+                backlog_rows.push(AttentionRow {
+                    repo: repo.clone(),
+                    age,
+                    detail: format!("{} ({}) — {}", item.slug, item.status, item.title),
+                });
+            }
+        }
+    }
+
+    [
+        render_attention_lane("Stale carryover", carry_rows),
+        render_attention_lane("Aging backlog", backlog_rows),
+        render_attention_lane("Orphaned captures", capture_rows),
+    ]
+    .join("\n\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -1567,6 +1678,127 @@ pub fn plan_unified_board(
                     "W_EMIT_NO_SENTINEL",
                     format!(
                         "status.md for HQ '{}' has no <!-- BEGIN generated:unified-board --> \
+                         sentinels; skipping",
+                        src.repo_slug
+                    ),
+                ));
+            }
+        }
+    }
+
+    plan
+}
+
+// ---------------------------------------------------------------------------
+// plan_attention_board
+// ---------------------------------------------------------------------------
+
+/// The `brain.toml` tier a repo slug belongs to (its `[[repos]]` `tier`), if any.
+fn tier_of_repo<'a>(slug: &str, config: &'a BrainConfig) -> Option<&'a str> {
+    config
+        .repos
+        .iter()
+        .find(|r| r.slug == slug)
+        .map(|r| r.tier.as_str())
+}
+
+/// Plan the Attention board splice into **every brain-level `status.md`,
+/// tier-scoped** (`markers::ATTENTION`).
+///
+/// Unlike [`plan_unified_board`] (HQ root only), this emits for both scopes:
+/// - **HQ root** ([`TierScope::All`]) — unions `carryover[]` from *every* loaded
+///   repo/tier + the whole HQ `backlog[]`.
+/// - **Tier sub-brain** ([`TierScope::Tier`]) — unions `carryover[]` from that
+///   tier's leaf repos plus the tier brain file itself, and the HQ `backlog[]`
+///   nodes whose `repo` belongs to that tier (so a capture made in a core
+///   project surfaces on the core board).
+///
+/// So `/prime`, `/session-recap`, and `/attention` run inside a tier show that
+/// tier's stale items, while HQ shows the whole corpus. Missing `status.md`, or
+/// one lacking the sentinels, yields a `W_EMIT_NO_SENTINEL` warning and no write.
+pub fn plan_attention_board(
+    files: &[(StateSource, StateFile)],
+    config: &BrainConfig,
+    today: chrono::NaiveDate,
+) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+
+    // The HQ backlog lives on the single All-scoped brain file.
+    let hq_backlog: &[Backlog] = files
+        .iter()
+        .find(|(_, f)| f.kind == "brain" && matches!(tier_scope_for(f, config), TierScope::All))
+        .map(|(_, f)| f.backlog.as_slice())
+        .unwrap_or(&[]);
+
+    for (src, file) in files {
+        if file.kind != "brain" {
+            continue;
+        }
+        let scope = tier_scope_for(file, config);
+
+        // Scope the carryover union (repo-tagged) to this board.
+        let mut carryover: Vec<(String, &Carryover)> = Vec::new();
+        for (s2, f2) in files {
+            let include = match &scope {
+                TierScope::All => true,
+                TierScope::Tier(t) => {
+                    s2.repo_slug == src.repo_slug // the tier brain file's own carryover
+                        || tier_of_repo(&s2.repo_slug, config) == Some(t.as_str())
+                }
+            };
+            if include {
+                carryover.extend(f2.carryover.iter().map(|c| (s2.repo_slug.clone(), c)));
+            }
+        }
+
+        // Scope the HQ backlog subset to this board.
+        let backlog: Vec<(String, &Backlog)> = hq_backlog
+            .iter()
+            .filter(|b| match &scope {
+                TierScope::All => true,
+                TierScope::Tier(t) => tier_of_repo(&b.repo, config) == Some(t.as_str()),
+            })
+            .map(|b| (b.repo.clone(), b))
+            .collect();
+
+        let Some(planning_dir) = src.abs_path.parent() else {
+            continue;
+        };
+        let board_path = planning_dir.join("status.md");
+
+        let original = match std::fs::read_to_string(&board_path) {
+            Ok(s) => s,
+            Err(_) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &board_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "no status.md beside '{}' state.json; skipping attention emit",
+                        src.repo_slug
+                    ),
+                ));
+                continue;
+            }
+        };
+
+        let board = render_attention_section(&carryover, &backlog, today, &config.attention);
+
+        match splice_generated(&original, markers::ATTENTION, &board) {
+            Ok(new_content) => {
+                if new_content != original {
+                    plan.actions.push(EmitAction {
+                        path: board_path,
+                        new_content,
+                        note: format!("update attention board for '{}'", src.repo_slug),
+                    });
+                }
+            }
+            Err(_) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &board_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "status.md for '{}' has no <!-- BEGIN generated:attention --> \
                          sentinels; skipping",
                         src.repo_slug
                     ),

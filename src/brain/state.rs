@@ -34,6 +34,10 @@
 //! - `E_STATE_DUE_FORMAT` — a `due` value is not a valid YYYY-MM-DD date.
 //! - `E_STATE_SDLC_WORKFLOW_ENUM` — an `sdlc_workflow` value ∉ {none,patch,task,run,flow}.
 //! - `E_STATE_MODEL_ENUM` — a `model` value ∉ {sonnet,gemini-pro,gemini-flash,either}.
+//! - `E_STATE_DATE_FORMAT` — a carryover/backlog `created`/`reviewed`/`snoozed_until` value
+//!   is not a valid `YYYY-MM-DD` (or RFC3339) date.
+//! - `W_STATE_CARRYOVER_STALE` — a `carryover[]` entry has aged past its per-kind threshold.
+//! - `W_STATE_BACKLOG_STALE` — an HQ `backlog[]` `idea`/`ready` node has aged past threshold.
 
 use std::path::Path;
 #[cfg(test)]
@@ -55,9 +59,9 @@ use crate::brain::config::BrainConfig;
 /// `BrainConfig`/`Diagnostic` types and stays here — it consumes these shared
 /// types instead of duplicating them.
 pub use okf_core::{
-    Backlog, Block, BlockedBy, Carryover, CarryoverScope, CrossRepoEdge, Endpoint, Focus, Origin,
-    RepoRollup, StateEdge, StateEdgeKind, StateFile, StateGraph, StateLoadError, StateNode,
-    StateSource, TierEntry, Track, TrackBlock, build_state_graph, load_state,
+    Backlog, BacklogOrigin, Block, BlockedBy, Carryover, CarryoverScope, CrossRepoEdge, Endpoint,
+    Focus, Origin, RepoRollup, StateEdge, StateEdgeKind, StateFile, StateGraph, StateLoadError,
+    StateNode, StateSource, TierEntry, Track, TrackBlock, build_state_graph, load_state,
 };
 
 // ---------------------------------------------------------------------------
@@ -265,6 +269,159 @@ const VALID_BACKLOG_STATUSES: &[&str] = &["idea", "ready", "promoted"];
 /// Valid `kind` values for `carryover[]` entries.
 const VALID_CARRYOVER_KINDS: &[&str] = &["constraint", "known_issue", "env", "deferred"];
 
+/// Parse an authored state-graph date that may be either bare `YYYY-MM-DD` or a
+/// full RFC3339 timestamp (some `carryover[].created` values were stamped with a
+/// time+offset). Returns the calendar date, or `None` if neither form parses.
+///
+/// This is the shared anchor parser for the Attention staleness clock and the
+/// `E_STATE_DATE_FORMAT` check — a value that returns `None` here is what the
+/// schema pass flags as malformed.
+pub fn parse_state_date(s: &str) -> Option<chrono::NaiveDate> {
+    chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
+        .ok()
+        .or_else(|| {
+            chrono::DateTime::parse_from_rfc3339(s.trim())
+                .ok()
+                .map(|dt| dt.date_naive())
+        })
+}
+
+/// The effective staleness anchor for an item: the latest of its `created` and
+/// (optional) `reviewed` dates that parses. `None` when no date parses (the
+/// item cannot age — the malformed date is surfaced separately as an error).
+fn staleness_anchor(created: Option<&str>, reviewed: Option<&str>) -> Option<chrono::NaiveDate> {
+    let c = created.and_then(parse_state_date);
+    let r = reviewed.and_then(parse_state_date);
+    match (c, r) {
+        (Some(c), Some(r)) => Some(c.max(r)),
+        (Some(c), None) => Some(c),
+        (None, Some(r)) => Some(r),
+        (None, None) => None,
+    }
+}
+
+/// Whether an item is currently snoozed: `snoozed_until` parses to a date that
+/// is still in the future (`today < snoozed_until`). An absent or unparseable
+/// value is not snoozed.
+fn is_snoozed(snoozed_until: Option<&str>, today: chrono::NaiveDate) -> bool {
+    snoozed_until
+        .and_then(parse_state_date)
+        .is_some_and(|d| today < d)
+}
+
+/// The staleness verdict for a `carryover[]` entry: `Some(age_days)` when the
+/// entry is past its per-`kind` threshold and not currently snoozed, else
+/// `None`. This is the **single** predicate shared by the `validate-brain`
+/// warnings and the `emit-state` Attention board, so the board shows exactly
+/// what the warnings fire on.
+pub fn carryover_stale_age(
+    item: &Carryover,
+    today: chrono::NaiveDate,
+    thresholds: &crate::brain::config::AttentionThresholds,
+) -> Option<i64> {
+    if is_snoozed(item.snoozed_until.as_deref(), today) {
+        return None;
+    }
+    let anchor = staleness_anchor(Some(&item.created), item.reviewed.as_deref())?;
+    let age = (today - anchor).num_days();
+    (age > thresholds.carryover_threshold(&item.kind)).then_some(age)
+}
+
+/// The staleness verdict for a `backlog[]` node: `Some(age_days)` when the node
+/// is an `idea`/`ready` past the backlog threshold and not snoozed, else `None`.
+/// (Whether the node lives in an HQ/brain file is the caller's concern.)
+pub fn backlog_stale_age(
+    item: &Backlog,
+    today: chrono::NaiveDate,
+    thresholds: &crate::brain::config::AttentionThresholds,
+) -> Option<i64> {
+    if item.status != "idea" && item.status != "ready" {
+        return None;
+    }
+    if is_snoozed(item.snoozed_until.as_deref(), today) {
+        return None;
+    }
+    let anchor = staleness_anchor(item.created.as_deref(), item.reviewed.as_deref())?;
+    let age = (today - anchor).num_days();
+    (age > thresholds.backlog_days).then_some(age)
+}
+
+/// Staleness warnings for `carryover[]` — one `W_STATE_CARRYOVER_STALE` per
+/// entry whose age (from `max(created, reviewed)`) exceeds its per-`kind`
+/// threshold and which is not currently snoozed. WARNING severity only — never
+/// flips the exit code. Runs on every repo's `state.json` (each file's own
+/// carryover is checked where it lives).
+pub fn check_carryover_staleness(
+    src: &StateSource,
+    file: &StateFile,
+    today: chrono::NaiveDate,
+    thresholds: &crate::brain::config::AttentionThresholds,
+) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let path = &src.abs_path;
+
+    for item in &file.carryover {
+        if let Some(age) = carryover_stale_age(item, today, thresholds) {
+            let threshold = thresholds.carryover_threshold(&item.kind);
+            let clears = item
+                .clears_when
+                .as_deref()
+                .map(|c| format!(" (clears when: {c})"))
+                .unwrap_or_default();
+            diags.push(Diagnostic::warning(
+                path,
+                "W_STATE_CARRYOVER_STALE",
+                format!(
+                    "carryover '{}' (kind '{}') is {age}d old (threshold {threshold}d){clears} — \
+                     promote it into a block/backlog node, resolve its clears_when, re-affirm it \
+                     (bump 'reviewed'), or /snooze it",
+                    item.slug, item.kind
+                ),
+            ));
+        }
+    }
+    diags
+}
+
+/// Staleness warnings for the HQ `backlog[]` — one `W_STATE_BACKLOG_STALE` per
+/// `idea`/`ready` node older than the backlog threshold that is not snoozed.
+/// Nodes with no parseable `created` cannot age (never stale until dated).
+/// WARNING severity only.
+pub fn check_backlog_staleness(
+    src: &StateSource,
+    file: &StateFile,
+    today: chrono::NaiveDate,
+    thresholds: &crate::brain::config::AttentionThresholds,
+) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    if file.kind != "brain" {
+        return diags; // backlog[] is HQ/brain-only
+    }
+    let path = &src.abs_path;
+    let threshold = thresholds.backlog_days;
+
+    for item in &file.backlog {
+        if let Some(age) = backlog_stale_age(item, today, thresholds) {
+            let is_capture = item.origin.as_ref().is_some_and(|o| o.kind == "capture");
+            let lead = if is_capture {
+                "captured note never triaged"
+            } else {
+                "backlog idea"
+            };
+            diags.push(Diagnostic::warning(
+                path,
+                "W_STATE_BACKLOG_STALE",
+                format!(
+                    "{lead}: backlog '{}' (status '{}') is {age}d old (threshold {threshold}d) — \
+                     promote it (/plan · /ticket · /chore) or /snooze it",
+                    item.slug, item.status
+                ),
+            ));
+        }
+    }
+    diags
+}
+
 /// Validate the schema-ring constraints for a successfully-deserialized
 /// [`StateFile`].
 ///
@@ -458,7 +615,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
         }
     }
 
-    // --- 8. backlog[].status enum (HQ brain only) ---
+    // --- 8. backlog[].status enum + date formats (HQ brain only) ---
     for item in &file.backlog {
         if !VALID_BACKLOG_STATUSES.contains(&item.status.as_str()) {
             diags.push(Diagnostic::error(
@@ -471,6 +628,24 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                     VALID_BACKLOG_STATUSES.join(", ")
                 ),
             ));
+        }
+        for (field, value) in [
+            ("created", item.created.as_deref()),
+            ("reviewed", item.reviewed.as_deref()),
+            ("snoozed_until", item.snoozed_until.as_deref()),
+        ] {
+            if let Some(v) = value
+                && parse_state_date(v).is_none()
+            {
+                diags.push(Diagnostic::error(
+                    path,
+                    "E_STATE_DATE_FORMAT",
+                    format!(
+                        "backlog item '{}' has malformed {field} date '{}'; must be YYYY-MM-DD",
+                        item.slug, v
+                    ),
+                ));
+            }
         }
     }
 
@@ -524,6 +699,26 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                         ),
                     ));
                 }
+            }
+        }
+
+        for (field, value) in [
+            ("created", Some(item.created.as_str())),
+            ("reviewed", item.reviewed.as_deref()),
+            ("snoozed_until", item.snoozed_until.as_deref()),
+        ] {
+            if let Some(v) = value
+                && parse_state_date(v).is_none()
+            {
+                diags.push(Diagnostic::error(
+                    path,
+                    "E_STATE_DATE_FORMAT",
+                    format!(
+                        "carryover item '{}' has malformed {field} date '{}'; must be YYYY-MM-DD \
+                         or RFC3339",
+                        item.slug, v
+                    ),
+                ));
             }
         }
     }
@@ -2337,6 +2532,7 @@ mod tests {
     fn make_config_with_alpha(alpha_repo_path: &str) -> BrainConfig {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
+            attention: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -2418,6 +2614,7 @@ mod tests {
 
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
+            attention: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -2494,6 +2691,7 @@ mod tests {
         .unwrap();
 
         let config = BrainConfig {
+            attention: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -2533,6 +2731,7 @@ mod tests {
         // Add a second repo entry that has no state.json on disk
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
+            attention: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -2642,6 +2841,7 @@ mod tests {
         // `discover_dedupes_repo_entry_that_shadows_a_tier_rollup`.
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
+            attention: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -2718,6 +2918,131 @@ mod tests {
 
     fn parse_file(json: &str) -> StateFile {
         serde_json::from_str(json).expect("fixture must parse")
+    }
+
+    // ---- Attention staleness (parse_state_date / carryover / backlog) ----
+
+    fn day(s: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn parse_state_date_accepts_bare_and_rfc3339() {
+        assert_eq!(parse_state_date("2026-07-05"), Some(day("2026-07-05")));
+        // RFC3339 with offset → calendar date in that offset.
+        assert_eq!(
+            parse_state_date("2026-07-05T07:10:00-03:00"),
+            Some(day("2026-07-05"))
+        );
+        assert_eq!(parse_state_date("not-a-date"), None);
+        assert_eq!(parse_state_date("2026-13-99"), None);
+    }
+
+    #[test]
+    fn carryover_staleness_fires_past_threshold_and_respects_snooze_and_reviewed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+        let today = day("2026-07-15");
+        let cfg = crate::brain::config::AttentionThresholds::default(); // deferred = 5
+
+        // deferred created 2026-07-01 → 14d old > 5d → stale.
+        let stale = parse_file(
+            r#"{"repo":"mev","kind":"project","updated":"2026-07-15",
+                "carryover":[{"slug":"old-thing","scope":{"repo":"mev"},"kind":"deferred",
+                              "text":"x","created":"2026-07-01"}]}"#,
+        );
+        let d = check_carryover_staleness(&src, &stale, today, &cfg);
+        assert_eq!(d.len(), 1, "14d-old deferred should be stale: {d:?}");
+        assert_eq!(d[0].locator, "W_STATE_CARRYOVER_STALE");
+        assert_eq!(d[0].severity, crate::Severity::Warning);
+
+        // Same item but reviewed 2026-07-13 → age 2d < 5d → not stale.
+        let reviewed = parse_file(
+            r#"{"repo":"mev","kind":"project","updated":"2026-07-15",
+                "carryover":[{"slug":"old-thing","scope":{"repo":"mev"},"kind":"deferred",
+                              "text":"x","created":"2026-07-01","reviewed":"2026-07-13"}]}"#,
+        );
+        assert!(
+            check_carryover_staleness(&src, &reviewed, today, &cfg).is_empty(),
+            "reviewed within threshold resets the clock"
+        );
+
+        // Same item but snoozed_until in the future → suppressed regardless of age.
+        let snoozed = parse_file(
+            r#"{"repo":"mev","kind":"project","updated":"2026-07-15",
+                "carryover":[{"slug":"old-thing","scope":{"repo":"mev"},"kind":"deferred",
+                              "text":"x","created":"2026-07-01","snoozed_until":"2026-07-20"}]}"#,
+        );
+        assert!(
+            check_carryover_staleness(&src, &snoozed, today, &cfg).is_empty(),
+            "future snoozed_until suppresses the warning"
+        );
+    }
+
+    #[test]
+    fn carryover_staleness_permanent_constraint_still_nags() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+        let today = day("2026-07-15");
+        let cfg = crate::brain::config::AttentionThresholds::default(); // constraint = 10
+
+        // A permanent constraint (no clears_when), created 30d ago → still nags.
+        let file = parse_file(
+            r#"{"repo":"mev","kind":"project","updated":"2026-07-15",
+                "carryover":[{"slug":"perm","scope":{"repo":"mev"},"kind":"constraint",
+                              "text":"always true","created":"2026-06-15"}]}"#,
+        );
+        let d = check_carryover_staleness(&src, &file, today, &cfg);
+        assert_eq!(d.len(), 1, "permanent constraint past threshold nags");
+    }
+
+    #[test]
+    fn backlog_staleness_hq_only_and_status_scoped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let today = day("2026-07-15");
+        let cfg = crate::brain::config::AttentionThresholds::default(); // backlog = 7
+
+        // Brain file: an idea 10d old (stale) + a promoted node (skipped).
+        let brain = parse_file(
+            r#"{"repo":"hq","kind":"brain","updated":"2026-07-15",
+                "backlog":[
+                  {"slug":"aged","title":"t","repo":"core","type":"research","status":"idea","created":"2026-07-05"},
+                  {"slug":"done","title":"t","repo":"core","type":"feature","status":"promoted","block":"X.1.A","created":"2026-01-01"}
+                ]}"#,
+        );
+        let brain_src = make_source(&path, "brain");
+        let d = check_backlog_staleness(&brain_src, &brain, today, &cfg);
+        assert_eq!(d.len(), 1, "only the aged idea is stale: {d:?}");
+        assert_eq!(d[0].locator, "W_STATE_BACKLOG_STALE");
+
+        // Same content in a project file → no backlog staleness (HQ-only).
+        let leaf_src = make_source(&path, "project");
+        let mut leaf = brain.clone();
+        leaf.kind = "project".to_string();
+        assert!(
+            check_backlog_staleness(&leaf_src, &leaf, today, &cfg).is_empty(),
+            "backlog staleness is brain-only"
+        );
+    }
+
+    #[test]
+    fn malformed_dates_raise_date_format_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+        let file = parse_file(
+            r#"{"repo":"mev","kind":"project","updated":"2026-07-15",
+                "carryover":[{"slug":"bad","scope":{"repo":"mev"},"kind":"deferred",
+                              "text":"x","created":"July 5th"}]}"#,
+        );
+        let d = check_schema(&src, &file);
+        assert!(
+            d.iter().any(|x| x.locator == "E_STATE_DATE_FORMAT"),
+            "malformed created must raise E_STATE_DATE_FORMAT: {d:?}"
+        );
     }
 
     #[test]
@@ -4332,6 +4657,7 @@ mod tests {
             }],
             block: None,
             notes: None,
+            ..Default::default()
         };
         let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![backlog_node]);
         let files = vec![pair];
@@ -4363,6 +4689,7 @@ mod tests {
             depends_on: vec![],
             block: None, // missing pointer
             notes: None,
+            ..Default::default()
         };
         let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![backlog_node]);
         let files = vec![pair];
@@ -4394,6 +4721,7 @@ mod tests {
             depends_on: vec![],
             block: Some("MV.3.GHOST".to_string()), // block doesn't exist in mev tracks[]
             notes: None,
+            ..Default::default()
         };
         let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![backlog_node]);
         let files = vec![pair];
@@ -4442,6 +4770,7 @@ mod tests {
             depends_on: vec![],
             block: Some("MV.3.P2".to_string()), // resolves to the real block
             notes: None,
+            ..Default::default()
         };
 
         // Two files: a mev leaf (owns the track block) and hq brain (owns the backlog node).
@@ -5184,6 +5513,7 @@ mod tests {
     fn make_mixed_tier_config() -> BrainConfig {
         use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
+            attention: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -5265,6 +5595,7 @@ mod tests {
         // self-entry (`slug == repo_path == "business"`). It must still scope to
         // its own tier (not `All`, which would spuriously target it as HQ).
         let config = BrainConfig {
+            attention: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -5575,6 +5906,7 @@ mod tests {
         // A config where "alpha" is (accidentally) listed twice — the second
         // listing must not produce a duplicate (repo, id) block in focus.now.
         let config = BrainConfig {
+            attention: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![

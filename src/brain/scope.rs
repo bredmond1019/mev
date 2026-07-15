@@ -98,6 +98,7 @@ mod tests {
     /// Build a test config with brain (root), core (tier), and mev (core/mev) units.
     fn three_unit_config() -> BrainConfig {
         BrainConfig {
+            attention: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -213,6 +214,7 @@ mod tests {
     fn two_unit_config_brain_fallback() {
         // Minimal two-unit config (brain + mev) — a brain-level file falls back to brain.
         let cfg = BrainConfig {
+            attention: Default::default(),
             repos: vec![
                 RepoEntry {
                     slug: "brain".to_string(),

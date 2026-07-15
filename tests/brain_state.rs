@@ -1157,6 +1157,7 @@ fn derive_cross_repo_skips_external_deps() {
 fn make_config_with_repo(slug: &str, tier: &str) -> mev::brain::config::BrainConfig {
     use mev::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
     BrainConfig {
+        attention: Default::default(),
         vocab: VocabConfig::default(),
         crawl: CrawlConfig::default(),
         repos: vec![RepoEntry {

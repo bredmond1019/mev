@@ -759,6 +759,7 @@ mod tests {
     fn brain_only_config() -> crate::brain::config::BrainConfig {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
+            attention: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig {
                 skip_dirs: vec![
@@ -918,6 +919,7 @@ mod tests {
     fn brain_and_subrepo_config() -> crate::brain::config::BrainConfig {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
+            attention: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig {
                 skip_dirs: vec![

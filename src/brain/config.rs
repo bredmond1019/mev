@@ -65,6 +65,80 @@ pub struct CrawlConfig {
     pub skip_dirs: Vec<String>,
 }
 
+/// `[attention]` section of `brain.toml` — per-`kind` staleness thresholds
+/// (in days) for the Attention surface.
+///
+/// A carryover/backlog item is "stale" (surfaced on the Attention board and via
+/// the `W_STATE_*_STALE` warnings) once its age exceeds the threshold for its
+/// kind, unless it is currently snoozed. An absent `[attention]` table yields
+/// all defaults via [`Default`]. Both the validator and the emit planner read
+/// this one struct, so the board shows exactly what the warnings fire on.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AttentionThresholds {
+    /// `carryover` kind `env` — transient environmental caveats (default 3).
+    #[serde(default = "default_env_days")]
+    pub env_days: i64,
+    /// `carryover` kind `deferred` — untickted follow-ons (default 5).
+    #[serde(default = "default_deferred_days")]
+    pub deferred_days: i64,
+    /// `carryover` kind `known_issue` (default 10).
+    #[serde(default = "default_known_issue_days")]
+    pub known_issue_days: i64,
+    /// `carryover` kind `constraint` (default 10).
+    #[serde(default = "default_constraint_days")]
+    pub constraint_days: i64,
+    /// `backlog[]` `idea`/`ready` nodes (default 7).
+    #[serde(default = "default_backlog_days")]
+    pub backlog_days: i64,
+}
+
+fn default_env_days() -> i64 {
+    3
+}
+fn default_deferred_days() -> i64 {
+    5
+}
+fn default_known_issue_days() -> i64 {
+    10
+}
+fn default_constraint_days() -> i64 {
+    10
+}
+fn default_backlog_days() -> i64 {
+    7
+}
+
+impl Default for AttentionThresholds {
+    fn default() -> Self {
+        Self {
+            env_days: default_env_days(),
+            deferred_days: default_deferred_days(),
+            known_issue_days: default_known_issue_days(),
+            constraint_days: default_constraint_days(),
+            backlog_days: default_backlog_days(),
+        }
+    }
+}
+
+impl AttentionThresholds {
+    /// The staleness threshold (in days) for a `carryover` entry of the given
+    /// `kind`. An unrecognised kind falls back to the most conservative
+    /// (longest) carryover threshold so novel kinds surface, but not eagerly.
+    pub fn carryover_threshold(&self, kind: &str) -> i64 {
+        match kind {
+            "env" => self.env_days,
+            "deferred" => self.deferred_days,
+            "known_issue" => self.known_issue_days,
+            "constraint" => self.constraint_days,
+            _ => self
+                .known_issue_days
+                .max(self.constraint_days)
+                .max(self.deferred_days)
+                .max(self.env_days),
+        }
+    }
+}
+
 /// One `[[repos]]` entry in `brain.toml`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RepoEntry {
@@ -100,6 +174,9 @@ pub struct BrainConfig {
     /// `[crawl]` section.
     #[serde(default)]
     pub crawl: CrawlConfig,
+    /// `[attention]` section — staleness thresholds for the Attention surface.
+    #[serde(default)]
+    pub attention: AttentionThresholds,
     /// `[[repos]]` entries.
     #[serde(default)]
     pub repos: Vec<RepoEntry>,
@@ -270,6 +347,33 @@ mod tests {
         let slugs = cfg.projects();
         assert!(slugs.contains(&"brain"), "expected slug 'brain'");
         assert!(slugs.contains(&"mev"), "expected slug 'mev'");
+    }
+
+    #[test]
+    fn attention_thresholds_default_when_section_absent() {
+        // The fixture brain.toml has no [attention] table → all defaults.
+        let cfg = load_brain_config(&fixture_path()).expect("should parse fixture");
+        assert_eq!(cfg.attention.env_days, 3);
+        assert_eq!(cfg.attention.deferred_days, 5);
+        assert_eq!(cfg.attention.known_issue_days, 10);
+        assert_eq!(cfg.attention.constraint_days, 10);
+        assert_eq!(cfg.attention.backlog_days, 7);
+        // Per-kind lookup + unknown-kind fallback (most conservative).
+        assert_eq!(cfg.attention.carryover_threshold("env"), 3);
+        assert_eq!(cfg.attention.carryover_threshold("deferred"), 5);
+        assert_eq!(cfg.attention.carryover_threshold("mystery"), 10);
+    }
+
+    #[test]
+    fn attention_thresholds_partial_override_keeps_other_defaults() {
+        let toml = r#"
+[attention]
+deferred_days = 2
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.attention.deferred_days, 2);
+        assert_eq!(cfg.attention.env_days, 3, "unset field keeps its default");
+        assert_eq!(cfg.attention.backlog_days, 7);
     }
 
     fn run_git(dir: &Path, args: &[&str]) {

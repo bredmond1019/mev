@@ -296,6 +296,7 @@ mod tests {
     /// at `status_file_rel` and `cache_doc_rel` (relative to the temp root).
     fn make_config(status_file_rel: &str, cache_doc_rel: &str) -> BrainConfig {
         BrainConfig {
+            attention: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![RepoEntry {

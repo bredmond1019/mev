@@ -47,6 +47,7 @@ fn temp_dir(suffix: &str) -> std::path::PathBuf {
 /// This is the canonical fixture config for all tests in this module.
 fn three_unit_config() -> BrainConfig {
     BrainConfig {
+        attention: Default::default(),
         vocab: VocabConfig::default(),
         crawl: CrawlConfig {
             skip_dirs: vec![
