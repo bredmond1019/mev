@@ -146,7 +146,7 @@ standalone block, not one already sitting in `master-plan.md`.
      if the dependency is non-block (hardware, a paid-API budget, a manual step), use
      `{ "type": "external", "what": "<gloss>" }` instead.
 4. Do **not** hand-author a `tasks` array on that block — `tracks[].blocks[].tasks` is a *derived*
-   pointer + status summary (`{ file, generated, counts }`, see `core/planning/state-schema.md`),
+   pointer + status summary (`{ file, generated, counts }`, see `docs/state/state-schema.md`),
    not a copy of the task list. `mev emit-state --write` (next step) derives it from the `tasks.json`
    you just wrote. (Not implemented in `mev` yet — the step is a no-op until it ships.)
 5. Save `planning/state.json` and validate it is still valid JSON:
@@ -156,7 +156,7 @@ standalone block, not one already sitting in `master-plan.md`.
 
 If this repo has a `planning/state.json`, run `mev emit-state --write` after committing — it derives
 `tracks[].blocks[].tasks` (a `{ file, generated, counts }` pointer + status summary, **not** a copy
-of the task list — see `core/planning/state-schema.md`) from the `tasks.json` you just wrote. Do not
+of the task list — see `docs/state/state-schema.md`) from the `tasks.json` you just wrote. Do not
 hand-edit a `tasks` array into `state.json` yourself; that field is derived, same as `focus`. (This
 derivation isn't implemented in `mev` yet — running the command is a no-op until it ships; it's
 listed here so the step is already in place when it does.)

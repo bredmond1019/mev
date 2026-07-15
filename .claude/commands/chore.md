@@ -120,7 +120,7 @@ After writing `tasks.md` + `tasks.json`, also register this chore's block in `pl
      dependency is non-block (hardware, a paid-API budget, a manual step), use
      `{ "type": "external", "what": "<gloss>" }` instead.
 3. Do **not** hand-author a `tasks` array on that block — `tracks[].blocks[].tasks` is a *derived*
-   pointer + status summary (`{ file, generated, counts }`, see `core/planning/state-schema.md`),
+   pointer + status summary (`{ file, generated, counts }`, see `docs/state/state-schema.md`),
    not a copy of the task list. `mev emit-state --write` (Step below) derives it from the
    `tasks.json` you just wrote. (Not implemented in `mev` yet — the step is a no-op until it ships.)
 4. Save `planning/state.json` and validate it is still valid JSON:
