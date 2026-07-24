@@ -5748,6 +5748,183 @@ heading = "Eng Repo"
 }
 
 // ---------------------------------------------------------------------------
+// emit-state-same-file-batching regression — hq-board, unified-board, and
+// attention all splice into the SAME planning/status.md via disjoint
+// sentinels. Before the fix, emit_state planned all eight batch-1 planners
+// from the same pre-batch original before applying any of them, so writing
+// a later planner's action (based on that stale original) would silently
+// drop an earlier planner's just-applied sentinel edit for the same file.
+// This proves all three regions survive a single emit_state(write=true) run.
+// ---------------------------------------------------------------------------
+
+mod same_file_batching_regression {
+    use std::fs;
+    use std::path::Path;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("mev-same-file-batching-{tag}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_file(root: &Path, rel: &str, content: &str) {
+        let target = root.join(rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&target, content.as_bytes()).unwrap();
+    }
+
+    fn write_json(root: &Path, rel: &str, value: &serde_json::Value) {
+        write_file(root, rel, &serde_json::to_string_pretty(value).unwrap());
+    }
+
+    /// `brain.toml` registering one leaf repo under a tier that doesn't match
+    /// the HQ root's own `repo` value, so the root resolves to `TierScope::All`.
+    fn write_brain_toml(root: &Path) {
+        let toml = r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "alpha"
+tier = "primary"
+repo_path = "repos/alpha"
+status_file = "repos/alpha/planning/status.md"
+cache_doc = "docs/projects/alpha.md"
+heading = "Alpha"
+"#;
+        fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
+    }
+
+    fn write_hq_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "hq",
+            "kind": "brain",
+            "updated": "2026-07-24",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "repos": [],
+            "cross_repo": []
+        });
+        write_json(root, "planning/state.json", &state);
+    }
+
+    /// HQ `status.md` carrying all three batch-1 sentinels that target this
+    /// one file: `hq-board`, `unified-board`, and `attention`.
+    fn write_hq_status_md(root: &Path) {
+        let doc = "---\n\
+                    type: ProjectStatus\n\
+                    title: HQ status\n\
+                    description: Same-file batching regression fixture.\n\
+                    ---\n\n\
+                    # HQ Status\n\n\
+                    <!-- BEGIN generated:hq-board -->\n\
+                    <!-- END generated:hq-board -->\n\n\
+                    <!-- BEGIN generated:unified-board -->\n\
+                    <!-- END generated:unified-board -->\n\n\
+                    <!-- BEGIN generated:attention -->\n\
+                    <!-- END generated:attention -->\n";
+        write_file(root, "planning/status.md", doc);
+    }
+
+    /// One leaf repo with an open, ready, `priority: 1` block (renders in both
+    /// hq-board's NEXT and unified-board's NEXT) and a stale carryover past
+    /// its default staleness threshold (renders in attention).
+    fn write_alpha_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "alpha",
+            "kind": "project",
+            "updated": "2026-07-24",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "tracks": [
+                {
+                    "title": "Phase 1",
+                    "blocks": [
+                        {
+                            "id": "AL.1",
+                            "title": "Alpha ready block",
+                            "status": "open",
+                            "depends_on": [],
+                            "wave": 1,
+                            "priority": 1
+                        }
+                    ]
+                }
+            ],
+            "carryover": [
+                {
+                    "slug": "alpha-stale-thing",
+                    "scope": { "repo": "alpha" },
+                    "kind": "known_issue",
+                    "text": "A carryover old enough to clear the default staleness threshold.",
+                    "clears_when": "Never, for this fixture.",
+                    "created": "2020-01-01"
+                }
+            ]
+        });
+        write_json(root, "repos/alpha/planning/state.json", &state);
+    }
+
+    fn read(root: &Path, rel: &str) -> String {
+        fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("failed to read {rel}: {e}"))
+    }
+
+    fn region<'a>(doc: &'a str, marker: &str) -> &'a str {
+        doc.split(&format!("<!-- BEGIN generated:{marker} -->"))
+            .nth(1)
+            .and_then(|s| s.split(&format!("<!-- END generated:{marker} -->")).next())
+            .unwrap_or_else(|| panic!("{marker} region must be present; got:\n{doc}"))
+    }
+
+    #[test]
+    fn hq_board_unified_board_and_attention_all_survive_one_write() {
+        let dir = temp_dir("survive");
+        write_brain_toml(&dir);
+        write_hq_state(&dir);
+        write_hq_status_md(&dir);
+        write_alpha_state(&dir);
+
+        let report = mev::emit_state(&dir, true).expect("emit_state should not error");
+        let errors: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == mev::Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "fixture emit should have no errors; got: {errors:#?}"
+        );
+
+        let status_after = read(&dir, "planning/status.md");
+
+        // Before the fix, only the LAST batch-1 planner to touch this file
+        // (attention) would have real content; hq-board and unified-board
+        // would each have been silently reverted to empty by a later
+        // planner's stale-original write.
+        assert!(
+            region(&status_after, "hq-board").contains("alpha:AL.1"),
+            "hq-board region must survive the later unified-board/attention writes to the \
+             same file; got:\n{status_after}"
+        );
+        assert!(
+            region(&status_after, "unified-board").contains("alpha:AL.1"),
+            "unified-board region must survive the later attention write to the same file; \
+             got:\n{status_after}"
+        );
+        assert!(
+            region(&status_after, "attention").contains("alpha-stale-thing"),
+            "attention region must be populated; got:\n{status_after}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // brain-focus-dual-role-drift task 4 — end-to-end proof that the writer
 // (`emit_state`) and the validator (`validate_brain_state`'s
 // `check_focus_drift`) now agree for a dual-role brain (a `kind: "brain"`

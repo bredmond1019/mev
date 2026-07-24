@@ -580,37 +580,55 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     // 3. Build the block-dependency graph.
     let graph = build_state_graph(&loaded);
 
-    // 4. Run all five planners.
+    // 4-5. Run each planner immediately followed by its own apply, in a stable
+    //    order — rather than planning all eight up front and applying them as
+    //    a batch afterward. Every planner that splices a rendered section
+    //    re-reads its target document at call time; several targets are
+    //    shared (status.md carries HQ_BOARD + UNIFIED_BOARD + ATTENTION for
+    //    the HQ root, and TIER_ROLLUP + ATTENTION for a tier sub-brain). If
+    //    all eight were planned before any of them wrote, every planner would
+    //    see the same pre-batch original and each write would silently drop
+    //    the previous one's sentinel edit (the emit-state-same-file-batching
+    //    known issue). Interleaving plan+apply means a later planner targeting
+    //    the same file reads the up-to-date text left by an earlier one.
+    //    `loaded`/`graph` stay the single fixed snapshot computed above for
+    //    every planner — only the on-disk *rendered documents* progress as we
+    //    go, not the corpus data driving what gets rendered. Order still
+    //    matters for shared targets: attention lands after hq_board/
+    //    tier_rollups/unified_board (its sibling sentinels in the same
+    //    files), and plan_status_frontmatter (below) runs last of all so it
+    //    reads the fully updated text in write mode.
     let state_plan = plan_state_json(&loaded, &graph, &config);
+    let state_diags = apply_plan(&state_plan, write);
+
     let mp_plan = plan_master_plan_tables(&loaded, &graph);
+    let mp_diags = apply_plan(&mp_plan, write);
+
     let project_caches_plan = plan_project_caches(root, &loaded, &graph, &config);
+    let project_caches_diags = apply_plan(&project_caches_plan, write);
+
     let tier_rollups_plan = plan_tier_rollups(&loaded, &graph, &config);
+    let tier_rollups_diags = apply_plan(&tier_rollups_plan, write);
+
     let hq_board_plan = plan_hq_board(&loaded, &graph, &config);
+    let hq_board_diags = apply_plan(&hq_board_plan, write);
+
     let today = chrono::Local::now().date_naive();
     let unified_board_plan = plan_unified_board(&loaded, &graph, &config, today);
-    let attention_plan = plan_attention_board(&loaded, &config, today);
-    let brain_caches_plan = plan_brain_cache_watermarks(root, &loaded, &config);
-
-    // 5. Apply all plans (write or dry-run), in a stable order. The attention
-    //    board writes to the same status.md files as the boards above but a
-    //    disjoint sentinel region; it must land before plan_status_frontmatter,
-    //    which re-reads those files in write mode.
-    let state_diags = apply_plan(&state_plan, write);
-    let mp_diags = apply_plan(&mp_plan, write);
-    let project_caches_diags = apply_plan(&project_caches_plan, write);
-    let tier_rollups_diags = apply_plan(&tier_rollups_plan, write);
-    let hq_board_diags = apply_plan(&hq_board_plan, write);
     let unified_board_diags = apply_plan(&unified_board_plan, write);
+
+    let attention_plan = plan_attention_board(&loaded, &config, today);
     let attention_diags = apply_plan(&attention_plan, write);
+
+    let brain_caches_plan = plan_brain_cache_watermarks(root, &loaded, &config);
     let brain_caches_diags = apply_plan(&brain_caches_plan, write);
 
-    // 6. Epic boards + sequence tables are planned AFTER the batch above is
-    //    applied, not alongside it. They target the same `status.md` files as
-    //    the HQ/unified/attention boards (and the same `master-plan.md` as
-    //    plan_master_plan_tables), and every planner in a batch reads the
-    //    *original* file — so two planned writes to one file would each carry
-    //    only their own sentinel edit, and the later apply would drop the
-    //    earlier one's. Planning here means these read the already-updated text.
+    // 6. Epic boards + sequence tables run after every planner above has both
+    //    planned and applied. `plan_epic_boards` shares `status.md` with the
+    //    HQ/unified/attention boards, so it reads their already-applied text;
+    //    `plan_epic_sequences` targets its own `epics/<slug>.md` docs, which
+    //    nothing above touches. The two are still planned together and applied
+    //    together (not interleaved) — safe, since they target disjoint files.
     let epic_board_plan = plan_epic_boards(&loaded, &graph, &config);
     let epic_seq_plan = plan_epic_sequences(root, &loaded, &graph, &config);
     let epic_board_diags = apply_plan(&epic_board_plan, write);
