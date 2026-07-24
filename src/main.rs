@@ -118,6 +118,10 @@ enum Command {
     ///   E_CONFIG_NOT_FOUND   — brain.toml could not be located (exit 1)
     ///   E_EMIT_LINKED_WORKTREE — --write invoked from inside a linked git worktree; refused
     ///                            before brain.toml resolution (exit 1). Dry-run is unaffected.
+    ///   E_EMIT_INCOMPLETE_CORPUS — --write refused because a discovered state.json failed to
+    ///                            load (exit 1); regenerating derived views from a partial
+    ///                            corpus would silently erase the missing repo(s). Dry-run is
+    ///                            unaffected — it still runs every planner and reports.
     EmitState {
         /// Path to search from when locating brain.toml (walks up to find it).
         /// Defaults to the current directory.

@@ -552,6 +552,7 @@ The other planners use their own markers in the same document types: `project-ca
 | `E_EMIT_WRITE_FAILED` | Error | IO error writing a file; causes exit 1 |
 | `E_CONFIG_NOT_FOUND` | Error | `brain.toml` could not be located by walking up from `path`; causes exit 1 |
 | `E_EMIT_LINKED_WORKTREE` | Error | `--write` invoked from inside a linked git worktree; causes exit 1 |
+| `E_EMIT_INCOMPLETE_CORPUS` | Error | `--write` refused because one or more discovered `state.json` files failed to load; causes exit 1 |
 
 `--write` refuses to run when `path` resolves to a linked git worktree (e.g. `trees/<slug>/` under a
 repo that already has its own main working tree) — `emit-state` resolves every repo's derived-file
@@ -560,6 +561,17 @@ paths from `brain.toml`, not from CWD, so writing from a worktree would silently
 the worktree path and exits non-zero (`E_EMIT_LINKED_WORKTREE`) without writing anything. Dry-run
 (no `--write`) is read-only and is never gated — it still succeeds from inside a worktree. Run
 `--write` from the repo's main working tree instead.
+
+`--write` also refuses to run when the corpus is incomplete: if any discovered `state.json` fails
+to load (an `E_STATE_MALFORMED_JSON` diagnostic), every derived view is a cross-repo union
+(`repos[]`/`cross_repo[]`, tier rollups, HQ/unified/epic boards, master-plan and epic sequence
+tables) — regenerating them from a partial corpus would silently erase the missing repo(s) from
+every surface, and rewriting `cross_repo[]` would delete the dangling references that are the only
+evidence of the failure. The command pushes `E_EMIT_INCOMPLETE_CORPUS` alongside the underlying
+`E_STATE_MALFORMED_JSON` cause, writes nothing, and exits non-zero. Dry-run is unaffected — it is
+the diagnostic tool for exactly this situation, and still runs every planner and reports the
+`W_EMIT_DRY_RUN` actions that would have been taken. Fix the load failure named by
+`E_STATE_MALFORMED_JSON`, then re-run `--write`.
 
 **Examples:**
 

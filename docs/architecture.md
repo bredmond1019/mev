@@ -360,6 +360,7 @@ constants as `pub const`s — `WAVE_TABLE`, `PROJECT_CACHE`, `TIER_ROLLUP`, `HQ_
 | `I_EMIT_WROTE` | Warning | File written in `--write` mode. |
 | `W_EMIT_NO_SENTINEL` | Warning | A target document is missing its marker's sentinel pair (`wave-table`, `project-cache`, `tier-rollup`, `hq-board`, `unified-board`, `attention`, `epic-board`, or `epic-sequence`) — or, for `epic-sequence`, the registry's `plan` path does not resolve at all; file skipped. |
 | `E_EMIT_WRITE_FAILED` | Error | IO error writing a file. |
+| `E_EMIT_INCOMPLETE_CORPUS` | Error | `--write` refused because one or more discovered `state.json` files failed to load (`loaded.len() < sources.len()`); derived views are cross-repo unions, so regenerating them from a partial corpus would silently erase the missing repo(s). Checked immediately after the load loop, before `build_state_graph` and the first planner; dry-run is exempt (the `write &&` conjunct is load-bearing). |
 
 #### Public library entry point
 
