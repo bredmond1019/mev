@@ -38,6 +38,13 @@
 //!   is not a valid `YYYY-MM-DD` (or RFC3339) date.
 //! - `W_STATE_CARRYOVER_STALE` — a `carryover[]` entry has aged past its per-kind threshold.
 //! - `W_STATE_BACKLOG_STALE` — an HQ `backlog[]` `idea`/`ready` node has aged past threshold.
+//! - `E_STATE_DUPLICATE_EPIC_SLUG` — two HQ `epics[]` entries share a `slug`.
+//! - `E_STATE_EPIC_BAD_STATUS` — an epic `status` ∉ `{active, paused, complete}`.
+//! - `E_STATE_UNKNOWN_EPIC` — a block's `epics[]` entry is not in the HQ registry.
+//! - `W_STATE_EPIC_REGISTRY_IGNORED` — a non-HQ file declares its own `epics[]`.
+//! - `W_STATE_EPIC_EMPTY` — a registered epic has no member blocks.
+//! - `W_STATE_EPIC_UNREACHABLE_DEP` — an unclosed epic block depends on an unclosed
+//!   block that belongs to no epic (a gate invisible on the epic's board).
 
 use std::path::Path;
 #[cfg(test)]
@@ -60,8 +67,9 @@ use crate::brain::config::BrainConfig;
 /// types instead of duplicating them.
 pub use okf_core::{
     Backlog, BacklogOrigin, Block, BlockedBy, Carryover, CarryoverScope, CrossRepoEdge, Endpoint,
-    Focus, Origin, RepoRollup, StateEdge, StateEdgeKind, StateFile, StateGraph, StateLoadError,
-    StateNode, StateSource, TierEntry, Track, TrackBlock, build_state_graph, load_state,
+    Epic, Focus, Origin, RepoRollup, StateEdge, StateEdgeKind, StateFile, StateGraph,
+    StateLoadError, StateNode, StateSource, TierEntry, Track, TrackBlock, build_state_graph,
+    load_state,
 };
 
 // ---------------------------------------------------------------------------
@@ -784,6 +792,204 @@ pub fn check_field_policy(src: &StateSource, file: &StateFile) -> Vec<Diagnostic
                             format!("block '{}' has invalid model '{}'; must be one of {{sonnet, gemini-pro, gemini-flash, either}}", block.id, model),
                         ));
                     }
+                }
+            }
+        }
+    }
+
+    diags
+}
+
+// ---------------------------------------------------------------------------
+// Epic registry + membership integrity
+// ---------------------------------------------------------------------------
+
+/// The valid values of an [`Epic`]'s `status` field.
+const EPIC_STATUSES: [&str; 3] = ["active", "paused", "complete"];
+
+/// Locate the HQ brain file's `epics[]` registry.
+///
+/// The registry is HQ-only (same precedent as `backlog[]`, D2), so it lives on
+/// the single `kind:"brain"` file whose [`tier_scope_for`] resolves to
+/// [`TierScope::All`]. Returns an empty slice when there is no such file, which
+/// makes every tagged block an `E_STATE_UNKNOWN_EPIC` — the correct outcome:
+/// membership without a registry has nothing to validate against.
+fn epic_registry<'a>(config: &BrainConfig, files: &'a [(StateSource, StateFile)]) -> &'a [Epic] {
+    files
+        .iter()
+        .find(|(_, f)| f.kind == "brain" && matches!(tier_scope_for(f, config), TierScope::All))
+        .map(|(_, f)| f.epics.as_slice())
+        .unwrap_or(&[])
+}
+
+/// Validate the `epics[]` registry and every block's epic membership.
+///
+/// A corpus-level check (not per-file, like [`check_field_policy`]) because
+/// membership on any repo's block is validated against a registry that lives in
+/// exactly one other file — the same shape as [`check_backlog_integrity`].
+///
+/// Checks performed:
+///
+/// 1. **`E_STATE_DUPLICATE_EPIC_SLUG`** — two registry entries share a `slug`.
+/// 2. **`E_STATE_EPIC_BAD_STATUS`** — a registry `status` ∉ [`EPIC_STATUSES`].
+/// 3. **`W_STATE_EPIC_REGISTRY_IGNORED`** — a non-HQ file carries its own
+///    `epics[]`. The registry is HQ-only, so such entries are silently unused;
+///    without this warning a shadow registry would look authoritative and every
+///    block referencing it would fail with a confusing `E_STATE_UNKNOWN_EPIC`.
+/// 4. **`E_STATE_UNKNOWN_EPIC`** — a block's `epics[]` entry resolves to no
+///    registry slug. This is what turns a typo into an error instead of a
+///    silently-empty board.
+/// 5. **`W_STATE_EPIC_EMPTY`** — a registered epic has no member blocks.
+/// 6. **`W_STATE_EPIC_UNREACHABLE_DEP`** — an unclosed block in some epic
+///    `depends_on` an unclosed block belonging to no epic. That dependency gates
+///    the epic but would never appear on its board — the silent-gate case.
+pub fn check_epics(config: &BrainConfig, files: &[(StateSource, StateFile)]) -> Vec<Diagnostic> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut diags = Vec::new();
+    let registry = epic_registry(config, files);
+
+    // --- 1/2. Registry well-formedness ---
+    let mut known: HashSet<&str> = HashSet::new();
+    for epic in registry {
+        // Report the HQ file itself; find it the same way `epic_registry` did.
+        let path = files
+            .iter()
+            .find(|(_, f)| f.kind == "brain" && matches!(tier_scope_for(f, config), TierScope::All))
+            .map(|(s, _)| s.abs_path.clone())
+            .unwrap_or_default();
+
+        if !known.insert(epic.slug.as_str()) {
+            diags.push(Diagnostic::error(
+                &path,
+                "E_STATE_DUPLICATE_EPIC_SLUG",
+                format!(
+                    "epics[] declares slug '{}' more than once; slugs are the membership key \
+                     and must be unique",
+                    epic.slug
+                ),
+            ));
+        }
+
+        if let Some(ref status) = epic.status
+            && !EPIC_STATUSES.contains(&status.as_str())
+        {
+            diags.push(Diagnostic::error(
+                &path,
+                "E_STATE_EPIC_BAD_STATUS",
+                format!(
+                    "epic '{}' has invalid status '{}'; must be one of {{{}}}",
+                    epic.slug,
+                    status,
+                    EPIC_STATUSES.join(", ")
+                ),
+            ));
+        }
+    }
+
+    // --- 3. Shadow registries on non-HQ files ---
+    for (src, file) in files {
+        let is_hq = file.kind == "brain" && matches!(tier_scope_for(file, config), TierScope::All);
+        if !is_hq && !file.epics.is_empty() {
+            diags.push(Diagnostic::warning(
+                &src.abs_path,
+                "W_STATE_EPIC_REGISTRY_IGNORED",
+                format!(
+                    "'{}' declares {} epics[] entr{}, but the registry is HQ-only and these are \
+                     ignored; move them to the HQ brain's state.json",
+                    src.repo_slug,
+                    file.epics.len(),
+                    if file.epics.len() == 1 { "y" } else { "ies" }
+                ),
+            ));
+        }
+    }
+
+    // --- 4. Membership resolves; collect members for check 5 ---
+    let mut members: HashMap<&str, usize> = known.iter().map(|s| (*s, 0usize)).collect();
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                for slug in &block.epics {
+                    match members.get_mut(slug.as_str()) {
+                        Some(count) => *count += 1,
+                        None => diags.push(Diagnostic::error(
+                            &src.abs_path,
+                            "E_STATE_UNKNOWN_EPIC",
+                            format!(
+                                "block '{}' claims epic '{}', which is not declared in the HQ \
+                                 epics[] registry",
+                                block.id, slug
+                            ),
+                        )),
+                    }
+                }
+            }
+        }
+    }
+
+    // --- 5. Registered but unused ---
+    for epic in registry {
+        if members.get(epic.slug.as_str()) == Some(&0) {
+            let path = files
+                .iter()
+                .find(|(_, f)| {
+                    f.kind == "brain" && matches!(tier_scope_for(f, config), TierScope::All)
+                })
+                .map(|(s, _)| s.abs_path.clone())
+                .unwrap_or_default();
+            diags.push(Diagnostic::warning(
+                &path,
+                "W_STATE_EPIC_EMPTY",
+                format!(
+                    "epic '{}' has no member blocks; its board will render empty until blocks \
+                     declare it in their epics[]",
+                    epic.slug
+                ),
+            ));
+        }
+    }
+
+    // --- 6. Silent gates: an unclosed dependency outside every epic ---
+    let mut by_key: HashMap<String, &TrackBlock> = HashMap::new();
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                by_key.insert(format!("{}:{}", src.repo_slug, block.id), block);
+            }
+        }
+    }
+    let is_closed = |b: &TrackBlock| b.status.as_deref() == Some("closed");
+
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                if block.epics.is_empty() || is_closed(block) {
+                    continue;
+                }
+                for dep in &block.depends_on {
+                    let BlockedBy::Block { repo, id, .. } = dep else {
+                        continue; // external deps have no target node
+                    };
+                    // A dangling target is reported by check_state_graph; skip it
+                    // here rather than double-reporting it as an untagged gate.
+                    let Some(target) = by_key.get(&format!("{repo}:{id}")) else {
+                        continue;
+                    };
+                    if is_closed(target) || !target.epics.is_empty() {
+                        continue;
+                    }
+                    diags.push(Diagnostic::warning(
+                        &src.abs_path,
+                        "W_STATE_EPIC_UNREACHABLE_DEP",
+                        format!(
+                            "block '{}' (epic{} {}) depends on open block '{repo}:{id}', which \
+                             belongs to no epic — it gates the epic but will not appear on its board",
+                            block.id,
+                            if block.epics.len() == 1 { "" } else { "s" },
+                            block.epics.join(", ")
+                        ),
+                    ));
                 }
             }
         }
@@ -1776,6 +1982,133 @@ pub fn derive_cross_repo(files: &[(StateSource, StateFile)]) -> Vec<CrossRepoEdg
 }
 
 // ---------------------------------------------------------------------------
+// Epic-scoped derivations
+// ---------------------------------------------------------------------------
+
+/// Filter an already-derived [`Focus`] down to one epic's member blocks.
+///
+/// Takes the *output* of [`derive_brain_focus`] rather than re-deriving, so an
+/// epic board can never disagree with the unified board about what is now, next,
+/// or blocked — it is the same union, just narrower. Order (and therefore the
+/// unified board's effective-priority sort) is preserved.
+///
+/// Membership is read off each [`Block`]'s `epics`, which
+/// [`derive_brain_focus`] carries through from the authoring `tracks[]` entry.
+pub fn derive_epic_focus(focus: &Focus, slug: &str) -> Focus {
+    let member = |b: &Block| b.epics.iter().any(|s| s == slug);
+    Focus {
+        now: focus.now.iter().filter(|b| member(b)).cloned().collect(),
+        next: focus.next.iter().filter(|b| member(b)).cloned().collect(),
+        blocked: focus
+            .blocked
+            .iter()
+            .filter(|b| member(b))
+            .cloned()
+            .collect(),
+    }
+}
+
+/// One `depends_on` edge crossing an epic's boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpicEdge {
+    /// `"repo:id"` of the dependent block (the one waiting).
+    pub from: String,
+    /// `"repo:id"` of the dependency block (the one being waited on).
+    pub to: String,
+    /// The epic slugs of whichever endpoint lies *outside* the epic being
+    /// derived. Empty when that block belongs to no epic at all.
+    pub other_epics: Vec<String>,
+    /// Whether this edge still gates anything — true while the dependency is
+    /// not `closed` and the dependent is not `closed`.
+    pub blocking: bool,
+}
+
+/// Every cross-epic `depends_on` edge for one epic, split by direction.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EpicEdges {
+    /// Edges where a member block depends on something outside the epic —
+    /// what this initiative is waiting on.
+    pub outbound: Vec<EpicEdge>,
+    /// Edges where something outside the epic depends on a member block —
+    /// what this initiative is holding up.
+    pub inbound: Vec<EpicEdge>,
+}
+
+/// Derive one epic's relationships to the rest of the corpus from the block
+/// `depends_on` graph.
+///
+/// **Nothing here is authored.** Epic-to-epic relationships are computed from
+/// the same edges that already drive blocked-ness, so they cannot drift from the
+/// work graph the way a hand-maintained epic-level `depends_on` would.
+///
+/// A block belonging to *both* endpoints' epics is "inside" for that epic, so a
+/// shared block never produces a self-edge. Edges whose target does not resolve
+/// are skipped (`check_state_graph` reports those); `external` deps have no
+/// target node and are skipped too.
+///
+/// Both lists are returned in full — including already-satisfied edges — so
+/// callers can render either the live gates or the complete relationship map.
+/// Use [`EpicEdge::blocking`] to tell them apart.
+pub fn derive_epic_edges(files: &[(StateSource, StateFile)], slug: &str) -> EpicEdges {
+    use std::collections::HashMap;
+
+    let mut by_key: HashMap<String, &TrackBlock> = HashMap::new();
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                by_key.insert(format!("{}:{}", src.repo_slug, block.id), block);
+            }
+        }
+    }
+
+    let in_epic = |b: &TrackBlock| b.epics.iter().any(|s| s == slug);
+    let is_closed = |b: &TrackBlock| b.status.as_deref() == Some("closed");
+
+    let mut edges = EpicEdges::default();
+
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let from_key = format!("{}:{}", src.repo_slug, block.id);
+                for dep in &block.depends_on {
+                    let BlockedBy::Block { repo, id, .. } = dep else {
+                        continue;
+                    };
+                    let to_key = format!("{repo}:{id}");
+                    let Some(target) = by_key.get(&to_key) else {
+                        continue;
+                    };
+
+                    let (from_in, to_in) = (in_epic(block), in_epic(target));
+                    if from_in == to_in {
+                        continue; // wholly inside or wholly outside — not a boundary
+                    }
+
+                    let edge = EpicEdge {
+                        from: from_key.clone(),
+                        to: to_key,
+                        other_epics: if from_in {
+                            target.epics.clone()
+                        } else {
+                            block.epics.clone()
+                        },
+                        blocking: !is_closed(target) && !is_closed(block),
+                    };
+
+                    if from_in {
+                        edges.outbound.push(edge);
+                    } else {
+                        edges.inbound.push(edge);
+                    }
+                }
+            }
+        }
+    }
+
+    edges
+}
+
+// ---------------------------------------------------------------------------
 // Tier scoping (MV.3B.U)
 // ---------------------------------------------------------------------------
 
@@ -1872,6 +2205,10 @@ pub fn derive_rollup(
                 }
                 let title_of = |id: &str| title_map.get(id).cloned().unwrap_or_default();
 
+                // `epics` stays empty here on purpose: `repos[]` is the per-repo
+                // headline cache, and the epic board filters `derive_brain_focus`'s
+                // union, not this. Leaving it empty means the field is skipped on
+                // serialization, so tagging blocks causes zero churn in `repos[]`.
                 let now = derived
                     .now
                     .iter()
@@ -1884,6 +2221,7 @@ pub fn derive_rollup(
                         note: None,
                         repo: None,
                         blocked_by: Vec::new(),
+                        epics: Vec::new(),
                     })
                     .collect();
 
@@ -1899,6 +2237,7 @@ pub fn derive_rollup(
                         note: None,
                         repo: None,
                         blocked_by: Vec::new(),
+                        epics: Vec::new(),
                     })
                     .collect();
 
@@ -1914,6 +2253,7 @@ pub fn derive_rollup(
                         note: None,
                         repo: None,
                         blocked_by: unmet.clone(),
+                        epics: Vec::new(),
                     })
                     .collect();
 
@@ -1941,6 +2281,54 @@ pub fn derive_rollup(
             }
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Shared block-lookup helpers (derive_brain_focus + the epic derivations)
+// ---------------------------------------------------------------------------
+
+/// Index a state file's `tracks[].blocks[]` by block id.
+///
+/// `focus` is a set of bare ids; every derivation that materializes it back into
+/// [`Block`] entries needs the authored title / `priority` / `due` / `epics` from
+/// `tracks[]`. Later blocks with a duplicate id overwrite earlier ones — a
+/// duplicate is already an error (`E_STATE_DUPLICATE_BLOCK_ID`), so which one
+/// wins is not load-bearing.
+fn track_block_index(file: &StateFile) -> std::collections::HashMap<&str, &TrackBlock> {
+    let mut index = std::collections::HashMap::new();
+    for track in &file.tracks {
+        for block in &track.blocks {
+            index.insert(block.id.as_str(), block);
+        }
+    }
+    index
+}
+
+/// Materialize one derived-focus id into a [`Block`], pulling the authored
+/// title / `priority` / `due` / `epics` out of `index`.
+///
+/// An id absent from `index` (only possible for a dangling focus entry, already
+/// reported as `E_STATE_DANGLING_FOCUS`) yields an empty title and no metadata
+/// rather than panicking.
+fn focus_block(
+    id: &str,
+    index: &std::collections::HashMap<&str, &TrackBlock>,
+    repo: Option<String>,
+    status: Option<String>,
+    blocked_by: Vec<BlockedBy>,
+) -> Block {
+    let authored = index.get(id);
+    Block {
+        id: id.to_string(),
+        title: authored.map(|b| b.title.clone()).unwrap_or_default(),
+        status,
+        note: None,
+        repo,
+        blocked_by,
+        priority: authored.and_then(|b| b.priority),
+        due: authored.and_then(|b| b.due.clone()),
+        epics: authored.map(|b| b.epics.clone()).unwrap_or_default(),
+    }
 }
 
 /// Derive a brain file's `focus.now/next/blocked` as the repo-tagged union of
@@ -1981,9 +2369,16 @@ pub fn derive_brain_focus(
     let mut seen_blocked: HashSet<(String, String)> = HashSet::new();
 
     for entry in in_scope {
-        let child = files
-            .iter()
-            .find(|(src, f)| src.repo_slug == entry.slug && f.kind == "project");
+        // A registered repo is either a leaf ("project") or a tier sub-brain
+        // root ("brain", `tier = "_root"` in brain.toml) that carries its own
+        // authored `tracks[]` (e.g. `business`'s "Business Ops" BZ.* track,
+        // D43). Both fold into the union the same way; a "brain" entry with
+        // empty `tracks[]` is a no-op via `derive_focus`'s short-circuit, so
+        // this is byte-identical for the pure container tiers (core, side,
+        // client, portfolio).
+        let child = files.iter().find(|(src, f)| {
+            src.repo_slug == entry.slug && (f.kind == "project" || f.kind == "brain")
+        });
 
         let Some((src, file)) = child else {
             continue;
@@ -1991,71 +2386,45 @@ pub fn derive_brain_focus(
 
         let derived = derive_focus(src, file, graph, files);
 
-        // Build a title/priority/due lookup from this child's tracks[].
-        let mut title_map: std::collections::HashMap<String, (String, Option<u8>, Option<String>)> =
-            std::collections::HashMap::new();
-        for track in &file.tracks {
-            for block in &track.blocks {
-                title_map.insert(
-                    block.id.clone(),
-                    (block.title.clone(), block.priority, block.due.clone()),
-                );
-            }
-        }
-        let title_of = |id: &str| {
-            title_map
-                .get(id)
-                .map(|(t, ..)| t.clone())
-                .unwrap_or_default()
-        };
-        let priority_of = |id: &str| title_map.get(id).and_then(|(_, p, _)| *p);
-        let due_of = |id: &str| title_map.get(id).and_then(|(_, _, d)| d.clone());
+        // Index this child's tracks[] for the title/priority/due/epics lookups.
+        let index = track_block_index(file);
 
         for id in &derived.now {
             let key = (entry.slug.clone(), id.clone());
             if seen_now.insert(key) {
-                now.push(Block {
-                    due: due_of(id),
-                    priority: priority_of(id),
-                    id: id.clone(),
-                    title: title_of(id),
-                    status: Some("in_progress".to_string()),
-                    note: None,
-                    repo: Some(entry.slug.clone()),
-                    blocked_by: Vec::new(),
-                });
+                now.push(focus_block(
+                    id,
+                    &index,
+                    Some(entry.slug.clone()),
+                    Some("in_progress".to_string()),
+                    Vec::new(),
+                ));
             }
         }
 
         for id in &derived.next {
             let key = (entry.slug.clone(), id.clone());
             if seen_next.insert(key) {
-                next.push(Block {
-                    due: due_of(id),
-                    priority: priority_of(id),
-                    id: id.clone(),
-                    title: title_of(id),
-                    status: None,
-                    note: None,
-                    repo: Some(entry.slug.clone()),
-                    blocked_by: Vec::new(),
-                });
+                next.push(focus_block(
+                    id,
+                    &index,
+                    Some(entry.slug.clone()),
+                    None,
+                    Vec::new(),
+                ));
             }
         }
 
         for (id, unmet) in &derived.blocked {
             let key = (entry.slug.clone(), id.clone());
             if seen_blocked.insert(key) {
-                blocked.push(Block {
-                    due: due_of(id),
-                    priority: priority_of(id),
-                    id: id.clone(),
-                    title: title_of(id),
-                    status: None,
-                    note: None,
-                    repo: Some(entry.slug.clone()),
-                    blocked_by: unmet.clone(),
-                });
+                blocked.push(focus_block(
+                    id,
+                    &index,
+                    Some(entry.slug.clone()),
+                    None,
+                    unmet.clone(),
+                ));
             }
         }
     }
@@ -2068,73 +2437,45 @@ pub fn derive_brain_focus(
     let self_derived = derive_focus(self_src, self_file, graph, files);
     let self_slug = &self_src.repo_slug;
 
-    // Build a title/priority/due lookup from the self file's own tracks[].
-    let mut self_title_map: std::collections::HashMap<
-        String,
-        (String, Option<u8>, Option<String>),
-    > = std::collections::HashMap::new();
-    for track in &self_file.tracks {
-        for block in &track.blocks {
-            self_title_map.insert(
-                block.id.clone(),
-                (block.title.clone(), block.priority, block.due.clone()),
-            );
-        }
-    }
-    let self_title_of = |id: &str| {
-        self_title_map
-            .get(id)
-            .map(|(t, ..)| t.clone())
-            .unwrap_or_default()
-    };
-    let self_priority_of = |id: &str| self_title_map.get(id).and_then(|(_, p, _)| *p);
-    let self_due_of = |id: &str| self_title_map.get(id).and_then(|(_, _, d)| d.clone());
+    // Index the self file's own tracks[] for the same lookups.
+    let self_index = track_block_index(self_file);
 
     for id in &self_derived.now {
         let key = (self_slug.clone(), id.clone());
         if seen_now.insert(key) {
-            now.push(Block {
-                due: self_due_of(id),
-                priority: self_priority_of(id),
-                id: id.clone(),
-                title: self_title_of(id),
-                status: Some("in_progress".to_string()),
-                note: None,
-                repo: Some(self_slug.clone()),
-                blocked_by: Vec::new(),
-            });
+            now.push(focus_block(
+                id,
+                &self_index,
+                Some(self_slug.clone()),
+                Some("in_progress".to_string()),
+                Vec::new(),
+            ));
         }
     }
 
     for id in &self_derived.next {
         let key = (self_slug.clone(), id.clone());
         if seen_next.insert(key) {
-            next.push(Block {
-                due: self_due_of(id),
-                priority: self_priority_of(id),
-                id: id.clone(),
-                title: self_title_of(id),
-                status: None,
-                note: None,
-                repo: Some(self_slug.clone()),
-                blocked_by: Vec::new(),
-            });
+            next.push(focus_block(
+                id,
+                &self_index,
+                Some(self_slug.clone()),
+                None,
+                Vec::new(),
+            ));
         }
     }
 
     for (id, unmet) in &self_derived.blocked {
         let key = (self_slug.clone(), id.clone());
         if seen_blocked.insert(key) {
-            blocked.push(Block {
-                due: self_due_of(id),
-                priority: self_priority_of(id),
-                id: id.clone(),
-                title: self_title_of(id),
-                status: None,
-                note: None,
-                repo: Some(self_slug.clone()),
-                blocked_by: unmet.clone(),
-            });
+            blocked.push(focus_block(
+                id,
+                &self_index,
+                Some(self_slug.clone()),
+                None,
+                unmet.clone(),
+            ));
         }
     }
 
@@ -3969,6 +4310,7 @@ mod tests {
         let node_vec: Vec<StateNode> = nodes
             .iter()
             .map(|(repo, id)| StateNode {
+                epics: Vec::new(),
                 key: format!("{repo}:{id}"),
                 repo: repo.to_string(),
                 id: id.to_string(),
@@ -4102,6 +4444,7 @@ mod tests {
         // Two nodes with a CrossRepo edge — CrossRepo edges must NOT trigger cycle detection.
         let node_vec = vec![
             StateNode {
+                epics: Vec::new(),
                 key: "a:X".to_string(),
                 repo: "a".to_string(),
                 id: "X".to_string(),
@@ -4109,6 +4452,7 @@ mod tests {
                 source_path: dir.path().join("a.json"),
             },
             StateNode {
+                epics: Vec::new(),
                 key: "b:Y".to_string(),
                 repo: "b".to_string(),
                 id: "Y".to_string(),
@@ -4164,6 +4508,7 @@ mod tests {
         let track_blocks: Vec<TrackBlock> = blocks
             .iter()
             .map(|(id, status, wave, deps)| TrackBlock {
+                epics: Vec::new(),
                 due: None,
                 priority: None,
                 sdlc_workflow: None,
@@ -4179,6 +4524,7 @@ mod tests {
 
         let path = dir.join(format!("{repo}-state.json"));
         let file = StateFile {
+            epics: Vec::new(),
             repo: repo.to_string(),
             kind: "project".to_string(),
             updated: "2026-06-30".to_string(),
@@ -4444,6 +4790,7 @@ mod tests {
         let track_blocks: Vec<TrackBlock> = blocks
             .iter()
             .map(|(id, status, deps)| TrackBlock {
+                epics: Vec::new(),
                 due: None,
                 priority: None,
                 sdlc_workflow: None,
@@ -4459,6 +4806,7 @@ mod tests {
 
         let path = dir.join(format!("{repo}-state.json"));
         let file = StateFile {
+            epics: Vec::new(),
             repo: repo.to_string(),
             kind: "project".to_string(),
             updated: "2026-06-30".to_string(),
@@ -4613,6 +4961,7 @@ mod tests {
     ) -> (StateSource, StateFile) {
         let path = dir.join(format!("{repo}-state.json"));
         let file = StateFile {
+            epics: Vec::new(),
             repo: repo.to_string(),
             kind: "brain".to_string(),
             updated: "2026-06-30".to_string(),
@@ -4747,6 +5096,7 @@ mod tests {
         // The origin back-pointer is structural metadata — the integrity check validates
         // that the block exists in tracks[], not that it carries an origin field.
         let real_block = TrackBlock {
+            epics: Vec::new(),
             due: None,
             priority: None,
             sdlc_workflow: None,
@@ -4776,6 +5126,7 @@ mod tests {
         // Two files: a mev leaf (owns the track block) and hq brain (owns the backlog node).
         let mev_path = dir.path().join("mev-state.json");
         let mev_file = StateFile {
+            epics: Vec::new(),
             repo: "mev".to_string(),
             kind: "project".to_string(),
             updated: "2026-06-30".to_string(),
@@ -4827,6 +5178,7 @@ mod tests {
         let make_blocks = |ids: &[&str]| -> Vec<Block> {
             ids.iter()
                 .map(|id| Block {
+                    epics: Vec::new(),
                     due: None,
                     priority: None,
                     id: id.to_string(),
@@ -4840,6 +5192,7 @@ mod tests {
         };
 
         StateFile {
+            epics: Vec::new(),
             repo: "hq".to_string(),
             kind: "brain".to_string(),
             updated: "2026-06-29".to_string(),
@@ -4870,6 +5223,7 @@ mod tests {
         let make_blocks = |ids: &[&str], with_status: bool| -> Vec<Block> {
             ids.iter()
                 .map(|id| Block {
+                    epics: Vec::new(),
                     due: None,
                     priority: None,
                     id: id.to_string(),
@@ -4887,6 +5241,7 @@ mod tests {
         };
 
         StateFile {
+            epics: Vec::new(),
             repo: slug.to_string(),
             kind: "project".to_string(),
             updated: "2026-06-29".to_string(),
@@ -5015,6 +5370,7 @@ mod tests {
         let track_blocks: Vec<TrackBlock> = blocks
             .iter()
             .map(|(id, status, deps)| TrackBlock {
+                epics: Vec::new(),
                 due: None,
                 priority: None,
                 sdlc_workflow: None,
@@ -5031,6 +5387,7 @@ mod tests {
         let make_focus_blocks = |ids: &[&str]| -> Vec<Block> {
             ids.iter()
                 .map(|id| Block {
+                    epics: Vec::new(),
                     due: None,
                     priority: None,
                     id: id.to_string(),
@@ -5045,6 +5402,7 @@ mod tests {
 
         let path = dir.join(format!("{repo}-drift-state.json"));
         let file = StateFile {
+            epics: Vec::new(),
             repo: repo.to_string(),
             kind: "project".to_string(),
             updated: "2026-06-30".to_string(),
@@ -5229,11 +5587,13 @@ mod tests {
         let path = dir.path().join("brain-state.json");
         // Brain file: non-empty focus but no tracks[] — skip.
         let file = StateFile {
+            epics: Vec::new(),
             repo: "hq".to_string(),
             kind: "brain".to_string(),
             updated: "2026-06-30".to_string(),
             focus: Focus {
                 now: vec![Block {
+                    epics: Vec::new(),
                     due: None,
                     priority: None,
                     id: "BA.1.A".to_string(),
@@ -5374,6 +5734,7 @@ mod tests {
         let pair_alpha = make_pair(dir, "alpha-state.json", "project", alpha_json);
 
         let make_block = |id: &str| Block {
+            epics: Vec::new(),
             due: None,
             priority: None,
             id: id.to_string(),
@@ -5384,6 +5745,7 @@ mod tests {
             blocked_by: vec![],
         };
         let self_file = StateFile {
+            epics: Vec::new(),
             repo: "core".to_string(),
             kind: "brain".to_string(),
             updated: "2026-06-29".to_string(),
@@ -5396,6 +5758,7 @@ mod tests {
                 title: "Own Track".to_string(),
                 blocks: vec![
                     TrackBlock {
+                        epics: Vec::new(),
                         due: None,
                         priority: None,
                         sdlc_workflow: None,
@@ -5408,6 +5771,7 @@ mod tests {
                         origin: None,
                     },
                     TrackBlock {
+                        epics: Vec::new(),
                         due: None,
                         priority: None,
                         sdlc_workflow: None,
@@ -5555,6 +5919,7 @@ mod tests {
 
     fn brain_state_file(repo: &str, repos: Vec<RepoRollup>) -> StateFile {
         StateFile {
+            epics: Vec::new(),
             repo: repo.to_string(),
             kind: "brain".to_string(),
             updated: "2026-07-01".to_string(),
@@ -5699,6 +6064,7 @@ mod tests {
             repo: "beta".to_string(),
             tier: None, // authored before tier was ever populated
             now: vec![Block {
+                epics: Vec::new(),
                 due: None,
                 priority: None,
                 id: "BE.1.A".to_string(),
@@ -6074,6 +6440,106 @@ mod tests {
     }
 
     #[test]
+    fn derive_brain_focus_unions_a_non_self_tier_brains_own_tracks() {
+        // Regression for the backlog defect (2026-07-17): a NON-self tier
+        // sub-brain root (kind: "brain", e.g. `business`, registered
+        // `tier = "_root"` like the HQ root itself) that carries its own
+        // `tracks[]` must fold into a `TierScope::All` union — not just the
+        // `self_file` passed to `derive_brain_focus` (Facet A only folds the
+        // literal self; a *sibling* tier root's own tracks were previously
+        // dropped entirely because the union loop required `kind == "project"`).
+        use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
+        let config = BrainConfig {
+            attention: Default::default(),
+            vocab: VocabConfig::default(),
+            crawl: CrawlConfig::default(),
+            repos: vec![
+                RepoEntry {
+                    slug: "brain".to_string(),
+                    tier: "_root".to_string(),
+                    repo_path: ".".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "business".to_string(),
+                    tier: "_root".to_string(),
+                    repo_path: "business".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+                RepoEntry {
+                    slug: "alpha".to_string(),
+                    tier: "core".to_string(),
+                    repo_path: "core/alpha".to_string(),
+                    status_file: String::new(),
+                    cache_doc: String::new(),
+                    heading: String::new(),
+                },
+            ],
+        };
+        let scope = TierScope::All;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair_alpha = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        // `business` is a tier-brain root (kind: "brain") whose own tracks[]
+        // authors a P0 revenue block — mirrors `business/planning/state.json`.
+        let business_json = r#"{
+  "repo": "business",
+  "kind": "brain",
+  "updated": "2026-07-17",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [{
+    "title": "Business Ops",
+    "blocks": [{ "id": "BZ.1.B", "title": "First client", "status": "open", "priority": 0 }]
+  }]
+}"#;
+        let pair_business = make_pair(dir.path(), "business-state.json", "brain", business_json);
+        let files = vec![pair_alpha, pair_business];
+        let (self_src, self_file) = empty_brain_pair(dir.path(), "brain");
+
+        let focus = derive_brain_focus(
+            &self_src,
+            &self_file,
+            &scope,
+            &config,
+            &StateGraph::default(),
+            &files,
+        );
+
+        let next_pairs: Vec<(Option<&str>, &str)> = focus
+            .next
+            .iter()
+            .map(|b| (b.repo.as_deref(), b.id.as_str()))
+            .collect();
+        assert!(
+            next_pairs.contains(&(Some("business"), "BZ.1.B")),
+            "a non-self tier sub-brain's own tracks[] must fold into the TierScope::All union, \
+             tagged with its own slug, got: {next_pairs:?}"
+        );
+        let now_pairs: Vec<(Option<&str>, &str)> = focus
+            .now
+            .iter()
+            .map(|b| (b.repo.as_deref(), b.id.as_str()))
+            .collect();
+        assert!(
+            now_pairs.contains(&(Some("alpha"), "AL.1.A")),
+            "leaf project children must still union alongside the tier-brain fold, got: {now_pairs:?}"
+        );
+        let business_block = focus
+            .next
+            .iter()
+            .find(|b| b.repo.as_deref() == Some("business") && b.id == "BZ.1.B")
+            .expect("business block present");
+        assert_eq!(
+            business_block.priority,
+            Some(0),
+            "priority must be carried through from the tier-brain's own tracks[]"
+        );
+    }
+
+    #[test]
     fn derive_brain_focus_dedups_self_and_child_sharing_same_repo_and_id() {
         // Contrived: the self file's repo slug collides with an in-scope
         // child's slug (the same (repo, id) pair authored by both the self
@@ -6371,6 +6837,7 @@ mod check_field_policy_tests {
 
     fn base_block() -> okf_core::TrackBlock {
         okf_core::TrackBlock {
+            epics: Vec::new(),
             id: "B.1".to_string(),
             title: "Test".to_string(),
             status: Some("open".to_string()),
@@ -6441,5 +6908,454 @@ mod check_field_policy_tests {
         let diags = run_field_policy(b);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].locator, "E_STATE_MODEL_ENUM");
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod check_epics_tests {
+    use super::*;
+
+    /// Build a `(source, file)` pair from a JSON fixture, deriving the repo slug
+    /// and path from the fixture itself.
+    fn pair(dir: &std::path::Path, kind: &'static str, json: &str) -> (StateSource, StateFile) {
+        let file: StateFile = serde_json::from_str(json).expect("fixture must parse");
+        let path = dir.join(format!("{}-state.json", file.repo));
+        std::fs::write(&path, json).unwrap();
+        let src = StateSource {
+            repo_slug: file.repo.clone(),
+            abs_path: path,
+            expected_kind: kind,
+        };
+        (src, file)
+    }
+
+    /// A config whose HQ file (`repo: "hq"`) matches no declared tier, so
+    /// `tier_scope_for` resolves it to `TierScope::All` — the registry holder.
+    fn epic_config() -> BrainConfig {
+        use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
+        let entry = |slug: &str, tier: &str, path: &str| RepoEntry {
+            slug: slug.to_string(),
+            tier: tier.to_string(),
+            repo_path: path.to_string(),
+            status_file: String::new(),
+            cache_doc: String::new(),
+            heading: String::new(),
+        };
+        BrainConfig {
+            attention: Default::default(),
+            vocab: VocabConfig::default(),
+            crawl: CrawlConfig::default(),
+            repos: vec![
+                entry("hq", "_root", "."),
+                entry("bastion", "core", "core/bastion"),
+                entry("mev", "core", "core/mev"),
+            ],
+        }
+    }
+
+    /// Collect just the locators, for order-insensitive assertions.
+    fn locators(diags: &[Diagnostic]) -> Vec<&str> {
+        diags.iter().map(|d| d.locator.as_str()).collect()
+    }
+
+    #[test]
+    fn check_epics_accepts_valid_membership() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hq = pair(
+            dir.path(),
+            "brain",
+            r#"{
+  "repo": "hq", "kind": "brain", "updated": "2026-07-24",
+  "epics": [
+    { "slug": "bastion-os", "title": "Bastion OS", "status": "active" },
+    { "slug": "bastion-web", "title": "Bastion Web + UI", "status": "active" }
+  ]
+}"#,
+        );
+        let bastion = pair(
+            dir.path(),
+            "project",
+            r#"{
+  "repo": "bastion", "kind": "project", "updated": "2026-07-24",
+  "tracks": [{ "title": "P", "blocks": [
+    { "id": "BA.11.K", "title": "board endpoint", "status": "closed",
+      "epics": ["bastion-os", "bastion-web"] }
+  ]}]
+}"#,
+        );
+
+        let diags = check_epics(&epic_config(), &[hq, bastion]);
+        assert!(
+            diags.is_empty(),
+            "valid multi-epic membership must be clean, got: {:?}",
+            locators(&diags)
+        );
+    }
+
+    #[test]
+    fn check_epics_flags_an_unknown_slug() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hq = pair(
+            dir.path(),
+            "brain",
+            r#"{
+  "repo": "hq", "kind": "brain", "updated": "2026-07-24",
+  "epics": [{ "slug": "bastion-os", "title": "Bastion OS", "status": "active" }]
+}"#,
+        );
+        // `bastion-osx` is the typo this check exists to catch — without it the
+        // block would silently belong to no board at all.
+        let bastion = pair(
+            dir.path(),
+            "project",
+            r#"{
+  "repo": "bastion", "kind": "project", "updated": "2026-07-24",
+  "tracks": [{ "title": "P", "blocks": [
+    { "id": "BA.1.A", "title": "typo'd", "status": "closed", "epics": ["bastion-osx"] }
+  ]}]
+}"#,
+        );
+
+        let diags = check_epics(&epic_config(), &[hq, bastion]);
+        assert!(
+            locators(&diags).contains(&"E_STATE_UNKNOWN_EPIC"),
+            "got: {:?}",
+            locators(&diags)
+        );
+        assert!(
+            diags.iter().any(|d| d.message.contains("bastion-osx")),
+            "the diagnostic must name the offending slug: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn check_epics_flags_duplicate_slugs_and_bad_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hq = pair(
+            dir.path(),
+            "brain",
+            r#"{
+  "repo": "hq", "kind": "brain", "updated": "2026-07-24",
+  "epics": [
+    { "slug": "dup", "title": "First", "status": "active" },
+    { "slug": "dup", "title": "Second", "status": "in-flight" }
+  ],
+  "tracks": [{ "title": "P", "blocks": [
+    { "id": "HQ.1.A", "title": "member", "status": "closed", "epics": ["dup"] }
+  ]}]
+}"#,
+        );
+
+        let found = check_epics(&epic_config(), &[hq]);
+        let found = locators(&found);
+        assert!(
+            found.contains(&"E_STATE_DUPLICATE_EPIC_SLUG"),
+            "got: {found:?}"
+        );
+        assert!(found.contains(&"E_STATE_EPIC_BAD_STATUS"), "got: {found:?}");
+    }
+
+    #[test]
+    fn check_epics_warns_on_an_epic_with_no_members() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hq = pair(
+            dir.path(),
+            "brain",
+            r#"{
+  "repo": "hq", "kind": "brain", "updated": "2026-07-24",
+  "epics": [{ "slug": "ghost", "title": "Nobody's work", "status": "active" }]
+}"#,
+        );
+
+        let diags = check_epics(&epic_config(), &[hq]);
+        assert_eq!(locators(&diags), vec!["W_STATE_EPIC_EMPTY"]);
+        assert!(
+            diags[0].severity != crate::Severity::Error,
+            "an empty epic must never fail the exit code"
+        );
+    }
+
+    #[test]
+    fn check_epics_warns_when_a_non_hq_file_declares_a_registry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hq = pair(
+            dir.path(),
+            "brain",
+            r#"{ "repo": "hq", "kind": "brain", "updated": "2026-07-24" }"#,
+        );
+        // A shadow registry on a leaf: silently ignored, so it must be flagged.
+        let mev = pair(
+            dir.path(),
+            "project",
+            r#"{
+  "repo": "mev", "kind": "project", "updated": "2026-07-24",
+  "epics": [{ "slug": "local-only", "title": "Shadow", "status": "active" }]
+}"#,
+        );
+
+        let diags = check_epics(&epic_config(), &[hq, mev]);
+        assert_eq!(locators(&diags), vec!["W_STATE_EPIC_REGISTRY_IGNORED"]);
+    }
+
+    #[test]
+    fn check_epics_warns_on_an_untagged_open_gate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hq = pair(
+            dir.path(),
+            "brain",
+            r#"{
+  "repo": "hq", "kind": "brain", "updated": "2026-07-24",
+  "epics": [{ "slug": "bastion-web", "title": "Bastion Web", "status": "active" }]
+}"#,
+        );
+        let bastion = pair(
+            dir.path(),
+            "project",
+            r#"{
+  "repo": "bastion", "kind": "project", "updated": "2026-07-24",
+  "tracks": [{ "title": "P", "blocks": [
+    { "id": "BA.9.A", "title": "untagged open gate", "status": "open" },
+    { "id": "BA.9.B", "title": "untagged but closed", "status": "closed" }
+  ]}]
+}"#,
+        );
+        let web = pair(
+            dir.path(),
+            "project",
+            r#"{
+  "repo": "bastion-web", "kind": "project", "updated": "2026-07-24",
+  "tracks": [{ "title": "P", "blocks": [
+    { "id": "BW.1.C", "title": "epic member", "status": "open",
+      "epics": ["bastion-web"],
+      "depends_on": [
+        { "type": "block", "repo": "bastion", "id": "BA.9.A" },
+        { "type": "block", "repo": "bastion", "id": "BA.9.B" },
+        { "type": "external", "what": "a hardware session" }
+      ]
+    }
+  ]}]
+}"#,
+        );
+
+        let diags = check_epics(&epic_config(), &[hq, bastion, web]);
+        let found = locators(&diags);
+        assert_eq!(
+            found,
+            vec!["W_STATE_EPIC_UNREACHABLE_DEP"],
+            "only the OPEN untagged dep is a silent gate: a closed one is already \
+             satisfied and an external one has no target node; got {found:?}"
+        );
+        assert!(
+            diags[0].message.contains("BA.9.A"),
+            "the warning must name the gating block: {}",
+            diags[0].message
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // derive_epic_focus / derive_epic_edges
+    // -----------------------------------------------------------------------
+
+    fn focus_entry(repo: &str, id: &str, epics: &[&str]) -> Block {
+        Block {
+            id: id.to_string(),
+            title: format!("{id} title"),
+            status: None,
+            note: None,
+            repo: Some(repo.to_string()),
+            blocked_by: Vec::new(),
+            priority: None,
+            due: None,
+            epics: epics.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn derive_epic_focus_narrows_the_union_and_keeps_order() {
+        let focus = Focus {
+            now: vec![focus_entry("bastion", "BA.1", &["bastion-os"])],
+            next: vec![
+                focus_entry("mev", "MV.1", &["bastion-os"]),
+                focus_entry("amistad", "AM.1", &[]),
+                // A shared block must appear on BOTH epics' boards.
+                focus_entry("bastion", "BA.2", &["bastion-os", "bastion-web"]),
+            ],
+            blocked: vec![focus_entry("bastion-web", "BW.1", &["bastion-web"])],
+        };
+
+        let os = derive_epic_focus(&focus, "bastion-os");
+        assert_eq!(
+            os.now.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(),
+            vec!["BA.1"]
+        );
+        assert_eq!(
+            os.next.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(),
+            vec!["MV.1", "BA.2"],
+            "unrelated blocks drop out; surviving order (the effective-priority \
+             sort) is preserved"
+        );
+        assert!(os.blocked.is_empty());
+
+        let web = derive_epic_focus(&focus, "bastion-web");
+        assert_eq!(
+            web.next.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(),
+            vec!["BA.2"],
+            "a block in two epics is a member of both boards"
+        );
+        assert_eq!(
+            web.blocked
+                .iter()
+                .map(|b| b.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["BW.1"]
+        );
+
+        let none = derive_epic_focus(&focus, "no-such-epic");
+        assert!(none.now.is_empty() && none.next.is_empty() && none.blocked.is_empty());
+    }
+
+    /// Fixture: `bastion-web`'s BW.1.C depends on bastion's BA.7.D (a
+    /// `bastion-os` block) and on an untagged BA.9.A; engine-rs's EN.2.B
+    /// depends back on BW.1.C. Mirrors the real cross-initiative shape.
+    fn epic_edge_files(dir: &std::path::Path) -> Vec<(StateSource, StateFile)> {
+        vec![
+            pair(
+                dir,
+                "project",
+                r#"{
+  "repo": "bastion", "kind": "project", "updated": "2026-07-24",
+  "tracks": [{ "title": "P", "blocks": [
+    { "id": "BA.7.D", "title": "os block", "status": "open", "epics": ["bastion-os"] },
+    { "id": "BA.9.A", "title": "untagged", "status": "closed" }
+  ]}]
+}"#,
+            ),
+            pair(
+                dir,
+                "project",
+                r#"{
+  "repo": "bastion-web", "kind": "project", "updated": "2026-07-24",
+  "tracks": [{ "title": "P", "blocks": [
+    { "id": "BW.1.C", "title": "web block", "status": "open", "epics": ["bastion-web"],
+      "depends_on": [
+        { "type": "block", "repo": "bastion", "id": "BA.7.D" },
+        { "type": "block", "repo": "bastion", "id": "BA.9.A" },
+        { "type": "block", "repo": "bastion", "id": "BA.NOPE" },
+        { "type": "external", "what": "a hardware session" }
+      ] },
+    { "id": "BW.2.A", "title": "sibling", "status": "open", "epics": ["bastion-web"],
+      "depends_on": [{ "type": "block", "repo": "bastion-web", "id": "BW.1.C" }] }
+  ]}]
+}"#,
+            ),
+            pair(
+                dir,
+                "project",
+                r#"{
+  "repo": "engine-rs", "kind": "project", "updated": "2026-07-24",
+  "tracks": [{ "title": "P", "blocks": [
+    { "id": "EN.2.B", "title": "engine block", "status": "open", "epics": ["engine-split"],
+      "depends_on": [{ "type": "block", "repo": "bastion-web", "id": "BW.1.C" }] }
+  ]}]
+}"#,
+            ),
+        ]
+    }
+
+    #[test]
+    fn derive_epic_edges_splits_boundary_edges_by_direction() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let files = epic_edge_files(dir.path());
+
+        let edges = derive_epic_edges(&files, "bastion-web");
+
+        // Outbound: what bastion-web waits on outside itself.
+        let out: Vec<(&str, &str)> = edges
+            .outbound
+            .iter()
+            .map(|e| (e.from.as_str(), e.to.as_str()))
+            .collect();
+        assert_eq!(
+            out,
+            vec![
+                ("bastion-web:BW.1.C", "bastion:BA.7.D"),
+                ("bastion-web:BW.1.C", "bastion:BA.9.A"),
+            ],
+            "the internal BW.2.C→BW.1.C edge, the external dep, and the dangling \
+             BA.NOPE target must all be excluded; got {out:?}"
+        );
+
+        // The bastion-os counterpart is attributed to its epic; the untagged one
+        // reports no epics at all.
+        assert_eq!(edges.outbound[0].other_epics, vec!["bastion-os"]);
+        assert!(edges.outbound[1].other_epics.is_empty());
+
+        // BA.7.D is open → still gating. BA.9.A is closed → satisfied.
+        assert!(edges.outbound[0].blocking);
+        assert!(!edges.outbound[1].blocking);
+
+        // Inbound: what bastion-web is holding up.
+        let inb: Vec<(&str, &str)> = edges
+            .inbound
+            .iter()
+            .map(|e| (e.from.as_str(), e.to.as_str()))
+            .collect();
+        assert_eq!(inb, vec![("engine-rs:EN.2.B", "bastion-web:BW.1.C")]);
+        assert_eq!(edges.inbound[0].other_epics, vec!["engine-split"]);
+        assert!(edges.inbound[0].blocking);
+    }
+
+    #[test]
+    fn derive_epic_edges_ignores_a_block_shared_by_both_endpoints() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hq = pair(
+            dir.path(),
+            "project",
+            r#"{
+  "repo": "bastion", "kind": "project", "updated": "2026-07-24",
+  "tracks": [{ "title": "P", "blocks": [
+    { "id": "BA.1", "title": "shared gate", "status": "open",
+      "epics": ["bastion-os", "bastion-web"] },
+    { "id": "BA.2", "title": "web block", "status": "open", "epics": ["bastion-web"],
+      "depends_on": [{ "type": "block", "repo": "bastion", "id": "BA.1" }] }
+  ]}]
+}"#,
+        );
+
+        let edges = derive_epic_edges(&[hq], "bastion-web");
+        assert_eq!(
+            edges,
+            EpicEdges::default(),
+            "both endpoints are inside bastion-web, so this is not a boundary edge"
+        );
+    }
+
+    #[test]
+    fn check_epics_is_silent_on_an_untagged_corpus() {
+        // Today's state: no registry, no membership anywhere. Adding this check
+        // must not produce a single diagnostic until epics are actually adopted.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hq = pair(
+            dir.path(),
+            "brain",
+            r#"{ "repo": "hq", "kind": "brain", "updated": "2026-07-24" }"#,
+        );
+        let leaf = pair(
+            dir.path(),
+            "project",
+            r#"{
+  "repo": "mev", "kind": "project", "updated": "2026-07-24",
+  "tracks": [{ "title": "P", "blocks": [
+    { "id": "MV.1.A", "title": "untagged", "status": "open",
+      "depends_on": [{ "type": "block", "repo": "mev", "id": "MV.0.A" }] }
+  ]}]
+}"#,
+        );
+
+        let diags = check_epics(&epic_config(), &[hq, leaf]);
+        assert!(diags.is_empty(), "got: {:?}", locators(&diags));
     }
 }

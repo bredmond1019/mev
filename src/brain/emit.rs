@@ -24,9 +24,10 @@ use thiserror::Error;
 
 use crate::brain::config::BrainConfig;
 use crate::brain::state::{
-    Backlog, Block, BlockedBy, Carryover, CrossRepoEdge, Focus, RepoRollup, StateFile, StateGraph,
-    StateSource, TierScope, backlog_stale_age, carryover_stale_age, derive_brain_focus,
-    derive_cross_repo, derive_focus, derive_rollup, effective_priorities, tier_scope_for,
+    Backlog, Block, BlockedBy, Carryover, CrossRepoEdge, Epic, EpicEdge, EpicEdges, Focus,
+    RepoRollup, StateFile, StateGraph, StateSource, TierScope, TrackBlock, backlog_stale_age,
+    carryover_stale_age, derive_brain_focus, derive_cross_repo, derive_epic_edges,
+    derive_epic_focus, derive_focus, derive_rollup, effective_priorities, tier_scope_for,
 };
 
 // ---------------------------------------------------------------------------
@@ -65,6 +66,16 @@ pub mod markers {
     /// orphaned captures. Emitted tier-scoped into every brain-level `status.md`
     /// (HQ = all repos; each tier sub-brain = that tier's repos).
     pub const ATTENTION: &str = "attention";
+
+    /// Marker for the per-epic board — one NOW/NEXT/BLOCKED + progress +
+    /// cross-epic relationships section per active cross-repo initiative.
+    /// Emitted into every brain-level `status.md` that carries the sentinels.
+    pub const EPIC_BOARD: &str = "epic-board";
+
+    /// Marker for one epic's cross-repo sequence table, spliced into that
+    /// epic's own `plan` document. Distinct from [`EPIC_BOARD`]: the board is a
+    /// live focus snapshot, this is the full ordered roadmap for one initiative.
+    pub const EPIC_SEQUENCE: &str = "epic-sequence";
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +123,42 @@ pub fn wave_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> Ve
     // Primary sort: wave asc (None → i64::MAX → last). Tiebreak: iteration order (stable).
     entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     entries.into_iter().map(|(_, _, key)| key).collect()
+}
+
+// ---------------------------------------------------------------------------
+// epic_members — one epic's blocks, in cross-repo wave order
+// ---------------------------------------------------------------------------
+
+/// Every block claiming `slug`, across all repos, in [`wave_order`].
+///
+/// Returns `(repo_slug, block)` pairs — the cross-repo sequence for one
+/// initiative, which is what an epic's sequence table renders. Ordering is
+/// delegated to `wave_order` rather than reimplemented so a per-epic table and
+/// a per-repo wave table can never disagree about sequence.
+pub fn epic_members<'a>(
+    graph: &StateGraph,
+    files: &'a [(StateSource, StateFile)],
+    slug: &str,
+) -> Vec<(String, &'a TrackBlock)> {
+    // Index members by "repo:id" so the wave-ordered key list can drive output.
+    let mut by_key: HashMap<String, (String, &TrackBlock)> = HashMap::new();
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                if block.epics.iter().any(|s| s == slug) {
+                    by_key.insert(
+                        format!("{}:{}", src.repo_slug, block.id),
+                        (src.repo_slug.clone(), block),
+                    );
+                }
+            }
+        }
+    }
+
+    wave_order(graph, files)
+        .into_iter()
+        .filter_map(|key| by_key.remove(&key))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -421,9 +468,9 @@ pub fn render_unified_board(
     let next_sorted = sort_unified_board_next(&focus.next, effective);
 
     let sections = [
-        render_unified_board_section("NOW", &focus.now, edges, config),
-        render_unified_board_section("NEXT", &next_sorted, edges, config),
-        render_unified_board_section("BLOCKED", &focus.blocked, edges, config),
+        render_unified_board_section(BOARD_LANE_LEVEL, "NOW", &focus.now, edges, config),
+        render_unified_board_section(BOARD_LANE_LEVEL, "NEXT", &next_sorted, edges, config),
+        render_unified_board_section(BOARD_LANE_LEVEL, "BLOCKED", &focus.blocked, edges, config),
         render_due_soon_section(focus, edges, config, today),
     ];
     sections.join("\n\n")
@@ -438,13 +485,16 @@ fn parse_due(due: &Option<String>) -> Option<chrono::NaiveDate> {
 
 /// Look up a block's `[BIZ]`/`[ENG]` tag from its `repo` slug: `"business"`
 /// tier renders `[BIZ]`, any other tier (or an unrecognised slug) renders
-/// `[ENG]`.
+/// `[ENG]`. The `business` tier ROOT itself (`tier = "_root"`, slug
+/// `"business"`) also renders `[BIZ]` — its own authored `tracks[]` (e.g.
+/// `BZ.*`) are business blocks too, not just its `tier = "business"` children.
 fn unified_board_tag(block: &Block, config: &BrainConfig) -> &'static str {
     let repo = block.repo.as_deref().unwrap_or("");
-    let is_business = config
-        .repos
-        .iter()
-        .any(|r| r.slug == repo && r.tier == "business");
+    let is_business = repo == "business"
+        || config
+            .repos
+            .iter()
+            .any(|r| r.slug == repo && r.tier == "business");
     if is_business { "[BIZ]" } else { "[ENG]" }
 }
 
@@ -484,15 +534,24 @@ fn sort_unified_board_next(next: &[Block], effective: &HashMap<String, u8>) -> V
     sorted
 }
 
-/// Render one `## {heading}` section of the unified board for `blocks`.
+/// Heading prefix for the top-level boards' lanes (`## NOW`, …).
+const BOARD_LANE_LEVEL: &str = "##";
+
+/// Heading prefix for the epic board's lanes. One level deeper than
+/// [`BOARD_LANE_LEVEL`] because each epic already owns an `###` heading — lanes
+/// must nest *under* their epic, not outrank it.
+const EPIC_LANE_LEVEL: &str = "####";
+
+/// Render one `{level} {heading}` section of a board for `blocks`.
 fn render_unified_board_section(
+    level: &str,
     heading: &str,
     blocks: &[Block],
     edges: &[CrossRepoEdge],
     config: &BrainConfig,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
-    lines.push(format!("## {heading}"));
+    lines.push(format!("{level} {heading}"));
 
     if blocks.is_empty() {
         lines.push("_none_".to_string());
@@ -555,7 +614,7 @@ fn render_due_soon_section(
     due_soon.sort_by_key(|(date, _)| *date);
 
     let mut lines: Vec<String> = Vec::new();
-    lines.push("## DUE-SOON".to_string());
+    lines.push(format!("{BOARD_LANE_LEVEL} DUE-SOON"));
 
     if due_soon.is_empty() {
         lines.push("_none_".to_string());
@@ -570,6 +629,291 @@ fn render_due_soon_section(
     }
 
     lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// render_epic_board — per-initiative NOW/NEXT/BLOCKED + progress + relationships
+// ---------------------------------------------------------------------------
+
+/// The epic `status` values whose boards are rendered. A `complete` or `paused`
+/// epic keeps its registry entry (and its blocks keep their membership) but
+/// drops off the board, so a finished initiative stops competing for attention.
+const RENDERED_EPIC_STATUSES: [&str; 1] = ["active"];
+
+/// Counted progress for one epic: how many member blocks are in each state.
+struct EpicProgress {
+    closed: usize,
+    in_progress: usize,
+    open: usize,
+}
+
+impl EpicProgress {
+    fn total(&self) -> usize {
+        self.closed + self.in_progress + self.open
+    }
+}
+
+/// Tally one epic's member blocks by authored status.
+fn epic_progress(members: &[(String, &TrackBlock)]) -> EpicProgress {
+    let mut p = EpicProgress {
+        closed: 0,
+        in_progress: 0,
+        open: 0,
+    };
+    for (_, block) in members {
+        match block.status.as_deref() {
+            Some("closed") => p.closed += 1,
+            Some("in_progress") => p.in_progress += 1,
+            _ => p.open += 1,
+        }
+    }
+    p
+}
+
+/// One epic's already-derived inputs to [`render_epic_board`].
+///
+/// Assembling these is the planner's job (it owns the corpus); the renderer
+/// stays a pure data-in/string-out function.
+pub struct EpicBoardInput<'a> {
+    /// The registry entry being rendered.
+    pub epic: &'a Epic,
+    /// This epic's member blocks in cross-repo wave order ([`epic_members`]).
+    pub members: Vec<(String, &'a TrackBlock)>,
+    /// This epic's boundary edges ([`derive_epic_edges`]).
+    pub edges: EpicEdges,
+}
+
+/// Render the per-epic board: one `### {title}` section per active epic, each
+/// with a progress line, `NOW` / `NEXT` / `BLOCKED` lanes, and the derived
+/// cross-epic relationships.
+///
+/// `focus` is the brain-level union (from `derive_brain_focus`) — each epic's
+/// lanes are [`derive_epic_focus`] slices of it, so an epic board can never
+/// disagree with the unified board about what is now, next, or blocked.
+/// `NEXT` is sorted by effective priority exactly as the unified board sorts it.
+///
+/// The relationship lines list only the **blocking** edges
+/// ([`EpicEdge::blocking`]) — satisfied history would bury the live signal. A
+/// counterpart in no epic renders as `(no epic)`, the readable face of
+/// `W_STATE_EPIC_UNREACHABLE_DEP`.
+///
+/// Rendered without a trailing newline, matching [`render_unified_board`] /
+/// [`render_wave_table`]; callers own any surrounding blank lines.
+pub fn render_epic_board(
+    inputs: &[EpicBoardInput<'_>],
+    focus: &Focus,
+    effective: &HashMap<String, u8>,
+    config: &BrainConfig,
+) -> String {
+    let rendered: Vec<&EpicBoardInput<'_>> = inputs
+        .iter()
+        .filter(|i| {
+            // An absent status defaults to active — a registry entry with no
+            // lifecycle set is still work someone declared.
+            i.epic
+                .status
+                .as_deref()
+                .map(|s| RENDERED_EPIC_STATUSES.contains(&s))
+                .unwrap_or(true)
+        })
+        .collect();
+
+    if rendered.is_empty() {
+        return "_no active epics_".to_string();
+    }
+
+    let mut sections: Vec<String> = Vec::new();
+    for input in rendered {
+        let epic = input.epic;
+        let progress = epic_progress(&input.members);
+        let scoped = derive_epic_focus(focus, &epic.slug);
+        let next_sorted = sort_unified_board_next(&scoped.next, effective);
+
+        let mut lines = vec![format!("### {}", epic.title)];
+        if let Some(ref description) = epic.description {
+            lines.push(String::new());
+            lines.push(format!("_{description}_"));
+        }
+        lines.push(String::new());
+        lines.push(render_epic_progress_line(&progress));
+        lines.push(String::new());
+        // No `edges` for the `(blocked by ...)` annotation: cross_repo notes are
+        // an HQ-board concern, and the epic board's own relationship lines below
+        // already name what gates this initiative.
+        lines.push(render_unified_board_section(
+            EPIC_LANE_LEVEL,
+            "NOW",
+            &scoped.now,
+            &[],
+            config,
+        ));
+        lines.push(String::new());
+        lines.push(render_unified_board_section(
+            EPIC_LANE_LEVEL,
+            "NEXT",
+            &next_sorted,
+            &[],
+            config,
+        ));
+        lines.push(String::new());
+        lines.push(render_unified_board_section(
+            EPIC_LANE_LEVEL,
+            "BLOCKED",
+            &scoped.blocked,
+            &[],
+            config,
+        ));
+
+        let relationships = render_epic_relationships(&input.edges);
+        if !relationships.is_empty() {
+            lines.push(String::new());
+            lines.push(relationships);
+        }
+
+        sections.push(lines.join("\n"));
+    }
+
+    sections.join("\n\n")
+}
+
+/// Render an epic's one-line progress summary, e.g.
+/// `**7/23 closed** · 2 in progress · 14 open`.
+fn render_epic_progress_line(p: &EpicProgress) -> String {
+    if p.total() == 0 {
+        return "**no member blocks yet**".to_string();
+    }
+    format!(
+        "**{}/{} closed** · {} in progress · {} open",
+        p.closed,
+        p.total(),
+        p.in_progress,
+        p.open
+    )
+}
+
+/// Render the `Waiting on` / `Holding up` relationship lines for one epic,
+/// listing only edges that still gate. Returns an empty string when nothing is
+/// live, so the caller can omit the block entirely.
+fn render_epic_relationships(edges: &EpicEdges) -> String {
+    let describe = |e: &&EpicEdge, counterpart: &str| {
+        let owner = if e.other_epics.is_empty() {
+            "no epic".to_string()
+        } else {
+            e.other_epics.join(", ")
+        };
+        format!("- {counterpart} ({owner})")
+    };
+
+    let mut lines: Vec<String> = Vec::new();
+
+    let waiting: Vec<&EpicEdge> = edges.outbound.iter().filter(|e| e.blocking).collect();
+    if !waiting.is_empty() {
+        lines.push("**Waiting on**".to_string());
+        let mut seen: Vec<&str> = Vec::new();
+        for edge in &waiting {
+            if seen.contains(&edge.to.as_str()) {
+                continue; // several members can gate on the same block
+            }
+            seen.push(&edge.to);
+            lines.push(describe(edge, &edge.to));
+        }
+    }
+
+    let holding: Vec<&EpicEdge> = edges.inbound.iter().filter(|e| e.blocking).collect();
+    if !holding.is_empty() {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push("**Holding up**".to_string());
+        let mut seen: Vec<&str> = Vec::new();
+        for edge in &holding {
+            if seen.contains(&edge.from.as_str()) {
+                continue;
+            }
+            seen.push(&edge.from);
+            lines.push(describe(edge, &edge.from));
+        }
+    }
+
+    lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// render_epic_sequence_table — one epic's cross-repo work order
+// ---------------------------------------------------------------------------
+
+/// Render one epic's members as a Markdown table in cross-repo wave order.
+///
+/// Columns: `Wave | Repo | Block | Title | Status | Depends on`. This is
+/// [`render_wave_table`]'s cross-repo sibling — same derived-status rule (an
+/// open block with an unmet `depends_on` renders `blocked`) and the same
+/// `global_status` lookup, but the row set is one epic across every repo rather
+/// than one repo across every epic.
+///
+/// Rendered without a trailing newline.
+pub fn render_epic_sequence_table(
+    members: &[(String, &TrackBlock)],
+    global_status: &HashMap<String, Option<String>>,
+) -> String {
+    let mut lines = vec![
+        "| Wave | Repo | Block | Title | Status | Depends on |".to_string(),
+        "|---|---|---|---|---|---|".to_string(),
+    ];
+
+    if members.is_empty() {
+        lines.push("| — | — | — | _no member blocks_ | — | — |".to_string());
+        return lines.join("\n");
+    }
+
+    for (repo, block) in members {
+        let wave = block
+            .wave
+            .map(|w| w.to_string())
+            .unwrap_or_else(|| "—".to_string());
+
+        let deps: Vec<String> = block
+            .depends_on
+            .iter()
+            .map(|dep| match dep {
+                BlockedBy::Block { repo, id, .. } => format!("{repo}:{id}"),
+                BlockedBy::External { what } => format!("external:{what}"),
+            })
+            .collect();
+        let deps_cell = if deps.is_empty() {
+            "—".to_string()
+        } else {
+            deps.join(", ")
+        };
+
+        let authored = block.status.as_deref().unwrap_or("open");
+        let status = if authored == "open" && has_unmet_dep(block, global_status) {
+            "blocked"
+        } else {
+            authored
+        };
+
+        lines.push(format!(
+            "| {wave} | {repo} | {} | {} | {status} | {deps_cell} |",
+            block.id, block.title
+        ));
+    }
+
+    lines.join("\n")
+}
+
+/// Whether `block` has at least one `depends_on` entry that is not yet met — any
+/// `external` entry, or a `block` entry whose target's authored status in
+/// `global_status` is not `closed` (an unresolvable target counts as unmet).
+fn has_unmet_dep(block: &TrackBlock, global_status: &HashMap<String, Option<String>>) -> bool {
+    block.depends_on.iter().any(|dep| match dep {
+        BlockedBy::External { .. } => true,
+        BlockedBy::Block { repo, id, .. } => {
+            global_status
+                .get(&format!("{repo}:{id}"))
+                .and_then(|s| s.as_deref())
+                != Some("closed")
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -817,6 +1161,12 @@ fn derived_focus_for(
     let priority_of = |id: &str| idx.get(id).and_then(|(_, _, p, _)| *p);
     let due_of = |id: &str| idx.get(id).and_then(|(_, _, _, d)| d.clone());
 
+    // `epics` stays empty in a leaf `focus`: membership is authored on
+    // `tracks[].blocks[]`, and the epic board filters `derive_brain_focus`'s
+    // union (which does carry it). Duplicating it here would make every leaf
+    // `state.json` churn whenever a block's membership changes, on top of the
+    // authored edit itself — and the empty vec is skipped on serialization, so
+    // tagging blocks leaves leaf files byte-identical.
     let now = d
         .now
         .iter()
@@ -829,6 +1179,7 @@ fn derived_focus_for(
             note: None,
             repo: None,
             blocked_by: Vec::new(),
+            epics: Vec::new(),
         })
         .collect();
 
@@ -844,6 +1195,7 @@ fn derived_focus_for(
             note: None,
             repo: None,
             blocked_by: Vec::new(),
+            epics: Vec::new(),
         })
         .collect();
 
@@ -859,6 +1211,7 @@ fn derived_focus_for(
             note: None,
             repo: None,
             blocked_by: unmet.clone(),
+            epics: Vec::new(),
         })
         .collect();
 
@@ -1701,6 +2054,237 @@ fn tier_of_repo<'a>(slug: &str, config: &'a BrainConfig) -> Option<&'a str> {
         .find(|r| r.slug == slug)
         .map(|r| r.tier.as_str())
 }
+
+// ---------------------------------------------------------------------------
+// plan_epic_boards
+// ---------------------------------------------------------------------------
+
+/// Plan the per-epic board splice into every brain-level `status.md` that
+/// carries the [`markers::EPIC_BOARD`] sentinel pair.
+///
+/// **Epic lanes are always global**, derived once from the HQ file at
+/// `TierScope::All`, even on a tier sub-brain's board. An epic is a cross-repo
+/// initiative by definition — showing a tier-truncated slice of one would hide
+/// exactly the cross-boundary sequence the board exists to make visible. What
+/// *is* tier-scoped is **which epics appear**: the HQ board shows every
+/// registered epic, and a tier sub-brain shows only those with at least one
+/// member block in its own tier. (This is the one board that deliberately
+/// departs from `plan_attention_board`'s tier-scoped-content rule.)
+///
+/// A missing `status.md`, or one lacking the sentinels, yields
+/// `W_EMIT_NO_SENTINEL` and no write — sentinels are never invented.
+pub fn plan_epic_boards(
+    files: &[(StateSource, StateFile)],
+    graph: &StateGraph,
+    config: &BrainConfig,
+) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+
+    // The registry and the global focus both come from the single All-scoped
+    // brain file. With no HQ file there is nothing to render anywhere.
+    let Some((hq_src, hq_file)) = files
+        .iter()
+        .find(|(_, f)| f.kind == "brain" && matches!(tier_scope_for(f, config), TierScope::All))
+    else {
+        return plan;
+    };
+    if hq_file.epics.is_empty() {
+        return plan; // no registry authored yet — nothing to emit
+    }
+
+    let global_focus = derive_brain_focus(hq_src, hq_file, &TierScope::All, config, graph, files);
+    let effective = effective_priorities(graph, files);
+
+    // Derive each epic's members + boundary edges once, not per brain file.
+    let all_inputs: Vec<EpicBoardInput<'_>> = hq_file
+        .epics
+        .iter()
+        .map(|epic| EpicBoardInput {
+            epic,
+            members: epic_members(graph, files, &epic.slug),
+            edges: derive_epic_edges(files, &epic.slug),
+        })
+        .collect();
+
+    for (src, file) in files {
+        if file.kind != "brain" {
+            continue;
+        }
+        let scope = tier_scope_for(file, config);
+
+        // Which epics this board shows (see the tier note above).
+        let inputs: Vec<EpicBoardInput<'_>> = all_inputs
+            .iter()
+            .filter(|i| match &scope {
+                TierScope::All => true,
+                TierScope::Tier(tier) => i
+                    .members
+                    .iter()
+                    .any(|(repo, _)| tier_of_repo(repo, config) == Some(tier.as_str())),
+            })
+            .map(|i| EpicBoardInput {
+                epic: i.epic,
+                members: i.members.clone(),
+                edges: i.edges.clone(),
+            })
+            .collect();
+        if inputs.is_empty() {
+            continue; // this tier owns no epic work; leave its sentinel alone
+        }
+
+        let Some(planning_dir) = src.abs_path.parent() else {
+            continue;
+        };
+        let board_path = planning_dir.join("status.md");
+
+        let original = match std::fs::read_to_string(&board_path) {
+            Ok(s) => s,
+            Err(_) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &board_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "no status.md beside '{}' state.json; skipping epic-board emit",
+                        src.repo_slug
+                    ),
+                ));
+                continue;
+            }
+        };
+
+        let board = render_epic_board(&inputs, &global_focus, &effective, config);
+
+        match splice_generated(&original, markers::EPIC_BOARD, &board) {
+            Ok(new_content) => {
+                if new_content != original {
+                    plan.actions.push(EmitAction {
+                        path: board_path,
+                        new_content,
+                        note: format!("update epic board for '{}'", src.repo_slug),
+                    });
+                }
+            }
+            Err(_) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &board_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "status.md for '{}' has no <!-- BEGIN generated:{} --> sentinels; skipping",
+                        src.repo_slug,
+                        markers::EPIC_BOARD
+                    ),
+                ));
+            }
+        }
+    }
+
+    plan
+}
+
+// ---------------------------------------------------------------------------
+// plan_epic_sequences
+// ---------------------------------------------------------------------------
+
+/// Plan the per-epic cross-repo sequence table splice into each registered
+/// epic's own `plan` document.
+///
+/// For every registry entry carrying a `plan` path, resolves it relative to
+/// `root` and splices [`render_epic_sequence_table`] into its
+/// [`markers::EPIC_SEQUENCE`] sentinel pair. An entry with no `plan`, a path
+/// that does not resolve, or a document without the sentinels is skipped
+/// (`W_EMIT_NO_SENTINEL` for the latter two) — never invents sentinels, and
+/// never creates the document.
+pub fn plan_epic_sequences(
+    root: &std::path::Path,
+    files: &[(StateSource, StateFile)],
+    graph: &StateGraph,
+    config: &BrainConfig,
+) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+
+    let Some((_, hq_file)) = files
+        .iter()
+        .find(|(_, f)| f.kind == "brain" && matches!(tier_scope_for(f, config), TierScope::All))
+    else {
+        return plan;
+    };
+
+    let global_status = global_status_map(files);
+    let mut claimed: HashMap<&str, &str> = HashMap::new();
+
+    for epic in &hq_file.epics {
+        let Some(ref rel) = epic.plan else {
+            continue; // an epic with no plan doc is fine — nothing to splice
+        };
+        let doc_path = root.join(rel);
+
+        // Two epics sharing one plan doc would each produce a full-document
+        // write carrying only their own table, and the later apply would drop
+        // the earlier one's. Refuse the second claim rather than lose it.
+        if let Some(first) = claimed.insert(rel.as_str(), epic.slug.as_str()) {
+            plan.diagnostics.push(crate::Diagnostic::warning(
+                &doc_path,
+                "W_EMIT_EPIC_PLAN_CONFLICT",
+                format!(
+                    "epics '{first}' and '{}' both point at plan doc '{rel}'; only one \
+                     epic-sequence table fits per document, so '{}' is skipped — give it \
+                     its own plan doc",
+                    epic.slug, epic.slug
+                ),
+            ));
+            continue;
+        }
+
+        let original = match std::fs::read_to_string(&doc_path) {
+            Ok(s) => s,
+            Err(_) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &doc_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "epic '{}' points at plan doc '{rel}', which does not exist; \
+                         skipping sequence emit",
+                        epic.slug
+                    ),
+                ));
+                continue;
+            }
+        };
+
+        let table =
+            render_epic_sequence_table(&epic_members(graph, files, &epic.slug), &global_status);
+
+        match splice_generated(&original, markers::EPIC_SEQUENCE, &table) {
+            Ok(new_content) => {
+                if new_content != original {
+                    plan.actions.push(EmitAction {
+                        path: doc_path,
+                        new_content,
+                        note: format!("update sequence table for epic '{}'", epic.slug),
+                    });
+                }
+            }
+            Err(_) => {
+                plan.diagnostics.push(crate::Diagnostic::warning(
+                    &doc_path,
+                    "W_EMIT_NO_SENTINEL",
+                    format!(
+                        "plan doc for epic '{}' has no <!-- BEGIN generated:{} --> sentinels; \
+                         skipping",
+                        epic.slug,
+                        markers::EPIC_SEQUENCE
+                    ),
+                ));
+            }
+        }
+    }
+
+    plan
+}
+
+// ---------------------------------------------------------------------------
+// plan_attention_board
+// ---------------------------------------------------------------------------
 
 /// Plan the Attention board splice into **every brain-level `status.md`,
 /// tier-scoped** (`markers::ATTENTION`).

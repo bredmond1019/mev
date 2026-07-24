@@ -8,12 +8,59 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-14T18:52:28Z"
+timestamp: "2026-07-24T17:30:47Z"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## [2026-07-24]
+
+### MV.8.A — Epics: a cross-repo initiative axis for `state.json`
+
+- **What:** Added `epics` — a **multi-valued** membership field on blocks plus an HQ-only `epics[]`
+  registry — and everything that consumes it.
+  - **Schema (`okf-core`, D15/D16 single source):** `epics: Vec<String>` on `TrackBlock`, `Block`,
+    and `StateNode`; new `Epic` struct (`slug`/`title`/`description`/`status`/`plan`/`repos`);
+    `epics: Vec<Epic>` on `StateFile`; membership copied onto graph nodes by `build_state_graph`.
+    Every field is `skip_serializing_if` empty — verified against a HEAD-built binary that all ~292
+    untagged blocks stay byte-identical (identical emit plans on the same corpus).
+  - **Validation (`src/brain/state.rs`):** `check_epics` — corpus-level, like
+    `check_backlog_integrity` rather than the per-file `check_field_policy`, since membership is
+    checked against a registry in another file. Six locators: `E_STATE_UNKNOWN_EPIC`,
+    `E_STATE_DUPLICATE_EPIC_SLUG`, `E_STATE_EPIC_BAD_STATUS`, `W_STATE_EPIC_EMPTY`,
+    `W_STATE_EPIC_UNREACHABLE_DEP`, `W_STATE_EPIC_REGISTRY_IGNORED`.
+  - **Derivation:** `derive_epic_focus` filters `derive_brain_focus`'s *output* (so an epic board
+    cannot disagree with the unified board); `derive_epic_edges` computes cross-epic relationships
+    from the block `depends_on` graph — **no epic-level `depends_on` was added**, per the D36
+    graph-vs-narrative litmus; `epic_members` delegates ordering to `wave_order`.
+  - **Emit:** `render_epic_board` / `render_epic_sequence_table` / `plan_epic_boards` /
+    `plan_epic_sequences` + the `epic-board` and `epic-sequence` markers, wired into `emit_state`
+    **after** the first apply batch. Also parameterized `render_unified_board_section` with a
+    heading level — epic lanes were rendering `## NOW` beneath an `### Epic` heading.
+  - **Data:** 3-epic registry (`bastion-os`, `bastion-surfaces`, `engine-split`), **157 core-tier
+    blocks tagged**, sentinels in both status docs, and new `core/planning/epics/` sequence docs.
+  - Refactored the six `Block` construction sites in `derive_rollup` / `derive_brain_focus` onto
+    shared `track_block_index` + `focus_block` helpers (a 3-tuple lookup MV.6.B had already widened
+    once).
+- **Why:** `tracks[]` groups work *within* one repo and `tier` groups repos organizationally.
+  Neither can express a program like "Bastion Web + UI against the `bastion serve` endpoint", which
+  spans three repos and interleaves with unrelated work in every existing view — so answering "what
+  is the sequence for just this initiative, and what gates it" meant reading three `state.json`
+  files and a prose master plan and joining them by hand. The graph already had `depends_on`,
+  `wave`, `status`, and effective priority; the only missing piece was a grouping label that crosses
+  repo boundaries.
+- **Verification:** mev 625 / okf-core 56 / bastion 1457 tests passing; `fmt` + `clippy -D warnings`
+  clean in all three; `validate-brain --state` 0 errors with zero epic diagnostics; `emit-state`
+  reaches a fixed point.
+- **Follow-ups:** four, captured as `carryover[]` rather than blocks (not yet scoped) —
+  `bastion-web-external-deps-not-block-edges` and `epic-taxonomy-open-calls` (core tier),
+  `emit-state-same-file-batching` and `epic-sequence-wave-scale` (mev). See `planning/handoff.md`.
+- **Refs:** `planning/handoff.md`, `docs/state/state-schema.md` (`epics[]`),
+  `core/planning/epics/index.md`
 
 ---
 

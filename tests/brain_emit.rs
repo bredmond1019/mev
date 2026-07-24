@@ -33,6 +33,7 @@ fn make_src(repo_slug: &str) -> StateSource {
 /// Build a minimal `StateFile` with `kind:"project"` and the given tracks.
 fn make_leaf(repo: &str, tracks: Vec<Track>) -> StateFile {
     StateFile {
+        epics: Vec::new(),
         repo: repo.to_string(),
         kind: "project".to_string(),
         updated: "2026-06-30".to_string(),
@@ -50,6 +51,7 @@ fn make_leaf(repo: &str, tracks: Vec<Track>) -> StateFile {
 /// Build a `TrackBlock` with a given wave and no deps.
 fn block(id: &str, title: &str, status: Option<&str>, wave: Option<i64>) -> TrackBlock {
     TrackBlock {
+        epics: Vec::new(),
         due: None,
         priority: None,
         sdlc_workflow: None,
@@ -73,6 +75,7 @@ fn block_with_dep(
     dep_id: &str,
 ) -> TrackBlock {
     TrackBlock {
+        epics: Vec::new(),
         due: None,
         priority: None,
         sdlc_workflow: None,
@@ -646,6 +649,7 @@ mod task3_planners {
         deps: Vec<BlockedBy>,
     ) -> TrackBlock {
         TrackBlock {
+            epics: Vec::new(),
             due: None,
             priority: None,
             sdlc_workflow: None,
@@ -661,6 +665,7 @@ mod task3_planners {
 
     fn make_leaf_file(repo: &str, tracks: Vec<Track>, focus: Focus) -> StateFile {
         StateFile {
+            epics: Vec::new(),
             repo: repo.to_string(),
             kind: "project".to_string(),
             updated: "2026-06-30".to_string(),
@@ -681,6 +686,7 @@ mod task3_planners {
         focus: Focus,
     ) -> StateFile {
         StateFile {
+            epics: Vec::new(),
             repo: "brain".to_string(),
             kind: "brain".to_string(),
             updated: "2026-06-30".to_string(),
@@ -698,6 +704,7 @@ mod task3_planners {
     fn focus_with_now(block_id: &str, title: &str) -> Focus {
         Focus {
             now: vec![Block {
+                epics: Vec::new(),
                 due: None,
                 priority: None,
                 id: block_id.to_string(),
@@ -775,6 +782,7 @@ mod task3_planners {
             title: "Phase 1".to_string(),
             blocks: vec![
                 TrackBlock {
+                    epics: Vec::new(),
                     due: Some("2026-07-10".to_string()),
                     priority: Some(1),
                     sdlc_workflow: None,
@@ -787,6 +795,7 @@ mod task3_planners {
                     origin: None,
                 },
                 TrackBlock {
+                    epics: Vec::new(),
                     due: None,
                     priority: Some(2),
                     sdlc_workflow: None,
@@ -855,6 +864,7 @@ mod task3_planners {
         // Pre-derive the correct focus.
         let correct_focus = Focus {
             now: vec![Block {
+                epics: Vec::new(),
                 due: None,
                 priority: None,
                 id: "B".to_string(),
@@ -3663,6 +3673,7 @@ mod task1_render_hq_board {
     /// Build a repo-tagged `Block` with no `blocked_by` entries (NOW/NEXT shape).
     fn tagged_block(repo: &str, id: &str, title: &str) -> Block {
         Block {
+            epics: Vec::new(),
             due: None,
             priority: None,
             id: id.to_string(),
@@ -3677,6 +3688,7 @@ mod task1_render_hq_board {
     /// Build a repo-tagged `Block` with the given `blocked_by` entries (BLOCKED shape).
     fn blocked_block(repo: &str, id: &str, title: &str, blocked_by: Vec<BlockedBy>) -> Block {
         Block {
+            epics: Vec::new(),
             due: None,
             priority: None,
             id: id.to_string(),
@@ -3932,6 +3944,7 @@ mod task2_render_unified_board {
         due: Option<&str>,
     ) -> Block {
         Block {
+            epics: Vec::new(),
             due: due.map(|s| s.to_string()),
             priority,
             id: id.to_string(),
@@ -3952,6 +3965,7 @@ mod task2_render_unified_board {
         blocked_by: Vec<BlockedBy>,
     ) -> Block {
         Block {
+            epics: Vec::new(),
             due: due.map(|s| s.to_string()),
             priority,
             id: id.to_string(),
@@ -3983,6 +3997,35 @@ mod task2_render_unified_board {
 
         assert!(rendered.contains("- [BIZ] business:BR.1 — Biz block"));
         assert!(rendered.contains("- [ENG] mev:MV.1 — Eng block"));
+    }
+
+    #[test]
+    fn tags_business_tier_root_itself_biz_not_just_its_children() {
+        // Regression for the backlog defect (2026-07-17): the real
+        // `brain.toml` registers the `business` tier ROOT with
+        // `tier = "_root"` (like every other tier root — `core`, `side`,
+        // `client`) — only its CHILDREN (e.g. `bastiel`) carry
+        // `tier = "business"`. A block tagged with `repo: "business"` (the
+        // tier root's own authored `tracks[]`, e.g. `BZ.*`) must still render
+        // `[BIZ]`, not fall through to the `[ENG]` default because its own
+        // `tier` field doesn't literally equal `"business"`.
+        let config = config_with_repos(&[("business", "_root"), ("bastiel", "business")]);
+        let focus = Focus {
+            now: vec![
+                tagged_block("business", "BZ.1", "Revenue block", None, None),
+                tagged_block("bastiel", "BL.1", "Demo block", None, None),
+            ],
+            next: vec![],
+            blocked: vec![],
+        };
+
+        let rendered = render_unified_board(&focus, &[], &HashMap::new(), &config, today());
+
+        assert!(
+            rendered.contains("- [BIZ] business:BZ.1 — Revenue block"),
+            "the business tier root's own tracks[] must render [BIZ], got:\n{rendered}"
+        );
+        assert!(rendered.contains("- [BIZ] bastiel:BL.1 — Demo block"));
     }
 
     #[test]
@@ -4245,6 +4288,7 @@ mod task2_plan_hq_board {
         deps: Vec<BlockedBy>,
     ) -> TrackBlock {
         TrackBlock {
+            epics: Vec::new(),
             due: None,
             priority: None,
             sdlc_workflow: None,
@@ -4260,6 +4304,7 @@ mod task2_plan_hq_board {
 
     fn make_leaf_file(repo: &str, tracks: Vec<Track>, focus: Focus) -> StateFile {
         StateFile {
+            epics: Vec::new(),
             repo: repo.to_string(),
             kind: "project".to_string(),
             updated: "2026-06-30".to_string(),
@@ -4280,6 +4325,7 @@ mod task2_plan_hq_board {
         focus: Focus,
     ) -> StateFile {
         StateFile {
+            epics: Vec::new(),
             repo: "hq".to_string(),
             kind: "brain".to_string(),
             updated: "2026-06-30".to_string(),
@@ -4587,6 +4633,7 @@ mod task2_plan_unified_board {
         deps: Vec<BlockedBy>,
     ) -> TrackBlock {
         TrackBlock {
+            epics: Vec::new(),
             due: None,
             priority: None,
             sdlc_workflow: None,
@@ -4602,6 +4649,7 @@ mod task2_plan_unified_board {
 
     fn make_leaf_file(repo: &str, tracks: Vec<Track>, focus: Focus) -> StateFile {
         StateFile {
+            epics: Vec::new(),
             repo: repo.to_string(),
             kind: "project".to_string(),
             updated: "2026-06-30".to_string(),
@@ -4622,6 +4670,7 @@ mod task2_plan_unified_board {
         focus: Focus,
     ) -> StateFile {
         StateFile {
+            epics: Vec::new(),
             repo: "hq".to_string(),
             kind: "brain".to_string(),
             updated: "2026-06-30".to_string(),
@@ -5151,6 +5200,7 @@ mod task_yaml_frontmatter_drift_tests {
                         # Body\n";
         let focus = Focus {
             now: vec![Block {
+                epics: Vec::new(),
                 due: None,
                 priority: None,
                 id: "1".into(),
@@ -5201,6 +5251,7 @@ mod task_yaml_frontmatter_drift_tests {
             expected_kind: "project",
         };
         let file = StateFile {
+            epics: Vec::new(),
             repo: "myrepo".to_string(),
             kind: "project".to_string(),
             updated: "2026-06-30".to_string(),
@@ -5208,6 +5259,7 @@ mod task_yaml_frontmatter_drift_tests {
             tracks: vec![Track {
                 title: "P".to_string(),
                 blocks: vec![TrackBlock {
+                    epics: Vec::new(),
                     due: None,
                     priority: None,
                     sdlc_workflow: None,
@@ -6176,6 +6228,7 @@ mod attention_board {
 
     fn leaf(repo: &str, carryover: Vec<Carryover>) -> StateFile {
         StateFile {
+            epics: Vec::new(),
             repo: repo.to_string(),
             kind: "project".to_string(),
             updated: "2026-07-15".to_string(),
@@ -6192,6 +6245,7 @@ mod attention_board {
 
     fn brain(repo: &str, backlog: Vec<Backlog>, carryover: Vec<Carryover>) -> StateFile {
         StateFile {
+            epics: Vec::new(),
             repo: repo.to_string(),
             kind: "brain".to_string(),
             updated: "2026-07-15".to_string(),
@@ -6462,5 +6516,512 @@ mod attention_board {
                 .any(|d| d.locator == "W_EMIT_NO_SENTINEL"),
             "missing sentinel must warn"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// epic_members tests
+// ---------------------------------------------------------------------------
+
+/// Build a `TrackBlock` that claims one or more epics.
+fn block_in_epics(id: &str, wave: Option<i64>, epics: &[&str]) -> TrackBlock {
+    let mut b = block(id, &format!("{id} title"), Some("open"), wave);
+    b.epics = epics.iter().map(|s| s.to_string()).collect();
+    b
+}
+
+#[test]
+fn epic_members_returns_only_members_in_cross_repo_wave_order() {
+    // Waves interleave across repos: the epic's sequence must follow wave order
+    // globally, not repo-by-repo.
+    let bastion = (
+        make_src("bastion"),
+        make_leaf(
+            "bastion",
+            vec![Track {
+                title: "P".to_string(),
+                blocks: vec![
+                    block_in_epics("BA.1", Some(1), &["bastion-os"]),
+                    block_in_epics("BA.2", Some(3), &["bastion-os", "bastion-web"]),
+                    block("BA.3", "untagged", Some("open"), Some(2)),
+                ],
+            }],
+        ),
+    );
+    let web = (
+        make_src("bastion-web"),
+        make_leaf(
+            "bastion-web",
+            vec![Track {
+                title: "P".to_string(),
+                blocks: vec![block_in_epics("BW.1", Some(2), &["bastion-web"])],
+            }],
+        ),
+    );
+    let files = vec![bastion, web];
+
+    let os: Vec<String> = mev::brain::emit::epic_members(&empty_graph(), &files, "bastion-os")
+        .into_iter()
+        .map(|(repo, b)| format!("{repo}:{}", b.id))
+        .collect();
+    assert_eq!(
+        os,
+        vec!["bastion:BA.1", "bastion:BA.2"],
+        "untagged BA.3 must not appear even though its wave sits between them"
+    );
+
+    let web_members: Vec<String> =
+        mev::brain::emit::epic_members(&empty_graph(), &files, "bastion-web")
+            .into_iter()
+            .map(|(repo, b)| format!("{repo}:{}", b.id))
+            .collect();
+    assert_eq!(
+        web_members,
+        vec!["bastion-web:BW.1", "bastion:BA.2"],
+        "wave 2 (other repo) must sort before wave 3 (same repo); BA.2 is a \
+         member of both epics"
+    );
+}
+
+#[test]
+fn epic_members_is_empty_for_an_unclaimed_slug() {
+    let files = vec![(
+        make_src("mev"),
+        make_leaf(
+            "mev",
+            vec![Track {
+                title: "P".to_string(),
+                blocks: vec![block("MV.1", "untagged", Some("open"), Some(1))],
+            }],
+        ),
+    )];
+    assert!(mev::brain::emit::epic_members(&empty_graph(), &files, "ghost").is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Epic board + sequence table tests
+// ---------------------------------------------------------------------------
+
+mod epic_emit {
+    use mev::brain::config::{BrainConfig, RepoEntry};
+    use mev::brain::emit::{
+        epic_members, markers, plan_epic_boards, plan_epic_sequences, render_epic_sequence_table,
+    };
+    use mev::brain::state::{
+        BlockedBy, Epic, Focus, StateFile, StateSource, Track, TrackBlock, build_state_graph,
+    };
+
+    fn config() -> BrainConfig {
+        BrainConfig {
+            attention: Default::default(),
+            repos: [
+                ("hq", "_root"),
+                ("core", "_root"),
+                ("bastion", "core"),
+                ("bastion-web", "core"),
+                ("amistad", "side"),
+            ]
+            .iter()
+            .map(|(slug, tier)| RepoEntry {
+                slug: slug.to_string(),
+                tier: tier.to_string(),
+                repo_path: String::new(),
+                status_file: String::new(),
+                cache_doc: String::new(),
+                heading: String::new(),
+            })
+            .collect(),
+            ..BrainConfig::default()
+        }
+    }
+
+    fn tb(id: &str, status: &str, wave: i64, epics: &[&str], deps: Vec<BlockedBy>) -> TrackBlock {
+        TrackBlock {
+            epics: epics.iter().map(|s| s.to_string()).collect(),
+            due: None,
+            priority: None,
+            sdlc_workflow: None,
+            model: None,
+            id: id.to_string(),
+            title: format!("{id} title"),
+            status: Some(status.to_string()),
+            depends_on: deps,
+            wave: Some(wave),
+            origin: None,
+        }
+    }
+
+    fn leaf(
+        dir: &std::path::Path,
+        repo: &str,
+        blocks: Vec<TrackBlock>,
+    ) -> (StateSource, StateFile) {
+        (
+            StateSource {
+                repo_slug: repo.to_string(),
+                abs_path: dir.join(repo).join("planning/state.json"),
+                expected_kind: "project",
+            },
+            StateFile {
+                epics: Vec::new(),
+                repo: repo.to_string(),
+                kind: "project".to_string(),
+                updated: "2026-07-24".to_string(),
+                focus: Focus::default(),
+                tracks: vec![Track {
+                    title: "P".to_string(),
+                    blocks,
+                }],
+                repos: vec![],
+                cross_repo: vec![],
+                tiers: vec![],
+                note: None,
+                backlog: vec![],
+                carryover: vec![],
+            },
+        )
+    }
+
+    fn epic(slug: &str, title: &str, status: &str, plan: Option<&str>) -> Epic {
+        Epic {
+            slug: slug.to_string(),
+            title: title.to_string(),
+            description: None,
+            status: Some(status.to_string()),
+            plan: plan.map(|p| p.to_string()),
+            repos: vec![],
+        }
+    }
+
+    fn hq(dir: &std::path::Path, repo: &str, epics: Vec<Epic>) -> (StateSource, StateFile) {
+        (
+            StateSource {
+                repo_slug: repo.to_string(),
+                abs_path: dir.join(repo).join("planning/state.json"),
+                expected_kind: "brain",
+            },
+            StateFile {
+                epics,
+                repo: repo.to_string(),
+                kind: "brain".to_string(),
+                updated: "2026-07-24".to_string(),
+                focus: Focus::default(),
+                tracks: vec![],
+                repos: vec![],
+                cross_repo: vec![],
+                tiers: vec![],
+                note: None,
+                backlog: vec![],
+                carryover: vec![],
+            },
+        )
+    }
+
+    fn doc_with(marker: &str) -> String {
+        format!(
+            "---\ntype: ProjectStatus\ntitle: T\ndescription: D\n---\n\n\
+             # Status\n\nBefore.\n\n\
+             <!-- BEGIN generated:{marker} -->\n<!-- END generated:{marker} -->\n\n\
+             After.\n"
+        )
+    }
+
+    /// Corpus: bastion-web's BW.1 (bastion-web epic) waits on bastion's BA.7
+    /// (bastion-os epic); amistad's AM.1 is unrelated side-tier work.
+    fn corpus(dir: &std::path::Path) -> Vec<(StateSource, StateFile)> {
+        vec![
+            leaf(
+                dir,
+                "bastion",
+                vec![
+                    tb("BA.6", "closed", 1, &["bastion-os"], vec![]),
+                    tb("BA.7", "in_progress", 2, &["bastion-os"], vec![]),
+                ],
+            ),
+            leaf(
+                dir,
+                "bastion-web",
+                vec![tb(
+                    "BW.1",
+                    "open",
+                    3,
+                    &["bastion-web"],
+                    vec![BlockedBy::Block {
+                        repo: "bastion".to_string(),
+                        id: "BA.7".to_string(),
+                        what: None,
+                    }],
+                )],
+            ),
+            leaf(dir, "amistad", vec![tb("AM.1", "open", 1, &[], vec![])]),
+        ]
+    }
+
+    // -- render_epic_sequence_table ------------------------------------------
+
+    #[test]
+    fn sequence_table_orders_across_repos_and_derives_blocked_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = corpus(tmp.path());
+        let graph = build_state_graph(&files);
+        let status = mev::brain::emit::global_status_map(&files);
+
+        let table =
+            render_epic_sequence_table(&epic_members(&graph, &files, "bastion-os"), &status);
+        assert!(table.contains("| Wave | Repo | Block | Title | Status | Depends on |"));
+        assert!(table.contains("| 1 | bastion | BA.6 |"), "got:\n{table}");
+        assert!(table.contains("| 2 | bastion | BA.7 |"), "got:\n{table}");
+        assert!(
+            !table.contains("AM.1") && !table.contains("BW.1"),
+            "only bastion-os members belong in this table:\n{table}"
+        );
+
+        // BW.1 is open and depends on the still-open BA.7 → derived `blocked`.
+        let web = render_epic_sequence_table(&epic_members(&graph, &files, "bastion-web"), &status);
+        assert!(
+            web.contains("| 3 | bastion-web | BW.1 | BW.1 title | blocked | bastion:BA.7 |"),
+            "got:\n{web}"
+        );
+    }
+
+    #[test]
+    fn sequence_table_renders_a_placeholder_for_an_empty_epic() {
+        let table = render_epic_sequence_table(&[], &Default::default());
+        assert!(table.contains("_no member blocks_"), "got:\n{table}");
+    }
+
+    // -- plan_epic_boards ----------------------------------------------------
+
+    #[test]
+    fn epic_board_splices_progress_lanes_and_relationships_and_is_a_fixed_point() {
+        let tmp = tempfile::tempdir().unwrap();
+        let status_path = tmp.path().join("hq/planning/status.md");
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(&status_path, doc_with(markers::EPIC_BOARD)).unwrap();
+
+        let mut files = corpus(tmp.path());
+        files.push(hq(
+            tmp.path(),
+            "hq",
+            vec![
+                epic("bastion-os", "Bastion OS", "active", None),
+                epic("bastion-web", "Bastion Web + UI", "active", None),
+            ],
+        ));
+        let graph = build_state_graph(&files);
+
+        let plan = plan_epic_boards(&files, &graph, &config());
+        assert_eq!(plan.actions.len(), 1, "one board write expected");
+        let out = &plan.actions[0].new_content;
+
+        assert!(out.contains("### Bastion OS"), "got:\n{out}");
+        assert!(out.contains("### Bastion Web + UI"), "got:\n{out}");
+        // 1 of 2 bastion-os blocks closed, 1 in progress, 0 open.
+        assert!(
+            out.contains("**1/2 closed** · 1 in progress · 0 open"),
+            "got:\n{out}"
+        );
+        // BA.7 is in_progress → NOW lane of the Bastion OS board.
+        assert!(out.contains("[ENG] bastion:BA.7"), "got:\n{out}");
+        // The cross-epic gate is named, attributed to the epic that owns it.
+        assert!(
+            out.contains("**Waiting on**") && out.contains("- bastion:BA.7 (bastion-os)"),
+            "got:\n{out}"
+        );
+        assert!(
+            out.contains("**Holding up**") && out.contains("- bastion-web:BW.1 (bastion-web)"),
+            "got:\n{out}"
+        );
+        // Lanes must nest UNDER their epic heading, not outrank it.
+        assert!(
+            out.contains("#### NOW") && out.contains("#### NEXT") && out.contains("#### BLOCKED"),
+            "epic lanes must be h4 beneath the h3 epic heading, got:\n{out}"
+        );
+        assert!(
+            !out.contains("\n## NOW"),
+            "an h2 lane would outrank the h3 epic heading and break the outline, got:\n{out}"
+        );
+        // Unrelated side-tier work never appears.
+        assert!(!out.contains("AM.1"), "got:\n{out}");
+        // Narrative outside the sentinels survives.
+        assert!(
+            out.contains("Before.") && out.contains("After."),
+            "got:\n{out}"
+        );
+
+        // Fixed point: re-planning against the emitted output yields no action.
+        std::fs::write(&status_path, out).unwrap();
+        let again = plan_epic_boards(&files, &graph, &config());
+        assert!(
+            again.actions.is_empty(),
+            "re-running against its own output must be a no-op, got: {:?}",
+            again.actions.iter().map(|a| &a.note).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn epic_board_omits_non_active_epics() {
+        let tmp = tempfile::tempdir().unwrap();
+        let status_path = tmp.path().join("hq/planning/status.md");
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(&status_path, doc_with(markers::EPIC_BOARD)).unwrap();
+
+        let mut files = corpus(tmp.path());
+        files.push(hq(
+            tmp.path(),
+            "hq",
+            vec![
+                epic("bastion-os", "Bastion OS", "complete", None),
+                epic("bastion-web", "Bastion Web + UI", "active", None),
+            ],
+        ));
+        let graph = build_state_graph(&files);
+
+        let plan = plan_epic_boards(&files, &graph, &config());
+        let out = &plan.actions[0].new_content;
+        assert!(!out.contains("### Bastion OS"), "got:\n{out}");
+        assert!(out.contains("### Bastion Web + UI"), "got:\n{out}");
+    }
+
+    #[test]
+    fn epic_board_warns_and_skips_when_the_sentinel_is_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let status_path = tmp.path().join("hq/planning/status.md");
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        // A status.md with only some *other* board's sentinels.
+        std::fs::write(&status_path, doc_with(markers::HQ_BOARD)).unwrap();
+
+        let mut files = corpus(tmp.path());
+        files.push(hq(
+            tmp.path(),
+            "hq",
+            vec![epic("bastion-os", "Bastion OS", "active", None)],
+        ));
+        let graph = build_state_graph(&files);
+
+        let plan = plan_epic_boards(&files, &graph, &config());
+        assert!(plan.actions.is_empty(), "must never invent sentinels");
+        assert_eq!(
+            plan.diagnostics
+                .iter()
+                .map(|d| d.locator.as_str())
+                .collect::<Vec<_>>(),
+            vec!["W_EMIT_NO_SENTINEL"]
+        );
+    }
+
+    #[test]
+    fn epic_board_is_a_no_op_without_a_registry() {
+        // Today's corpus: no epics[] authored anywhere. The planner must not
+        // touch a single file — not even one carrying the sentinel.
+        let tmp = tempfile::tempdir().unwrap();
+        let status_path = tmp.path().join("hq/planning/status.md");
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(&status_path, doc_with(markers::EPIC_BOARD)).unwrap();
+
+        let mut files = corpus(tmp.path());
+        files.push(hq(tmp.path(), "hq", vec![]));
+        let graph = build_state_graph(&files);
+
+        let plan = plan_epic_boards(&files, &graph, &config());
+        assert!(plan.actions.is_empty());
+        assert!(plan.diagnostics.is_empty());
+    }
+
+    // -- plan_epic_sequences -------------------------------------------------
+
+    #[test]
+    fn epic_sequences_splice_into_the_registry_plan_doc() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan_rel = "core/planning/bastion-os.md";
+        let plan_path = tmp.path().join(plan_rel);
+        std::fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        std::fs::write(&plan_path, doc_with(markers::EPIC_SEQUENCE)).unwrap();
+
+        let mut files = corpus(tmp.path());
+        files.push(hq(
+            tmp.path(),
+            "hq",
+            vec![
+                epic("bastion-os", "Bastion OS", "active", Some(plan_rel)),
+                // No `plan` path — skipped silently, not a warning.
+                epic("bastion-web", "Bastion Web", "active", None),
+            ],
+        ));
+        let graph = build_state_graph(&files);
+
+        let plan = plan_epic_sequences(tmp.path(), &files, &graph, &config());
+        assert_eq!(plan.actions.len(), 1);
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+        let out = &plan.actions[0].new_content;
+        assert!(out.contains("| 1 | bastion | BA.6 |"), "got:\n{out}");
+        assert!(out.contains("Before.") && out.contains("After."));
+
+        // Fixed point.
+        std::fs::write(&plan_path, out).unwrap();
+        assert!(
+            plan_epic_sequences(tmp.path(), &files, &graph, &config())
+                .actions
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn epic_sequences_warn_when_the_plan_doc_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut files = corpus(tmp.path());
+        files.push(hq(
+            tmp.path(),
+            "hq",
+            vec![epic("bastion-os", "Bastion OS", "active", Some("nope.md"))],
+        ));
+        let graph = build_state_graph(&files);
+
+        let plan = plan_epic_sequences(tmp.path(), &files, &graph, &config());
+        assert!(plan.actions.is_empty());
+        assert_eq!(
+            plan.diagnostics
+                .iter()
+                .map(|d| d.locator.as_str())
+                .collect::<Vec<_>>(),
+            vec!["W_EMIT_NO_SENTINEL"]
+        );
+    }
+
+    #[test]
+    fn two_epics_sharing_a_plan_doc_warn_instead_of_clobbering() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rel = "core/planning/shared.md";
+        let path = tmp.path().join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, doc_with(markers::EPIC_SEQUENCE)).unwrap();
+
+        let mut files = corpus(tmp.path());
+        files.push(hq(
+            tmp.path(),
+            "hq",
+            vec![
+                epic("bastion-os", "Bastion OS", "active", Some(rel)),
+                epic("bastion-web", "Bastion Web", "active", Some(rel)),
+            ],
+        ));
+        let graph = build_state_graph(&files);
+
+        let plan = plan_epic_sequences(tmp.path(), &files, &graph, &config());
+        assert_eq!(
+            plan.actions.len(),
+            1,
+            "only the first claimant may write; the second must not queue a \
+             competing full-document write"
+        );
+        assert_eq!(
+            plan.diagnostics
+                .iter()
+                .map(|d| d.locator.as_str())
+                .collect::<Vec<_>>(),
+            vec!["W_EMIT_EPIC_PLAN_CONFLICT"]
+        );
+        // The surviving table is the first epic's.
+        assert!(plan.actions[0].new_content.contains("BA.6"));
     }
 }

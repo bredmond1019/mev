@@ -359,8 +359,8 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     use brain::config::find_brain_config;
     use brain::state::{
         StateLoadError, build_state_graph, check_backlog_integrity, check_backlog_staleness,
-        check_carryover_staleness, check_field_policy, check_focus_drift, check_rollup,
-        check_schema, check_state_graph, check_status_consistency, detect_cycles,
+        check_carryover_staleness, check_epics, check_field_policy, check_focus_drift,
+        check_rollup, check_schema, check_state_graph, check_status_consistency, detect_cycles,
         discover_state_files, load_state,
     };
     use std::collections::HashMap;
@@ -435,6 +435,10 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     let backlog_diags = check_backlog_integrity(&loaded, &graph);
     report.diagnostics.extend(backlog_diags);
 
+    // 7b. Epic registry + membership — cross-file, so it runs once over the
+    //     whole corpus rather than per-file like check_field_policy.
+    report.diagnostics.extend(check_epics(&config, &loaded));
+
     // 8. Rollup-drift checks (brain files only).
     // Build a slug → StateFile map of all loaded children (project kind).
     let children: HashMap<String, brain::state::StateFile> = loaded
@@ -500,6 +504,14 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
 ///   NOW/NEXT/BLOCKED/DUE-SOON unified board (unioning engineering + business blocks,
 ///   tagged `[BIZ]`/`[ENG]`) into the HQ brain's `status.md`
 ///   (`<!-- BEGIN generated:unified-board -->` sentinels; `MV.6.B`).
+/// - [`brain::emit::plan_epic_boards`] — splices the per-epic
+///   progress/NOW/NEXT/BLOCKED board plus derived cross-epic relationships into every
+///   brain-level `status.md` carrying the `<!-- BEGIN generated:epic-board -->`
+///   sentinels. Lanes are global (an epic is cross-repo by definition); only *which*
+///   epics appear is tier-scoped.
+/// - [`brain::emit::plan_epic_sequences`] — splices each epic's cross-repo wave-ordered
+///   sequence table into the `plan` doc its registry entry points at
+///   (`<!-- BEGIN generated:epic-sequence -->` sentinels).
 ///
 /// When `write` is `false` (default), the function is a **dry-run**: no files are
 /// written and each planned action is reported as a `W_EMIT_DRY_RUN` diagnostic.
@@ -514,9 +526,9 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
 pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report> {
     use brain::config::find_brain_config;
     use brain::emit::{
-        apply_plan, plan_attention_board, plan_brain_cache_watermarks, plan_hq_board,
-        plan_master_plan_tables, plan_project_caches, plan_state_json, plan_status_frontmatter,
-        plan_tier_rollups, plan_unified_board,
+        apply_plan, plan_attention_board, plan_brain_cache_watermarks, plan_epic_boards,
+        plan_epic_sequences, plan_hq_board, plan_master_plan_tables, plan_project_caches,
+        plan_state_json, plan_status_frontmatter, plan_tier_rollups, plan_unified_board,
     };
     use brain::state::{StateLoadError, build_state_graph, discover_state_files, load_state};
 
@@ -592,7 +604,19 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     let attention_diags = apply_plan(&attention_plan, write);
     let brain_caches_diags = apply_plan(&brain_caches_plan, write);
 
-    // 6. Run and apply the YAML frontmatter planner last so it sees the updated markdown in write mode.
+    // 6. Epic boards + sequence tables are planned AFTER the batch above is
+    //    applied, not alongside it. They target the same `status.md` files as
+    //    the HQ/unified/attention boards (and the same `master-plan.md` as
+    //    plan_master_plan_tables), and every planner in a batch reads the
+    //    *original* file — so two planned writes to one file would each carry
+    //    only their own sentinel edit, and the later apply would drop the
+    //    earlier one's. Planning here means these read the already-updated text.
+    let epic_board_plan = plan_epic_boards(&loaded, &graph, &config);
+    let epic_seq_plan = plan_epic_sequences(root, &loaded, &graph, &config);
+    let epic_board_diags = apply_plan(&epic_board_plan, write);
+    let epic_seq_diags = apply_plan(&epic_seq_plan, write);
+
+    // 7. Run and apply the YAML frontmatter planner last so it sees the updated markdown in write mode.
     let status_fm_plan = plan_status_frontmatter(root, &loaded, &graph, &config);
     let status_fm_diags = apply_plan(&status_fm_plan, write);
 
@@ -604,6 +628,8 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     report.diagnostics.extend(unified_board_diags);
     report.diagnostics.extend(attention_diags);
     report.diagnostics.extend(brain_caches_diags);
+    report.diagnostics.extend(epic_board_diags);
+    report.diagnostics.extend(epic_seq_diags);
     report.diagnostics.extend(status_fm_diags);
 
     Ok(report)
