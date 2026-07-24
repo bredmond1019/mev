@@ -2688,10 +2688,17 @@ heading = "Repo P"
         write_json(root, rel, &state);
     }
 
-    /// Full core-tier fixture: brain.toml + core brain state + repo-a/repo-b
-    /// (loadable) + repo-d (malformed) + repo-p (portfolio-tier control,
-    /// loadable but must be excluded from the core rollup). repo-c and repo-e
-    /// intentionally have no `planning/state.json` on disk at all.
+    /// Full core-tier fixture: brain.toml + core brain state + repo-a/repo-b/
+    /// repo-d (all loadable) + repo-p (portfolio-tier control, loadable but
+    /// must be excluded from the core rollup). repo-c and repo-e intentionally
+    /// have no `planning/state.json` on disk at all.
+    ///
+    /// repo-d is loadable here (not malformed) so the tier-scoping assertions
+    /// below — which are not themselves about malformed-corpus handling — are
+    /// exercised against a *complete* corpus and aren't tripped by the
+    /// `E_EMIT_INCOMPLETE_CORPUS` guard (`emit-state-incomplete-corpus-guard`).
+    /// The malformed-repo-d scenario has its own dedicated fixture:
+    /// [`corrupt_repo_d_state_json`], used only by the guard regression test.
     fn write_core_fixture(root: &Path) {
         write_brain_toml(root);
         write_core_brain_state(root);
@@ -2709,11 +2716,12 @@ heading = "Repo P"
             "RB.1.A",
             "Repo B block A",
         );
-        // repo-d: state.json exists but is not valid JSON (E_STATE_MALFORMED_JSON).
-        write_file(
+        write_leaf_state(
             root,
             "repos/repo-d/planning/state.json",
-            "{ this is not valid json ",
+            "repo-d",
+            "RD.1.A",
+            "Repo D block A",
         );
         write_leaf_state(
             root,
@@ -2721,6 +2729,19 @@ heading = "Repo P"
             "repo-p",
             "RP.1.A",
             "Repo P block A",
+        );
+    }
+
+    /// Corrupts repo-d's `state.json` in an already-written core fixture with
+    /// content that is not valid JSON, mirroring the real 2026-07-24 defect.
+    /// Used only by the `E_EMIT_INCOMPLETE_CORPUS` guard regression test —
+    /// every other test in this module runs against the fully-loadable
+    /// [`write_core_fixture`] corpus.
+    fn corrupt_repo_d_state_json(root: &Path) {
+        write_file(
+            root,
+            "repos/repo-d/planning/state.json",
+            "{ this is not valid json ",
         );
     }
 
@@ -2746,8 +2767,10 @@ heading = "Repo P"
         write_core_fixture(&dir);
 
         let report = mev::emit_state(&dir, true).expect("emit_state should not error (panic)");
-        // The only expected error is E_STATE_MALFORMED_JSON for repo-d (see the
-        // dedicated regression test below) — it must not abort the rollup.
+        // This fixture's corpus is fully loadable (see write_core_fixture's
+        // doc comment) — no errors of any kind are expected here. The
+        // malformed-repo-d / E_EMIT_INCOMPLETE_CORPUS scenario has its own
+        // dedicated regression test below.
         let non_malformed_errors: Vec<_> = report
             .diagnostics
             .iter()
@@ -2851,19 +2874,26 @@ heading = "Repo P"
 
     // -----------------------------------------------------------------------
     // Test 4 — REGRESSION: a malformed child state.json must NOT truncate the
-    // brain repos[] — its existing entry is preserved (reproduces the live
-    // bastion-drop incident this block fixes).
+    // brain repos[] (reproduces the live bastion-drop incident this block
+    // fixes). Superseded by `emit-state-incomplete-corpus-guard`: rather than
+    // regenerating the rollup while preserving repo-d's cached entry,
+    // `emit_state` now refuses the whole write (E_EMIT_INCOMPLETE_CORPUS) —
+    // a stronger guarantee that repo-d's entry (and everything else) is left
+    // byte-identical rather than regenerated at all.
     // -----------------------------------------------------------------------
 
     #[test]
     fn malformed_child_state_json_does_not_truncate_rollup() {
         let dir = temp_dir("malformed-regression");
         write_core_fixture(&dir);
+        corrupt_repo_d_state_json(&dir);
+
+        let before = fs::read(dir.join("planning/state.json")).unwrap();
 
         let report = mev::emit_state(&dir, true).expect("emit_state should not error");
 
-        // The malformed repo-d state.json should surface as a load error, but
-        // must not be a hard failure that aborts the whole rollup.
+        // The malformed repo-d state.json should still surface as a load
+        // error — the guard adds a refusal, it does not replace the cause.
         let malformed_diag = report
             .diagnostics
             .iter()
@@ -2874,19 +2904,43 @@ heading = "Repo P"
             report.diagnostics
         );
 
-        let brain_after: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(dir.join("planning/state.json")).unwrap())
-                .unwrap();
-        let repos = repos_by_slug(&brain_after);
+        // The incomplete-corpus guard must refuse the write outright.
+        let guard_diag = report
+            .diagnostics
+            .iter()
+            .find(|d| d.locator == "E_EMIT_INCOMPLETE_CORPUS");
+        assert!(
+            guard_diag.is_some(),
+            "expected E_EMIT_INCOMPLETE_CORPUS guard; got: {:#?}",
+            report.diagnostics
+        );
 
-        // repo-d must still be present (preserved), not dropped.
+        let wrote: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "I_EMIT_WROTE")
+            .collect();
+        assert!(
+            wrote.is_empty(),
+            "a refused write must not produce any I_EMIT_WROTE diagnostic; got: {wrote:#?}"
+        );
+
+        let after = fs::read(dir.join("planning/state.json")).unwrap();
+        assert_eq!(
+            before, after,
+            "brain state.json must be byte-identical when the corpus is incomplete"
+        );
+
+        // repo-d's pre-existing cached entry is untouched (nothing was
+        // regenerated), not dropped.
+        let brain_after: serde_json::Value = serde_json::from_slice(&after).unwrap();
+        let repos = repos_by_slug(&brain_after);
         assert!(
             repos.contains_key("repo-d"),
-            "repo-d must be preserved despite malformed state.json; got slugs: {:?}",
+            "repo-d must still be present (refused write leaves it untouched); got slugs: {:?}",
             repos.keys().collect::<Vec<_>>()
         );
         let repo_d = &repos["repo-d"];
-        assert_eq!(repo_d["tier"].as_str(), Some("core"));
         let next = repo_d["next"].as_array().unwrap();
         assert!(
             next.iter().any(|b| b["id"].as_str() == Some("RD.1.A")),
@@ -2924,7 +2978,8 @@ heading = "Repo P"
 
     // -----------------------------------------------------------------------
     // Test 6 — brain focus is the repo-tagged union of loadable children's
-    // derived focus (repo-c/d/e contribute nothing — no live tracks).
+    // derived focus (repo-c/e contribute nothing — no source and no live
+    // tracks; repo-p is excluded as out-of-tier).
     // -----------------------------------------------------------------------
 
     #[test]
