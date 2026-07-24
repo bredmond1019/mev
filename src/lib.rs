@@ -521,6 +521,18 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
 /// A target file lacking the relevant sentinels is skipped with a `W_EMIT_NO_SENTINEL`
 /// warning — the emitter never splices into arbitrary prose.
 ///
+/// **Corpus-completeness guard.** When `write` is `true` and any discovered
+/// `state.json` failed to load (an `E_STATE_MALFORMED_JSON` diagnostic was pushed),
+/// `emit_state` refuses to regenerate any derived surface: it pushes an
+/// `E_EMIT_INCOMPLETE_CORPUS` error diagnostic and returns *before*
+/// `build_state_graph` and the first planner runs, leaving every file untouched.
+/// Derived views are cross-repo unions, so writing them from a partial corpus would
+/// silently erase the missing repo(s) — and rewriting `cross_repo[]` would delete the
+/// dangling references that are the only evidence. Dry-run (`write == false`) is
+/// entirely exempt from this guard: it still runs every planner and reports
+/// `W_EMIT_DRY_RUN` actions, alongside the `E_STATE_MALFORMED_JSON` cause, so it
+/// remains the diagnostic tool for exactly this situation.
+///
 /// Resolves `brain.toml` the same way as [`validate_brain`] — see that function's
 /// doc for the `E_CONFIG_NOT_FOUND` fallback behaviour.
 pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report> {
@@ -575,6 +587,28 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
                 ));
             }
         }
+    }
+
+    // 2.5. Completeness guard: refuse to write derived views from a partial corpus.
+    //    Derived views (focus, repos[]/cross_repo[], project caches, tier rollups,
+    //    HQ/unified/epic boards, master-plan and epic sequence tables) are all
+    //    cross-repo unions — regenerating them while any discovered state.json
+    //    failed to load would silently erase the missing repo(s) from every
+    //    surface, and rewriting cross_repo[] would delete the dangling references
+    //    that are the only evidence a repo went missing. This must run before
+    //    `build_state_graph`/the first `apply_plan` and must NOT affect dry-run —
+    //    the `write &&` conjunct is load-bearing and must stay first.
+    if write && loaded.len() < sources.len() {
+        report.diagnostics.push(Diagnostic::error(
+            root,
+            "E_EMIT_INCOMPLETE_CORPUS",
+            format!(
+                "refusing to write derived views: {} of {} discovered state.json files failed to load. Derived views (focus, repos[]/cross_repo[], project caches, tier rollups, HQ/unified/epic boards, master-plan and epic sequence tables) are cross-repo unions — regenerating them from a partial corpus would silently erase the missing repo(s) from every surface, and rewriting cross_repo[] would delete the dangling references that are the only evidence. Fix the E_STATE_MALFORMED_JSON error(s) above, then re-run.",
+                sources.len() - loaded.len(),
+                sources.len()
+            ),
+        ));
+        return Ok(report);
     }
 
     // 3. Build the block-dependency graph.
