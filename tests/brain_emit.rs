@@ -6584,6 +6584,59 @@ fn epic_members_returns_only_members_in_cross_repo_wave_order() {
 }
 
 #[test]
+fn epic_members_follows_depends_on_over_mismatched_cross_repo_wave_scales() {
+    // Per-repo wave scales are not comparable (bastion uses small numbers,
+    // this corpus stands in for a repo whose scale runs much higher, e.g.
+    // the real bastion-web 10-60 range). BW.1 (wave 1) depends on BA.1
+    // (wave 250) — raw wave order would wrongly sort the dependent BW.1
+    // first; the topological sort must still put BA.1 first.
+    let bastion = (
+        make_src("bastion"),
+        make_leaf(
+            "bastion",
+            vec![Track {
+                title: "P".to_string(),
+                blocks: vec![block_in_epics("BA.1", Some(250), &["ep"])],
+            }],
+        ),
+    );
+    let web = (
+        make_src("bastion-web"),
+        make_leaf(
+            "bastion-web",
+            vec![Track {
+                title: "P".to_string(),
+                blocks: vec![{
+                    let mut b = block_with_dep(
+                        "BW.1",
+                        "BW.1 title",
+                        Some("open"),
+                        Some(1),
+                        "bastion",
+                        "BA.1",
+                    );
+                    b.epics = vec!["ep".to_string()];
+                    b
+                }],
+            }],
+        ),
+    );
+    let files = vec![bastion, web];
+    let graph = mev::brain::state::build_state_graph(&files);
+
+    let members: Vec<String> = mev::brain::emit::epic_members(&graph, &files, "ep")
+        .into_iter()
+        .map(|(repo, b)| format!("{repo}:{}", b.id))
+        .collect();
+
+    assert_eq!(
+        members,
+        vec!["bastion:BA.1", "bastion-web:BW.1"],
+        "BA.1 must precede BW.1 despite its higher raw wave number, because BW.1 depends on it"
+    );
+}
+
+#[test]
 fn epic_members_is_empty_for_an_unclaimed_slug() {
     let files = vec![(
         make_src("mev"),
@@ -6596,6 +6649,44 @@ fn epic_members_is_empty_for_an_unclaimed_slug() {
         ),
     )];
     assert!(mev::brain::emit::epic_members(&empty_graph(), &files, "ghost").is_empty());
+}
+
+#[test]
+fn epic_members_cycle_terminates_without_hang_or_panic() {
+    // A depends_on cycle (A -> B -> A) must not be assumed away here — the
+    // corpus-level cycle check (MV.3.P2) may not have run yet. The DFS guard
+    // should just terminate deterministically instead of hanging or panicking.
+    let file = make_leaf(
+        "repo",
+        vec![Track {
+            title: "P".to_string(),
+            blocks: vec![
+                {
+                    let mut b = block_with_dep("A", "A", Some("open"), Some(1), "repo", "B");
+                    b.epics = vec!["ep".to_string()];
+                    b
+                },
+                {
+                    let mut b = block_with_dep("B", "B", Some("open"), Some(2), "repo", "A");
+                    b.epics = vec!["ep".to_string()];
+                    b
+                },
+            ],
+        }],
+    );
+    let files = vec![(make_src("repo"), file)];
+    let graph = mev::brain::state::build_state_graph(&files);
+
+    let members: Vec<String> = mev::brain::emit::epic_members(&graph, &files, "ep")
+        .into_iter()
+        .map(|(repo, b)| format!("{repo}:{}", b.id))
+        .collect();
+
+    assert_eq!(
+        members.len(),
+        2,
+        "both cyclic members must still appear exactly once"
+    );
 }
 
 // ---------------------------------------------------------------------------

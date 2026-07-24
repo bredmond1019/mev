@@ -126,38 +126,108 @@ pub fn wave_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> Ve
 }
 
 // ---------------------------------------------------------------------------
-// epic_members — one epic's blocks, in cross-repo wave order
+// epic_members — one epic's blocks, in cross-repo dependency order
 // ---------------------------------------------------------------------------
 
-/// Every block claiming `slug`, across all repos, in [`wave_order`].
+/// Every block claiming `slug`, across all repos, in dependency-respecting
+/// order.
 ///
 /// Returns `(repo_slug, block)` pairs — the cross-repo sequence for one
-/// initiative, which is what an epic's sequence table renders. Ordering is
-/// delegated to `wave_order` rather than reimplemented so a per-epic table and
-/// a per-repo wave table can never disagree about sequence.
+/// initiative, which is what an epic's sequence table renders.
+///
+/// Cross-repo `wave` numbers are **not** on a shared scale (per-repo authors
+/// pick their own range — bastion uses 1-7, bastion-web 10-60, bastion-ui
+/// 1-20 — see the `epic-sequence-wave-scale` carryover this superseded), so
+/// sorting a multi-repo table by raw `wave` alone can misrepresent an
+/// initiative's real work order or strand a `None`-wave block at the bottom.
+/// This instead does a DFS-based topological sort over the full `depends_on`
+/// graph (every block, every repo — not just this epic's members), then
+/// filters the result down to `slug`'s members. Walking the *full* graph
+/// (rather than only edges between two members) means a member gated by a
+/// same-repo, out-of-epic prerequisite still sorts after it correctly.
+///
+/// DFS visitation order defaults to [`wave_order`] (global wave, then
+/// iteration index) so that within a component with no dependency
+/// constraint — most same-epic block pairs, which just aren't linked by an
+/// edge — the table still reads in the same stable order it always has.
+/// Only `{type:"block"}` deps that resolve to a real node participate;
+/// `external` deps have no target node and cannot constrain ordering.
+///
+/// Cycle-safe: a node already on the current DFS stack short-circuits
+/// instead of recursing again, mirroring the guard in
+/// [`crate::brain::state::effective_priorities`] — this does not assume
+/// `MV.3.P2`'s cycle check already rejected the corpus.
 pub fn epic_members<'a>(
     graph: &StateGraph,
     files: &'a [(StateSource, StateFile)],
     slug: &str,
 ) -> Vec<(String, &'a TrackBlock)> {
-    // Index members by "repo:id" so the wave-ordered key list can drive output.
+    use std::collections::HashSet;
+
+    // Index every block (regardless of epic membership — dependency chains
+    // can pass through non-member nodes) by "repo:id".
     let mut by_key: HashMap<String, (String, &TrackBlock)> = HashMap::new();
     for (src, file) in files {
         for track in &file.tracks {
             for block in &track.blocks {
-                if block.epics.iter().any(|s| s == slug) {
-                    by_key.insert(
-                        format!("{}:{}", src.repo_slug, block.id),
-                        (src.repo_slug.clone(), block),
-                    );
-                }
+                by_key.insert(
+                    format!("{}:{}", src.repo_slug, block.id),
+                    (src.repo_slug.clone(), block),
+                );
             }
         }
     }
 
-    wave_order(graph, files)
+    // Forward deps: key -> [dep keys it depends_on], block-type only, and
+    // only where the target actually resolves to a node in this corpus.
+    let mut deps: HashMap<&str, Vec<String>> = HashMap::new();
+    for (key, (_, block)) in &by_key {
+        let ds = block
+            .depends_on
+            .iter()
+            .filter_map(|dep| match dep {
+                BlockedBy::Block { repo, id, .. } => {
+                    let dep_key = format!("{repo}:{id}");
+                    by_key.contains_key(&dep_key).then_some(dep_key)
+                }
+                BlockedBy::External { .. } => None,
+            })
+            .collect();
+        deps.insert(key.as_str(), ds);
+    }
+
+    fn visit(
+        key: &str,
+        deps: &HashMap<&str, Vec<String>>,
+        visited: &mut HashSet<String>,
+        on_stack: &mut HashSet<String>,
+        output: &mut Vec<String>,
+    ) {
+        if visited.contains(key) || on_stack.contains(key) {
+            return;
+        }
+        on_stack.insert(key.to_string());
+        if let Some(ds) = deps.get(key) {
+            for d in ds {
+                visit(d, deps, visited, on_stack, output);
+            }
+        }
+        on_stack.remove(key);
+        visited.insert(key.to_string());
+        output.push(key.to_string());
+    }
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut on_stack: HashSet<String> = HashSet::new();
+    let mut order: Vec<String> = Vec::new();
+    for key in wave_order(graph, files) {
+        visit(&key, &deps, &mut visited, &mut on_stack, &mut order);
+    }
+
+    order
         .into_iter()
-        .filter_map(|key| by_key.remove(&key))
+        .filter_map(|key| by_key.get(&key).cloned())
+        .filter(|(_, block)| block.epics.iter().any(|s| s == slug))
         .collect()
 }
 
