@@ -2546,6 +2546,364 @@ heading = "Beta"
 }
 
 // ---------------------------------------------------------------------------
+// emit-state-incomplete-corpus-guard — Task 2
+//
+// Covers: `emit_state(&dir, true)` refuses to write derived views when any
+// discovered `state.json` fails to load (`E_EMIT_INCOMPLETE_CORPUS`, cause
+// `E_STATE_MALFORMED_JSON` preserved, no file touched), `emit_state(&dir,
+// false)` (dry-run) remains fully exempt from the guard, and a healthy
+// corpus is unaffected (regression + non-vacuousness for the byte-identity
+// assertion above).
+// ---------------------------------------------------------------------------
+
+mod incomplete_corpus_guard {
+    use std::fs;
+    use std::path::Path;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("mev-incomplete-corpus-guard-{tag}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_file(root: &Path, rel: &str, content: &str) {
+        let target = root.join(rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&target, content.as_bytes()).unwrap();
+    }
+
+    fn write_json(root: &Path, rel: &str, value: &serde_json::Value) {
+        write_file(root, rel, &serde_json::to_string_pretty(value).unwrap());
+    }
+
+    /// Minimal `brain.toml` registering two leaf repos (alpha, beta) — the
+    /// same corpus-builder shape used by `task4_emit_state`.
+    fn write_brain_toml(root: &Path) {
+        let toml = r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "alpha"
+tier = "primary"
+repo_path = "repos/alpha"
+status_file = "repos/alpha/planning/status.md"
+cache_doc = "docs/projects/alpha.md"
+heading = "Alpha"
+
+[[repos]]
+slug = "beta"
+tier = "primary"
+repo_path = "repos/beta"
+status_file = "repos/beta/planning/status.md"
+cache_doc = "docs/projects/beta.md"
+heading = "Beta"
+"#;
+        fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
+    }
+
+    /// Stale HQ brain `planning/state.json` — `repos[]` caches alpha with an
+    /// empty `now` even though alpha's leaf has an `in_progress` block, so a
+    /// healthy write regenerates it.
+    fn write_stale_brain_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "hq",
+            "kind": "brain",
+            "updated": "2026-06-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "repos": [
+                {
+                    "repo": "alpha",
+                    "now": [],
+                    "next": [],
+                    "blocked": []
+                }
+            ],
+            "cross_repo": []
+        });
+        write_json(root, "planning/state.json", &state);
+    }
+
+    /// Alpha leaf `planning/state.json` with one `in_progress` block.
+    fn write_alpha_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "alpha",
+            "kind": "project",
+            "updated": "2026-06-29",
+            "focus": {
+                "now": [{ "id": "AL.1.A", "title": "Alpha block A", "status": "in_progress" }],
+                "next": [],
+                "blocked": []
+            },
+            "tracks": [
+                {
+                    "title": "Phase 1",
+                    "blocks": [
+                        { "id": "AL.1.A", "title": "Alpha block A", "status": "in_progress" },
+                        { "id": "AL.1.B", "title": "Alpha block B", "status": "open" }
+                    ]
+                }
+            ]
+        });
+        write_json(root, "repos/alpha/planning/state.json", &state);
+    }
+
+    /// Healthy beta leaf `planning/state.json` — a stale `focus.now` entry
+    /// (the block is `open`, not `in_progress`), so a healthy write clears it.
+    /// This is the file whose byte-identity (refused) vs. byte-change
+    /// (healthy) makes test 1's assertion non-vacuous.
+    fn write_beta_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "beta",
+            "kind": "project",
+            "updated": "2026-06-29",
+            "focus": {
+                "now": [{ "id": "BE.1.A", "title": "Beta block A", "status": "in_progress" }],
+                "next": [],
+                "blocked": []
+            },
+            "tracks": [
+                {
+                    "title": "Phase 1",
+                    "blocks": [
+                        { "id": "BE.1.A", "title": "Beta block A", "status": "open" }
+                    ]
+                }
+            ]
+        });
+        write_json(root, "repos/beta/planning/state.json", &state);
+    }
+
+    /// Beta leaf `planning/state.json` carrying a schema-invalid `depends_on`
+    /// entry — `{"type":"block","repo":"x","id":null}` — mirroring the real
+    /// 2026-07-24 defect (`okf_core::state::BlockedBy::Block.id` is a
+    /// non-optional `String`; a JSON `null` fails deserialization, so the
+    /// whole file is rejected as `StateLoadError::Parse`, not merely one
+    /// field). Valid JSON, invalid schema.
+    fn write_corrupt_beta_state(root: &Path) {
+        let state = serde_json::json!({
+            "repo": "beta",
+            "kind": "project",
+            "updated": "2026-06-29",
+            "focus": {
+                "now": [{ "id": "BE.1.A", "title": "Beta block A", "status": "in_progress" }],
+                "next": [],
+                "blocked": []
+            },
+            "tracks": [
+                {
+                    "title": "Phase 1",
+                    "blocks": [
+                        {
+                            "id": "BE.1.A",
+                            "title": "Beta block A",
+                            "status": "open",
+                            "depends_on": [
+                                { "type": "block", "repo": "x", "id": null }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        });
+        write_json(root, "repos/beta/planning/state.json", &state);
+    }
+
+    /// The healthy fixture: brain.toml + stale brain state + alpha + healthy
+    /// (but stale-focus) beta. A `--write` run rewrites both the HQ brain
+    /// state and beta's leaf state.
+    fn write_healthy_fixture(root: &Path) {
+        write_brain_toml(root);
+        write_stale_brain_state(root);
+        write_alpha_state(root);
+        write_beta_state(root);
+    }
+
+    /// The broken fixture: identical to the healthy one except beta's leaf
+    /// `state.json` fails to load (schema-invalid `depends_on`).
+    fn write_broken_fixture(root: &Path) {
+        write_brain_toml(root);
+        write_stale_brain_state(root);
+        write_alpha_state(root);
+        write_corrupt_beta_state(root);
+    }
+
+    /// Snapshot the byte content of every file a healthy write would rewrite
+    /// — alpha, beta, and the HQ brain `state.json`.
+    struct Snapshot {
+        alpha: Vec<u8>,
+        beta: Vec<u8>,
+        brain: Vec<u8>,
+    }
+
+    fn snapshot(root: &Path) -> Snapshot {
+        Snapshot {
+            alpha: fs::read(root.join("repos/alpha/planning/state.json")).unwrap(),
+            beta: fs::read(root.join("repos/beta/planning/state.json")).unwrap(),
+            brain: fs::read(root.join("planning/state.json")).unwrap(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1 — write=true refuses on a corpus with a failed-to-load file.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn emit_state_write_refuses_when_a_state_file_fails_to_load() {
+        let dir = temp_dir("write-refuses");
+        write_broken_fixture(&dir);
+
+        let before = snapshot(&dir);
+
+        let report = mev::emit_state(&dir, true).expect("emit_state should not error");
+
+        let has_incomplete_corpus = report
+            .diagnostics
+            .iter()
+            .any(|d| d.locator == "E_EMIT_INCOMPLETE_CORPUS");
+        assert!(
+            has_incomplete_corpus,
+            "expected E_EMIT_INCOMPLETE_CORPUS; got: {:#?}",
+            report.diagnostics
+        );
+
+        let has_malformed_cause = report
+            .diagnostics
+            .iter()
+            .any(|d| d.locator == "E_STATE_MALFORMED_JSON");
+        assert!(
+            has_malformed_cause,
+            "the underlying E_STATE_MALFORMED_JSON cause must not be swallowed; got: {:#?}",
+            report.diagnostics
+        );
+
+        let wrote_diags: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "I_EMIT_WROTE")
+            .collect();
+        assert!(
+            wrote_diags.is_empty(),
+            "a refused write must not emit I_EMIT_WROTE; got: {wrote_diags:#?}"
+        );
+
+        let after = snapshot(&dir);
+        assert_eq!(
+            after.alpha, before.alpha,
+            "alpha state.json must be byte-identical after a refused write"
+        );
+        assert_eq!(
+            after.beta, before.beta,
+            "beta state.json must be byte-identical after a refused write"
+        );
+        assert_eq!(
+            after.brain, before.brain,
+            "brain state.json must be byte-identical after a refused write"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2 — dry-run stays fully exempt from the guard.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn emit_state_dry_run_still_reports_on_an_incomplete_corpus() {
+        let dir = temp_dir("dry-run-exempt");
+        write_broken_fixture(&dir);
+
+        let report = mev::emit_state(&dir, false).expect("emit_state should not error");
+
+        let dry_run_diags: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "W_EMIT_DRY_RUN")
+            .collect();
+        assert!(
+            !dry_run_diags.is_empty(),
+            "dry-run must still run every planner and report W_EMIT_DRY_RUN; got: {:#?}",
+            report.diagnostics
+        );
+
+        let has_malformed_cause = report
+            .diagnostics
+            .iter()
+            .any(|d| d.locator == "E_STATE_MALFORMED_JSON");
+        assert!(
+            has_malformed_cause,
+            "E_STATE_MALFORMED_JSON must be reported in dry-run too; got: {:#?}",
+            report.diagnostics
+        );
+
+        let has_incomplete_corpus = report
+            .diagnostics
+            .iter()
+            .any(|d| d.locator == "E_EMIT_INCOMPLETE_CORPUS");
+        assert!(
+            !has_incomplete_corpus,
+            "dry-run must never be refused by E_EMIT_INCOMPLETE_CORPUS; got: {:#?}",
+            report.diagnostics
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3 — regression: a complete corpus (loaded.len() == sources.len())
+    // is unaffected, including the degenerate all-loaded case, and its
+    // rewritten files are what make test 1's byte-identity assertion
+    // non-vacuous.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn emit_state_write_still_proceeds_on_a_complete_corpus() {
+        let dir = temp_dir("healthy-write-proceeds");
+        write_healthy_fixture(&dir);
+
+        let before = snapshot(&dir);
+
+        let report = mev::emit_state(&dir, true).expect("emit_state should not error");
+
+        let has_incomplete_corpus = report
+            .diagnostics
+            .iter()
+            .any(|d| d.locator == "E_EMIT_INCOMPLETE_CORPUS");
+        assert!(
+            !has_incomplete_corpus,
+            "a complete corpus must never trip the guard; got: {:#?}",
+            report.diagnostics
+        );
+
+        let wrote_diags: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "I_EMIT_WROTE")
+            .collect();
+        assert!(
+            !wrote_diags.is_empty(),
+            "a healthy corpus must still write derived views; got: {:#?}",
+            report.diagnostics
+        );
+
+        let after = snapshot(&dir);
+        assert_ne!(
+            after.beta, before.beta,
+            "beta state.json must change on a healthy write — this is what makes \
+             test 1's byte-identity assertion on the same file non-vacuous"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MV.3B.U Task 4 — end-to-end `emit_state` tier-scoping + brain-focus
 // integration tests.
 //
