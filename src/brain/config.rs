@@ -187,6 +187,101 @@ impl BrainConfig {
     pub fn projects(&self) -> Vec<&str> {
         self.repos.iter().map(|r| r.slug.as_str()).collect()
     }
+
+    /// Look up a `[[repos]]` entry by slug.
+    fn repo(&self, slug: &str) -> Option<&RepoEntry> {
+        self.repos.iter().find(|r| r.slug == slug)
+    }
+
+    /// Derive the set of derived surfaces a given repo `slug` feeds, for
+    /// `emit-state --scope <slug>` (ticket `ticket-emit-state-scope-and-lock`).
+    ///
+    /// Purely mechanical over the `[[repos]]` registry — no hardcoded repo list:
+    ///
+    /// - **`own_state_json`** — `{repo_path}/planning/state.json`, mirroring the
+    ///   fixed suffix [`crate::brain::state::discover_state_files`] uses for every
+    ///   leaf repo (independent of the `status_file` field, which already embeds
+    ///   the same `{repo_path}` prefix for its own `status.md` sibling).
+    /// - **`cache_doc`** — the entry's own `cache_doc` field, verbatim.
+    /// - **`tier_rollup_status_file`** — the `status_file` of the `[[repos]]` entry
+    ///   whose `slug` equals this repo's `tier` value (a "tier-container
+    ///   self-entry", e.g. `slug = "core"`, `tier = "core"` on the leaf that feeds
+    ///   it — mirroring the self-entry convention `tier_scope_for` and
+    ///   `discover_state_files` already use, where a tier container is a
+    ///   `[[repos]]` entry whose `slug` names the tier). `None` when no entry's
+    ///   `slug` matches the tier (e.g. a `tier = "_root"` entry such as the HQ
+    ///   root or a tier-container's own entry, which has no *further* tier to
+    ///   roll into — it feeds the HQ board directly instead).
+    /// - **`hq_board_status_file`** — the `status_file` of the `[[repos]]` entry
+    ///   with `repo_path == "."` (the HQ root). Every repo feeds the HQ board.
+    ///
+    /// Returns [`ScopeError::UnknownSlug`] (carrying every valid slug, in
+    /// registry order) when `slug` is not registered.
+    pub fn scope_dependencies(&self, slug: &str) -> Result<ScopeDependencySet, ScopeError> {
+        let repo = self.repo(slug).ok_or_else(|| ScopeError::UnknownSlug {
+            slug: slug.to_string(),
+            valid_slugs: self.projects().into_iter().map(str::to_string).collect(),
+        })?;
+
+        let own_state_json = PathBuf::from(&repo.repo_path)
+            .join("planning")
+            .join("state.json");
+
+        let cache_doc = PathBuf::from(&repo.cache_doc);
+
+        let tier_rollup_status_file = self
+            .repo(&repo.tier)
+            .filter(|tier_repo| tier_repo.slug != repo.slug)
+            .map(|tier_repo| PathBuf::from(&tier_repo.status_file));
+
+        let hq_repo = self
+            .repos
+            .iter()
+            .find(|r| r.repo_path == "." || r.repo_path.is_empty())
+            .ok_or(ScopeError::NoHqRoot)?;
+        let hq_board_status_file = PathBuf::from(&hq_repo.status_file);
+
+        Ok(ScopeDependencySet {
+            own_state_json,
+            cache_doc,
+            tier_rollup_status_file,
+            hq_board_status_file,
+        })
+    }
+}
+
+/// The derived surfaces a single repo (resolved via [`BrainConfig::scope_dependencies`])
+/// feeds — the set `emit-state --scope <repo>` must regenerate and nothing else.
+///
+/// All paths are relative to the brain root (as every `[[repos]]` field already is).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeDependencySet {
+    /// `{repo_path}/planning/state.json` — the repo's own leaf state file.
+    pub own_state_json: PathBuf,
+    /// The repo's `cache_doc` (e.g. `docs/projects/<slug>.md`).
+    pub cache_doc: PathBuf,
+    /// The `status_file` of the repo's tier container, if the tier resolves to a
+    /// registered `[[repos]]` entry distinct from this repo itself. `None` for a
+    /// tier-container (or root) entry that has no further tier to roll into.
+    pub tier_rollup_status_file: Option<PathBuf>,
+    /// The HQ root's `status_file` — the Operating Board target every repo feeds.
+    pub hq_board_status_file: PathBuf,
+}
+
+/// Errors from [`BrainConfig::scope_dependencies`].
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ScopeError {
+    /// The requested `--scope` slug is not a registered `[[repos]]` entry.
+    #[error("unknown --scope slug '{slug}'; valid slugs: {valid_slugs:?}")]
+    UnknownSlug {
+        slug: String,
+        valid_slugs: Vec<String>,
+    },
+    /// The registry has no `[[repos]]` entry with `repo_path == "."` (the HQ
+    /// root), so the HQ board target cannot be derived. This should not occur
+    /// with a well-formed `brain.toml`.
+    #[error("brain.toml has no [[repos]] entry with repo_path = \".\" (HQ root)")]
+    NoHqRoot,
 }
 
 // ---------------------------------------------------------------------------
@@ -438,5 +533,116 @@ deferred_days = 2
             !is_linked_worktree(dir.path()),
             "a plain non-git directory must fail open to false"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // BrainConfig::scope_dependencies (ticket-emit-state-scope-and-lock task 1)
+    // -----------------------------------------------------------------------
+
+    fn repo_entry(slug: &str, tier: &str, repo_path: &str) -> RepoEntry {
+        RepoEntry {
+            slug: slug.to_string(),
+            tier: tier.to_string(),
+            repo_path: repo_path.to_string(),
+            status_file: format!("{repo_path}/planning/status.md"),
+            cache_doc: format!("docs/projects/{slug}.md"),
+            heading: slug.to_string(),
+        }
+    }
+
+    /// Mirrors the real HQ `brain.toml` shape: an HQ root, two tier-container
+    /// self-entries (`core`, `business`), and one leaf repo under each tier.
+    fn scoped_fixture_config() -> BrainConfig {
+        BrainConfig {
+            vocab: VocabConfig::default(),
+            crawl: CrawlConfig::default(),
+            attention: AttentionThresholds::default(),
+            repos: vec![
+                RepoEntry {
+                    slug: "brain".to_string(),
+                    tier: "_root".to_string(),
+                    repo_path: ".".to_string(),
+                    status_file: "planning/status.md".to_string(),
+                    cache_doc: "README.md".to_string(),
+                    heading: "Company Brain".to_string(),
+                },
+                repo_entry("core", "_root", "core"),
+                repo_entry("mev", "core", "core/mev"),
+                repo_entry("business", "_root", "business"),
+                repo_entry("bastiel", "business", "business/bastiel"),
+            ],
+        }
+    }
+
+    #[test]
+    fn scope_dependencies_valid_core_tier_slug() {
+        let cfg = scoped_fixture_config();
+        let deps = cfg.scope_dependencies("mev").expect("mev is registered");
+
+        assert_eq!(
+            deps.own_state_json,
+            PathBuf::from("core/mev/planning/state.json")
+        );
+        assert_eq!(deps.cache_doc, PathBuf::from("docs/projects/mev.md"));
+        assert_eq!(
+            deps.tier_rollup_status_file,
+            Some(PathBuf::from("core/planning/status.md")),
+            "mev's tier 'core' resolves to the 'core' tier-container entry"
+        );
+        assert_eq!(
+            deps.hq_board_status_file,
+            PathBuf::from("planning/status.md")
+        );
+    }
+
+    #[test]
+    fn scope_dependencies_valid_business_tier_slug() {
+        let cfg = scoped_fixture_config();
+        let deps = cfg
+            .scope_dependencies("bastiel")
+            .expect("bastiel is registered");
+
+        assert_eq!(
+            deps.own_state_json,
+            PathBuf::from("business/bastiel/planning/state.json")
+        );
+        assert_eq!(deps.cache_doc, PathBuf::from("docs/projects/bastiel.md"));
+        assert_eq!(
+            deps.tier_rollup_status_file,
+            Some(PathBuf::from("business/planning/status.md")),
+            "bastiel's tier 'business' resolves to the 'business' tier-container entry"
+        );
+        assert_eq!(
+            deps.hq_board_status_file,
+            PathBuf::from("planning/status.md")
+        );
+    }
+
+    #[test]
+    fn scope_dependencies_tier_container_self_entry_has_no_further_rollup() {
+        // 'core' itself has tier = "_root", which names no [[repos]] entry, so
+        // it feeds the HQ board directly rather than a further tier rollup.
+        let cfg = scoped_fixture_config();
+        let deps = cfg.scope_dependencies("core").expect("core is registered");
+        assert_eq!(deps.tier_rollup_status_file, None);
+    }
+
+    #[test]
+    fn scope_dependencies_unknown_slug_carries_valid_slugs() {
+        let cfg = scoped_fixture_config();
+        let err = cfg
+            .scope_dependencies("nonexistent")
+            .expect_err("nonexistent is not registered");
+
+        match err {
+            ScopeError::UnknownSlug { slug, valid_slugs } => {
+                assert_eq!(slug, "nonexistent");
+                assert_eq!(
+                    valid_slugs,
+                    vec!["brain", "core", "mev", "business", "bastiel"]
+                );
+            }
+            other => panic!("expected ScopeError::UnknownSlug, got {other:?}"),
+        }
     }
 }
