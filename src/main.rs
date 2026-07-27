@@ -125,6 +125,11 @@ enum Command {
     ///   E_EMIT_UNKNOWN_SCOPE — --scope names a slug with no matching [[repos]] entry in
     ///                            brain.toml (exit 1); the diagnostic message names every
     ///                            valid slug.
+    ///   E_EMIT_LOCK_HELD     — --write could not acquire the advisory lock at
+    ///                            <root>/.mev-emit.lock because another live process
+    ///                            already holds it (exit 1); a stale lock (owning process
+    ///                            no longer alive) is reclaimed automatically instead.
+    ///                            Dry-run never takes the lock.
     EmitState {
         /// Path to search from when locating brain.toml (walks up to find it).
         /// Defaults to the current directory.
@@ -653,6 +658,33 @@ fn main() -> ExitCode {
                     eprintln!("error: {e}");
                     return ExitCode::FAILURE;
                 }
+            };
+            // Advisory lock: only --write mutates derived files, so only --write needs
+            // mutual exclusion. Dry-run stays lock-free (it never touches disk). The
+            // guard is held for the rest of this match arm and releases on every exit
+            // path (success or error) via Drop.
+            let _lock_guard = if write {
+                match mev::brain::lock::acquire_lock(&root, mev::brain::lock::DEFAULT_LOCK_TIMEOUT)
+                {
+                    Ok(guard) => Some(guard),
+                    Err(mev::brain::lock::LockError::Held {
+                        holder_pid,
+                        lock_path,
+                        waited_secs,
+                    }) => {
+                        eprintln!(
+                            "error [E_EMIT_LOCK_HELD] another emit-state --write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
+                            lock_path.display()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                    Err(e) => {
+                        eprintln!("error [E_EMIT_LOCK_HELD] {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                None
             };
             let scope_deps = match &scope {
                 Some(slug) => {

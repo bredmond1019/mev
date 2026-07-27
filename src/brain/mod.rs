@@ -12,6 +12,7 @@ pub mod epics;
 pub mod graph;
 pub mod graph_emit;
 pub mod links;
+pub mod lock;
 pub mod manifest;
 pub mod okf;
 pub mod scope;
