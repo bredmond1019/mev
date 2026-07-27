@@ -27,6 +27,10 @@ pub use brain::links::{
 pub use brain::manifest::{Manifest, ManifestEntry, build_manifest};
 pub use brain::okf::{OkfFrontmatter, validate_md_file};
 pub use brain::visualize::generate_graph_visual;
+pub use doc::{
+    OpportunityKind, plan_add_action, plan_document, plan_index_reconcile, plan_ingest,
+    plan_merge_contacts, plan_set_stage,
+};
 pub use learn_ai::LearnAiValidator;
 pub use learn_ai::crawl::{ContentFile, Corpus, FileKind, Locale, crawl};
 pub use learn_ai::meta::validate_file;
@@ -784,6 +788,134 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     report.diagnostics.extend(epic_seq_diags);
     report.diagnostics.extend(status_fm_diags);
 
+    Ok(report)
+}
+
+/// Materialize a single generic `BrainDocModel` document from a raw JSON payload
+/// (`mev doc materialize`, `MV.9.A` task 4).
+///
+/// `model` selects which okf-core model to build the document from:
+/// `"opportunity"` (dispatches through [`doc::opportunity::plan_ingest`]'s shape
+/// auto-detection), `"learning-artifact"` (`okf_core::LearningArtifact::from_payload`), or
+/// `"proposal"` (`okf_core::Proposal::from_automation_roadmap`, reading `company_name` and
+/// `roadmap` fields off `input`). Any other value pushes `E_DOC_UNKNOWN_MODEL` and plans
+/// nothing.
+///
+/// Mirrors [`emit_state`]'s shape: resolve (the caller already resolved `root`), plan, then
+/// `apply_plan(&plan, write)`, folding the diagnostics into a [`Report`].
+pub fn doc_materialize(
+    root: &std::path::Path,
+    model: &str,
+    input: &serde_json::Value,
+    write: bool,
+) -> anyhow::Result<Report> {
+    use brain::emit::apply_plan;
+    use okf_core::{LearningArtifact, Proposal};
+
+    let plan = match model {
+        "opportunity" => doc::opportunity::plan_ingest(input, None, root),
+        "learning-artifact" => {
+            let artifact = LearningArtifact::from_payload(input);
+            doc::plan_document(&artifact, root)
+        }
+        "proposal" => {
+            let company_name = input
+                .get("company_name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let roadmap = input
+                .get("roadmap")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let proposal = Proposal::from_automation_roadmap(company_name, &roadmap);
+            doc::plan_document(&proposal, root)
+        }
+        other => {
+            let mut report = Report::default();
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_DOC_UNKNOWN_MODEL",
+                format!(
+                    "unknown model '{other}' (expected one of: opportunity | learning-artifact | proposal)"
+                ),
+            ));
+            return Ok(report);
+        }
+    };
+
+    let mut report = Report::default();
+    report.diagnostics.extend(apply_plan(&plan, write));
+    Ok(report)
+}
+
+/// Ingest a raw `CompanyBrief`/`ProspectingResult`/job-posting JSON payload as a new (or
+/// updated) Opportunity document (`mev doc opportunity ingest`).
+///
+/// `kind` dispatches directly when given; `None` auto-detects from `input`'s shape (see
+/// [`doc::opportunity::plan_ingest`]).
+pub fn doc_opportunity_ingest(
+    root: &std::path::Path,
+    input: &serde_json::Value,
+    kind: Option<OpportunityKind>,
+    write: bool,
+) -> anyhow::Result<Report> {
+    use brain::emit::apply_plan;
+
+    let plan = doc::opportunity::plan_ingest(input, kind, root);
+    let mut report = Report::default();
+    report.diagnostics.extend(apply_plan(&plan, write));
+    Ok(report)
+}
+
+/// Set an existing Opportunity's `stage` (`mev doc opportunity set-stage`). Re-running with
+/// the same stage is a zero-action no-op.
+pub fn doc_opportunity_set_stage(
+    root: &std::path::Path,
+    slug: &str,
+    stage: &str,
+    write: bool,
+) -> anyhow::Result<Report> {
+    use brain::emit::apply_plan;
+
+    let plan = doc::opportunity::plan_set_stage(slug, stage, root);
+    let mut report = Report::default();
+    report.diagnostics.extend(apply_plan(&plan, write));
+    Ok(report)
+}
+
+/// Append one `{at, kind, note}` action to an existing Opportunity's `actions[]`
+/// (`mev doc opportunity add-action`). An identical triple already present is not
+/// re-appended, so a repeat call is a zero-action no-op.
+pub fn doc_opportunity_add_action(
+    root: &std::path::Path,
+    slug: &str,
+    at: &str,
+    kind: &str,
+    note: &str,
+    write: bool,
+) -> anyhow::Result<Report> {
+    use brain::emit::apply_plan;
+
+    let plan = doc::opportunity::plan_add_action(slug, at, kind, note, root);
+    let mut report = Report::default();
+    report.diagnostics.extend(apply_plan(&plan, write));
+    Ok(report)
+}
+
+/// Merge one or more contacts into an existing Opportunity's `contacts[]`, matched on
+/// `name` (`mev doc opportunity merge-contacts`). An already-merged contact is a
+/// zero-action no-op.
+pub fn doc_opportunity_merge_contacts(
+    root: &std::path::Path,
+    slug: &str,
+    contacts: &serde_json::Value,
+    write: bool,
+) -> anyhow::Result<Report> {
+    use brain::emit::apply_plan;
+
+    let plan = doc::opportunity::plan_merge_contacts(slug, contacts, root);
+    let mut report = Report::default();
+    report.diagnostics.extend(apply_plan(&plan, write));
     Ok(report)
 }
 

@@ -224,6 +224,137 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Materialize brain documents and manage Opportunity records (Phase 9, Block MV.9.A).
+    ///
+    /// The generic doc-materializer over okf-core's `BrainDocModel`: `materialize` plans (and,
+    /// with --write, applies) any of the three okf-core models from a raw JSON payload; the
+    /// `opportunity` subcommand family (`ingest`, `set-stage`, `add-action`, `merge-contacts`)
+    /// operates specifically on Opportunity documents under
+    /// `business/docs/opportunities/`. Every verb resolves its target-corpus root via
+    /// `find_brain_root` from the optional `path` argument (defaults to `.`).
+    ///
+    /// Dry-run is the default on every verb: without --write nothing is touched on disk and
+    /// every planned action is still reported. Refuses --write from inside a linked git
+    /// worktree, with the same guard message `emit-state` uses.
+    ///
+    /// Diagnostic codes:
+    ///   W_DOC_UNCHANGED             — document already matches computed content (no-op)
+    ///   W_DOC_MISSING_SENTINEL      — a generated section's sentinel pair is absent; that
+    ///                                 section is left untouched rather than clobbered
+    ///   W_DOC_INDEX_MISSING         — target index.md absent; no index action planned
+    ///   W_DOC_INDEX_NO_TABLE        — index.md has no parsable table; no index action planned
+    ///   W_DOC_INDEX_COLUMN_MISMATCH — row_cells count doesn't match the table's column count
+    ///   E_DOC_BAD_INDEX_PATH        — model's index_path has no parent directory component
+    ///   E_DOC_UNKNOWN_INPUT_SHAPE   — ingest input matches neither the company nor the
+    ///                                 prospecting-sweep shape (pass --kind explicitly)
+    ///   E_DOC_UNKNOWN_MODEL         — --model is not one of opportunity|learning-artifact|proposal
+    ///   E_DOC_BAD_STAGE             — set-stage stage is not one of the seven documented values
+    ///   E_DOC_NOT_FOUND             — a mutator's target file is absent or unparsable
+    ///   W_EMIT_DRY_RUN / I_EMIT_WROTE — reused unchanged from `apply_plan`'s write half
+    ///
+    /// Exit codes:
+    ///   0 — planned (dry-run) or applied successfully, no errors
+    ///   1 — a resolution/parse/write failure, a linked-worktree write refusal, or any
+    ///       error-severity diagnostic (`E_DOC_*` / `E_CONFIG_NOT_FOUND`)
+    Doc {
+        #[command(subcommand)]
+        command: DocCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DocCommand {
+    /// Plan (and, with --write, apply) a document for one of the three okf-core models from a
+    /// raw JSON payload.
+    Materialize {
+        /// Which okf-core `BrainDocModel` to build: opportunity | learning-artifact | proposal.
+        #[arg(long)]
+        model: String,
+        /// Path to the JSON payload to build the model from.
+        #[arg(long)]
+        input: PathBuf,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Apply the write. Without this the command is a dry-run.
+        #[arg(long)]
+        write: bool,
+    },
+    /// The Opportunity command family: ingest / set-stage / add-action / merge-contacts.
+    Opportunity {
+        #[command(subcommand)]
+        command: OpportunityCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum OpportunityCommand {
+    /// Ingest a raw CompanyBrief/ProspectingResult/job-posting JSON payload as a new (or
+    /// updated) Opportunity document.
+    Ingest {
+        /// Path to the JSON payload (CompanyBrief or ProspectingResult shape).
+        #[arg(long)]
+        input: PathBuf,
+        /// Explicit opportunity kind: company | prospecting-sweep | job-posting. When omitted,
+        /// the kind is auto-detected from the input's shape.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Apply the write. Without this the command is a dry-run.
+        #[arg(long)]
+        write: bool,
+    },
+    /// Set an existing opportunity's `stage`.
+    SetStage {
+        /// The opportunity's slug (its filename stem under business/docs/opportunities/).
+        slug: String,
+        /// The new stage: identified | researching | contacted | conversation |
+        /// proposal-sent | closed-won | closed-lost.
+        stage: String,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Apply the write. Without this the command is a dry-run.
+        #[arg(long)]
+        write: bool,
+    },
+    /// Append one `{at, kind, note}` action to an existing opportunity's `actions[]`.
+    AddAction {
+        /// The opportunity's slug.
+        slug: String,
+        /// The action's kind (e.g. "email", "call", "meeting").
+        #[arg(long)]
+        kind: String,
+        /// A free-form note describing the action.
+        #[arg(long)]
+        note: String,
+        /// The action's ISO date. Defaults to today when omitted.
+        #[arg(long)]
+        at: Option<String>,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Apply the write. Without this the command is a dry-run.
+        #[arg(long)]
+        write: bool,
+    },
+    /// Merge one or more contacts into an existing opportunity's `contacts[]`, matched on
+    /// `name`.
+    MergeContacts {
+        /// The opportunity's slug.
+        slug: String,
+        /// Path to a JSON contact object, or a JSON array of contact objects.
+        #[arg(long)]
+        input: PathBuf,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Apply the write. Without this the command is a dry-run.
+        #[arg(long)]
+        write: bool,
+    },
 }
 
 /// Shared dispatch for `defer-epic` / `resume-epic` / `sync-epics`.
@@ -268,6 +399,92 @@ fn run_epic_status(
         Ok(report) => {
             if json {
                 let envelope = mev::JsonReport::new(label, &root, &report);
+                match envelope.to_json() {
+                    Ok(s) => println!("{s}"),
+                    Err(e) => {
+                        eprintln!("error: could not serialize report: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                for d in &report.diagnostics {
+                    print_diagnostic(d);
+                }
+                let mode = if write { "write" } else { "dry-run" };
+                println!(
+                    "{label} {} {}: {} error(s), {} warning(s)",
+                    mode,
+                    root.display(),
+                    report.error_count(),
+                    report.warning_count()
+                );
+            }
+            if report.is_failure() {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Shared guard for every `mev doc ...` verb: refuse `--write` from inside a linked git
+/// worktree, same message shape as `emit-state`/`run_epic_status`. Returns `Some(exit code)`
+/// when the guard fires (caller should return it immediately), `None` otherwise.
+fn doc_worktree_guard(path: &std::path::Path, write: bool) -> Option<ExitCode> {
+    if write && mev::brain::config::is_linked_worktree(path) {
+        eprintln!(
+            "error: refusing to write from inside a linked git worktree ({}) — mev doc resolves \
+             derived-file paths from brain.toml, not CWD, so writing from a worktree would \
+             silently regenerate the MAIN checkout's files instead of the worktree's own copy. \
+             Run `mev doc ... --write` from the main working tree instead.",
+            path.display()
+        );
+        return Some(ExitCode::FAILURE);
+    }
+    None
+}
+
+/// Resolve the brain root from `path`, printing `error: {e}` and returning the failure exit
+/// code on failure.
+fn doc_resolve_root(path: &std::path::Path) -> Result<PathBuf, ExitCode> {
+    mev::brain::config::find_brain_root(path).map_err(|e| {
+        eprintln!("error: {e}");
+        ExitCode::FAILURE
+    })
+}
+
+/// Read and parse a JSON payload from `path`, printing `error: {e}` and returning the failure
+/// exit code on failure.
+fn doc_read_json(path: &std::path::Path) -> Result<serde_json::Value, ExitCode> {
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        eprintln!("error: could not read {}: {e}", path.display());
+        ExitCode::FAILURE
+    })?;
+    serde_json::from_str(&content).map_err(|e| {
+        eprintln!("error: could not parse {} as JSON: {e}", path.display());
+        ExitCode::FAILURE
+    })
+}
+
+/// Shared reporting tail for every `mev doc ...` verb: print diagnostics (or a `--json`
+/// envelope), then a `<label> <mode> <root>: N error(s), M warning(s)` summary, and translate
+/// the report's failure state into the process exit code.
+fn report_doc(
+    label: &str,
+    root: &std::path::Path,
+    write: bool,
+    json: bool,
+    result: anyhow::Result<mev::Report>,
+) -> ExitCode {
+    match result {
+        Ok(report) => {
+            if json {
+                let envelope = mev::JsonReport::new(label, root, &report);
                 match envelope.to_json() {
                     Ok(s) => println!("{s}"),
                     Err(e) => {
@@ -549,6 +766,123 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::Doc { command } => match command {
+            DocCommand::Materialize {
+                model,
+                input,
+                path,
+                write,
+            } => {
+                if let Some(code) = doc_worktree_guard(&path, write) {
+                    return code;
+                }
+                let root = match doc_resolve_root(&path) {
+                    Ok(r) => r,
+                    Err(code) => return code,
+                };
+                let input_json = match doc_read_json(&input) {
+                    Ok(v) => v,
+                    Err(code) => return code,
+                };
+                let result = mev::doc_materialize(&root, &model, &input_json, write);
+                report_doc("doc-materialize", &root, write, cli.json, result)
+            }
+            DocCommand::Opportunity { command } => match command {
+                OpportunityCommand::Ingest {
+                    input,
+                    kind,
+                    path,
+                    write,
+                } => {
+                    if let Some(code) = doc_worktree_guard(&path, write) {
+                        return code;
+                    }
+                    let root = match doc_resolve_root(&path) {
+                        Ok(r) => r,
+                        Err(code) => return code,
+                    };
+                    let input_json = match doc_read_json(&input) {
+                        Ok(v) => v,
+                        Err(code) => return code,
+                    };
+                    let kind = match kind {
+                        Some(k) => match k.parse::<mev::OpportunityKind>() {
+                            Ok(k) => Some(k),
+                            Err(e) => {
+                                eprintln!("error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        },
+                        None => None,
+                    };
+                    let result = mev::doc_opportunity_ingest(&root, &input_json, kind, write);
+                    report_doc("doc-opportunity-ingest", &root, write, cli.json, result)
+                }
+                OpportunityCommand::SetStage {
+                    slug,
+                    stage,
+                    path,
+                    write,
+                } => {
+                    if let Some(code) = doc_worktree_guard(&path, write) {
+                        return code;
+                    }
+                    let root = match doc_resolve_root(&path) {
+                        Ok(r) => r,
+                        Err(code) => return code,
+                    };
+                    let result = mev::doc_opportunity_set_stage(&root, &slug, &stage, write);
+                    report_doc("doc-opportunity-set-stage", &root, write, cli.json, result)
+                }
+                OpportunityCommand::AddAction {
+                    slug,
+                    kind,
+                    note,
+                    at,
+                    path,
+                    write,
+                } => {
+                    if let Some(code) = doc_worktree_guard(&path, write) {
+                        return code;
+                    }
+                    let root = match doc_resolve_root(&path) {
+                        Ok(r) => r,
+                        Err(code) => return code,
+                    };
+                    let at = at.unwrap_or_else(|| chrono::Local::now().date_naive().to_string());
+                    let result =
+                        mev::doc_opportunity_add_action(&root, &slug, &at, &kind, &note, write);
+                    report_doc("doc-opportunity-add-action", &root, write, cli.json, result)
+                }
+                OpportunityCommand::MergeContacts {
+                    slug,
+                    input,
+                    path,
+                    write,
+                } => {
+                    if let Some(code) = doc_worktree_guard(&path, write) {
+                        return code;
+                    }
+                    let root = match doc_resolve_root(&path) {
+                        Ok(r) => r,
+                        Err(code) => return code,
+                    };
+                    let input_json = match doc_read_json(&input) {
+                        Ok(v) => v,
+                        Err(code) => return code,
+                    };
+                    let result =
+                        mev::doc_opportunity_merge_contacts(&root, &slug, &input_json, write);
+                    report_doc(
+                        "doc-opportunity-merge-contacts",
+                        &root,
+                        write,
+                        cli.json,
+                        result,
+                    )
+                }
+            },
+        },
         Command::GenerateGraph { path, out } => {
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,

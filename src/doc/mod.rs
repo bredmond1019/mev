@@ -11,4 +11,8 @@ pub mod index_reconcile;
 pub mod materialize;
 pub mod opportunity;
 
+pub use index_reconcile::plan_index_reconcile;
 pub use materialize::plan_document;
+pub use opportunity::{
+    OpportunityKind, plan_add_action, plan_ingest, plan_merge_contacts, plan_set_stage,
+};
