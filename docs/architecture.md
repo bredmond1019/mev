@@ -38,6 +38,11 @@ src/
     ├── structure.rs ← check_structure() — Phase 3 Block L (bidirectional index.md <-> directory structural coverage: orphan files, dangling rows)
     ├── manifest.rs ← ManifestEntry, Manifest, build_manifest() — Phase 3 Block Q (canonical corpus manifest for RAG indexer)
     └── graph_emit.rs ← GraphExport, ExportedEdge, build_graph_export() (re-exported from okf-core, BA.15.12/D16) — Phase 3B Block R (graph-export envelope for the orchestrator's Postgres edges table, D4)
+└── doc/
+    ├── mod.rs             ← module docs + re-exports — Phase 9 Block MV.9.A
+    ├── materialize.rs     ← plan_document() — generic per-model doc planner
+    ├── index_reconcile.rs ← plan_index_reconcile() — index.md row upsert
+    └── opportunity.rs     ← OpportunityKind, plan_ingest/plan_set_stage/plan_add_action/plan_merge_contacts
 
 tests/
 ├── brain_config.rs    ← integration tests for brain.toml loading + BrainConfig
@@ -51,6 +56,10 @@ tests/
 ├── brain_state.rs     ← integration tests for validate_brain_state() end-to-end — Phase 3 Block P
 ├── brain_structure.rs ← integration tests for validate_brain_structure() end-to-end — Phase 3 Block L
 ├── brain_validate.rs  ← integration tests for BrainValidator end-to-end
+├── doc_materialize.rs ← integration tests for plan_document() — Phase 9 Block MV.9.A
+├── doc_index_reconcile.rs ← integration tests for plan_index_reconcile()
+├── doc_opportunity.rs ← integration tests for the Opportunity command family
+├── doc_cli.rs         ← integration tests for the `mev doc ...` CLI surface
 ├── smoke.rs           ← integration tests for the learn-ai validate() public API
 └── fixtures/
     └── brain.toml     ← minimal fixture — NOT the live brain.toml
@@ -514,3 +523,91 @@ Design principles (shared with `manifest.rs`):
 `brain.toml`, crawls the corpus with `crawl_corpus`, builds the graph with `build_graph`, and
 calls `build_graph_export`. The returned `GraphExport` is a pure value — nothing is written to
 disk or a DB. Invoked by `mev emit-graph`.
+
+---
+
+### Doc materializer (`src/doc/`) — Phase 9, Block MV.9.A
+
+The doc materializer is the generic brain-document **writer**, sitting on the same
+`EmitPlan`/`apply_plan` seam as `src/brain/emit.rs` (above) rather than replacing it: every
+`src/doc/*` planner returns an `EmitPlan`, and `apply_plan` remains the single place any bytes
+actually land on disk. Where `emit.rs` derives content from the state-graph corpus, `src/doc/`
+derives content from an okf-core `BrainDocModel` — a typed document (`Opportunity`,
+`LearningArtifact`, `Proposal`) built from an external JSON payload (a company research brief, a
+lesson payload, an automation roadmap) rather than from `state.json`.
+
+```
+src/doc/
+├── mod.rs             ← module docs + re-exports (plan_document, plan_index_reconcile,
+│                         plan_ingest, plan_set_stage, plan_add_action, plan_merge_contacts,
+│                         OpportunityKind)
+├── materialize.rs      ← plan_document() — the generic per-model doc planner
+├── index_reconcile.rs  ← plan_index_reconcile() — the index.md row upsert
+└── opportunity.rs      ← the four Opportunity command-family planners
+```
+
+**D53 boundary:** mev plans and writes the source `.md` (this module); engine-rs executes the
+workflow nodes that call it (`EN.7.A`/`EN.7.B`, out of scope here); `bastion serve` only ever
+reads the result. See `docs/decisions/D53-engine-executes-mev-writes-brain-docs.md` in the brain
+repo.
+
+#### `materialize.rs` — the generic per-model planner
+
+| Function | Signature | Description |
+|---|---|---|
+| `plan_document` | `(&impl BrainDocModel, &Path) -> EmitPlan` | The target path is derived from the model's `IndexIntent` — `root.join(dirname(index_intent.index_path)).join(index_intent.link_target)` — never from a per-model constant, so the same function plans successfully for all three okf-core models. **Create** (target absent): content is `okf_core::render_document(model)`. **Update** (target present): every `BodySection::Generated` in `model.body()` is re-spliced over the existing bytes via `crate::brain::emit::splice_generated` (a missing sentinel pair pushes `W_DOC_MISSING_SENTINEL` and leaves that section untouched), and the leading frontmatter fence is replaced with `serialize_nested_frontmatter(&model.frontmatter())` — every byte outside the sentinel pairs and the frontmatter fence survives verbatim. **Idempotency:** when computed content equals the existing bytes, no `EmitAction` is planned and `W_DOC_UNCHANGED` is pushed instead. Internally calls `plan_index_reconcile` and merges the result via `EmitPlan::extend`, so one call plans both the doc write and its index row. This function performs the one read needed to compute an update; it performs no writes — `apply_plan` stays the single write point. |
+
+A bad `index_path` (no parent directory component, e.g. a bare `"index.md"`) raises
+`E_DOC_BAD_INDEX_PATH` rather than writing to `root` itself.
+
+#### `index_reconcile.rs` — index.md row upsert
+
+| Function | Signature | Description |
+|---|---|---|
+| `plan_index_reconcile` | `(&IndexIntent, &Path) -> EmitPlan` | Locates `root.join(&intent.index_path)`, parses its first Markdown table, and upserts one row keyed on `link_target`: a body row whose first cell links to `intent.link_target` is replaced in place with the row rendered from `intent.row_cells` (cell 1 is `[<row_cells[0]>](<link_target>)`); no such row means one new row is appended. Never duplicates, reorders, or alters any other row. A `row_cells` length that doesn't match the table's column count pushes `W_DOC_INDEX_COLUMN_MISMATCH` and plans no action. A missing `index.md` pushes `W_DOC_INDEX_MISSING`; a table-less `index.md` pushes `W_DOC_INDEX_NO_TABLE` — in both cases no index is ever created. Unchanged after upsert pushes `W_DOC_UNCHANGED`. |
+
+#### `opportunity.rs` — the Opportunity command family
+
+All four planners resolve their target file through the same `IndexIntent`-derived path
+`plan_document` uses, and mutate a parsed `Opportunity` model rather than raw text.
+
+| Function | Signature | Description |
+|---|---|---|
+| `plan_ingest` | `(&serde_json::Value, Option<OpportunityKind>, &Path) -> EmitPlan` | Builds an `Opportunity` from a raw payload and plans it via `plan_document`. `kind: None` auto-detects: `company_name` present → `Company`; `prospects`/`vertical` present → `ProspectingSweep`; neither → `E_DOC_UNKNOWN_INPUT_SHAPE`, no plan. `Company` dispatches to `Opportunity::from_company_brief`; `ProspectingSweep` to `Opportunity::from_prospecting_result`; `JobPosting` builds from the same brief shape with `kind: "job-posting"`. |
+| `plan_set_stage` | `(&str, &str, &Path) -> EmitPlan` | Loads the existing file, `parse_nested_frontmatter` + `Opportunity::from_frontmatter`, sets `stage` (validated against the seven documented values — an unknown value pushes `E_DOC_BAD_STAGE` and plans nothing), and re-plans via `plan_document`. |
+| `plan_add_action` | `(&str, &str, &str, &str, &Path) -> EmitPlan` | Appends one `Action { at, kind, note }` to `actions[]`. An identical triple already present is not re-appended (the re-plan then becomes a `W_DOC_UNCHANGED` no-op via `plan_document`'s idempotency guard). |
+| `plan_merge_contacts` | `(&str, &serde_json::Value, &Path) -> EmitPlan` | Merges `Contact` entries into `contacts[]` matched on `name`: unions `emails`/`whatsapp`/`phones`/`links` (deduped, order-stable); fills `role`/`note` only when the existing value is empty, so an enriched field is never overwritten by a blank one. |
+
+All three mutators (`plan_set_stage`, `plan_add_action`, `plan_merge_contacts`) push
+`E_DOC_NOT_FOUND` and plan nothing when the target file is absent or unparsable.
+
+| Type | Description |
+|---|---|
+| `OpportunityKind` | `Company \| ProspectingSweep \| JobPosting` — parses from the CLI's `--kind` string (`company \| prospecting-sweep \| job-posting`). |
+
+#### Diagnostic locators emitted by `src/doc/`
+
+| Locator | Severity | Condition |
+|---|---|---|
+| `W_DOC_UNCHANGED` | Warning | Computed content already matches the existing file/row; no action planned. |
+| `W_DOC_MISSING_SENTINEL` | Warning | A `BodySection::Generated` section's sentinel pair is absent; section left untouched. |
+| `W_DOC_INDEX_MISSING` | Warning | The target `index.md` is absent; no index action planned. |
+| `W_DOC_INDEX_NO_TABLE` | Warning | `index.md` has no parsable table; no index action planned. |
+| `W_DOC_INDEX_COLUMN_MISMATCH` | Warning | `row_cells` count doesn't match the table's column count; no index action planned. |
+| `E_DOC_BAD_INDEX_PATH` | Error | The model's `IndexIntent.index_path` has no parent directory component. |
+| `E_DOC_UNKNOWN_INPUT_SHAPE` | Error | `ingest` input matches neither the company nor the prospecting-sweep shape, and no `--kind` was given. |
+| `E_DOC_UNKNOWN_MODEL` | Error | `doc materialize --model` is not one of `opportunity`\|`learning-artifact`\|`proposal`. |
+| `E_DOC_BAD_STAGE` | Error | `set-stage`'s stage argument is not one of the seven documented values. |
+| `E_DOC_NOT_FOUND` | Error | A mutator's target file is absent or unparsable. |
+
+`apply_plan`'s existing `W_EMIT_DRY_RUN` / `I_EMIT_WROTE` codes are reused unchanged for the
+write half — no new codes were needed there.
+
+#### Public library entry points
+
+`doc_materialize`, `doc_opportunity_ingest`, `doc_opportunity_set_stage`,
+`doc_opportunity_add_action`, and `doc_opportunity_merge_contacts` (all in `src/lib.rs`) mirror
+`emit_state`'s shape: the caller resolves `root` (via `find_brain_root`), the function plans via
+the appropriate `src/doc/` planner, applies with `apply_plan(&plan, write)`, and folds the
+diagnostics into a `Report`. Invoked by `mev doc materialize` and the `mev doc opportunity ...`
+subcommands respectively.
