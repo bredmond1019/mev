@@ -632,19 +632,34 @@ pub fn epic_status(
 
     // Regenerate derived views so focus/boards agree with the authored edit.
     if write && had_actions && !report.is_failure() {
-        let emit = emit_state(root, true)?;
+        let emit = emit_state(root, true, None)?;
         report.diagnostics.extend(emit.diagnostics);
     }
 
     Ok(report)
 }
 
-pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report> {
+/// Generate derived views for the Bastion Brain repo.
+///
+/// `scope`, when `Some`, restricts every planner's *writes* (not its
+/// computation — every planner still sees the full, unfiltered corpus) to the
+/// single repo's derived surfaces named by
+/// [`brain::config::BrainConfig::scope_dependencies`] via
+/// [`brain::emit::filter_plan_by_scope`]. `None` is the unscoped, full-corpus
+/// default and must remain byte-for-byte identical to this function's
+/// behaviour before `--scope` existed — `filter_plan_by_scope` is a no-op
+/// when `scope` is `None`.
+pub fn emit_state(
+    root: &std::path::Path,
+    write: bool,
+    scope: Option<&brain::config::ScopeDependencySet>,
+) -> anyhow::Result<Report> {
     use brain::config::find_brain_config;
     use brain::emit::{
-        apply_plan, plan_attention_board, plan_brain_cache_watermarks, plan_epic_boards,
-        plan_epic_sequences, plan_hq_board, plan_master_plan_tables, plan_project_caches,
-        plan_state_json, plan_status_frontmatter, plan_tier_rollups, plan_unified_board,
+        apply_plan, filter_plan_by_scope, plan_attention_board, plan_brain_cache_watermarks,
+        plan_epic_boards, plan_epic_sequences, plan_hq_board, plan_master_plan_tables,
+        plan_project_caches, plan_state_json, plan_status_frontmatter, plan_tier_rollups,
+        plan_unified_board,
     };
     use brain::state::{StateLoadError, build_state_graph, discover_state_files, load_state};
 
@@ -736,29 +751,43 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     //    tier_rollups/unified_board (its sibling sentinels in the same
     //    files), and plan_status_frontmatter (below) runs last of all so it
     //    reads the fully updated text in write mode.
-    let state_plan = plan_state_json(&loaded, &graph, &config);
+    let state_plan = filter_plan_by_scope(plan_state_json(&loaded, &graph, &config), root, scope);
     let state_diags = apply_plan(&state_plan, write);
 
-    let mp_plan = plan_master_plan_tables(&loaded, &graph);
+    let mp_plan = filter_plan_by_scope(plan_master_plan_tables(&loaded, &graph), root, scope);
     let mp_diags = apply_plan(&mp_plan, write);
 
-    let project_caches_plan = plan_project_caches(root, &loaded, &graph, &config);
+    let project_caches_plan = filter_plan_by_scope(
+        plan_project_caches(root, &loaded, &graph, &config),
+        root,
+        scope,
+    );
     let project_caches_diags = apply_plan(&project_caches_plan, write);
 
-    let tier_rollups_plan = plan_tier_rollups(&loaded, &graph, &config);
+    let tier_rollups_plan =
+        filter_plan_by_scope(plan_tier_rollups(&loaded, &graph, &config), root, scope);
     let tier_rollups_diags = apply_plan(&tier_rollups_plan, write);
 
-    let hq_board_plan = plan_hq_board(&loaded, &graph, &config);
+    let hq_board_plan = filter_plan_by_scope(plan_hq_board(&loaded, &graph, &config), root, scope);
     let hq_board_diags = apply_plan(&hq_board_plan, write);
 
     let today = chrono::Local::now().date_naive();
-    let unified_board_plan = plan_unified_board(&loaded, &graph, &config, today);
+    let unified_board_plan = filter_plan_by_scope(
+        plan_unified_board(&loaded, &graph, &config, today),
+        root,
+        scope,
+    );
     let unified_board_diags = apply_plan(&unified_board_plan, write);
 
-    let attention_plan = plan_attention_board(&loaded, &config, today);
+    let attention_plan =
+        filter_plan_by_scope(plan_attention_board(&loaded, &config, today), root, scope);
     let attention_diags = apply_plan(&attention_plan, write);
 
-    let brain_caches_plan = plan_brain_cache_watermarks(root, &loaded, &config);
+    let brain_caches_plan = filter_plan_by_scope(
+        plan_brain_cache_watermarks(root, &loaded, &config),
+        root,
+        scope,
+    );
     let brain_caches_diags = apply_plan(&brain_caches_plan, write);
 
     // 6. Epic boards + sequence tables run after every planner above has both
@@ -767,13 +796,22 @@ pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report>
     //    `plan_epic_sequences` targets its own `epics/<slug>.md` docs, which
     //    nothing above touches. The two are still planned together and applied
     //    together (not interleaved) — safe, since they target disjoint files.
-    let epic_board_plan = plan_epic_boards(&loaded, &graph, &config);
-    let epic_seq_plan = plan_epic_sequences(root, &loaded, &graph, &config);
+    let epic_board_plan =
+        filter_plan_by_scope(plan_epic_boards(&loaded, &graph, &config), root, scope);
+    let epic_seq_plan = filter_plan_by_scope(
+        plan_epic_sequences(root, &loaded, &graph, &config),
+        root,
+        scope,
+    );
     let epic_board_diags = apply_plan(&epic_board_plan, write);
     let epic_seq_diags = apply_plan(&epic_seq_plan, write);
 
     // 7. Run and apply the YAML frontmatter planner last so it sees the updated markdown in write mode.
-    let status_fm_plan = plan_status_frontmatter(root, &loaded, &graph, &config);
+    let status_fm_plan = filter_plan_by_scope(
+        plan_status_frontmatter(root, &loaded, &graph, &config),
+        root,
+        scope,
+    );
     let status_fm_diags = apply_plan(&status_fm_plan, write);
 
     report.diagnostics.extend(state_diags);

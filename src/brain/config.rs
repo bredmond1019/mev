@@ -268,6 +268,31 @@ pub struct ScopeDependencySet {
     pub hq_board_status_file: PathBuf,
 }
 
+impl ScopeDependencySet {
+    /// Every target path in this set, resolved against `root`, as the absolute
+    /// paths an `emit-state` planner would produce for the *same* fields
+    /// (`root.join(<relative field>)`) — see [`BrainConfig::scope_dependencies`]'s
+    /// doc comment for why each field's construction already matches its
+    /// planner's own path-building.
+    pub fn absolute_targets(&self, root: &Path) -> Vec<PathBuf> {
+        let mut targets = vec![
+            root.join(&self.own_state_json),
+            root.join(&self.cache_doc),
+            root.join(&self.hq_board_status_file),
+        ];
+        if let Some(tier) = &self.tier_rollup_status_file {
+            targets.push(root.join(tier));
+        }
+        targets
+    }
+
+    /// Is `path` (already an absolute path, as every `EmitAction::path` is) one
+    /// of this scope's target surfaces under `root`?
+    pub fn allows(&self, root: &Path, path: &Path) -> bool {
+        self.absolute_targets(root).iter().any(|t| t == path)
+    }
+}
+
 /// Errors from [`BrainConfig::scope_dependencies`].
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ScopeError {
@@ -644,5 +669,45 @@ deferred_days = 2
             }
             other => panic!("expected ScopeError::UnknownSlug, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ScopeDependencySet::allows / absolute_targets (task 2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scope_allows_own_state_json_cache_doc_and_hq_board() {
+        let cfg = scoped_fixture_config();
+        let deps = cfg.scope_dependencies("mev").expect("mev is registered");
+        let root = PathBuf::from("/hq");
+
+        assert!(deps.allows(&root, &root.join("core/mev/planning/state.json")));
+        assert!(deps.allows(&root, &root.join("docs/projects/mev.md")));
+        assert!(deps.allows(&root, &root.join("core/planning/status.md")));
+        assert!(deps.allows(&root, &root.join("planning/status.md")));
+    }
+
+    #[test]
+    fn scope_disallows_unrelated_repo_paths() {
+        let cfg = scoped_fixture_config();
+        let deps = cfg.scope_dependencies("mev").expect("mev is registered");
+        let root = PathBuf::from("/hq");
+
+        assert!(!deps.allows(&root, &root.join("business/bastiel/planning/state.json")));
+        assert!(!deps.allows(&root, &root.join("docs/projects/bastiel.md")));
+        assert!(!deps.allows(&root, &root.join("business/planning/status.md")));
+    }
+
+    #[test]
+    fn scope_allows_no_tier_rollup_when_none() {
+        // A tier-container self-entry has no further tier rollup — its target
+        // set has three entries, not four, and never allows a path that isn't
+        // one of them.
+        let cfg = scoped_fixture_config();
+        let deps = cfg.scope_dependencies("core").expect("core is registered");
+        let root = PathBuf::from("/hq");
+
+        assert_eq!(deps.absolute_targets(&root).len(), 3);
+        assert!(!deps.allows(&root, &root.join("core/planning/status.md")));
     }
 }

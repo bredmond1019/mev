@@ -2355,7 +2355,7 @@ heading = "Beta"
         let beta_before = fs::read(&beta_state_path).unwrap();
         let brain_before = fs::read(&brain_state_path).unwrap();
 
-        let report = mev::emit_state(&dir, false).expect("emit_state should not error");
+        let report = mev::emit_state(&dir, false, None).expect("emit_state should not error");
 
         // No files must have changed.
         assert_eq!(
@@ -2417,7 +2417,7 @@ heading = "Beta"
             "fixture must be stale (now should be non-empty before emit)"
         );
 
-        let report = mev::emit_state(&dir, true).expect("emit_state should not error");
+        let report = mev::emit_state(&dir, true, None).expect("emit_state should not error");
 
         // No errors.
         assert_eq!(
@@ -2475,7 +2475,7 @@ heading = "Beta"
         write_stale_fixture(&dir);
 
         // First write.
-        mev::emit_state(&dir, true).expect("first emit should not error");
+        mev::emit_state(&dir, true, None).expect("first emit should not error");
 
         // Snapshot file contents after first write.
         let alpha_after1 = fs::read(dir.join("repos/alpha/planning/state.json")).unwrap();
@@ -2483,7 +2483,7 @@ heading = "Beta"
         let brain_after1 = fs::read(dir.join("planning/state.json")).unwrap();
 
         // Second write.
-        let report2 = mev::emit_state(&dir, true).expect("second emit should not error");
+        let report2 = mev::emit_state(&dir, true, None).expect("second emit should not error");
 
         // No I_EMIT_WROTE diagnostics on the second run (nothing changed).
         let wrote2: Vec<_> = report2
@@ -2532,7 +2532,7 @@ heading = "Beta"
             return;
         }
 
-        let report = mev::emit_state(&dir, false).expect("emit_state should not panic");
+        let report = mev::emit_state(&dir, false, None).expect("emit_state should not panic");
         let config_err = report
             .diagnostics
             .iter()
@@ -2763,7 +2763,7 @@ heading = "Beta"
 
         let before = snapshot(&dir);
 
-        let report = mev::emit_state(&dir, true).expect("emit_state should not error");
+        let report = mev::emit_state(&dir, true, None).expect("emit_state should not error");
 
         let has_incomplete_corpus = report
             .diagnostics
@@ -2821,7 +2821,7 @@ heading = "Beta"
         let dir = temp_dir("dry-run-exempt");
         write_broken_fixture(&dir);
 
-        let report = mev::emit_state(&dir, false).expect("emit_state should not error");
+        let report = mev::emit_state(&dir, false, None).expect("emit_state should not error");
 
         let dry_run_diags: Vec<_> = report
             .diagnostics
@@ -2871,7 +2871,7 @@ heading = "Beta"
 
         let before = snapshot(&dir);
 
-        let report = mev::emit_state(&dir, true).expect("emit_state should not error");
+        let report = mev::emit_state(&dir, true, None).expect("emit_state should not error");
 
         let has_incomplete_corpus = report
             .diagnostics
@@ -3126,7 +3126,8 @@ heading = "Repo P"
         let dir = temp_dir("core-rollup");
         write_core_fixture(&dir);
 
-        let report = mev::emit_state(&dir, true).expect("emit_state should not error (panic)");
+        let report =
+            mev::emit_state(&dir, true, None).expect("emit_state should not error (panic)");
         // This fixture's corpus is fully loadable (see write_core_fixture's
         // doc comment) — no errors of any kind are expected here. The
         // malformed-repo-d / E_EMIT_INCOMPLETE_CORPUS scenario has its own
@@ -3178,7 +3179,7 @@ heading = "Repo P"
         let dir = temp_dir("derived-branch");
         write_core_fixture(&dir);
 
-        mev::emit_state(&dir, true).expect("emit_state should not error");
+        mev::emit_state(&dir, true, None).expect("emit_state should not error");
 
         let brain_after: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join("planning/state.json")).unwrap())
@@ -3214,7 +3215,7 @@ heading = "Repo P"
         let dir = temp_dir("preserve-branch");
         write_core_fixture(&dir);
 
-        mev::emit_state(&dir, true).expect("emit_state should not error");
+        mev::emit_state(&dir, true, None).expect("emit_state should not error");
 
         let brain_after: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join("planning/state.json")).unwrap())
@@ -3250,7 +3251,7 @@ heading = "Repo P"
 
         let before = fs::read(dir.join("planning/state.json")).unwrap();
 
-        let report = mev::emit_state(&dir, true).expect("emit_state should not error");
+        let report = mev::emit_state(&dir, true, None).expect("emit_state should not error");
 
         // The malformed repo-d state.json should still surface as a load
         // error — the guard adds a refusal, it does not replace the cause.
@@ -3320,7 +3321,7 @@ heading = "Repo P"
         let dir = temp_dir("stub-branch");
         write_core_fixture(&dir);
 
-        mev::emit_state(&dir, true).expect("emit_state should not error");
+        mev::emit_state(&dir, true, None).expect("emit_state should not error");
 
         let brain_after: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join("planning/state.json")).unwrap())
@@ -3347,7 +3348,7 @@ heading = "Repo P"
         let dir = temp_dir("focus-union");
         write_core_fixture(&dir);
 
-        mev::emit_state(&dir, true).expect("emit_state should not error");
+        mev::emit_state(&dir, true, None).expect("emit_state should not error");
 
         let brain_after: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join("planning/state.json")).unwrap())
@@ -3412,7 +3413,7 @@ heading = "Repo P"
             "Repo P block A",
         );
 
-        mev::emit_state(&dir, true).expect("emit_state should not error");
+        mev::emit_state(&dir, true, None).expect("emit_state should not error");
 
         let brain_after: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join("planning/state.json")).unwrap())
@@ -3455,13 +3456,13 @@ heading = "Repo P"
         let dir = temp_dir("fixed-point");
         write_core_fixture(&dir);
 
-        mev::emit_state(&dir, true).expect("first emit should not error");
+        mev::emit_state(&dir, true, None).expect("first emit should not error");
 
         let brain_after1 = fs::read(dir.join("planning/state.json")).unwrap();
         let repo_a_after1 = fs::read(dir.join("repos/repo-a/planning/state.json")).unwrap();
         let repo_b_after1 = fs::read(dir.join("repos/repo-b/planning/state.json")).unwrap();
 
-        let report2 = mev::emit_state(&dir, true).expect("second emit should not error");
+        let report2 = mev::emit_state(&dir, true, None).expect("second emit should not error");
 
         let wrote2: Vec<_> = report2
             .diagnostics
@@ -3748,7 +3749,7 @@ heading = "Repo B"
         // and depends on it, so it must render as blocked everywhere. ---
         write_corpus(&dir, "in_progress");
 
-        let report_before = mev::emit_state(&dir, true).expect("first emit should not error");
+        let report_before = mev::emit_state(&dir, true, None).expect("first emit should not error");
         let unexpected_errors: Vec<_> = report_before
             .diagnostics
             .iter()
@@ -3799,7 +3800,7 @@ heading = "Repo B"
             &serde_json::json!([]),
         );
 
-        let report_after = mev::emit_state(&dir, true).expect("second emit should not error");
+        let report_after = mev::emit_state(&dir, true, None).expect("second emit should not error");
         let unexpected_errors: Vec<_> = report_after
             .diagnostics
             .iter()
@@ -3900,7 +3901,7 @@ heading = "Repo B"
         .collect();
 
         let report_fixed_point =
-            mev::emit_state(&dir, true).expect("fixed-point emit should not error");
+            mev::emit_state(&dir, true, None).expect("fixed-point emit should not error");
         let wrote: Vec<_> = report_fixed_point
             .diagnostics
             .iter()
@@ -6077,7 +6078,7 @@ heading = "Eng Repo"
         write_biz_repo_state(&dir);
         write_eng_repo_state(&dir, &due_soon, &overdue, &far_future);
 
-        let report = mev::emit_state(&dir, true).expect("emit should not error");
+        let report = mev::emit_state(&dir, true, None).expect("emit should not error");
         let unexpected_errors: Vec<_> = report
             .diagnostics
             .iter()
@@ -6146,7 +6147,8 @@ heading = "Eng Repo"
         // be a no-op, and the unified-board region byte-identical. ---
         let snapshot = fs::read(dir.join("planning/status.md")).unwrap();
 
-        let report_second = mev::emit_state(&dir, true).expect("second emit should not error");
+        let report_second =
+            mev::emit_state(&dir, true, None).expect("second emit should not error");
         let wrote: Vec<_> = report_second
             .diagnostics
             .iter()
@@ -6255,7 +6257,7 @@ heading = "Eng Repo"
         write_biz_repo_state_gating(&dir);
         write_eng_repo_state_gating(&dir);
 
-        let report = mev::emit_state(&dir, true).expect("emit should not error");
+        let report = mev::emit_state(&dir, true, None).expect("emit should not error");
         let unexpected_errors: Vec<_> = report
             .diagnostics
             .iter()
@@ -6303,7 +6305,8 @@ heading = "Eng Repo"
         // be a no-op, and the unified-board region byte-identical. ---
         let snapshot = fs::read(dir.join("planning/status.md")).unwrap();
 
-        let report_second = mev::emit_state(&dir, true).expect("second emit should not error");
+        let report_second =
+            mev::emit_state(&dir, true, None).expect("second emit should not error");
         let wrote: Vec<_> = report_second
             .diagnostics
             .iter()
@@ -6465,7 +6468,7 @@ heading = "Alpha"
         write_hq_status_md(&dir);
         write_alpha_state(&dir);
 
-        let report = mev::emit_state(&dir, true).expect("emit_state should not error");
+        let report = mev::emit_state(&dir, true, None).expect("emit_state should not error");
         let errors: Vec<_> = report
             .diagnostics
             .iter()
@@ -6609,7 +6612,7 @@ heading = "Alpha"
 
         // Write pass — this is what regenerates the brain's stored `focus`
         // via `derive_brain_focus` (children ∪ own tracks[], Facet A).
-        let emit_report = mev::emit_state(&dir, true).expect("emit_state should not error");
+        let emit_report = mev::emit_state(&dir, true, None).expect("emit_state should not error");
         let emit_errors: Vec<_> = emit_report
             .diagnostics
             .iter()
@@ -6658,7 +6661,7 @@ heading = "Alpha"
         // a no-op (byte-identical planning/state.json).
         let snapshot = fs::read(dir.join("planning/state.json")).unwrap();
         let emit_report_2 =
-            mev::emit_state(&dir, true).expect("second emit_state should not error");
+            mev::emit_state(&dir, true, None).expect("second emit_state should not error");
         let wrote: Vec<_> = emit_report_2
             .diagnostics
             .iter()
@@ -7868,5 +7871,144 @@ mod epic_emit {
         );
         // The surviving table is the first epic's.
         assert!(plan.actions[0].new_content.contains("BA.6"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task 2 (ticket-emit-state-scope-and-lock) — filter_plan_by_scope
+// ---------------------------------------------------------------------------
+
+mod task2_scope_filter {
+    use mev::brain::config::{BrainConfig, RepoEntry};
+    use mev::brain::emit::{EmitAction, EmitPlan, filter_plan_by_scope};
+    use std::path::PathBuf;
+
+    fn repo_entry(slug: &str, tier: &str, repo_path: &str) -> RepoEntry {
+        RepoEntry {
+            slug: slug.to_string(),
+            tier: tier.to_string(),
+            repo_path: repo_path.to_string(),
+            status_file: format!("{repo_path}/planning/status.md"),
+            cache_doc: format!("docs/projects/{slug}.md"),
+            heading: slug.to_string(),
+        }
+    }
+
+    /// Mirrors the real HQ `brain.toml` shape used by `config.rs`'s own
+    /// `scope_dependencies` tests: an HQ root, a `core` tier-container
+    /// self-entry, and one leaf under it plus one unrelated leaf under a
+    /// second tier.
+    fn scoped_fixture_config() -> BrainConfig {
+        BrainConfig {
+            repos: vec![
+                RepoEntry {
+                    slug: "brain".to_string(),
+                    tier: "_root".to_string(),
+                    repo_path: ".".to_string(),
+                    status_file: "planning/status.md".to_string(),
+                    cache_doc: "README.md".to_string(),
+                    heading: "Company Brain".to_string(),
+                },
+                repo_entry("core", "_root", "core"),
+                repo_entry("mev", "core", "core/mev"),
+                repo_entry("business", "_root", "business"),
+                repo_entry("bastiel", "business", "business/bastiel"),
+            ],
+            ..BrainConfig::default()
+        }
+    }
+
+    fn action(path: PathBuf) -> EmitAction {
+        EmitAction {
+            path,
+            new_content: "irrelevant".to_string(),
+            note: "test action".to_string(),
+        }
+    }
+
+    #[test]
+    fn none_scope_passes_every_action_through_unfiltered() {
+        let root = PathBuf::from("/hq");
+        let plan = EmitPlan {
+            actions: vec![
+                action(root.join("core/mev/planning/state.json")),
+                action(root.join("business/bastiel/planning/state.json")),
+                action(root.join("docs/projects/anything.md")),
+            ],
+            diagnostics: vec![],
+        };
+        let action_count = plan.actions.len();
+
+        let filtered = filter_plan_by_scope(plan, &root, None);
+
+        assert_eq!(
+            filtered.actions.len(),
+            action_count,
+            "unscoped filtering must be a byte-for-byte no-op"
+        );
+    }
+
+    #[test]
+    fn scoped_filter_keeps_only_in_scope_targets_and_preserves_diagnostics() {
+        let cfg = scoped_fixture_config();
+        let deps = cfg.scope_dependencies("mev").expect("mev is registered");
+        let root = PathBuf::from("/hq");
+
+        let mev_state = root.join("core/mev/planning/state.json");
+        let mev_cache = root.join("docs/projects/mev.md");
+        let core_tier_rollup = root.join("core/planning/status.md");
+        let hq_board = root.join("planning/status.md");
+        let bastiel_state = root.join("business/bastiel/planning/state.json");
+        let unrelated_doc = root.join("docs/projects/unrelated.md");
+
+        let diag = mev::Diagnostic::warning(root.join("wherever"), "W_EMIT_NO_SENTINEL", "note");
+        let plan = EmitPlan {
+            actions: vec![
+                action(mev_state.clone()),
+                action(mev_cache.clone()),
+                action(core_tier_rollup.clone()),
+                action(hq_board.clone()),
+                action(bastiel_state),
+                action(unrelated_doc),
+            ],
+            diagnostics: vec![diag],
+        };
+
+        let filtered = filter_plan_by_scope(plan, &root, Some(&deps));
+
+        let mut kept_paths: Vec<_> = filtered.actions.iter().map(|a| a.path.clone()).collect();
+        kept_paths.sort();
+        let mut expected = vec![mev_state, mev_cache, core_tier_rollup, hq_board];
+        expected.sort();
+        assert_eq!(
+            kept_paths, expected,
+            "exactly the four scope surfaces survive filtering: own state.json, \
+             cache_doc, tier rollup status.md, and the HQ board status.md"
+        );
+        assert_eq!(
+            filtered.diagnostics.len(),
+            1,
+            "diagnostics always pass through regardless of scope"
+        );
+    }
+
+    #[test]
+    fn scoped_filter_drops_everything_when_scope_matches_nothing() {
+        let cfg = scoped_fixture_config();
+        let deps = cfg
+            .scope_dependencies("bastiel")
+            .expect("bastiel is registered");
+        let root = PathBuf::from("/hq");
+
+        let plan = EmitPlan {
+            actions: vec![action(root.join("core/mev/planning/state.json"))],
+            diagnostics: vec![],
+        };
+
+        let filtered = filter_plan_by_scope(plan, &root, Some(&deps));
+        assert!(
+            filtered.actions.is_empty(),
+            "an out-of-scope action must be dropped, not defaulted through"
+        );
     }
 }

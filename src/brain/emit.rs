@@ -1295,6 +1295,42 @@ impl EmitPlan {
     }
 }
 
+/// Restrict a planner's proposed writes to a single repo's derived surfaces
+/// (`mev emit-state --scope <repo>`, ticket `ticket-emit-state-scope-and-lock`).
+///
+/// `scope == None` is the unscoped, full-corpus default — every action passes
+/// through unfiltered, byte-for-byte identical to calling the planner alone.
+/// `scope == Some(set)` drops any [`EmitAction`] whose `path` is not one of
+/// `set`'s four target surfaces (own `state.json`, `cache_doc`, tier rollup
+/// `status.md`, HQ board `status.md`) — see
+/// [`crate::brain::config::ScopeDependencySet::allows`]. Diagnostics (e.g.
+/// `W_EMIT_NO_SENTINEL`) are always passed through unfiltered: they report on
+/// planning-time conditions, not writes, and scoping is about *what gets
+/// written*, not what gets diagnosed.
+///
+/// Filtering out-of-scope actions here — rather than never planning them —
+/// keeps every planner computing from the full, unfiltered corpus (`loaded`/
+/// `graph` stay whole), so a scoped run's rollup tables still reflect every
+/// repo's current state; only the *write* is narrowed. This is what makes a
+/// scoped run never blank a repo it did not visit.
+pub fn filter_plan_by_scope(
+    plan: EmitPlan,
+    root: &std::path::Path,
+    scope: Option<&crate::brain::config::ScopeDependencySet>,
+) -> EmitPlan {
+    let Some(scope) = scope else {
+        return plan;
+    };
+    EmitPlan {
+        actions: plan
+            .actions
+            .into_iter()
+            .filter(|a| scope.allows(root, &a.path))
+            .collect(),
+        diagnostics: plan.diagnostics,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------

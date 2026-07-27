@@ -122,6 +122,9 @@ enum Command {
     ///                            load (exit 1); regenerating derived views from a partial
     ///                            corpus would silently erase the missing repo(s). Dry-run is
     ///                            unaffected — it still runs every planner and reports.
+    ///   E_EMIT_UNKNOWN_SCOPE — --scope names a slug with no matching [[repos]] entry in
+    ///                            brain.toml (exit 1); the diagnostic message names every
+    ///                            valid slug.
     EmitState {
         /// Path to search from when locating brain.toml (walks up to find it).
         /// Defaults to the current directory.
@@ -131,6 +134,12 @@ enum Command {
         /// it prints what would be written (W_EMIT_DRY_RUN) without touching any files.
         #[arg(long)]
         write: bool,
+        /// Limit regeneration to one repo's derived surfaces (its own leaf state.json,
+        /// cache_doc, tier rollup, and the HQ board) plus nothing else — every other
+        /// repo's files are left untouched. Omit to regenerate the whole corpus, which
+        /// is today's default behaviour and stays byte-for-byte unchanged.
+        #[arg(long, value_name = "REPO")]
+        scope: Option<String>,
     },
     /// Emit the `scope:doc_id` knowledge graph as a JSON artifact (Phase 3B, Block R).
     ///
@@ -630,7 +639,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::EmitState { path, write } => {
+        Command::EmitState { path, write, scope } => {
             if write && mev::brain::config::is_linked_worktree(&path) {
                 eprintln!(
                     "error: refusing to run emit-state --write from inside a linked git worktree ({}) — emit-state resolves every repo's derived-file paths from brain.toml, not CWD, so writing from a worktree would silently regenerate the MAIN checkout's files instead of the worktree's own copy. Run `mev emit-state --write` from the main working tree instead.",
@@ -645,7 +654,34 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match mev::emit_state(&root, write) {
+            let scope_deps = match &scope {
+                Some(slug) => {
+                    let config =
+                        match mev::brain::config::load_brain_config(&root.join("brain.toml")) {
+                            Ok(cfg) => cfg,
+                            Err(e) => {
+                                eprintln!("error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                    match config.scope_dependencies(slug) {
+                        Ok(deps) => Some(deps),
+                        Err(mev::brain::config::ScopeError::UnknownSlug { slug, valid_slugs }) => {
+                            eprintln!(
+                                "error [E_EMIT_UNKNOWN_SCOPE] unknown --scope slug '{slug}'; valid slugs: {}",
+                                valid_slugs.join(", ")
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                        Err(e) => {
+                            eprintln!("error [E_EMIT_UNKNOWN_SCOPE] {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+                None => None,
+            };
+            match mev::emit_state(&root, write, scope_deps.as_ref()) {
                 Ok(report) => {
                     if cli.json {
                         let envelope = mev::JsonReport::new("brain-emit", &root, &report);
