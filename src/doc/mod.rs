@@ -9,5 +9,6 @@
 
 pub mod index_reconcile;
 pub mod materialize;
+pub mod opportunity;
 
 pub use materialize::plan_document;
