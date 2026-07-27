@@ -6,6 +6,7 @@
 //! `planning/master-plan.md`).
 
 pub mod brain;
+pub mod doc;
 mod learn_ai;
 mod shared;
 pub mod theme;
