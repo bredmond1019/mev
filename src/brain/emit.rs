@@ -415,6 +415,12 @@ pub fn global_status_map(files: &[(StateSource, StateFile)]) -> HashMap<String, 
 /// Rendered without a trailing newline, matching the [`render_wave_table`]
 /// convention; callers that embed it inside a document own any surrounding
 /// blank lines.
+///
+/// **`focus.deferred` is deliberately not rendered here.** The Operating Board is
+/// the terse three-lane triage view — "what is live right now". Back-burner work
+/// is by definition not triage, so surfacing it would defeat the purpose of
+/// deferring it. The unified board is the superset that does show a `DEFERRED`
+/// section; see [`render_unified_board`].
 pub fn render_hq_board(focus: &Focus, edges: &[CrossRepoEdge]) -> String {
     let sections = [
         render_hq_board_section("NOW", &focus.now, edges),
@@ -541,6 +547,9 @@ pub fn render_unified_board(
         render_unified_board_section(BOARD_LANE_LEVEL, "NOW", &focus.now, edges, config),
         render_unified_board_section(BOARD_LANE_LEVEL, "NEXT", &next_sorted, edges, config),
         render_unified_board_section(BOARD_LANE_LEVEL, "BLOCKED", &focus.blocked, edges, config),
+        // DEFERRED is deliberately NOT priority-sorted: back-burner work has no
+        // queue position, and sorting it would imply one.
+        render_unified_board_section(BOARD_LANE_LEVEL, "DEFERRED", &focus.deferred, edges, config),
         render_due_soon_section(focus, edges, config, today),
     ];
     sections.join("\n\n")
@@ -665,6 +674,12 @@ fn render_unified_board_line(
 /// union whose `due` parses and is `<= today + 14 days`, sorted by due date
 /// ascending (soonest/most-overdue first) and annotated `(overdue)` when
 /// `due < today`.
+///
+/// **`focus.deferred` is deliberately excluded from the union.** A deferred
+/// block's `due` is no longer a commitment — deferring it *is* the decision to
+/// let that date pass. Consequence to be aware of: deferring a block silently
+/// removes it from DUE-SOON even when it is already overdue. That is intended;
+/// un-defer it (back to `open`) to put the date back in play.
 fn render_due_soon_section(
     focus: &Focus,
     edges: &[CrossRepoEdge],
@@ -734,6 +749,11 @@ fn epic_progress(members: &[(String, &TrackBlock)]) -> EpicProgress {
         match block.status.as_deref() {
             Some("closed") => p.closed += 1,
             Some("in_progress") => p.in_progress += 1,
+            // `deferred` intentionally falls through to `open`: deferring a
+            // block parks *attention*, it does not shrink an epic's scope. The
+            // work is still unfinished, so it stays in the denominator and the
+            // percentage does not move when you defer. Changing this would
+            // shift every epic's progress number — a separate, deliberate call.
             _ => p.open += 1,
         }
     }
@@ -830,6 +850,14 @@ pub fn render_epic_board(
             EPIC_LANE_LEVEL,
             "BLOCKED",
             &scoped.blocked,
+            &[],
+            config,
+        ));
+        lines.push(String::new());
+        lines.push(render_unified_board_section(
+            EPIC_LANE_LEVEL,
+            "DEFERRED",
+            &scoped.deferred,
             &[],
             config,
         ));
@@ -1285,7 +1313,28 @@ fn derived_focus_for(
         })
         .collect();
 
-    Focus { now, next, blocked }
+    let deferred = d
+        .deferred
+        .iter()
+        .map(|id| Block {
+            due: due_of(id),
+            priority: priority_of(id),
+            id: id.clone(),
+            title: title_of(id),
+            status: Some("deferred".to_string()),
+            note: None,
+            repo: None,
+            blocked_by: Vec::new(),
+            epics: Vec::new(),
+        })
+        .collect();
+
+    Focus {
+        now,
+        next,
+        blocked,
+        deferred,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1465,6 +1514,11 @@ pub fn plan_master_plan_tables(files: &[(StateSource, StateFile)], graph: &State
 /// section joins its blocks as `` `id` — title `` (comma-separated), or the literal
 /// `none` when the section is empty. This is the line [`plan_project_caches`]
 /// splices into a project cache doc's [`markers::PROJECT_CACHE`] sentinel.
+///
+/// A fourth `` Deferred: <deferred>.`` clause is appended **only when the lane is
+/// non-empty**. Emitting it unconditionally (as `Deferred: none.`) would rewrite
+/// every project cache doc in the portfolio on the first `emit-state --write`
+/// after this change, for repos that have deferred nothing.
 fn render_focus_line(
     src: &StateSource,
     file: &StateFile,
@@ -1485,12 +1539,16 @@ fn render_focus_line(
         }
     };
 
-    format!(
+    let mut line = format!(
         "**Current focus:** {}. Next: {}. Blocked: {}.",
         summarize(&focus.now),
         summarize(&focus.next),
         summarize(&focus.blocked)
-    )
+    );
+    if !focus.deferred.is_empty() {
+        line.push_str(&format!(" Deferred: {}.", summarize(&focus.deferred)));
+    }
+    line
 }
 
 /// Reconcile the `synced_from` scalar in `original`'s OKF frontmatter to `new_value`.
@@ -1543,16 +1601,21 @@ fn reconcile_synced_from(original: &str, new_value: &str) -> String {
     result
 }
 
-/// Reconcile the `now`, `next`, and `blocked` scalars in `original`'s OKF frontmatter
-/// to match the provided `focus`.
+/// Reconcile the `now`, `next`, `blocked`, and `deferred` scalars in `original`'s
+/// OKF frontmatter to match the provided `focus`.
 ///
 /// Locates the leading `---`-fenced frontmatter block. For each scalar:
 /// - if the queue is empty, the value is the literal `[]`.
 /// - otherwise, the value is a double-quoted string joining the blocks in that queue
 ///   (e.g., `"repo:id — title"`), with `\` and `"` escaped.
 ///
-/// If a line for the key exists, it is replaced; if not, it is appended before the
-/// closing fence.
+/// If a line for the key exists, it is always replaced. A **missing** line is
+/// appended before the closing fence only for the three original scalars —
+/// `deferred:` is appended only when the lane is non-empty. Appending it
+/// unconditionally would inject a `deferred: []` line into the frontmatter of
+/// every `status.md` in the portfolio on the first `emit-state --write` after
+/// this change. An existing `deferred:` line is still updated (so a lane that
+/// empties out correctly becomes `[]`).
 ///
 /// Returns `original` unchanged if no frontmatter block is found.
 pub fn reconcile_status_scalars(original: &str, focus: &Focus) -> String {
@@ -1591,19 +1654,28 @@ pub fn reconcile_status_scalars(original: &str, focus: &Focus) -> String {
     };
 
     let updates = [
-        ("now:", format_queue(&focus.now)),
-        ("next:", format_queue(&focus.next)),
-        ("blocked:", format_queue(&focus.blocked)),
+        ("now:", format_queue(&focus.now), true),
+        ("next:", format_queue(&focus.next), true),
+        ("blocked:", format_queue(&focus.blocked), true),
+        (
+            "deferred:",
+            format_queue(&focus.deferred),
+            !focus.deferred.is_empty(),
+        ),
     ];
 
-    for (key, val) in updates {
+    for (key, val, append_if_missing) in updates {
         let new_line = format!("{key} {val}");
         match fm_lines
             .iter()
             .position(|l| l.trim_start().starts_with(key))
         {
             Some(pos) => fm_lines[pos] = new_line,
-            None => fm_lines.push(new_line),
+            None => {
+                if append_if_missing {
+                    fm_lines.push(new_line);
+                }
+            }
         }
     }
 

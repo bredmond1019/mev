@@ -262,14 +262,30 @@ pub fn discover_state_files(
 // Schema-ring checks
 // ---------------------------------------------------------------------------
 
-/// Valid `status` values for `focus.now` and `focus.blocked` block entries (derived view).
-const VALID_STATUSES: &[&str] = &["open", "in_progress", "blocked", "closed"];
+/// Valid `status` values for `focus.now`, `focus.blocked`, and `focus.deferred`
+/// block entries (derived view).
+///
+/// `"deferred"` appears here as well as in [`VALID_TRACK_BLOCK_STATUSES`] because
+/// the emitter stamps `status: "deferred"` onto the `focus.deferred[]` entries it
+/// derives — omit it and `emit-state --write` would produce files that
+/// `validate-brain` immediately rejects with `E_STATE_SCHEMA_BAD_STATUS`.
+const VALID_STATUSES: &[&str] = &["open", "in_progress", "blocked", "deferred", "closed"];
 
 /// Valid *authored* `status` values for `tracks[].blocks[]` entries.
 ///
 /// `"blocked"` is intentionally excluded — it is a derived property, never an authored one.
 /// Any block authored with `"blocked"` triggers `E_STATE_AUTHORED_BLOCKED`.
-const VALID_TRACK_BLOCK_STATUSES: &[&str] = &["open", "in_progress", "closed"];
+///
+/// `"deferred"`, by contrast, *is* authored: it is a deliberate human decision to park
+/// a block on the back burner, which nothing can derive. It is manual and sticky (no
+/// expiry date — edit back to `"open"` to resume).
+const VALID_TRACK_BLOCK_STATUSES: &[&str] = &["open", "in_progress", "deferred", "closed"];
+
+/// The focus lanes, in the order they are reported in diagnostics and boards.
+///
+/// Used to drive [`check_focus_drift`]'s per-lane comparison from a single list,
+/// so a new lane cannot be added to some comparisons but forgotten in others.
+const FOCUS_LANES: [&str; 4] = ["now", "next", "blocked", "deferred"];
 
 /// Valid `status` values for `backlog[]` entries (HQ brain only).
 const VALID_BACKLOG_STATUSES: &[&str] = &["idea", "ready", "promoted"];
@@ -499,7 +515,13 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
 
     // --- 3. status enum + 4. blocked_by well-formedness ---
     // Check all focus collections that carry status or blocked_by.
-    for block in file.focus.now.iter().chain(file.focus.blocked.iter()) {
+    for block in file
+        .focus
+        .now
+        .iter()
+        .chain(file.focus.blocked.iter())
+        .chain(file.focus.deferred.iter())
+    {
         // status enum
         if let Some(status) = &block.status
             && !VALID_STATUSES.contains(&status.as_str())
@@ -1072,7 +1094,8 @@ pub fn check_state_graph(
             .now
             .iter()
             .chain(file.focus.next.iter())
-            .chain(file.focus.blocked.iter());
+            .chain(file.focus.blocked.iter())
+            .chain(file.focus.deferred.iter());
 
         for block in all_focus {
             let key = format!("{}:{}", src.repo_slug, block.id);
@@ -1370,9 +1393,15 @@ pub fn check_rollup(
         let actual_blocked: HashSet<&str> =
             child.focus.blocked.iter().map(|b| b.id.as_str()).collect();
 
+        let cached_deferred: HashSet<&str> =
+            rollup.deferred.iter().map(|b| b.id.as_str()).collect();
+        let actual_deferred: HashSet<&str> =
+            child.focus.deferred.iter().map(|b| b.id.as_str()).collect();
+
         if cached_now != actual_now
             || cached_next != actual_next
             || cached_blocked != actual_blocked
+            || cached_deferred != actual_deferred
         {
             // Build a compact diff summary for the warning message.
             let mut diffs: Vec<String> = Vec::new();
@@ -1395,6 +1424,13 @@ pub fn check_rollup(
                     "blocked: cached={:?} actual={:?}",
                     sorted_set(&cached_blocked),
                     sorted_set(&actual_blocked)
+                ));
+            }
+            if cached_deferred != actual_deferred {
+                diffs.push(format!(
+                    "deferred: cached={:?} actual={:?}",
+                    sorted_set(&cached_deferred),
+                    sorted_set(&actual_deferred)
                 ));
             }
 
@@ -1716,7 +1752,7 @@ pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> V
 
 /// The derived view of a file's focus — computed from `tracks[]` by [`derive_focus`].
 ///
-/// All three lists contain canonical block IDs (without the `"repo:"` prefix).
+/// All four lists contain canonical block IDs (without the `"repo:"` prefix).
 /// `blocked` additionally carries the **unmet subset** of `depends_on` for each blocked
 /// block — the unmet items are used by the emitter to populate `focus.blocked[].blocked_by[]`.
 #[derive(Debug, Clone, Default)]
@@ -1727,6 +1763,11 @@ pub struct DerivedFocus {
     pub next: Vec<String>,
     /// `(block_id, unmet_deps)` — open blocks with at least one unmet dependency.
     pub blocked: Vec<(String, Vec<BlockedBy>)>,
+    /// Block IDs with authored `status == "deferred"` — parked on the back burner.
+    ///
+    /// Plain IDs, like `now`: a deferred block carries no `blocked_by`, because
+    /// deferral is a terminal lane assignment that never consults dependencies.
+    pub deferred: Vec<String>,
 }
 
 /// Derive the expected `focus` from a file's `tracks[]`.
@@ -1756,6 +1797,15 @@ pub struct DerivedFocus {
 ///   `depends_on` list.
 /// - `next` — every `tracks[]` block returned by [`ready_order`] for this file
 ///   (open blocks with no external deps and all block deps `closed`), in wave order.
+/// - `deferred` — every `tracks[]` block with authored `status == "deferred"`.
+///
+/// **Why `deferred` is terminal, not a flavour of `blocked`.** A deferred block with
+/// unmet dependencies lands in `deferred` only, never in `blocked` — the unmet-subset
+/// computation runs exclusively under the `"open"` arm, exactly as `in_progress` blocks
+/// are never reported as blocked. Deferral is a statement about *attention*, not about
+/// *readiness*, so it wins over whatever the DAG says. Conversely, deferral does not
+/// propagate: an `open` block that depends on a deferred block is still `blocked`,
+/// because the dep is not `closed`.
 pub fn derive_focus(
     src: &StateSource,
     file: &StateFile,
@@ -1781,6 +1831,7 @@ pub fn derive_focus(
 
     let mut now: Vec<String> = Vec::new();
     let mut blocked: Vec<(String, Vec<BlockedBy>)> = Vec::new();
+    let mut deferred: Vec<String> = Vec::new();
 
     for track in &file.tracks {
         for block in &track.blocks {
@@ -1789,6 +1840,10 @@ pub fn derive_focus(
             match authored_status {
                 "in_progress" => {
                     now.push(block.id.clone());
+                }
+                "deferred" => {
+                    // Terminal — no dependency inspection. See the doc comment above.
+                    deferred.push(block.id.clone());
                 }
                 "open" => {
                     // Collect the unmet subset of depends_on.
@@ -1808,9 +1863,12 @@ pub fn derive_focus(
                     if !unmet.is_empty() {
                         blocked.push((block.id.clone(), unmet));
                     }
-                    // `closed` and `blocked` (invalid authored) are skipped; they
-                    // don't appear in the derived focus.
                 }
+                // `closed` and `blocked` (invalid authored, caught by
+                // `E_STATE_AUTHORED_BLOCKED`) are skipped — they have no derived
+                // lane. Any NEW authored status added to
+                // `VALID_TRACK_BLOCK_STATUSES` must also get an arm above, or it
+                // silently vanishes from every derived view with no diagnostic.
                 _ => {}
             }
         }
@@ -1825,7 +1883,12 @@ pub fn derive_focus(
         .map(|key| key[this_prefix.len()..].to_string())
         .collect();
 
-    DerivedFocus { now, next, blocked }
+    DerivedFocus {
+        now,
+        next,
+        blocked,
+        deferred,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1870,65 +1933,57 @@ pub fn check_focus_drift(
     // writer's children-union for a brain with in-scope children. Project-
     // kind files are unaffected and keep using `derive_focus` exactly as
     // before.
-    let (derived_now_owned, derived_next_owned, derived_blocked_owned): (
-        Vec<String>,
-        Vec<String>,
-        Vec<String>,
-    ) = if file.kind == "brain" {
+    // One entry per focus lane, in report order. Adding a fifth lane means
+    // adding a row to FOCUS_LANES and one element to each array below — not
+    // editing four parallel blocks that can drift apart.
+    let derived_owned: [Vec<String>; FOCUS_LANES.len()] = if file.kind == "brain" {
         let scope = tier_scope_for(file, config);
         let derived = derive_brain_focus(src, file, &scope, config, graph, files);
-        (
-            derived.now.iter().map(|b| b.id.clone()).collect(),
-            derived.next.iter().map(|b| b.id.clone()).collect(),
-            derived.blocked.iter().map(|b| b.id.clone()).collect(),
-        )
+        let ids = |blocks: &[Block]| blocks.iter().map(|b| b.id.clone()).collect();
+        [
+            ids(&derived.now),
+            ids(&derived.next),
+            ids(&derived.blocked),
+            ids(&derived.deferred),
+        ]
     } else {
         let derived = derive_focus(src, file, graph, files);
-        (
+        [
             derived.now.clone(),
             derived.next.clone(),
             derived.blocked.iter().map(|(id, _)| id.clone()).collect(),
-        )
+            derived.deferred.clone(),
+        ]
     };
-    let derived_now_str: HashSet<&str> = derived_now_owned.iter().map(|s| s.as_str()).collect();
-    let derived_next_str: HashSet<&str> = derived_next_owned.iter().map(|s| s.as_str()).collect();
-    let derived_blocked_str: HashSet<&str> =
-        derived_blocked_owned.iter().map(|s| s.as_str()).collect();
 
-    // Compare stored focus to derived (block-id sets only).
-    let stored_now: HashSet<&str> = file.focus.now.iter().map(|b| b.id.as_str()).collect();
-    let stored_next: HashSet<&str> = file.focus.next.iter().map(|b| b.id.as_str()).collect();
-    let stored_blocked: HashSet<&str> = file.focus.blocked.iter().map(|b| b.id.as_str()).collect();
+    let stored_lanes: [&[Block]; FOCUS_LANES.len()] = [
+        &file.focus.now,
+        &file.focus.next,
+        &file.focus.blocked,
+        &file.focus.deferred,
+    ];
 
-    if stored_now == derived_now_str
-        && stored_next == derived_next_str
-        && stored_blocked == derived_blocked_str
-    {
-        return vec![];
-    }
-
-    // Build a compact diff for the warning message.
+    // Compare stored focus to derived (block-id sets only), building a compact
+    // per-lane diff for the warning message.
     let mut diffs: Vec<String> = Vec::new();
-    if stored_now != derived_now_str {
-        diffs.push(format!(
-            "now: stored={:?} derived={:?}",
-            sorted_set(&stored_now),
-            sorted_set(&derived_now_str),
-        ));
+    for ((lane, stored_blocks), derived_ids) in FOCUS_LANES
+        .iter()
+        .zip(stored_lanes.iter())
+        .zip(derived_owned.iter())
+    {
+        let stored: HashSet<&str> = stored_blocks.iter().map(|b| b.id.as_str()).collect();
+        let derived: HashSet<&str> = derived_ids.iter().map(|s| s.as_str()).collect();
+        if stored != derived {
+            diffs.push(format!(
+                "{lane}: stored={:?} derived={:?}",
+                sorted_set(&stored),
+                sorted_set(&derived),
+            ));
+        }
     }
-    if stored_next != derived_next_str {
-        diffs.push(format!(
-            "next: stored={:?} derived={:?}",
-            sorted_set(&stored_next),
-            sorted_set(&derived_next_str),
-        ));
-    }
-    if stored_blocked != derived_blocked_str {
-        diffs.push(format!(
-            "blocked: stored={:?} derived={:?}",
-            sorted_set(&stored_blocked),
-            sorted_set(&derived_blocked_str),
-        ));
+
+    if diffs.is_empty() {
+        return vec![];
     }
 
     vec![Diagnostic::warning(
@@ -1989,8 +2044,8 @@ pub fn derive_cross_repo(files: &[(StateSource, StateFile)]) -> Vec<CrossRepoEdg
 ///
 /// Takes the *output* of [`derive_brain_focus`] rather than re-deriving, so an
 /// epic board can never disagree with the unified board about what is now, next,
-/// or blocked — it is the same union, just narrower. Order (and therefore the
-/// unified board's effective-priority sort) is preserved.
+/// blocked, or deferred — it is the same union, just narrower. Order (and
+/// therefore the unified board's effective-priority sort) is preserved.
 ///
 /// Membership is read off each [`Block`]'s `epics`, which
 /// [`derive_brain_focus`] carries through from the authoring `tracks[]` entry.
@@ -2001,6 +2056,12 @@ pub fn derive_epic_focus(focus: &Focus, slug: &str) -> Focus {
         next: focus.next.iter().filter(|b| member(b)).cloned().collect(),
         blocked: focus
             .blocked
+            .iter()
+            .filter(|b| member(b))
+            .cloned()
+            .collect(),
+        deferred: focus
+            .deferred
             .iter()
             .filter(|b| member(b))
             .cloned()
@@ -2257,12 +2318,29 @@ pub fn derive_rollup(
                     })
                     .collect();
 
+                let deferred = derived
+                    .deferred
+                    .iter()
+                    .map(|id| Block {
+                        due: None,
+                        priority: None,
+                        id: id.clone(),
+                        title: title_of(id),
+                        status: Some("deferred".to_string()),
+                        note: None,
+                        repo: None,
+                        blocked_by: Vec::new(),
+                        epics: Vec::new(),
+                    })
+                    .collect();
+
                 RepoRollup {
                     repo: entry.slug.clone(),
                     tier: Some(entry.tier.clone()),
                     now,
                     next,
                     blocked,
+                    deferred,
                 }
             } else if let Some(preserved) = existing.iter().find(|r| r.repo == entry.slug) {
                 let mut preserved = preserved.clone();
@@ -2277,6 +2355,7 @@ pub fn derive_rollup(
                     now: Vec::new(),
                     next: Vec::new(),
                     blocked: Vec::new(),
+                    deferred: Vec::new(),
                 }
             }
         })
@@ -2344,7 +2423,7 @@ fn focus_block(
 /// preserve/stub branches, which operate on the cached `repos[]` headline, not
 /// `focus`, since there is no live tracks[] to derive from).
 ///
-/// Deduplicated by `(repo, id)` within each of `now`/`next`/`blocked`
+/// Deduplicated by `(repo, id)` within each of `now`/`next`/`blocked`/`deferred`
 /// independently — the first occurrence wins.
 pub fn derive_brain_focus(
     self_src: &StateSource,
@@ -2364,9 +2443,11 @@ pub fn derive_brain_focus(
     let mut now: Vec<Block> = Vec::new();
     let mut next: Vec<Block> = Vec::new();
     let mut blocked: Vec<Block> = Vec::new();
+    let mut deferred: Vec<Block> = Vec::new();
     let mut seen_now: HashSet<(String, String)> = HashSet::new();
     let mut seen_next: HashSet<(String, String)> = HashSet::new();
     let mut seen_blocked: HashSet<(String, String)> = HashSet::new();
+    let mut seen_deferred: HashSet<(String, String)> = HashSet::new();
 
     for entry in in_scope {
         // A registered repo is either a leaf ("project") or a tier sub-brain
@@ -2427,6 +2508,19 @@ pub fn derive_brain_focus(
                 ));
             }
         }
+
+        for id in &derived.deferred {
+            let key = (entry.slug.clone(), id.clone());
+            if seen_deferred.insert(key) {
+                deferred.push(focus_block(
+                    id,
+                    &index,
+                    Some(entry.slug.clone()),
+                    Some("deferred".to_string()),
+                    Vec::new(),
+                ));
+            }
+        }
     }
 
     // Facet A — dual-role folding: fold the brain file's OWN tracks[]-derived
@@ -2479,7 +2573,25 @@ pub fn derive_brain_focus(
         }
     }
 
-    Focus { now, next, blocked }
+    for id in &self_derived.deferred {
+        let key = (self_slug.clone(), id.clone());
+        if seen_deferred.insert(key) {
+            deferred.push(focus_block(
+                id,
+                &self_index,
+                Some(self_slug.clone()),
+                Some("deferred".to_string()),
+                Vec::new(),
+            ));
+        }
+    }
+
+    Focus {
+        now,
+        next,
+        blocked,
+        deferred,
+    }
 }
 
 /// Return a deterministically sorted `Vec<&str>` from a `HashSet<&str>` for
@@ -4095,6 +4207,40 @@ mod tests {
     }
 
     #[test]
+    fn check_schema_authored_deferred_is_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        // `deferred` is a legal AUTHORED status (unlike `blocked`), and the
+        // emitter also stamps it onto the derived focus.deferred[] entries —
+        // both must validate clean, or `emit-state --write` would produce files
+        // that `validate-brain` immediately rejects.
+        let json = r#"{
+  "repo": "test",
+  "kind": "project",
+  "updated": "2026-07-26",
+  "focus": {
+    "now": [], "next": [], "blocked": [],
+    "deferred": [{ "id": "T.1", "title": "Back burner", "status": "deferred" }]
+  },
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [
+      { "id": "T.1", "title": "Back burner", "status": "deferred" }
+    ]
+  }]
+}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+
+        assert!(
+            diags.is_empty(),
+            "authored + derived `deferred` must validate clean, got: {diags:?}"
+        );
+    }
+
+    #[test]
     fn check_schema_authored_blocked_emits_e_state_authored_blocked() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("state.json");
@@ -4564,6 +4710,143 @@ mod tests {
             order,
             vec!["alpha:AL.1.A"],
             "open block with no deps should appear in ready_order, got: {order:?}"
+        );
+    }
+
+    #[test]
+    fn derive_focus_deferred_block_lands_in_deferred_lane_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("deferred"), None, vec![])],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+
+        let d = derive_focus(src, file, &graph, &files);
+
+        assert_eq!(d.deferred, vec!["AL.1.A"]);
+        assert!(d.now.is_empty(), "deferred must not be now: {:?}", d.now);
+        assert!(d.next.is_empty(), "deferred must not be next: {:?}", d.next);
+        assert!(
+            d.blocked.is_empty(),
+            "deferred must not be blocked: {:?}",
+            d.blocked
+        );
+    }
+
+    #[test]
+    fn derive_focus_deferred_with_unmet_deps_stays_deferred_not_blocked() {
+        // Deferral is a statement about ATTENTION, not readiness — it wins over
+        // whatever the DAG says. A deferred block with a wide-open external dep
+        // is still just deferred, never blocked.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[
+                (
+                    "AL.1.A",
+                    Some("deferred"),
+                    None,
+                    vec![
+                        BlockedBy::External {
+                            what: "waiting on vendor".to_string(),
+                        },
+                        BlockedBy::Block {
+                            repo: "alpha".to_string(),
+                            id: "AL.1.B".to_string(),
+                            what: None,
+                        },
+                    ],
+                ),
+                ("AL.1.B", Some("open"), None, vec![]),
+            ],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+
+        let d = derive_focus(src, file, &graph, &files);
+
+        assert_eq!(d.deferred, vec!["AL.1.A"]);
+        assert!(
+            d.blocked.is_empty(),
+            "a deferred block must never appear in blocked, got: {:?}",
+            d.blocked
+        );
+    }
+
+    #[test]
+    fn derive_focus_open_block_depending_on_deferred_is_blocked() {
+        // Deferral does NOT propagate down the DAG. The dependent stays blocked,
+        // because its dep is not `closed` — which is exactly why deferring a
+        // block that others depend on quietly stalls them.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("deferred"), None, vec![]),
+                (
+                    "AL.1.B",
+                    Some("open"),
+                    None,
+                    vec![BlockedBy::Block {
+                        repo: "alpha".to_string(),
+                        id: "AL.1.A".to_string(),
+                        what: None,
+                    }],
+                ),
+            ],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+
+        let d = derive_focus(src, file, &graph, &files);
+
+        assert_eq!(d.deferred, vec!["AL.1.A"]);
+        assert_eq!(d.blocked.len(), 1, "dependent must be blocked");
+        assert_eq!(d.blocked[0].0, "AL.1.B");
+        assert_eq!(
+            d.blocked[0].1.len(),
+            1,
+            "the deferred dep must be reported as the unmet edge"
+        );
+        assert!(
+            d.next.is_empty(),
+            "dependent must not be ready while its dep is deferred: {:?}",
+            d.next
+        );
+    }
+
+    #[test]
+    fn ready_order_deferred_block_excluded() {
+        // Regression pin. `ready_order`'s gate is `status != "open"`, so a
+        // deferred block is excluded for free — but that is load-bearing, not
+        // incidental. If anyone ever relaxes the gate to `!= "closed"`,
+        // deferred work silently floods back into `focus.next` and the whole
+        // back-burner feature stops working. This test is the tripwire.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("deferred"), None, vec![]),
+                ("AL.1.B", Some("open"), None, vec![]),
+            ],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert_eq!(
+            order,
+            vec!["alpha:AL.1.B"],
+            "deferred block must never be ready, even with zero deps; got: {order:?}"
         );
     }
 
@@ -5204,6 +5487,7 @@ mod tests {
                 now: make_blocks(now_ids),
                 next: make_blocks(next_ids),
                 blocked: make_blocks(blocked_ids),
+                deferred: Vec::new(),
             }],
             cross_repo: vec![],
             tiers: vec![],
@@ -5249,6 +5533,7 @@ mod tests {
                 now: make_blocks(now_ids, true),
                 next: make_blocks(next_ids, false),
                 blocked: make_blocks(blocked_ids, false),
+                deferred: Vec::new(),
             },
             tracks: vec![],
             repos: vec![],
@@ -5410,6 +5695,7 @@ mod tests {
                 now: make_focus_blocks(stored_now),
                 next: make_focus_blocks(stored_next),
                 blocked: make_focus_blocks(stored_blocked),
+                deferred: Vec::new(),
             },
             tracks: vec![Track {
                 title: "Phase 1".to_string(),
@@ -5454,6 +5740,95 @@ mod tests {
         assert!(
             diags.is_empty(),
             "in-sync focus should produce no diagnostics, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_deferred_mismatch_emits_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Block is deferred in tracks[] but stored focus has no deferred lane.
+        let pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("deferred"), vec![])],
+            &[], // stored now
+            &[], // stored next
+            &[], // stored blocked — and no stored deferred either
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &BrainConfig::default(), &graph, &files);
+
+        assert_eq!(diags.len(), 1, "expected one drift warning, got: {diags:?}");
+        assert_eq!(diags[0].locator, "W_STATE_FOCUS_DRIFT");
+        assert!(
+            diags[0].message.contains("deferred:"),
+            "drift message must name the deferred lane, got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_deferred_in_sync_produces_no_diagnostics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("deferred"), vec![])],
+            &[],
+            &[],
+            &[],
+        );
+        // Stored deferred lane matches the derivation.
+        pair.1.focus.deferred = vec![Block {
+            epics: Vec::new(),
+            due: None,
+            priority: None,
+            id: "AL.1.A".to_string(),
+            title: "AL.1.A".to_string(),
+            status: Some("deferred".to_string()),
+            note: None,
+            repo: None,
+            blocked_by: Vec::new(),
+        }];
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &BrainConfig::default(), &graph, &files);
+
+        assert!(
+            diags.is_empty(),
+            "matching deferred lane should not drift, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_drift_no_deferred_blocks_and_no_deferred_key_is_clean() {
+        // The day-one case for all ~23 existing repos: nothing is deferred and no
+        // state.json carries a `deferred` key. Adding the lane must not make a
+        // single one of them start warning.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_drift_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("in_progress"), vec![]),
+                ("AL.1.B", Some("open"), vec![]),
+            ],
+            &["AL.1.A"],
+            &["AL.1.B"],
+            &[],
+        );
+        let files = vec![pair];
+        assert!(files[0].1.focus.deferred.is_empty());
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let diags = check_focus_drift(src, file, &BrainConfig::default(), &graph, &files);
+
+        assert!(
+            diags.is_empty(),
+            "pre-existing corpus must stay clean, got: {diags:?}"
         );
     }
 
@@ -5605,6 +5980,7 @@ mod tests {
                 }],
                 next: vec![],
                 blocked: vec![],
+                deferred: Vec::new(),
             },
             tracks: vec![],
             repos: vec![],
@@ -5753,6 +6129,7 @@ mod tests {
                 now: stored_now.iter().map(|id| make_block(id)).collect(),
                 next: stored_next.iter().map(|id| make_block(id)).collect(),
                 blocked: stored_blocked.iter().map(|id| make_block(id)).collect(),
+                deferred: Vec::new(),
             },
             tracks: vec![Track {
                 title: "Own Track".to_string(),
@@ -6076,6 +6453,7 @@ mod tests {
             }],
             next: vec![],
             blocked: vec![],
+            deferred: Vec::new(),
         }];
 
         let rollups = derive_rollup(&scope, &config, &existing, &StateGraph::default(), &files);
@@ -6118,6 +6496,7 @@ mod tests {
             now: vec![],
             next: vec![],
             blocked: vec![],
+            deferred: Vec::new(),
         }];
 
         let rollups = derive_rollup(
@@ -6191,6 +6570,80 @@ mod tests {
 
         assert_eq!(focus.now.len(), 1);
         assert_eq!(focus.now[0].repo.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn derive_brain_focus_unions_child_deferred_blocks_repo_tagged() {
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let json = r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-07-26",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [{ "id": "AL.9.A", "title": "Back burner", "status": "deferred" }]
+  }]
+}"#;
+        let files = vec![make_pair(dir.path(), "alpha-state.json", "project", json)];
+        let (self_src, self_file) = empty_brain_pair(dir.path(), "core");
+
+        let focus = derive_brain_focus(
+            &self_src,
+            &self_file,
+            &scope,
+            &config,
+            &StateGraph::default(),
+            &files,
+        );
+
+        assert_eq!(
+            focus.deferred.len(),
+            1,
+            "child deferred must fold into union"
+        );
+        assert_eq!(focus.deferred[0].id, "AL.9.A");
+        assert_eq!(focus.deferred[0].repo.as_deref(), Some("alpha"));
+        assert_eq!(focus.deferred[0].status.as_deref(), Some("deferred"));
+        assert!(focus.next.is_empty(), "must not leak into next");
+        assert!(focus.blocked.is_empty(), "must not leak into blocked");
+    }
+
+    #[test]
+    fn derive_rollup_carries_child_deferred_lane() {
+        let config = make_mixed_tier_config();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let json = r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-07-26",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [{ "id": "AL.9.A", "title": "Back burner", "status": "deferred" }]
+  }]
+}"#;
+        let files = vec![make_pair(dir.path(), "alpha-state.json", "project", json)];
+        let graph = build_state_graph(&files);
+
+        let rollups = derive_rollup(
+            &TierScope::Tier("core".to_string()),
+            &config,
+            &[],
+            &graph,
+            &files,
+        );
+
+        let alpha = rollups
+            .iter()
+            .find(|r| r.repo == "alpha")
+            .expect("alpha rollup");
+        assert_eq!(alpha.deferred.len(), 1);
+        assert_eq!(alpha.deferred[0].id, "AL.9.A");
+        assert_eq!(alpha.deferred[0].status.as_deref(), Some("deferred"));
+        assert!(alpha.next.is_empty());
     }
 
     #[test]
@@ -7184,6 +7637,7 @@ mod check_epics_tests {
                 focus_entry("bastion", "BA.2", &["bastion-os", "bastion-web"]),
             ],
             blocked: vec![focus_entry("bastion-web", "BW.1", &["bastion-web"])],
+            deferred: Vec::new(),
         };
 
         let os = derive_epic_focus(&focus, "bastion-os");

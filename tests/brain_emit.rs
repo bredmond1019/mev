@@ -716,6 +716,7 @@ mod task3_planners {
             }],
             next: vec![],
             blocked: vec![],
+            deferred: Vec::new(),
         }
     }
 
@@ -876,6 +877,7 @@ mod task3_planners {
             }],
             next: vec![],
             blocked: vec![],
+            deferred: Vec::new(),
         };
         let file = make_leaf_file("myrepo", tracks, correct_focus);
         let src = StateSource {
@@ -4098,6 +4100,28 @@ mod task1_render_hq_board {
         }
     }
 
+    #[test]
+    fn hq_board_deliberately_omits_the_deferred_lane() {
+        // Pins an intentional divergence, not an oversight. The Operating Board
+        // is terse three-lane triage — "what is live right now". Surfacing
+        // back-burner work there would defeat the point of deferring it. The
+        // unified board is the superset that DOES render a DEFERRED section.
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![],
+            deferred: vec![tagged_block("mev", "MV.9", "Back burner")],
+        };
+
+        let rendered = render_hq_board(&focus, &[]);
+
+        assert_eq!(
+            rendered, "## NOW\n_none_\n\n## NEXT\n_none_\n\n## BLOCKED\n_none_",
+            "HQ board must stay three lanes and ignore focus.deferred"
+        );
+        assert!(!rendered.contains("MV.9"));
+    }
+
     /// Build a repo-tagged `Block` with the given `blocked_by` entries (BLOCKED shape).
     fn blocked_block(repo: &str, id: &str, title: &str, blocked_by: Vec<BlockedBy>) -> Block {
         Block {
@@ -4139,6 +4163,7 @@ mod task1_render_hq_board {
             now: vec![tagged_block("core", "A", "Block A")],
             next: vec![tagged_block("bastion", "B", "Block B")],
             blocked: vec![],
+            deferred: Vec::new(),
         };
 
         let rendered = render_hq_board(&focus, &[]);
@@ -4164,6 +4189,7 @@ _none_";
             ],
             next: vec![],
             blocked: vec![],
+            deferred: Vec::new(),
         };
 
         let rendered = render_hq_board(&focus, &[]);
@@ -4190,6 +4216,7 @@ _none_";
                     what: None,
                 }],
             )],
+            deferred: Vec::new(),
         };
         let edges = vec![cross_repo_edge(
             "mev",
@@ -4221,6 +4248,7 @@ _none_";
                     what: Some("needs the shared schema".to_string()),
                 }],
             )],
+            deferred: Vec::new(),
         };
 
         // No cross_repo[] edges supplied — the dependency's own `what` is used.
@@ -4244,6 +4272,7 @@ _none_";
                     what: "waiting on hardware".to_string(),
                 }],
             )],
+            deferred: Vec::new(),
         };
 
         let rendered = render_hq_board(&focus, &[]);
@@ -4266,6 +4295,7 @@ _none_";
                     what: None,
                 }],
             )],
+            deferred: Vec::new(),
         };
 
         let rendered = render_hq_board(&focus, &[]);
@@ -4293,6 +4323,7 @@ _none_";
                     },
                 ],
             )],
+            deferred: Vec::new(),
         };
 
         let rendered = render_hq_board(&focus, &[]);
@@ -4404,6 +4435,7 @@ mod task2_render_unified_board {
             ],
             next: vec![],
             blocked: vec![],
+            deferred: Vec::new(),
         };
 
         let rendered = render_unified_board(&focus, &[], &HashMap::new(), &config, today());
@@ -4430,6 +4462,7 @@ mod task2_render_unified_board {
             ],
             next: vec![],
             blocked: vec![],
+            deferred: Vec::new(),
         };
 
         let rendered = render_unified_board(&focus, &[], &HashMap::new(), &config, today());
@@ -4448,6 +4481,7 @@ mod task2_render_unified_board {
             now: vec![tagged_block("mystery", "X.1", "Unknown", None, None)],
             next: vec![],
             blocked: vec![],
+            deferred: Vec::new(),
         };
 
         let rendered = render_unified_board(&focus, &[], &HashMap::new(), &config, today());
@@ -4465,6 +4499,7 @@ mod task2_render_unified_board {
                 tagged_block("business", "BR.2", "Biz P1", Some(1), None),
             ],
             blocked: vec![],
+            deferred: Vec::new(),
         };
 
         let rendered = render_unified_board(&focus, &[], &HashMap::new(), &config, today());
@@ -4491,6 +4526,7 @@ mod task2_render_unified_board {
                 tagged_block("mev", "SOLO", "No hot dependents", Some(1), None),
             ],
             blocked: vec![],
+            deferred: Vec::new(),
         };
         let mut effective = HashMap::new();
         effective.insert("mev:GATE".to_string(), 0u8);
@@ -4520,6 +4556,7 @@ mod task2_render_unified_board {
                 tagged_block("mev", "D", "No priority second", None, None),
             ],
             blocked: vec![],
+            deferred: Vec::new(),
         };
 
         let rendered = render_unified_board(&focus, &[], &HashMap::new(), &config, today());
@@ -4557,6 +4594,7 @@ mod task2_render_unified_board {
                 tagged_block("mev", "NODATE", "No date", None, None),
             ],
             blocked: vec![],
+            deferred: Vec::new(),
         };
 
         let rendered = render_unified_board(&focus, &[], &HashMap::new(), &config, today());
@@ -4591,6 +4629,7 @@ mod task2_render_unified_board {
                 Some("2026-06-01"),
             )],
             blocked: vec![],
+            deferred: Vec::new(),
         };
 
         let rendered = render_unified_board(&focus, &[], &HashMap::new(), &config, today());
@@ -4622,6 +4661,7 @@ mod task2_render_unified_board {
                     what: None,
                 }],
             )],
+            deferred: Vec::new(),
         };
         let edges = vec![CrossRepoEdge {
             from: Endpoint {
@@ -4644,13 +4684,70 @@ mod task2_render_unified_board {
     }
 
     #[test]
-    fn empty_focus_renders_none_in_all_four_sections() {
+    fn deferred_lane_renders_its_own_section() {
+        let config = config_with_repos(&[("mev", "engine")]);
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![],
+            deferred: vec![tagged_block("mev", "MV.9", "Back burner", None, None)],
+        };
+
+        let rendered = render_unified_board(&focus, &[], &HashMap::new(), &config, today());
+
+        assert!(rendered.contains("## DEFERRED"), "got: {rendered}");
+        assert!(
+            rendered.contains("MV.9 — Back burner"),
+            "deferred block must be listed, got: {rendered}"
+        );
+        // And it must NOT have leaked into the lane it was deferred out of.
+        let next_section = rendered
+            .split("## NEXT")
+            .nth(1)
+            .and_then(|s| s.split("##").next())
+            .unwrap_or_default();
+        assert!(
+            next_section.contains("_none_"),
+            "deferred work must not appear in NEXT, got: {next_section}"
+        );
+    }
+
+    #[test]
+    fn deferred_block_is_excluded_from_due_soon_even_when_overdue() {
+        // Deferring a block is the decision to let its date pass. An overdue
+        // deferred block must stay silent rather than nagging from DUE-SOON.
+        let config = config_with_repos(&[("mev", "engine")]);
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![],
+            deferred: vec![tagged_block(
+                "mev",
+                "MV.9",
+                "Overdue but parked",
+                None,
+                Some("2026-01-01"),
+            )],
+        };
+
+        let rendered = render_unified_board(&focus, &[], &HashMap::new(), &config, today());
+
+        let due_soon = rendered.split("## DUE-SOON").nth(1).unwrap_or_default();
+        assert!(
+            due_soon.contains("_none_"),
+            "deferred block must not appear in DUE-SOON, got: {due_soon}"
+        );
+        assert!(!due_soon.contains("overdue"), "got: {due_soon}");
+    }
+
+    #[test]
+    fn empty_focus_renders_none_in_all_five_sections() {
         let config = config_with_repos(&[]);
         let rendered =
             render_unified_board(&Focus::default(), &[], &HashMap::new(), &config, today());
 
-        let expected =
-            "## NOW\n_none_\n\n## NEXT\n_none_\n\n## BLOCKED\n_none_\n\n## DUE-SOON\n_none_";
+        let expected = "## NOW\n_none_\n\n## NEXT\n_none_\n\n## BLOCKED\n_none_\n\n\
+             ## DEFERRED\n_none_\n\n## DUE-SOON\n_none_";
         assert_eq!(rendered, expected);
     }
 
@@ -5625,6 +5722,7 @@ mod task_yaml_frontmatter_drift_tests {
             }],
             next: vec![],
             blocked: vec![],
+            deferred: Vec::new(),
         };
         let new_content = reconcile_status_scalars(original, &focus);
         assert!(new_content.contains("now: \"core:1 — One\""));
@@ -5644,11 +5742,77 @@ mod task_yaml_frontmatter_drift_tests {
             now: vec![],
             next: vec![],
             blocked: vec![],
+            deferred: Vec::new(),
         };
         let new_content = reconcile_status_scalars(original, &focus);
         assert!(new_content.contains("now: []"));
         assert!(new_content.contains("next: []"));
         assert!(new_content.contains("blocked: []"));
+    }
+
+    #[test]
+    fn reconcile_status_scalars_does_not_append_empty_deferred() {
+        // Churn guard. ~23 `status.md` files have no `deferred:` key and nothing
+        // deferred. Appending `deferred: []` to each would rewrite every one of
+        // them on the first `emit-state --write` after this change.
+        let original = "---\n\
+                        title: Foo\n\
+                        now: []\n\
+                        next: []\n\
+                        blocked: []\n\
+                        ---\n\n\
+                        # Body\n";
+        let focus = Focus::default();
+        let new_content = reconcile_status_scalars(original, &focus);
+
+        assert_eq!(
+            new_content, original,
+            "an empty deferred lane must leave the frontmatter byte-identical"
+        );
+    }
+
+    #[test]
+    fn reconcile_status_scalars_appends_deferred_when_non_empty() {
+        let original = "---\n\
+                        title: Foo\n\
+                        ---\n\n\
+                        # Body\n";
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![],
+            deferred: vec![Block {
+                epics: Vec::new(),
+                due: None,
+                priority: None,
+                id: "9".into(),
+                title: "Nine".into(),
+                status: Some("deferred".into()),
+                note: None,
+                repo: Some("core".into()),
+                blocked_by: vec![],
+            }],
+        };
+        let new_content = reconcile_status_scalars(original, &focus);
+        assert!(
+            new_content.contains("deferred: \"core:9 — Nine\""),
+            "got: {new_content}"
+        );
+    }
+
+    #[test]
+    fn reconcile_status_scalars_empties_an_existing_deferred_key() {
+        // The other half of the conditional-append rule: once a repo HAS a
+        // `deferred:` key, un-deferring everything must set it to `[]` rather
+        // than leaving a stale value behind.
+        let original = "---\n\
+                        title: Foo\n\
+                        deferred: \"core:9 — Nine\"\n\
+                        ---\n\n\
+                        # Body\n";
+        let new_content = reconcile_status_scalars(original, &Focus::default());
+        assert!(new_content.contains("deferred: []"), "got: {new_content}");
+        assert!(!new_content.contains("Nine"));
     }
 
     #[test]
