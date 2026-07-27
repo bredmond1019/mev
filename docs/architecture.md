@@ -26,14 +26,15 @@ src/
 │   └── meta.rs     ← validate_file() — per-file frontmatter + JSON struct checks
 └── brain/
     ├── mod.rs      ← BrainValidator (implements ContentValidator); wires crawl_corpus
-    ├── config.rs   ← BrainConfig, CrawlConfig, VocabConfig, RepoEntry; find_brain_config(), load_brain_config()
+    ├── config.rs   ← BrainConfig, CrawlConfig, VocabConfig, RepoEntry; find_brain_config(), load_brain_config(); BrainConfig::scope_dependencies(), ScopeDependencySet, ScopeError — `emit-state --scope` dependency resolution (ticket-emit-state-scope-and-lock)
     ├── crawl.rs    ← crawl_corpus() → (Corpus, Vec<Diagnostic>); Corpus, CorpusEntry, MdFile; crawl_brain() (legacy)
     ├── okf.rs      ← OkfFrontmatter (re-exported from bastion's okf-core crate, BA.15.12/D15/D16), validate_md_file() — OKF field checks; root-instruction-file exemption
     ├── scope.rs    ← scope_units(), scope_for(), owning_unit() — registry-driven scope resolver
     ├── sync.rs     ← (internal) sync helpers
     ├── graph.rs    ← EdgeKind, Edge, Node, Graph, GraphArtifact, EdgeResolution, resolve_edge (re-exported from okf-core, BA.15.12/D16), DocMeta; build_graph(), check_graph() — Phase 3 Block J (read_doc_metadata removed by D5 extract-once refactor in Block Q)
     ├── state.rs    ← serde schema, StateGraph, StateNode, StateEdge, StateSource, TierEntry, load_state(), build_state_graph() (re-exported from okf-core, BA.15.12/D15/D16); mev-local: discover_state_files(), check_schema(), check_state_graph(), check_rollup(), detect_cycles(), ready_order(), check_focus_drift(), derive_focus(), derive_rollup(), derive_cross_repo(), tier_scope_for(), derive_brain_focus(), check_epics(), derive_epic_focus(), derive_epic_edges() — Phase 3 Block P / P2 / T / MV.3B.U (v2: depends_on DAG, cycle detection, derived-blocked enforcement, backlog nodes, focus-drift warnings, single-source derivation helpers; MV.3B.U: tier-scoped non-destructive rollup + brain-focus union; epics: cross-repo initiative registry + membership integrity + derived cross-epic relationships)
-    ├── emit.rs     ← EmitError, EmitAction, EmitPlan, markers (WAVE_TABLE, PROJECT_CACHE, TIER_ROLLUP, HQ_BOARD, UNIFIED_BOARD); wave_order(), render_wave_table(), global_status_map(), splice_generated(), plan_state_json(), plan_master_plan_tables(), plan_project_caches(), plan_tier_rollups(), render_hq_board(), plan_hq_board(), render_unified_board(), plan_unified_board(), apply_plan() — Phase 3 Block T (derived-view generation: wave tables, focus regen, brain rollup; MV.4.A: cross-repo depends_on resolution via global_status_map; MV.4.B: project-cache + tier-rollup splice; MV.4.C: HQ root Operating Board splice; MV.6.B: priority-ranked unified NOW/NEXT/BLOCKED/DUE-SOON board splice)
+    ├── emit.rs     ← EmitError, EmitAction, EmitPlan, markers (WAVE_TABLE, PROJECT_CACHE, TIER_ROLLUP, HQ_BOARD, UNIFIED_BOARD); wave_order(), render_wave_table(), global_status_map(), splice_generated(), plan_state_json(), plan_master_plan_tables(), plan_project_caches(), plan_tier_rollups(), render_hq_board(), plan_hq_board(), render_unified_board(), plan_unified_board(), apply_plan(), filter_plan_by_scope() — Phase 3 Block T (derived-view generation: wave tables, focus regen, brain rollup; MV.4.A: cross-repo depends_on resolution via global_status_map; MV.4.B: project-cache + tier-rollup splice; MV.4.C: HQ root Operating Board splice; MV.6.B: priority-ranked unified NOW/NEXT/BLOCKED/DUE-SOON board splice; ticket-emit-state-scope-and-lock: filter_plan_by_scope() narrows an already-built EmitPlan down to one repo's ScopeDependencySet targets, applied after planning so scoping cannot change which actions the unscoped planners themselves would compute)
+    ├── lock.rs     ← LockError, LockGuard, acquire_lock(), DEFAULT_LOCK_TIMEOUT — advisory lockfile (`<root>/.mev-emit.lock`) guarding `emit-state --write` against concurrent writers; stale (dead-pid) lockfiles are reclaimed automatically (ticket-emit-state-scope-and-lock)
     ├── links.rs    ← LinkKind, LinkRef; extract_links(), check_links(), collect_doc_ids(), read_moves_pending(), check_moved_references() — Phase 3 Block K
     ├── structure.rs ← check_structure() — Phase 3 Block L (bidirectional index.md <-> directory structural coverage: orphan files, dangling rows)
     ├── manifest.rs ← ManifestEntry, Manifest, build_manifest() — Phase 3 Block Q (canonical corpus manifest for RAG indexer)
@@ -60,6 +61,8 @@ tests/
 ├── doc_index_reconcile.rs ← integration tests for plan_index_reconcile()
 ├── doc_opportunity.rs ← integration tests for the Opportunity command family
 ├── doc_cli.rs         ← integration tests for the `mev doc ...` CLI surface
+├── emit_state_scope.rs ← integration tests for `emit-state --scope` (byte-identity of unvisited repos, unknown-slug diagnostic, unscoped-unchanged) — ticket-emit-state-scope-and-lock
+├── emit_state_lock.rs ← integration tests for the advisory lock (contention, stale-lock reclaim) — ticket-emit-state-scope-and-lock
 ├── smoke.rs           ← integration tests for the learn-ai validate() public API
 └── fixtures/
     └── brain.toml     ← minimal fixture — NOT the live brain.toml

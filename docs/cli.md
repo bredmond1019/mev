@@ -500,13 +500,61 @@ Regenerate all derived views in the Brain corpus from the authored `tracks[]` DA
 `mev emit-state` is the **single derivation engine** that `/log-work` shells out to for regenerating leaf `focus` fields, the brain `repos[]` / `cross_repo[]` rollup, brain `focus`, the master-plan wave/dependency tables, the per-project cache docs (focus line + `synced_from` watermark), the tier sub-brain rollup tables, the HQ Operating Board, and the HQ unified priority board. Because the validator's `check_focus_drift` and `check_rollup` share the same `derive_focus` / `derive_rollup` functions, running `mev emit-state --write` followed by `mev validate-brain --state` on the same corpus will report zero `W_STATE_FOCUS_DRIFT` and zero `W_STATE_ROLLUP_DRIFT` — the emit is, by construction, the fixed point of the drift check across every generated surface.
 
 ```bash
-mev emit-state [--write] [path]
+mev emit-state [--write] [--scope <repo>] [path]
 ```
 
 | Argument / Flag | Default | Description |
 |---|---|---|
 | `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
 | `--write` | off | Write the derived views in place. Without this flag the command is a dry-run |
+| `--scope <repo>` | unset (whole corpus) | Limit regeneration to one repo's own derived surfaces plus the rollups it feeds — nothing else. Omit for today's default full-corpus behaviour, byte-for-byte unchanged. |
+
+#### `--scope <repo>` — per-repo regeneration
+
+Unscoped, `emit-state --write` regenerates the derived surfaces of **every** registered repo on
+every run — a single `/log-work` in one sub-repo dirties dozens of files across the whole corpus.
+`--scope <repo>` narrows a `--write` to exactly the surfaces that one repo feeds, derived
+mechanically from the `[[repos]]` registry in `brain.toml` (never hardcoded):
+
+- the repo's own leaf `planning/state.json`,
+- its `cache_doc` (e.g. `docs/projects/<slug>.md`),
+- its tier container's rollup `status.md` (the `[[repos]]` entry whose `slug` matches this repo's
+  `tier`), when that tier resolves to a distinct registered entry, and
+- the HQ root's `status.md` (the Operating Board) — every repo feeds this one.
+
+Every other repo's files are left byte-identical. A scoped run never blanks or truncates a repo it
+did not visit — rollups preserve every row it didn't touch. An unknown `--scope` slug fails fast
+with `E_EMIT_UNKNOWN_SCOPE`, naming every valid slug, before any planner runs or any file is
+touched.
+
+**Operating guidance:** reach for `--scope <repo>` from a single sub-repo's own workflow commands
+(`/log-work`, `/start-block`, `/blocked`, …) where only that repo's state changed — it keeps the
+diff local and avoids cross-repo churn when several agents are working concurrently. Leave the
+periodic full reconciliation (cron-bound `routine.sh`, or any run meant to catch drift across the
+whole corpus) unscoped — only a full run recomputes every cross-repo edge (`cross_repo[]`, the
+unified board's cross-repo priority sort, epic relationships) that a single repo's scope cannot see.
+
+```bash
+# Regenerate only mev's own derived surfaces (its state.json, cache doc, tier rollup, HQ board)
+mev emit-state --scope mev --write
+
+# Unknown slug: fails fast, names the valid slugs, writes nothing
+mev emit-state --scope not-a-repo --write
+```
+
+#### Advisory lock on `--write`
+
+`--write` (scoped or not) takes an exclusive advisory lockfile at `<root>/.mev-emit.lock` for the
+duration of the run, recording the owning pid. This guards against concurrent `emit-state --write`
+invocations interleaving writes to the same derived file — a real risk given how many workflow
+commands shell out to `emit-state --write`, and one `E_EMIT_LINKED_WORKTREE` does not cover: that
+guard only catches a linked git *worktree*, not the symlinked `planning/` vaults (D46) two agents
+in different sub-repos can both be writing through at once.
+
+A second concurrent `--write` polls briefly for the lock to free up, then fails with
+`E_EMIT_LOCK_HELD` (naming the holder's pid) and writes nothing rather than interleaving. A
+lockfile whose owning process is no longer alive is reclaimed automatically instead of blocking
+forever. Dry-run (no `--write`) never takes the lock and is unaffected by contention.
 
 #### Derived views updated
 
@@ -553,6 +601,8 @@ The other planners use their own markers in the same document types: `project-ca
 | `E_CONFIG_NOT_FOUND` | Error | `brain.toml` could not be located by walking up from `path`; causes exit 1 |
 | `E_EMIT_LINKED_WORKTREE` | Error | `--write` invoked from inside a linked git worktree; causes exit 1 |
 | `E_EMIT_INCOMPLETE_CORPUS` | Error | `--write` refused because one or more discovered `state.json` files failed to load; causes exit 1 |
+| `E_EMIT_UNKNOWN_SCOPE` | Error | `--scope` names a slug with no matching `[[repos]]` entry in `brain.toml`; the message names every valid slug; causes exit 1 |
+| `E_EMIT_LOCK_HELD` | Error | `--write` could not acquire the advisory lock at `<root>/.mev-emit.lock` within the timeout because another live process already holds it (names the holder pid); causes exit 1. A lockfile whose owning process is no longer alive is reclaimed automatically instead of blocking forever. Dry-run never takes the lock. |
 
 `--write` refuses to run when `path` resolves to a linked git worktree (e.g. `trees/<slug>/` under a
 repo that already has its own main working tree) — `emit-state` resolves every repo's derived-file
@@ -587,6 +637,9 @@ mev emit-state --write
 
 # Write derived views from an explicit brain root
 mev emit-state --write ~/Dev/agentic-portfolio
+
+# Write only mev's own derived surfaces (leaf state.json, cache doc, tier rollup, HQ board)
+mev emit-state --scope mev --write
 
 # Machine-readable dry-run output
 mev --json emit-state
