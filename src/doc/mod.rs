@@ -7,6 +7,7 @@
 //! `materialize::plan_document`'s doc comment) — `apply_plan` stays the
 //! single write point.
 
+pub mod index_reconcile;
 pub mod materialize;
 
 pub use materialize::plan_document;

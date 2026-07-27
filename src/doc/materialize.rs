@@ -11,6 +11,7 @@ use okf_core::{BodySection, BrainDocModel, render_document, serialize_nested_fro
 
 use crate::Diagnostic;
 use crate::brain::emit::{EmitAction, EmitError, EmitPlan, splice_generated};
+use crate::doc::index_reconcile::plan_index_reconcile;
 
 /// Compute the target file path for a document under `root`, derived from
 /// its `IndexIntent` fields: `root/dirname(index_path)/link_target`.
@@ -136,10 +137,12 @@ pub fn plan_document(model: &impl BrainDocModel, root: &Path) -> EmitPlan {
         }
     }
 
-    EmitPlan {
+    let mut plan = EmitPlan {
         actions,
         diagnostics,
-    }
+    };
+    plan.extend(plan_index_reconcile(&intent, root));
+    plan
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
