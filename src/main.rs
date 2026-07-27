@@ -154,6 +154,67 @@ enum Command {
         #[arg(long)]
         pretty: bool,
     },
+    /// Park an epic: set its registry status to `paused` and cascade `deferred`
+    /// onto every one of its open member blocks.
+    ///
+    /// The epic-level counterpart of a block's `deferred` status. Parked work stays
+    /// on the roadmap and stays counted, but stops competing for attention: its
+    /// blocks leave `focus.next`, and its board section collapses to one line.
+    ///
+    /// Blocks with `status: "in_progress"` are deliberately left alone and reported
+    /// (`W_EPIC_SKIPPED_IN_PROGRESS`) — parking work you are mid-block on is far more
+    /// likely to be a mistake than an intent.
+    ///
+    /// Dry-run by default; pass --write to apply. A successful --write also runs
+    /// `emit-state --write`, so `focus` and the boards are regenerated in the same
+    /// invocation rather than being left drifted.
+    ///
+    /// Exit codes:
+    ///   0 — planned (dry-run) or applied successfully
+    ///   1 — unknown epic slug, no HQ registry, or a write failure
+    DeferEpic {
+        /// Epic slug as it appears in the HQ `epics[]` registry (e.g. `bastion-tui`).
+        slug: String,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Apply the edits. Without this the command prints what it would change.
+        #[arg(long)]
+        write: bool,
+    },
+    /// Un-park an epic: set its registry status to `active` and return every
+    /// `deferred` member block to `open`. The inverse of `defer-epic`.
+    ///
+    /// Dry-run by default; pass --write to apply (which also re-runs emit-state).
+    ResumeEpic {
+        /// Epic slug as it appears in the HQ `epics[]` registry.
+        slug: String,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Apply the edits. Without this the command prints what it would change.
+        #[arg(long)]
+        write: bool,
+    },
+    /// Reconcile every epic's registry status against its blocks, in both directions.
+    ///
+    /// - An epic whose remaining work is entirely `deferred` but which is still
+    ///   `active` is set to `paused`.
+    /// - An epic already `paused` that still has `open` members has those members
+    ///   deferred.
+    ///
+    /// Never un-defers anything: an active epic with *some* deferred blocks is a
+    /// normal state, so un-parking stays explicit via `resume-epic`.
+    ///
+    /// Dry-run by default; pass --write to apply (which also re-runs emit-state).
+    SyncEpics {
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Apply the edits. Without this the command prints what it would change.
+        #[arg(long)]
+        write: bool,
+    },
     /// Generate an interactive HTML visualization of the knowledge graph (graph.html)
     GenerateGraph {
         /// Path to search from when locating brain.toml. Defaults to the current directory.
@@ -163,6 +224,81 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+}
+
+/// Shared dispatch for `defer-epic` / `resume-epic` / `sync-epics`.
+///
+/// All three resolve the brain root, run [`mev::epic_status`], and report in the
+/// same shape as `emit-state` (per-diagnostic lines + a mode/count summary, or a
+/// JSON envelope under `--json`).
+fn run_epic_status(
+    path: &std::path::Path,
+    slug: Option<&str>,
+    action: mev::brain::epics::EpicAction,
+    write: bool,
+    json: bool,
+) -> ExitCode {
+    // Same worktree guard as emit-state: a --write here chains into emit-state,
+    // which resolves every repo's paths from brain.toml rather than CWD.
+    if write && mev::brain::config::is_linked_worktree(path) {
+        eprintln!(
+            "error: refusing to write from inside a linked git worktree ({}) — epic edits chain \
+             into emit-state, which resolves derived-file paths from brain.toml, not CWD, so this \
+             would regenerate the MAIN checkout's files. Run from the main working tree instead.",
+            path.display()
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let root = match mev::brain::config::find_brain_root(path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let label = match (slug, action) {
+        (Some(_), mev::brain::epics::EpicAction::Defer) => "defer-epic",
+        (Some(_), mev::brain::epics::EpicAction::Resume) => "resume-epic",
+        (None, _) => "sync-epics",
+    };
+
+    match mev::epic_status(&root, slug, action, write) {
+        Ok(report) => {
+            if json {
+                let envelope = mev::JsonReport::new(label, &root, &report);
+                match envelope.to_json() {
+                    Ok(s) => println!("{s}"),
+                    Err(e) => {
+                        eprintln!("error: could not serialize report: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                for d in &report.diagnostics {
+                    print_diagnostic(d);
+                }
+                let mode = if write { "write" } else { "dry-run" };
+                println!(
+                    "{label} {} {}: {} error(s), {} warning(s)",
+                    mode,
+                    root.display(),
+                    report.error_count(),
+                    report.warning_count()
+                );
+            }
+            if report.is_failure() {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn print_diagnostic(d: &mev::Diagnostic) {
@@ -328,6 +464,27 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::DeferEpic { slug, path, write } => run_epic_status(
+            &path,
+            Some(&slug),
+            mev::brain::epics::EpicAction::Defer,
+            write,
+            cli.json,
+        ),
+        Command::ResumeEpic { slug, path, write } => run_epic_status(
+            &path,
+            Some(&slug),
+            mev::brain::epics::EpicAction::Resume,
+            write,
+            cli.json,
+        ),
+        Command::SyncEpics { path, write } => run_epic_status(
+            &path,
+            None,
+            mev::brain::epics::EpicAction::Defer,
+            write,
+            cli.json,
+        ),
         Command::Manifest { path, pretty } => {
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,

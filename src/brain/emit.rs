@@ -720,40 +720,72 @@ fn render_due_soon_section(
 // render_epic_board — per-initiative NOW/NEXT/BLOCKED + progress + relationships
 // ---------------------------------------------------------------------------
 
-/// The epic `status` values whose boards are rendered. A `complete` or `paused`
-/// epic keeps its registry entry (and its blocks keep their membership) but
-/// drops off the board, so a finished initiative stops competing for attention.
+/// The epic `status` values whose boards render in FULL (all lanes + relationships).
+///
+/// A `complete` epic drops off the board entirely — a finished initiative should
+/// stop competing for attention. A `paused` epic does **not** drop off: it renders
+/// collapsed to a single marked line (see [`render_epic_board`]), because parked
+/// work still needs to be visible enough that you remember it exists.
 const RENDERED_EPIC_STATUSES: [&str; 1] = ["active"];
 
+/// Epic `status` values that render collapsed to a one-line summary instead of a
+/// full board section.
+const COLLAPSED_EPIC_STATUSES: [&str; 1] = ["paused"];
+
+/// The authored epic status meaning "parked" — the epic-level counterpart of a
+/// block's `deferred` status. Paired with block deferral by `mev defer-epic`.
+pub const EPIC_STATUS_PAUSED: &str = "paused";
+
+/// The authored epic status meaning "live".
+pub const EPIC_STATUS_ACTIVE: &str = "active";
+
 /// Counted progress for one epic: how many member blocks are in each state.
-struct EpicProgress {
-    closed: usize,
-    in_progress: usize,
-    open: usize,
+pub struct EpicProgress {
+    /// Members with authored `status == "closed"`.
+    pub closed: usize,
+    /// Members with authored `status == "in_progress"`.
+    pub in_progress: usize,
+    /// Members that are open (authored `open`, or status absent).
+    pub open: usize,
+    /// Members with authored `status == "deferred"`.
+    pub deferred: usize,
 }
 
 impl EpicProgress {
-    fn total(&self) -> usize {
-        self.closed + self.in_progress + self.open
+    /// Every member block, in any state.
+    pub fn total(&self) -> usize {
+        self.closed + self.in_progress + self.open + self.deferred
+    }
+
+    /// Is this epic's remaining work entirely parked?
+    ///
+    /// True iff it has at least one deferred member and **no** unfinished
+    /// non-deferred work (nothing open, nothing in progress). An epic whose
+    /// members are all `closed` is *complete*, not deferred, so the
+    /// `deferred > 0` clause is load-bearing.
+    ///
+    /// This is the **single** predicate behind the collapsed board rendering,
+    /// the `fully_deferred` flag on the serve API, and `mev sync-epics`'s
+    /// "all blocks deferred → pause the epic" direction — so the three can
+    /// never disagree about what "a deferred epic" means.
+    pub fn is_fully_deferred(&self) -> bool {
+        self.deferred > 0 && self.open == 0 && self.in_progress == 0
     }
 }
 
 /// Tally one epic's member blocks by authored status.
-fn epic_progress(members: &[(String, &TrackBlock)]) -> EpicProgress {
+pub fn epic_progress(members: &[(String, &TrackBlock)]) -> EpicProgress {
     let mut p = EpicProgress {
         closed: 0,
         in_progress: 0,
         open: 0,
+        deferred: 0,
     };
     for (_, block) in members {
         match block.status.as_deref() {
             Some("closed") => p.closed += 1,
             Some("in_progress") => p.in_progress += 1,
-            // `deferred` intentionally falls through to `open`: deferring a
-            // block parks *attention*, it does not shrink an epic's scope. The
-            // work is still unfinished, so it stays in the denominator and the
-            // percentage does not move when you defer. Changing this would
-            // shift every epic's progress number — a separate, deliberate call.
+            Some("deferred") => p.deferred += 1,
             _ => p.open += 1,
         }
     }
@@ -795,20 +827,29 @@ pub fn render_epic_board(
     effective: &HashMap<String, u8>,
     config: &BrainConfig,
 ) -> String {
+    // Three-way split by authored status, not the old two-way filter:
+    //   active (or absent)  → full board section
+    //   paused              → ONE collapsed line, still visible
+    //   complete            → dropped entirely
+    // Parked work must stay visible enough that you remember it exists; a
+    // finished initiative should genuinely stop competing for attention.
+    let status_of = |i: &EpicBoardInput<'_>| {
+        i.epic
+            .status
+            .as_deref()
+            .unwrap_or(EPIC_STATUS_ACTIVE)
+            .to_string()
+    };
     let rendered: Vec<&EpicBoardInput<'_>> = inputs
         .iter()
-        .filter(|i| {
-            // An absent status defaults to active — a registry entry with no
-            // lifecycle set is still work someone declared.
-            i.epic
-                .status
-                .as_deref()
-                .map(|s| RENDERED_EPIC_STATUSES.contains(&s))
-                .unwrap_or(true)
-        })
+        .filter(|i| RENDERED_EPIC_STATUSES.contains(&status_of(i).as_str()))
+        .collect();
+    let collapsed: Vec<&EpicBoardInput<'_>> = inputs
+        .iter()
+        .filter(|i| COLLAPSED_EPIC_STATUSES.contains(&status_of(i).as_str()))
         .collect();
 
-    if rendered.is_empty() {
+    if rendered.is_empty() && collapsed.is_empty() {
         return "_no active epics_".to_string();
     }
 
@@ -871,7 +912,34 @@ pub fn render_epic_board(
         sections.push(lines.join("\n"));
     }
 
+    // Collapsed (paused) epics render last, as one line each — present, but
+    // visibly parked and costing a line instead of a dozen.
+    for input in collapsed {
+        sections.push(render_collapsed_epic_line(
+            input.epic,
+            &epic_progress(&input.members),
+        ));
+    }
+
     sections.join("\n\n")
+}
+
+/// Render one paused epic as a single line: heading, progress, parked marker.
+///
+/// This is what a deferred initiative looks like on the board — enough to know
+/// it exists and how much is parked, without the dozen lines of empty
+/// `NOW`/`NEXT`/`BLOCKED` cells a full section would spend saying "nothing here".
+fn render_collapsed_epic_line(epic: &Epic, progress: &EpicProgress) -> String {
+    let marker = if progress.is_fully_deferred() {
+        "_deferred — all remaining work parked_"
+    } else {
+        "_paused_"
+    };
+    format!(
+        "### {} — {} · {marker}",
+        epic.title,
+        render_epic_progress_line(progress)
+    )
 }
 
 /// Render an epic's one-line progress summary, e.g.
@@ -880,13 +948,22 @@ fn render_epic_progress_line(p: &EpicProgress) -> String {
     if p.total() == 0 {
         return "**no member blocks yet**".to_string();
     }
-    format!(
+    // `deferred` is reported as its own term rather than folded into `open`.
+    // Folding made a fully-parked epic read "0 in progress · 2 open", which is
+    // indistinguishable from two blocks that are ready to pick up. The clause is
+    // omitted entirely when nothing is deferred, so active epics' lines are
+    // byte-identical to before this change.
+    let mut line = format!(
         "**{}/{} closed** · {} in progress · {} open",
         p.closed,
         p.total(),
         p.in_progress,
         p.open
-    )
+    );
+    if p.deferred > 0 {
+        line.push_str(&format!(" · {} deferred", p.deferred));
+    }
+    line
 }
 
 /// Render the `Waiting on` / `Holding up` relationship lines for one epic,

@@ -145,7 +145,7 @@ When `--state` is passed, `mev` runs the full OKF schema pass first, then append
 | `E_STATE_DANGLING_CROSS_REPO` | Error | A brain `cross_repo[]` edge's endpoint does not resolve to a known block |
 | `W_STATE_ROLLUP_DRIFT` | Warning | Brain `repos[]` headline differs from the child repo's actual `focus` |
 | `E_STATE_CYCLE` | Error | A `depends_on` edge forms a cycle; the cycle path is named in the message |
-| `E_STATE_AUTHORED_BLOCKED` | Error | A `tracks[].blocks[].status` is `"blocked"` — `blocked` is derived, not authored |
+| `E_STATE_AUTHORED_BLOCKED` | Error | A `tracks[].blocks[].status` is `"blocked"` — `blocked` is derived, not authored. (`"deferred"`, by contrast, **is** a legal authored status.) |
 | `E_STATE_STATUS_INCONSISTENT` | Error | A `closed` block has a `type:block` `depends_on` target that is not `closed` |
 | `E_STATE_DANGLING_PROMOTION` | Error | A `status:"promoted"` backlog node's `block` pointer resolves to no `tracks[]` node |
 | `E_STATE_PRIORITY_RANGE` | Error | A `priority` value is not in 0..=3 |
@@ -594,6 +594,61 @@ mev --json emit-state
 # Machine-readable write output
 mev --json emit-state --write ~/Dev/agentic-portfolio
 ```
+
+---
+
+### `defer-epic <slug> [--write] [path]` · `resume-epic <slug> [--write] [path]` · `sync-epics [--write] [path]`
+
+Park and un-park a whole initiative, keeping the HQ `epics[]` registry status and
+its member blocks' authored statuses in agreement.
+
+An epic is "parked" when its registry `status` is `paused` **and** its unfinished
+member blocks are `deferred`. Those two can drift — a `paused` epic whose blocks
+are still `open` keeps flooding `focus.next` even though you consider the
+initiative shelved. These commands move both together.
+
+| Command | Registry | Member blocks |
+|---|---|---|
+| `defer-epic <slug>` | → `paused` | `open` → `deferred` |
+| `resume-epic <slug>` | → `active` | `deferred` → `open` |
+| `sync-epics` | fully-deferred epics → `paused` | stragglers in a `paused` epic → `deferred` |
+
+**`in_progress` blocks are never touched**, in either direction. Parking work you
+are mid-block on is far more likely to be a mistake than an intent, so it is left
+alone and reported as `W_EPIC_SKIPPED_IN_PROGRESS`. `closed` blocks are likewise
+never reopened.
+
+**`sync-epics` never un-defers anything.** An `active` epic with *some* deferred
+blocks is a perfectly normal state (you parked two of nine). Un-parking is always
+explicit, via `resume-epic`.
+
+**Dry-run by default**, exactly like `emit-state`: without `--write` the proposed
+edits print as `W_EMIT_DRY_RUN` and nothing is touched. A successful `--write`
+additionally runs `emit-state --write`, so `focus`, the boards and the rollups are
+regenerated in the same invocation instead of being left drifted.
+
+> **These are the only commands that write *authored* state.** Everything else mev
+> writes is derived. The cascade lives behind an explicit command precisely so
+> `emit-state` stays safe to run unattended — see `src/brain/epics.rs` for the
+> full rationale.
+
+```bash
+# What would parking the TUI initiative change?
+mev defer-epic bastion-tui
+
+# Park it (and regenerate every derived view)
+mev defer-epic bastion-tui --write
+
+# Bring it back
+mev resume-epic bastion-tui --write
+
+# You deferred blocks by hand; make the registry agree
+mev sync-epics --write
+```
+
+Exit codes: `0` planned/applied successfully · `1` unknown epic slug
+(`E_EPIC_UNKNOWN`), no HQ registry (`E_EPIC_NO_REGISTRY`), an unreadable
+state.json (`E_EPIC_INCOMPLETE_CORPUS` on `--write`), or a write failure.
 
 ---
 

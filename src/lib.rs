@@ -535,6 +535,105 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
 ///
 /// Resolves `brain.toml` the same way as [`validate_brain`] — see that function's
 /// doc for the `E_CONFIG_NOT_FOUND` fallback behaviour.
+/// Park or un-park an epic, cascading to its member blocks (`mev defer-epic` /
+/// `mev resume-epic` / `mev sync-epics`).
+///
+/// `action` selects the direction; `slug` names one epic, or `None` reconciles the
+/// whole registry in both directions (see [`brain::epics::plan_sync_epics`]).
+///
+/// Dry-run by default, exactly like [`emit_state`]: without `write` the proposed
+/// authored edits are reported as `W_EMIT_DRY_RUN` and nothing is touched. With
+/// `write`, the authored edits are applied **and then [`emit_state`] is run** so
+/// the derived views (`focus`, boards, rollups) are regenerated in the same
+/// invocation — otherwise the corpus would be left in a state the drift checks
+/// immediately complain about.
+///
+/// This is the one place mev writes *authored* state; see the module docs on
+/// `brain::epics` for why that lives behind an explicit command rather than in
+/// `emit-state`.
+pub fn epic_status(
+    root: &std::path::Path,
+    slug: Option<&str>,
+    action: brain::epics::EpicAction,
+    write: bool,
+) -> anyhow::Result<Report> {
+    use brain::config::find_brain_config;
+    use brain::emit::apply_plan;
+    use brain::epics::{EpicAction, plan_defer_epic, plan_resume_epic, plan_sync_epics};
+    use brain::state::{StateLoadError, discover_state_files, load_state};
+
+    let mut report = Report::default();
+
+    let config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    let (sources, discovery_diags) = discover_state_files(root, &config);
+    report.diagnostics.extend(discovery_diags);
+
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    let mut load_failed = false;
+    for src in &sources {
+        match load_state(&src.abs_path) {
+            Ok(file) => loaded.push((src.clone(), file)),
+            Err(StateLoadError::Parse { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("state.json is not valid JSON or does not match the schema: {source}"),
+                ));
+            }
+            Err(StateLoadError::Io { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("could not read state.json: {source}"),
+                ));
+            }
+        }
+    }
+
+    // Same completeness guard as emit-state: an epic's members span repos, so
+    // cascading from a partial corpus would silently skip whole repos' blocks.
+    if write && load_failed {
+        report.diagnostics.push(Diagnostic::error(
+            root,
+            "E_EPIC_INCOMPLETE_CORPUS",
+            "refusing to write: at least one state.json failed to load, and an epic's members \
+             span repos — cascading now would silently skip the unreadable repo's blocks"
+                .to_string(),
+        ));
+        return Ok(report);
+    }
+
+    let plan = match (slug, action) {
+        (Some(s), EpicAction::Defer) => plan_defer_epic(s, &config, &loaded),
+        (Some(s), EpicAction::Resume) => plan_resume_epic(s, &config, &loaded),
+        (None, _) => plan_sync_epics(&config, &loaded),
+    };
+
+    let had_actions = !plan.actions.is_empty();
+    report.diagnostics.extend(apply_plan(&plan, write));
+
+    // Regenerate derived views so focus/boards agree with the authored edit.
+    if write && had_actions && !report.is_failure() {
+        let emit = emit_state(root, true)?;
+        report.diagnostics.extend(emit.diagnostics);
+    }
+
+    Ok(report)
+}
+
 pub fn emit_state(root: &std::path::Path, write: bool) -> anyhow::Result<Report> {
     use brain::config::find_brain_config;
     use brain::emit::{

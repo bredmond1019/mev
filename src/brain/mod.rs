@@ -8,6 +8,7 @@
 pub mod config;
 pub mod crawl;
 pub mod emit;
+pub mod epics;
 pub mod graph;
 pub mod graph_emit;
 pub mod links;
