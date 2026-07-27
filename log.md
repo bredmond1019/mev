@@ -17,6 +17,46 @@ timestamp: "2026-07-24T17:30:47Z"
 
 ---
 
+## [run: 2026-07-27]
+
+### MV.9.A — Generic doc-materializer engine + CLI + Opportunity command family
+
+Implemented the mev-side half of D53 (mev writes source `.md`; engine-rs executes) across six
+tasks, all PASS. Task 1 built `mev::doc::plan_document`, a generic `EmitPlan` planner over any
+`okf_core::doc::model::BrainDocModel` — proven against all three sketched models (`Opportunity`,
+`LearningArtifact`, `Proposal`) through the same code path — deriving the target path from
+`IndexIntent`, re-splicing `Generated` sections via the existing `splice_generated` seam, and
+no-opping with `W_DOC_UNCHANGED` when nothing changed; a missing sentinel pair raises
+`W_DOC_MISSING_SENTINEL` rather than silently clobbering hand-edited content. Task 2 added
+`plan_index_reconcile`, an idempotent `index.md` row upsert (matched on `link_target`) merged into
+`plan_document` via `EmitPlan::extend`. Task 3 added `src/doc/opportunity.rs`'s four planners
+(`plan_ingest` with kind auto-detect and a `job-posting` kind, `plan_set_stage`, `plan_add_action`,
+`plan_merge_contacts`), all idempotent, backed by a real Anthropic `CompanyBrief` fixture and 13
+integration tests. Task 4 wired `mev doc materialize` and `mev doc opportunity
+{ingest,set-stage,add-action,merge-contacts}` CLI subcommands plus stable `mev::doc_*` library
+runners, exercised end-to-end against the built binary. Task 5 documented the full `doc` command
+family and the materializer's place in the `EmitPlan`/`apply_plan` seam in `docs/cli.md` and
+`docs/architecture.md`. Task 6 confirmed all four harness gates green and ran a dry-run opportunity
+ingest against the real brain corpus — it wrote nothing and `validate-brain` reported zero errors.
+Final review verdict: **PASS**. Notable decisions: an `E_DOC_UNKNOWN_MODEL` diagnostic was added
+beyond the original spec's list so `doc materialize --model <bad>` still exits 1 with a reportable
+code; `add-action --at` defaults to today's date when omitted; `load_opportunity()` maps both a
+missing file and a frontmatter parse/reconstruct failure to the single documented `E_DOC_NOT_FOUND`
+code. Closes Phase 9's opening block (`MV.9.A`); engine-rs node/workflow wiring (`EN.7.A`/`EN.7.B`)
+and the Synapse harvest hop (`EN.7.C`) remain out of scope per the block's Notes.
+
+Next: pick the next phase/block per `master-plan.md` (no open mev-tracked spec).
+
+```
+c906ef7 feat: implement 9.A-doc-materializer-task5
+733d995 feat: implement 9.A-doc-materializer-task4
+6c6533f feat: implement 9.A-doc-materializer-task3
+80779fd feat: implement 9.A-doc-materializer-task2
+a21f478 feat: implement 9.A-doc-materializer-task1
+```
+
+---
+
 ## [2026-07-24]
 
 ### MV.8.A — Epics: a cross-repo initiative axis for `state.json`
