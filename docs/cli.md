@@ -652,6 +652,144 @@ state.json (`E_EPIC_INCOMPLETE_CORPUS` on `--write`), or a write failure.
 
 ---
 
+### `doc materialize` · `doc opportunity ingest|set-stage|add-action|merge-contacts`
+
+The generic brain-document materializer (Phase 9, Block MV.9.A) — plans (and, with `--write`,
+applies) any of okf-core's three `BrainDocModel` implementors (`Opportunity`,
+`LearningArtifact`, `Proposal`) from a raw JSON payload, plus the Opportunity-specific
+command family for the `business/docs/opportunities/` corpus.
+
+```bash
+mev doc materialize --model <opportunity|learning-artifact|proposal> --input <path.json> [path] [--write]
+mev doc opportunity ingest --input <path.json> [--kind company|prospecting-sweep|job-posting] [path] [--write]
+mev doc opportunity set-stage <slug> <stage> [path] [--write]
+mev doc opportunity add-action <slug> --kind <k> --note <n> [--at <ISO date>] [path] [--write]
+mev doc opportunity merge-contacts <slug> --input <path.json> [path] [--write]
+```
+
+Every verb resolves its target-corpus root via `find_brain_root` from the optional trailing
+`path` argument (default `.`), exactly like `emit-state`. **Dry-run is the default on every
+verb** — without `--write`, nothing is touched on disk and every planned action is still
+reported; `--write` applies the plan.
+
+#### `doc materialize`
+
+| Flag | Default | Description |
+|---|---|---|
+| `--model` | *(required)* | Which okf-core model to build: `opportunity` \| `learning-artifact` \| `proposal` |
+| `--input` | *(required)* | Path to the JSON payload the model is built from |
+| `path` | `.` | Path to search from when locating `brain.toml` |
+| `--write` | off | Apply the write; without this the command is a dry-run |
+
+`--model opportunity` dispatches through the same shape auto-detection as `doc opportunity
+ingest` (`--kind` is not exposed on this generic verb — use `doc opportunity ingest` when you
+need to name it explicitly). `--model learning-artifact` builds via
+`LearningArtifact::from_payload(input)`; `--model proposal` reads `company_name` and `roadmap`
+off `input` and builds via `Proposal::from_automation_roadmap`. Any other `--model` value pushes
+`E_DOC_UNKNOWN_MODEL` and plans nothing.
+
+#### `doc opportunity ingest`
+
+| Flag | Default | Description |
+|---|---|---|
+| `--input` | *(required)* | Path to a `CompanyBrief` / `ProspectingResult` / job-posting JSON payload |
+| `--kind` | auto-detect | `company` \| `prospecting-sweep` \| `job-posting`. Omit to auto-detect from the input's shape (`company_name` present → company; `prospects`/`vertical` present → prospecting-sweep; neither → `E_DOC_UNKNOWN_INPUT_SHAPE`, pass `--kind` explicitly) |
+| `path` | `.` | Path to search from when locating `brain.toml` |
+| `--write` | off | Apply the write; without this the command is a dry-run |
+
+Creates or updates the target Opportunity document (path derived from its `IndexIntent`, under
+`business/docs/opportunities/`) and reconciles that directory's `index.md` table in the same
+plan. The raw ingested payload is embedded as the first fenced `json` block in the body.
+
+#### `doc opportunity set-stage <slug> <stage>`
+
+Sets an existing Opportunity's `stage` field. `stage` must be one of the seven documented
+values: `identified | researching | contacted | conversation | proposal-sent | closed-won |
+closed-lost`; any other value pushes `E_DOC_BAD_STAGE` and plans nothing. Re-running with the
+same stage is a zero-action no-op (`W_DOC_UNCHANGED`).
+
+#### `doc opportunity add-action <slug>`
+
+| Flag | Default | Description |
+|---|---|---|
+| `--kind` | *(required)* | The action's kind (e.g. `email`, `call`, `meeting`) |
+| `--note` | *(required)* | A free-form note describing the action |
+| `--at` | today | The action's ISO date |
+
+Appends one `{at, kind, note}` entry to the opportunity's `actions[]`. An identical triple
+already present is not re-appended — a repeat call is a zero-action no-op.
+
+#### `doc opportunity merge-contacts <slug>`
+
+| Flag | Default | Description |
+|---|---|---|
+| `--input` | *(required)* | Path to a JSON contact object, or a JSON array of contact objects |
+
+Merges contacts into the opportunity's `contacts[]`, matched on `name`: `emails` / `whatsapp` /
+`phones` / `links` are unioned (deduped, order-stable), and `role`/`note` are filled only when
+the existing value is empty. An already-merged contact is a zero-action no-op.
+
+#### Shared behaviour across every `doc` verb
+
+- **Linked-worktree write guard:** `--write` from inside a linked git worktree is refused with
+  the same guard message `emit-state` uses (`doc` resolves derived-file paths from `brain.toml`,
+  not CWD, so a worktree write would silently regenerate the main checkout's files instead).
+- Every mutator (`set-stage` / `add-action` / `merge-contacts`) requires the target document to
+  already exist; a missing target pushes `E_DOC_NOT_FOUND` and plans nothing.
+- `--json` wraps the report in the standard `JsonReport` envelope (see below), labelled
+  `doc-materialize`, `doc-opportunity-ingest`, `doc-opportunity-set-stage`,
+  `doc-opportunity-add-action`, or `doc-opportunity-merge-contacts`.
+
+#### Diagnostic codes
+
+| Locator | Severity | Condition |
+|---|---|---|
+| `W_DOC_UNCHANGED` | Warning | Computed content already matches the existing file; no action planned |
+| `W_DOC_MISSING_SENTINEL` | Warning | A `BodySection::Generated` section's sentinel pair is absent; that section is left untouched rather than clobbered |
+| `W_DOC_INDEX_MISSING` | Warning | The target `index.md` is absent; no index action planned (never creates one) |
+| `W_DOC_INDEX_NO_TABLE` | Warning | `index.md` has no parsable table; no index action planned |
+| `W_DOC_INDEX_COLUMN_MISMATCH` | Warning | The model's `row_cells` count doesn't match the table's column count; no index action planned |
+| `E_DOC_BAD_INDEX_PATH` | Error | The model's `IndexIntent.index_path` has no parent directory component |
+| `E_DOC_UNKNOWN_INPUT_SHAPE` | Error | `ingest` input matches neither the company nor the prospecting-sweep shape and `--kind` was not given |
+| `E_DOC_UNKNOWN_MODEL` | Error | `materialize --model` is not one of `opportunity` \| `learning-artifact` \| `proposal` |
+| `E_DOC_BAD_STAGE` | Error | `set-stage`'s `stage` argument is not one of the seven documented values |
+| `E_DOC_NOT_FOUND` | Error | A mutator's target file is absent or unparsable |
+| `W_EMIT_DRY_RUN` / `I_EMIT_WROTE` | Warning | Reused unchanged from `apply_plan`'s write half — see `emit-state` above |
+
+Exit codes: `0` planned (dry-run) or applied successfully with no errors · `1` a
+resolution/parse/write failure, a linked-worktree write refusal, or any error-severity
+diagnostic (`E_DOC_*` / `E_CONFIG_NOT_FOUND`).
+
+**Examples:**
+
+```bash
+# Dry-run: what would ingesting this brief produce?
+mev doc opportunity ingest --input company-brief.json
+
+# Apply it
+mev doc opportunity ingest --input company-brief.json --write
+
+# Explicit kind
+mev doc opportunity ingest --input posting.json --kind job-posting --write
+
+# Move an opportunity forward
+mev doc opportunity set-stage acme-co contacted --write
+
+# Log an action
+mev doc opportunity add-action acme-co --kind email --note "sent intro" --write
+
+# Merge in a new contact
+mev doc opportunity merge-contacts acme-co --input contact.json --write
+
+# Materialize a learning-artifact document from a payload
+mev doc materialize --model learning-artifact --input lesson-payload.json --write
+
+# Machine-readable dry-run output
+mev --json doc opportunity ingest --input company-brief.json
+```
+
+---
+
 ## Exit codes
 
 | Code | Meaning |
