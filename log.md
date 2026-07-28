@@ -8,12 +8,52 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-28T14:35:00Z"
+timestamp: "2026-07-28T16:26:31Z"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## [run: 2026-07-28]
+
+### MV.10.B — Enriched block-graph exporter (block_graph.rs); PASS
+
+Ran `/sdlc-flow 10.B-block-graph-exporter` (branch `10.B-block-graph-exporter-flow`), 6 tasks all
+PASS, final review verdict PASS. Task 1 built the `src/brain/block_graph.rs` scaffold —
+`BlockGraphExport`/`BlockGraphNode`/`BlockGraphEdge`/`BlockLane`/`BlockGraphScope`/
+`BlockGraphScopeEcho` types plus the full-corpus derivation pipeline (lane from `derive_focus` with
+repo-slug prefixing, cycle-safe longest-path `layer` restricted to `BlockedBy` edges with back-edges
+contributing 0, `in_cycle` from `cycle_paths`), registered in `src/brain/mod.rs`. Task 2 layered the
+seven-stage scope filter (tier → repo → epic-overrides-tier → closed → boundary → edges → truncate)
+strictly after derivation via a `node_meta` index, retaining boundary/dangling edges and tracking
+`truncated`/`total_nodes`. Task 3 added the `block_graph_brain` driver in `src/lib.rs` (mirrors
+`graph_brain`, reuses `emit_state`'s corpus-load pipeline, skips malformed `state.json` files) and
+re-exported the public surface from the crate root. Task 4 added `tests/brain_block_graph.rs` — a
+9-node multi-repo/multi-tier fixture covering HQ/tier/repo/epic scoping, `include_closed`/
+`include_boundary`, `max_nodes` truncation, byte-identical determinism, a dual-role brain fixture, and
+a dangling edge. Task 5 documented the exporter in `docs/architecture.md` alongside the existing
+Graph exporter section. Task 6 was validation-only — all four harness gates green (fmt, clippy `-D
+warnings`, 413 tests, release build), scope boundaries confirmed clean (no `okf-core` changes, no CLI
+subcommand, `docs/cli.md` untouched per MV.10.C's scope). No amendments — all decisions were
+within-spec interpretations of stated ambiguity (e.g. `layer` computed only over `BlockedBy` edges,
+matching `cycle_paths`/`effective_priorities` precedent). This closes Phase 10's `MV.10.A → MV.10.B`
+spine and unblocks `MV.10.C` (the CLI subcommand) and bastion's `BA.17.A` endpoint.
+
+Next: `MV.10.C` — `mev emit-block-graph` CLI subcommand, or `MV.ticket.distill-freshness-lane`.
+
+```
+45ac2cc feat: implement 10.B-block-graph-exporter-task5
+a08c337 feat: implement 10.B-block-graph-exporter-task4
+aad39d6 feat: implement 10.B-block-graph-exporter-task3
+b98e2ce feat: implement 10.B-block-graph-exporter-task2
+c66acf1 fix: fix pass 1 for 10.B-block-graph-exporter-task1
+cd1bac3 feat: implement 10.B-block-graph-exporter-task1
+1fd061f docs: document topo_order + cycle_paths public API (MV.10.A close-out)
+50296da feat: implement 10.A-topo-order-cycle-paths-task2
+```
 
 ---
 
