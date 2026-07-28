@@ -292,7 +292,12 @@ pub fn build_block_graph_export(
     let mut layer_stack: HashSet<String> = HashSet::new();
     let mut layer_of_key: HashMap<String, u32> = HashMap::new();
     for key in by_key.keys() {
-        let l = layer_of(key.as_str(), &resolved_deps, &mut layer_memo, &mut layer_stack);
+        let l = layer_of(
+            key.as_str(),
+            &resolved_deps,
+            &mut layer_memo,
+            &mut layer_stack,
+        );
         layer_of_key.insert(key.clone(), l);
     }
 
@@ -361,16 +366,10 @@ pub fn build_block_graph_export(
             let target_node_id = by_key
                 .contains_key(&edge.to_ref)
                 .then(|| edge.to_ref.clone());
-            let source_closed = status_map
-                .get(edge.from.as_str())
-                .copied()
-                .flatten()
-                == Some("closed");
-            let target_closed = status_map
-                .get(edge.to_ref.as_str())
-                .copied()
-                .flatten()
-                == Some("closed");
+            let source_closed =
+                status_map.get(edge.from.as_str()).copied().flatten() == Some("closed");
+            let target_closed =
+                status_map.get(edge.to_ref.as_str()).copied().flatten() == Some("closed");
             BlockGraphEdge {
                 from: edge.from.clone(),
                 to_ref: edge.to_ref.clone(),
@@ -543,7 +542,11 @@ mod tests {
             &default_scope(),
         );
 
-        assert_eq!(export.nodes.len(), 1, "no synthetic node for the external dep");
+        assert_eq!(
+            export.nodes.len(),
+            1,
+            "no synthetic node for the external dep"
+        );
         assert_eq!(
             export.nodes[0].external_deps,
             vec!["waiting on vendor API".to_string()]
@@ -594,7 +597,10 @@ mod tests {
             .iter()
             .find(|e| e.from == "repo:A" && e.to_ref == "repo:B")
             .unwrap();
-        assert!(!edge.blocking, "target is closed, so the edge is not blocking");
+        assert!(
+            !edge.blocking,
+            "target is closed, so the edge is not blocking"
+        );
     }
 
     #[test]
