@@ -7447,6 +7447,113 @@ fn epic_members_cycle_terminates_without_hang_or_panic() {
 }
 
 // ---------------------------------------------------------------------------
+// topo_order tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn topo_order_dependency_edge_forces_order() {
+    // B depends on A; even though A has a later wave than B, A must precede
+    // B in the topological order.
+    let file = make_leaf(
+        "repo",
+        vec![Track {
+            title: "P".to_string(),
+            blocks: vec![
+                block_with_dep("B", "B", Some("open"), Some(1), "repo", "A"),
+                block("A", "A", Some("open"), Some(5)),
+            ],
+        }],
+    );
+    let files = vec![(make_src("repo"), file)];
+    let graph = mev::brain::state::build_state_graph(&files);
+
+    let order = mev::brain::emit::topo_order(&graph, &files);
+    let a_pos = order.iter().position(|k| k == "repo:A").unwrap();
+    let b_pos = order.iter().position(|k| k == "repo:B").unwrap();
+    assert!(
+        a_pos < b_pos,
+        "A must precede B despite its later wave, because B depends on it: {order:?}"
+    );
+}
+
+#[test]
+fn topo_order_unconstrained_pairs_keep_wave_order() {
+    // No dependency edge between X and Y: topo_order must fall back to
+    // wave_order's stable wave-then-iteration order.
+    let file = make_leaf(
+        "repo",
+        vec![Track {
+            title: "P".to_string(),
+            blocks: vec![
+                block("Y", "Y", Some("open"), Some(2)),
+                block("X", "X", Some("open"), Some(1)),
+            ],
+        }],
+    );
+    let files = vec![(make_src("repo"), file)];
+    let graph = empty_graph();
+
+    let order = mev::brain::emit::topo_order(&graph, &files);
+    assert_eq!(
+        order,
+        wave_order(&graph, &files),
+        "unconstrained pairs must match wave_order exactly"
+    );
+}
+
+#[test]
+fn topo_order_cycle_terminates_without_hang_or_panic() {
+    // A depends_on cycle (A -> B -> A) must not hang or panic; the on_stack
+    // short-circuit must terminate the DFS deterministically.
+    let file = make_leaf(
+        "repo",
+        vec![Track {
+            title: "P".to_string(),
+            blocks: vec![
+                block_with_dep("A", "A", Some("open"), Some(1), "repo", "B"),
+                block_with_dep("B", "B", Some("open"), Some(2), "repo", "A"),
+            ],
+        }],
+    );
+    let files = vec![(make_src("repo"), file)];
+    let graph = mev::brain::state::build_state_graph(&files);
+
+    let order = mev::brain::emit::topo_order(&graph, &files);
+    assert_eq!(
+        order.len(),
+        2,
+        "both cyclic nodes must still appear exactly once: {order:?}"
+    );
+}
+
+#[test]
+fn topo_order_external_deps_do_not_constrain_order() {
+    // An External dep has no target node in this corpus and must not
+    // participate in ordering — B must fall back to wave order relative to
+    // any other block, not be forced after some phantom target.
+    let mut b = block("B", "B", Some("open"), Some(1));
+    b.depends_on.push(BlockedBy::External {
+        what: "deploy-gate".to_string(),
+    });
+    let file = make_leaf(
+        "repo",
+        vec![Track {
+            title: "P".to_string(),
+            blocks: vec![block("A", "A", Some("open"), Some(2)), b],
+        }],
+    );
+    let files = vec![(make_src("repo"), file)];
+    let graph = empty_graph();
+
+    let order = mev::brain::emit::topo_order(&graph, &files);
+    assert_eq!(
+        order,
+        wave_order(&graph, &files),
+        "External dep must not constrain order; must match plain wave_order"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Epic board + sequence table tests
 // ---------------------------------------------------------------------------
 

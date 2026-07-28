@@ -129,43 +129,25 @@ pub fn wave_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> Ve
 // epic_members — one epic's blocks, in cross-repo dependency order
 // ---------------------------------------------------------------------------
 
-/// Every block claiming `slug`, across all repos, in dependency-respecting
-/// order.
-///
-/// Returns `(repo_slug, block)` pairs — the cross-repo sequence for one
-/// initiative, which is what an epic's sequence table renders.
-///
-/// Cross-repo `wave` numbers are **not** on a shared scale (per-repo authors
-/// pick their own range — bastion uses 1-7, bastion-web 10-60, bastion-ui
-/// 1-20 — see the `epic-sequence-wave-scale` carryover this superseded), so
-/// sorting a multi-repo table by raw `wave` alone can misrepresent an
-/// initiative's real work order or strand a `None`-wave block at the bottom.
-/// This instead does a DFS-based topological sort over the full `depends_on`
-/// graph (every block, every repo — not just this epic's members), then
-/// filters the result down to `slug`'s members. Walking the *full* graph
-/// (rather than only edges between two members) means a member gated by a
-/// same-repo, out-of-epic prerequisite still sorts after it correctly.
-///
-/// DFS visitation order defaults to [`wave_order`] (global wave, then
-/// iteration index) so that within a component with no dependency
-/// constraint — most same-epic block pairs, which just aren't linked by an
-/// edge — the table still reads in the same stable order it always has.
-/// Only `{type:"block"}` deps that resolve to a real node participate;
-/// `external` deps have no target node and cannot constrain ordering.
+/// Cycle-safe DFS topological order over the full `depends_on` graph (every
+/// block, every repo), seeded in [`wave_order`] so that within a component
+/// with no dependency constraint — most block pairs, which just aren't
+/// linked by an edge — the order still reads in the same stable
+/// wave-then-iteration order [`wave_order`] would produce on its own. Only
+/// `{type:"block"}` deps that resolve to a real node in this corpus
+/// participate; `external` deps have no target node and cannot constrain
+/// ordering.
 ///
 /// Cycle-safe: a node already on the current DFS stack short-circuits
 /// instead of recursing again, mirroring the guard in
 /// [`crate::brain::state::effective_priorities`] — this does not assume
 /// `MV.3.P2`'s cycle check already rejected the corpus.
-pub fn epic_members<'a>(
-    graph: &StateGraph,
-    files: &'a [(StateSource, StateFile)],
-    slug: &str,
-) -> Vec<(String, &'a TrackBlock)> {
+///
+/// Returns every block's `"repo:id"` key, in order.
+pub fn topo_order(graph: &StateGraph, files: &[(StateSource, StateFile)]) -> Vec<String> {
     use std::collections::HashSet;
 
-    // Index every block (regardless of epic membership — dependency chains
-    // can pass through non-member nodes) by "repo:id".
+    // Index every block by "repo:id".
     let mut by_key: HashMap<String, (String, &TrackBlock)> = HashMap::new();
     for (src, file) in files {
         for track in &file.tracks {
@@ -225,6 +207,44 @@ pub fn epic_members<'a>(
     }
 
     order
+}
+
+/// Every block claiming `slug`, across all repos, in dependency-respecting
+/// order.
+///
+/// Returns `(repo_slug, block)` pairs — the cross-repo sequence for one
+/// initiative, which is what an epic's sequence table renders.
+///
+/// Cross-repo `wave` numbers are **not** on a shared scale (per-repo authors
+/// pick their own range — bastion uses 1-7, bastion-web 10-60, bastion-ui
+/// 1-20 — see the `epic-sequence-wave-scale` carryover this superseded), so
+/// sorting a multi-repo table by raw `wave` alone can misrepresent an
+/// initiative's real work order or strand a `None`-wave block at the bottom.
+/// This filters [`topo_order`]'s full-graph topological order (every block,
+/// every repo — not just this epic's members) down to `slug`'s members.
+/// Walking the *full* graph (rather than only edges between two members)
+/// means a member gated by a same-repo, out-of-epic prerequisite still sorts
+/// after it correctly.
+pub fn epic_members<'a>(
+    graph: &StateGraph,
+    files: &'a [(StateSource, StateFile)],
+    slug: &str,
+) -> Vec<(String, &'a TrackBlock)> {
+    // Index every block (regardless of epic membership — dependency chains
+    // can pass through non-member nodes) by "repo:id".
+    let mut by_key: HashMap<String, (String, &TrackBlock)> = HashMap::new();
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                by_key.insert(
+                    format!("{}:{}", src.repo_slug, block.id),
+                    (src.repo_slug.clone(), block),
+                );
+            }
+        }
+    }
+
+    topo_order(graph, files)
         .into_iter()
         .filter_map(|key| by_key.get(&key).cloned())
         .filter(|(_, block)| block.epics.iter().any(|s| s == slug))
