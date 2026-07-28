@@ -1021,7 +1021,7 @@ pub fn block_graph_brain(
     scope: &brain::block_graph::BlockGraphScope,
 ) -> anyhow::Result<brain::block_graph::BlockGraphExport> {
     use brain::config::find_brain_config;
-    use brain::state::{build_state_graph, discover_state_files, load_state};
+    use brain::state::{build_state_graph, discover_state_files, epic_registry, load_state};
 
     let config = find_brain_config(root)
         .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
@@ -1037,10 +1037,23 @@ pub fn block_graph_brain(
         }
     }
 
-    // 3. Build the block-dependency graph.
+    // 3. Validate `scope.epic` against the HQ epic registry. The CLI has no
+    //    loaded corpus of its own, so this is the only point that can reject
+    //    an unknown/blank epic slug before the export is built.
+    if let Some(slug) = &scope.epic {
+        if slug.trim().is_empty() {
+            return Err(anyhow::anyhow!("--epic requires a non-empty slug"));
+        }
+        let registry = epic_registry(&config, &loaded);
+        if !registry.iter().any(|e| e.slug == *slug) {
+            return Err(anyhow::anyhow!("unknown epic: {slug}"));
+        }
+    }
+
+    // 4. Build the block-dependency graph.
     let graph = build_state_graph(&loaded);
 
-    // 4. Derive the enriched, scoped export.
+    // 5. Derive the enriched, scoped export.
     Ok(build_block_graph_export(
         root, &config, &graph, &loaded, scope,
     ))

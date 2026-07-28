@@ -836,7 +836,10 @@ const EPIC_STATUSES: [&str; 3] = ["active", "paused", "complete"];
 /// [`TierScope::All`]. Returns an empty slice when there is no such file, which
 /// makes every tagged block an `E_STATE_UNKNOWN_EPIC` — the correct outcome:
 /// membership without a registry has nothing to validate against.
-fn epic_registry<'a>(config: &BrainConfig, files: &'a [(StateSource, StateFile)]) -> &'a [Epic] {
+pub(crate) fn epic_registry<'a>(
+    config: &BrainConfig,
+    files: &'a [(StateSource, StateFile)],
+) -> &'a [Epic] {
     files
         .iter()
         .find(|(_, f)| f.kind == "brain" && matches!(tier_scope_for(f, config), TierScope::All))

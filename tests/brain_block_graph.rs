@@ -600,6 +600,91 @@ fn dependent_count_identical_across_scoped_and_unscoped_export() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// A registered epic slug still builds successfully and produces the same node set as
+/// the earlier `epic_scope_overrides_tier` assertion — the new validation step in
+/// `block_graph_brain` must not reject a known slug.
+#[test]
+fn known_epic_scope_still_builds() {
+    let dir = build_fixture("known-epic");
+
+    let mut scope = default_scope();
+    scope.epic = Some("epic-x".to_string());
+    let export = block_graph_brain(&dir, &scope).expect("a registered epic slug must still build");
+
+    assert_eq!(node_keys(&export), vec!["alpha:A1", "gamma:G1"]);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// An unknown `--epic` slug is rejected with an error naming the slug, instead of
+/// silently building an empty-looking export.
+#[test]
+fn unknown_epic_scope_is_rejected() {
+    let dir = build_fixture("unknown-epic");
+
+    let mut scope = default_scope();
+    scope.epic = Some("no-such-epic".to_string());
+    let err = block_graph_brain(&dir, &scope)
+        .expect_err("an unknown epic slug must be rejected")
+        .to_string();
+
+    assert!(
+        err.contains("no-such-epic"),
+        "error message must name the unknown slug, got: {err}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A blank `--epic` slug is rejected too, independent of whether it happens to match a
+/// registry entry.
+#[test]
+fn blank_epic_scope_is_rejected() {
+    let dir = build_fixture("blank-epic");
+
+    let mut scope = default_scope();
+    scope.epic = Some(String::new());
+    let err = block_graph_brain(&dir, &scope)
+        .expect_err("a blank epic slug must be rejected")
+        .to_string();
+
+    assert!(
+        err.contains("--epic"),
+        "error message must explain the blank-slug requirement, got: {err}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A corpus with no HQ `epics[]` registry (no `kind: "brain"` file resolving to
+/// `TierScope::All`) rejects ANY `--epic` value — matching `epic_registry`'s documented
+/// empty-slice fallback: membership without a registry has nothing to validate against.
+#[test]
+fn epic_scope_rejected_when_corpus_has_no_registry() {
+    let dir = temp_dir("no-registry");
+    write_brain_toml(&dir);
+    // No HQ `planning/state.json` at all — only the leaf/tier files, so there is no
+    // `kind: "brain"` file whose scope resolves to `TierScope::All`.
+    write_core_tier_state(&dir);
+    write_portfolio_tier_state(&dir);
+    write_alpha_state(&dir);
+    write_beta_state(&dir);
+    write_gamma_state(&dir);
+
+    let mut scope = default_scope();
+    scope.epic = Some("epic-x".to_string());
+    let err = block_graph_brain(&dir, &scope)
+        .expect_err("any epic must be rejected when there is no HQ registry")
+        .to_string();
+
+    assert!(
+        err.contains("epic-x"),
+        "error message must name the slug even with no registry, got: {err}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// DANGLING EDGE: `alpha:A4`'s `depends_on` targets `alpha:GHOST`, which is never
 /// defined anywhere in the fixture. The edge is present in `edges` with
 /// `target_node_id: None` — retained, never dropped, and no node is synthesized for it.
