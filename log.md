@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-28T17:10:00Z"
+timestamp: "2026-07-28T23:10:00Z"
 ---
 
 # Log — mev
@@ -18,6 +18,25 @@ timestamp: "2026-07-28T17:10:00Z"
 ---
 
 ## [run: 2026-07-28]
+
+### MV.10.C — mev emit-block-graph CLI subcommand; PASS
+
+Ran `/sdlc-task 10.C-emit-block-graph-cli` in-place on `main`, 6 tasks all PASS (commits
+`4d83548`..`6f6972a`). Added `dependent_count: u32` to `BlockGraphNode` — a corpus-wide,
+scope-stable count of distinct in-corpus `BlockedBy` dependents (`CrossRepo` excluded).
+Added epic-slug validation to `block_graph_brain` (unknown/blank `--epic` now a hard `Err`
+before any corpus loading). Wired `mev emit-block-graph`, an 8-flag clap subcommand (`--scope
+hq|tier|repo|epic`, `--tier`, `--epic`, `--repo`, `--include-closed`, `--include-boundary`,
+`--max-nodes`, `--pretty`) mirroring `emit-graph`'s CLI pattern, with pre-filesystem validation
+of scope/flag pairing. 14 new CLI integration tests (`tests/emit_block_graph_cli.rs`) covering
+every scope flag, validation exit codes, determinism, and the disk-untouched guarantee.
+`docs/cli.md` documents the subcommand. Two amendment-logged deviations: `--include-boundary`
+added as an eighth flag to reach all seven scope-pipeline stages from the CLI; epic validation
+lives in `block_graph_brain` rather than `main.rs` since it needs the loaded corpus. Low-effort
+`/code-review --fix` found no issues. `/close-out` found `docs/architecture.md` stale against
+this session's two new behaviors (`dependent_count` field, epic-registry validation) and
+patched it surgically (commit `54ad725`). All four harness gates green throughout (415+ tests).
+Unblocks `MV.10.D`.
 
 ### MV.10.B close-out — manual testing found and fixed a truncation/edges bug
 
