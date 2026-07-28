@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-24T17:30:47Z"
+timestamp: "2026-07-28T14:35:00Z"
 ---
 
 # Log — mev
@@ -17,7 +17,28 @@ timestamp: "2026-07-24T17:30:47Z"
 
 ---
 
-## [run: 2026-07-27]
+## [run: 2026-07-28]
+
+### MV.10.A — Extract topo_order + cycle_paths primitives; close-out
+
+Ran `/sdlc-task 10.A-topo-order-cycle-paths` (in-place, main), 3 tasks all PASS. Task 1 extracted
+`pub fn topo_order(graph, files) -> Vec<String>` (`src/brain/emit.rs`) — the cycle-safe, wave-seeded
+DFS topological sort previously inlined in `epic_members` — leaving `epic_members` a thin filter
+over it with an unchanged signature; 4 new unit tests. Task 2 extracted `pub fn cycle_paths(graph)
+-> Vec<CyclePath>` (`src/brain/state.rs`) — canonical-rotation-deduplicated cycle finder — out of
+`detect_cycles`'s DFS, rewriting `detect_cycles` as a thin formatter over it that preserves
+byte-identical `E_STATE_CYCLE` messages; new unit tests plus a parity test against `detect_cycles`.
+Task 3 was validation-only (no source changes needed).
+
+Closed out with `/close-out`: all four harness gates green (fmt, clippy `-D warnings`, cargo test,
+release build) plus the emoji gate; coverage confirmed adequate (both new public functions carry
+dedicated tests, no blocking gaps); `/code-review low` (run directly by the user, since
+`/code-review` cannot be invoked by the agent — `disable-model-invocation`) found zero issues,
+confirming the refactor is behavior-preserving with no stale call sites; `docs/architecture.md`
+patched to document `topo_order` and `cycle_paths`/`CyclePath` in their respective Public
+functions / State types tables (previously undocumented new public API).
+
+**Refs:** `MV.10.A`, unblocks `MV.10.B` (enriched block-graph exporter, consumes both primitives).
 
 ### MV.9.A — Generic doc-materializer engine + CLI + Opportunity command family
 
