@@ -576,7 +576,9 @@ Applied in order, strictly after full-corpus enrichment:
 6. **Edges** — keep an edge when its `from` survives and its `to_ref` either survives or
    is dangling; drop edges pointing at a filtered-out node unless boundary re-added it.
 7. **Truncate** — record the pre-truncation count in `total_nodes`, then keep the first
-   `max_nodes` entries in `topo_index` order and set `truncated` accordingly.
+   `max_nodes` entries in `topo_index` order and set `truncated` accordingly. When truncation
+   occurs, `edges` is re-filtered against the truncated node set (same rule as Stage 6) so a
+   consumer never receives an edge naming a node it wasn't sent.
 
 #### Public function
 

@@ -486,6 +486,34 @@ fn max_nodes_sets_truncated_with_pre_truncation_total() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// `max_nodes` truncation re-filters `edges` against the truncated node set: an edge
+/// surviving Stage 6 (both endpoints in scope) must still be dropped at Stage 7 if
+/// truncation removed one of its endpoints from the returned `nodes` list. Otherwise a
+/// consumer would receive an edge naming a node it was never sent.
+#[test]
+fn max_nodes_truncation_drops_edges_whose_endpoints_were_truncated_out() {
+    let dir = build_fixture("max-nodes-edges");
+
+    let mut scope = default_scope();
+    scope.max_nodes = 1;
+    let export = block_graph_brain(&dir, &scope).expect("block_graph_brain must succeed");
+
+    assert_eq!(export.nodes.len(), 1);
+    let kept_key = export.nodes[0].key.clone();
+
+    // With only one node kept, every surviving edge must have BOTH endpoints equal to
+    // that single node — impossible in this fixture (no self-loops) — so edges must be
+    // empty. Every edge in this fixture (A3->G1, A4->alpha:GHOST, G2->G1) has distinct
+    // from/to, so this also proves the fix actually filters rather than no-op'ing.
+    assert!(
+        export.edges.is_empty(),
+        "expected no edges to survive a single-node truncation, kept node was {kept_key}, got: {:?}",
+        export.edges
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// DETERMINISM: two consecutive `block_graph_brain` builds over an unchanged fixture
 /// serialize BYTE-IDENTICAL. This relies on `discover_state_files`' stable ordering
 /// (HQ root, then tier sub-brains in `tiers[]` order, then `[[repos]]` leaves in

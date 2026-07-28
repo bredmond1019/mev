@@ -7,7 +7,8 @@
 //! deterministic ordering, and a pure value returned (nothing written to disk).
 //!
 //! Every derivation runs over the **full corpus** first; the seven-stage scope pipeline
-//! (tier → repo → epic → closed → boundary → edges → truncate) is layered on top,
+//! (tier → repo → epic → closed → boundary → edges → truncate, with truncate re-filtering
+//! edges against the final node set) is layered on top,
 //! strictly *after* enrichment, which is what guarantees a scoped export can never
 //! report a different `lane`, `effective_priority`, `layer`, or `topo_index` for a node
 //! than an unscoped export does. Epic scope overrides tier rather than intersecting
@@ -462,7 +463,7 @@ pub fn build_block_graph_export(
 
     // Stage 6 — EDGES: keep an edge when its `from` survives (in-scope or
     // boundary) AND its `to_ref` either survives too or is dangling.
-    let scoped_edges: Vec<BlockGraphEdge> = edges
+    let mut scoped_edges: Vec<BlockGraphEdge> = edges
         .into_iter()
         .filter(|e| {
             let from_ok = final_keys.contains(&e.from);
@@ -475,11 +476,24 @@ pub fn build_block_graph_export(
         .collect();
 
     // Stage 7 — TRUNCATE: `total_nodes` holds the pre-truncation count; the
-    // (already topo-ordered) node list is then capped at `max_nodes`.
+    // (already topo-ordered) node list is then capped at `max_nodes`. Edges are
+    // re-filtered against the truncated node set so the envelope stays
+    // internally consistent — an edge surviving Stage 6 but naming a node that
+    // truncation just dropped would otherwise dangle for a reason a consumer
+    // can't distinguish from a genuinely unresolved reference.
     let total_nodes = scoped_nodes.len() as u32;
     let truncated = scoped_nodes.len() > scope.max_nodes;
     if truncated {
         scoped_nodes.truncate(scope.max_nodes);
+        let truncated_keys: HashSet<&str> = scoped_nodes.iter().map(|n| n.key.as_str()).collect();
+        scoped_edges.retain(|e| {
+            let from_ok = truncated_keys.contains(e.from.as_str());
+            let to_ok = match &e.target_node_id {
+                Some(t) => truncated_keys.contains(t.as_str()),
+                None => true,
+            };
+            from_ok && to_ok
+        });
     }
 
     let scope_echo = BlockGraphScopeEcho {
