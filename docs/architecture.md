@@ -532,6 +532,81 @@ disk or a DB. Invoked by `mev emit-graph`.
 
 ---
 
+### Block-graph exporter (`src/brain/block_graph.rs`) — Phase 10 Block MV.10.B
+
+`build_block_graph_export` is *the* single enriched block-graph derivation shared by
+`MV.10.C`'s CLI and bastion's `BA.17.A` endpoint — neither of those consumers ever
+re-derives a field; both project this module's output. Mirrors `graph_emit.rs`'s envelope
+style: a `version`/`root` header, a `nodes`/`edges` body, and a resolved-target field on
+edges — but where the graph exporter walks the OKF `scope:doc_id` corpus, this module
+enriches the `state.json` corpus's `tracks[].blocks[]` (`okf_core::StateGraph`).
+
+Design principles (shared with `graph_emit.rs`):
+- **Pure output** — `build_block_graph_export` does not write to disk; it returns a value
+  the caller (`MV.10.C`'s CLI subcommand or bastion's `BA.17.A` endpoint) serialises.
+- **No re-derivation** — every enrichment field is consumed from an existing primitive
+  (`topo_order`, `cycle_paths`, `effective_priorities`, `ready_order`, `derive_focus`) —
+  never recomputed independently. `external_deps` becomes node data (the `what` strings
+  from `BlockedBy::External` entries); no synthetic node is ever created for an external
+  dependency, so node count always equals the in-scope block count.
+- **Full corpus before scope** — every derivation (`lane`, `effective_priority`, `layer`,
+  `topo_index`, `in_cycle`) runs over the **full corpus** first. The seven-stage scope
+  pipeline is layered strictly *after* enrichment, which is the invariant that guarantees
+  a scoped export can never report a different value for one of those fields than an
+  unscoped export does for the same node.
+- **okf-core untouched** — the enrichment sits strictly above `okf_core::StateGraph`;
+  `build_state_graph`'s node/edge semantics are unchanged, and no `okf-core` file is
+  modified by this module.
+
+#### The seven-stage scope pipeline
+
+Applied in order, strictly after full-corpus enrichment:
+
+1. **Tier** — resolve in-scope repo slugs via `derive_rollup(&scope.tier, …)`, the same
+   way bastion's `assemble_board` does, so the graph and the board cannot disagree about
+   tier membership.
+2. **Repo** — if `scope.repo` is `Some`, intersect down to that slug.
+3. **Epic** — if `scope.epic` is `Some`, membership is `epic_members`'s key set. Epic
+   **overrides** tier rather than intersecting with it (epic is a cross-repo projection,
+   matching bastion's `BoardScope::Epic` arm).
+4. **Closed** — when `include_closed` is `false`, drop `BlockLane::Closed` nodes.
+5. **Boundary** — when `include_boundary` is `true`, re-add any direct dependency or
+   dependent of a surviving node, flagged `in_scope: false`; survivors keep
+   `in_scope: true`.
+6. **Edges** — keep an edge when its `from` survives and its `to_ref` either survives or
+   is dangling; drop edges pointing at a filtered-out node unless boundary re-added it.
+7. **Truncate** — record the pre-truncation count in `total_nodes`, then keep the first
+   `max_nodes` entries in `topo_index` order and set `truncated` accordingly.
+
+#### Public function
+
+| Function | Signature | Description |
+|---|---|---|
+| `build_block_graph_export` | `(&Path, &BrainConfig, &StateGraph, &[(StateSource, StateFile)], &BlockGraphScope) -> BlockGraphExport` | `root` is stored as a display string in the envelope header. Computes full-corpus enrichment (`lane`, `effective_priority`, `layer`, `topo_index`, `ready`, `in_cycle`, `external_deps`, `unmet_count`) for every block, then applies the seven-stage scope pipeline. Nodes are emitted in `topo_index` order. |
+
+#### Block-graph types
+
+| Type | Description |
+|---|---|
+| `BlockGraphExport` | The complete envelope: `version` (`"1"`), `root` (display path), `scope: BlockGraphScopeEcho`, `nodes: Vec<BlockGraphNode>`, `edges: Vec<BlockGraphEdge>`, `cycles: Vec<Vec<String>>` (over the **full corpus**, from `cycle_paths` — never the scoped subgraph), `total_nodes` (pre-truncation count), `truncated`. Derives `Serialize`. |
+| `BlockGraphNode` | One enriched block: `key`/`repo`/`id`/`title`/`status`, `lane: BlockLane`, `track`/`wave`/`priority`/`effective_priority`/`due`, `epics`, `layer` (longest path over resolved `depends_on` edges, `0` = no resolved prerequisites, terminates on a cycle via an on-stack recursion guard), `topo_index`, `ready`, `in_cycle`, `in_scope`, `external_deps`, `unmet_count`. Derives `Serialize`. |
+| `BlockGraphEdge` | One directed edge: `from`, `to_ref` (raw, as-authored), `kind: StateEdgeKind`, `target_node_id: Option<String>` (`Some` when resolved, `None` when dangling — a dangling edge is retained, never dropped), `blocking` (`false` when either endpoint is `closed`). Derives `Serialize`. |
+| `BlockLane` | `#[serde(rename_all = "snake_case")]` enum: `Now`/`Next`/`Blocked`/`Deferred` mirror `derive_focus`'s four lanes (with the owning file's repo slug prefixed onto each bare block ID before joining against node keys); `Closed` comes from the authored `TrackBlock.status == "closed"`; `Other` is the fallback for an unrecognised authored status. |
+| `BlockGraphScope` | The scope request: `tier: TierScope`, `epic: Option<String>`, `repo: Option<String>`, `include_closed`, `include_boundary`, `max_nodes`. |
+| `BlockGraphScopeEcho` | The request echoed back on `BlockGraphExport`: `tier: Option<String>` (`None` for `TierScope::All`), `epic`, `repo`, `include_closed`, `include_boundary`. Derives `Serialize`. |
+
+#### Public library entry point
+
+`block_graph_brain(root: &Path, scope: &BlockGraphScope) -> anyhow::Result<BlockGraphExport>`
+(in `src/lib.rs`) resolves `brain.toml`, discovers and loads every `planning/state.json`
+(`discover_state_files` → `load_state`, mirroring `emit_state`'s corpus-load pipeline),
+builds the `StateGraph`, and calls `build_block_graph_export`. An individual malformed
+`state.json` is skipped rather than failing the whole call, matching bastion's
+`assemble_board` posture; only an unresolvable brain root is a hard `Err`. The returned
+`BlockGraphExport` is a pure value — nothing is written to disk.
+
+---
+
 ### Doc materializer (`src/doc/`) — Phase 9, Block MV.9.A
 
 The doc materializer is the generic brain-document **writer**, sitting on the same
