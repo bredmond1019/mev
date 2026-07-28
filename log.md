@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-28T16:26:31Z"
+timestamp: "2026-07-28T17:10:00Z"
 ---
 
 # Log — mev
@@ -18,6 +18,22 @@ timestamp: "2026-07-28T16:26:31Z"
 ---
 
 ## [run: 2026-07-28]
+
+### MV.10.B close-out — manual testing found and fixed a truncation/edges bug
+
+Before merging PR #21, manually exercised `block_graph_brain` against the live brain corpus
+(362 nodes / 562 edges full scope) via a scratch example script across five scope combinations
+(tier/repo/epic/boundary/closed) — all behaved correctly. Found one real issue: `max_nodes`
+truncation (Stage 7) capped `nodes` but left `edges` computed against the pre-truncation scope
+(Stage 6), so a truncated export (e.g. 5 of 362 nodes) still returned all 562 edges, most naming
+`from`/`target_node_id` keys absent from the returned `nodes` array — internally inconsistent for
+any graph-rendering consumer (`MV.10.C`'s CLI, bastion's `BA.17.A`). Fixed by re-filtering
+`edges` against the truncated node set in Stage 7, mirroring Stage 6's rule; added a regression
+test (`max_nodes_truncation_drops_edges_whose_endpoints_were_truncated_out`) proving a
+single-node truncation drops every edge in the fixture. `docs/architecture.md`'s seven-stage
+pipeline section and the module-level doc comment updated to state the re-filter. All four
+harness gates re-confirmed green (full suite passing, including the new regression test).
+Pushed to PR #21.
 
 ### MV.10.B — Enriched block-graph exporter (block_graph.rs); PASS
 
