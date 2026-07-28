@@ -103,6 +103,13 @@ pub struct BlockGraphNode {
     /// Count of unmet dependencies for a `Blocked` node (from `DerivedFocus.blocked`'s
     /// unmet subset) — `0` for every other lane.
     pub unmet_count: u32,
+    /// Corpus-wide count of in-corpus blocks whose `BlockedBy` edges point at this node
+    /// (`CrossRepo` edges excluded, mirroring `layer`'s edge-kind filter). Computed over
+    /// the full corpus before any scope filtering, so it is identical for a given node
+    /// key across a scoped and an unscoped export. `0` for a node nothing depends on —
+    /// never absent, never a sentinel. Distinct `(from, to_ref)` pairs are deduped, so a
+    /// duplicated authored `depends_on` entry cannot inflate the count.
+    pub dependent_count: u32,
 }
 
 /// One directed edge in the exported block graph.
@@ -304,6 +311,20 @@ pub fn build_block_graph_export(
         layer_of_key.insert(key.clone(), l);
     }
 
+    // --- dependent_count: corpus-wide fan-in over resolved BlockedBy edges only
+    // (CrossRepo excluded, same edge-kind filter `layer` uses above). Distinct `from`
+    // keys per `to_ref` are deduped so a duplicated authored `depends_on` entry can't
+    // inflate the count. ---
+    let mut dependents_of: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for edge in &graph.edges {
+        if edge.kind == StateEdgeKind::BlockedBy {
+            dependents_of
+                .entry(edge.to_ref.as_str())
+                .or_default()
+                .insert(edge.from.as_str());
+        }
+    }
+
     // --- Assemble nodes, in topo_index order. ---
     let mut nodes: Vec<BlockGraphNode> = Vec::with_capacity(topo.len());
     for key in &topo {
@@ -358,6 +379,10 @@ pub fn build_block_graph_export(
             in_scope: true,
             external_deps,
             unmet_count,
+            dependent_count: dependents_of
+                .get(key.as_str())
+                .map(|s| s.len() as u32)
+                .unwrap_or(0),
         });
     }
 
@@ -1083,6 +1108,188 @@ mod tests {
         );
         assert_eq!(scoped_node.layer, unscoped_node.layer);
         assert_eq!(scoped_node.topo_index, unscoped_node.topo_index);
+    }
+
+    // -----------------------------------------------------------------
+    // Task 1 — dependent_count
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn dependent_count_fan_in_of_three() {
+        // B, C, D all depend on A -> dependent_count(A) == 3.
+        let a = block("A", Some("open"));
+        let mut b = block("B", Some("open"));
+        b.depends_on = vec![dep("repo", "A")];
+        let mut c = block("C", Some("open"));
+        c.depends_on = vec![dep("repo", "A")];
+        let mut d = block("D", Some("open"));
+        d.depends_on = vec![dep("repo", "A")];
+
+        let file = project_file(vec![a, b, c, d]);
+        let files = vec![(src("repo"), file)];
+        let graph = build_state_graph(&files);
+        let export = build_block_graph_export(
+            Path::new("/hq"),
+            &single_repo_config(),
+            &graph,
+            &files,
+            &default_scope(),
+        );
+
+        let dependent_count_of = |id: &str| {
+            export
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .dependent_count
+        };
+        assert_eq!(dependent_count_of("A"), 3);
+        assert_eq!(dependent_count_of("B"), 0);
+    }
+
+    #[test]
+    fn dependent_count_zero_for_leaf_no_dependents() {
+        let a = block("A", Some("open"));
+        let file = project_file(vec![a]);
+        let files = vec![(src("repo"), file)];
+        let graph = build_state_graph(&files);
+        let export = build_block_graph_export(
+            Path::new("/hq"),
+            &single_repo_config(),
+            &graph,
+            &files,
+            &default_scope(),
+        );
+
+        assert_eq!(export.nodes[0].dependent_count, 0);
+    }
+
+    #[test]
+    fn dependent_count_ignores_dangling_edge() {
+        // A depends on a nonexistent block "GHOST" — the dangling edge must not
+        // increment any node's dependent_count (there is no node "GHOST" to increment,
+        // and "A" itself gets no dependent from this edge).
+        let mut a = block("A", Some("open"));
+        a.depends_on = vec![dep("repo", "GHOST")];
+        let file = project_file(vec![a]);
+        let files = vec![(src("repo"), file)];
+        let graph = build_state_graph(&files);
+        let export = build_block_graph_export(
+            Path::new("/hq"),
+            &single_repo_config(),
+            &graph,
+            &files,
+            &default_scope(),
+        );
+
+        assert_eq!(export.nodes.len(), 1);
+        assert_eq!(export.nodes[0].dependent_count, 0);
+    }
+
+    #[test]
+    fn dependent_count_excludes_cross_repo_edges() {
+        // A brain-level CrossRepo edge from "alpha:A" to "beta:B1" must not count
+        // toward beta:B1's dependent_count — only BlockedBy edges count.
+        let a = block("A", Some("open"));
+        let b = block("B1", Some("open"));
+        let mut alpha_file = project_file(vec![a]);
+        alpha_file.cross_repo = vec![crate::brain::state::CrossRepoEdge {
+            from: crate::brain::state::Endpoint {
+                repo: "alpha".to_string(),
+                id: "A".to_string(),
+            },
+            to: crate::brain::state::Endpoint {
+                repo: "beta".to_string(),
+                id: "B1".to_string(),
+            },
+            note: None,
+        }];
+        let files = vec![
+            (src("alpha"), alpha_file),
+            (src("beta"), project_file(vec![b])),
+        ];
+        let graph = build_state_graph(&files);
+        let config = two_repo_config();
+        let export =
+            build_block_graph_export(Path::new("/hq"), &config, &graph, &files, &default_scope());
+
+        let b1 = export.nodes.iter().find(|n| n.key == "beta:B1").unwrap();
+        assert_eq!(
+            b1.dependent_count, 0,
+            "a CrossRepo edge must not count toward dependent_count"
+        );
+    }
+
+    #[test]
+    fn dependent_count_deduped_for_duplicate_depends_on_entries() {
+        // B lists a dependency on A twice — dependent_count(A) must still be 1, not 2.
+        let a = block("A", Some("open"));
+        let mut b = block("B", Some("open"));
+        b.depends_on = vec![dep("repo", "A"), dep("repo", "A")];
+        let file = project_file(vec![a, b]);
+        let files = vec![(src("repo"), file)];
+        let graph = build_state_graph(&files);
+        let export = build_block_graph_export(
+            Path::new("/hq"),
+            &single_repo_config(),
+            &graph,
+            &files,
+            &default_scope(),
+        );
+
+        let dependent_count_of = |id: &str| {
+            export
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .dependent_count
+        };
+        assert_eq!(dependent_count_of("A"), 1);
+    }
+
+    #[test]
+    fn dependent_count_identical_scoped_and_unscoped() {
+        // "alpha:A" has two dependents: "alpha:C" (same repo) and "beta:B1" (cross-repo
+        // BlockedBy, not CrossRepo). dependent_count(alpha:A) must match whether the
+        // export is scoped down to just "alpha" or left unscoped.
+        let mut c = block("C", Some("open"));
+        c.depends_on = vec![dep("alpha", "A")];
+        let a = block("A", Some("open"));
+        let mut b1 = block("B1", Some("open"));
+        b1.depends_on = vec![dep("alpha", "A")];
+        let files = vec![
+            (src("alpha"), project_file(vec![a, c])),
+            (src("beta"), project_file(vec![b1])),
+        ];
+        let graph = build_state_graph(&files);
+        let config = two_repo_config();
+
+        let unscoped =
+            build_block_graph_export(Path::new("/hq"), &config, &graph, &files, &default_scope());
+        let unscoped_count = unscoped
+            .nodes
+            .iter()
+            .find(|n| n.key == "alpha:A")
+            .unwrap()
+            .dependent_count;
+        assert_eq!(unscoped_count, 2);
+
+        let mut scope = default_scope();
+        scope.repo = Some("alpha".to_string());
+        let scoped = build_block_graph_export(Path::new("/hq"), &config, &graph, &files, &scope);
+        let scoped_count = scoped
+            .nodes
+            .iter()
+            .find(|n| n.key == "alpha:A")
+            .unwrap()
+            .dependent_count;
+
+        assert_eq!(
+            scoped_count, unscoped_count,
+            "dependent_count must be scope-stable"
+        );
     }
 
     #[test]

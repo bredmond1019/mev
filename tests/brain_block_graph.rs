@@ -563,6 +563,43 @@ fn dual_role_brain_fixture_produces_correct_lane() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// `dependent_count` is corpus-wide and scope-stable: `gamma:G1` has two dependents
+/// (`alpha:A3`, a cross-repo `BlockedBy`, and `gamma:G2`, same-repo) — that count must
+/// be identical whether the export is unscoped (`hq`) or scoped down to the `portfolio`
+/// tier (which still contains `gamma`), the load-bearing scope-stability assertion for
+/// MV.10.C task 1.
+#[test]
+fn dependent_count_identical_across_scoped_and_unscoped_export() {
+    let dir = build_fixture("dependent-count-scope-stability");
+
+    let unscoped = block_graph_brain(&dir, &default_scope()).expect("unscoped build must succeed");
+    let unscoped_g1 = unscoped
+        .nodes
+        .iter()
+        .find(|n| n.key == "gamma:G1")
+        .expect("gamma:G1 present in unscoped export");
+    assert_eq!(
+        unscoped_g1.dependent_count, 2,
+        "gamma:G1 has two BlockedBy dependents: alpha:A3 and gamma:G2"
+    );
+
+    let mut scope = default_scope();
+    scope.tier = TierScope::Tier("portfolio".to_string());
+    let scoped = block_graph_brain(&dir, &scope).expect("portfolio-tier-scoped build must succeed");
+    let scoped_g1 = scoped
+        .nodes
+        .iter()
+        .find(|n| n.key == "gamma:G1")
+        .expect("gamma:G1 present in portfolio-tier-scoped export");
+
+    assert_eq!(
+        scoped_g1.dependent_count, unscoped_g1.dependent_count,
+        "dependent_count must be identical across scoped and unscoped exports"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// DANGLING EDGE: `alpha:A4`'s `depends_on` targets `alpha:GHOST`, which is never
 /// defined anywhere in the fixture. The edge is present in `edges` with
 /// `target_node_id: None` — retained, never dropped, and no node is synthesized for it.
