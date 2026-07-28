@@ -591,7 +591,7 @@ Applied in order, strictly after full-corpus enrichment:
 | Type | Description |
 |---|---|
 | `BlockGraphExport` | The complete envelope: `version` (`"1"`), `root` (display path), `scope: BlockGraphScopeEcho`, `nodes: Vec<BlockGraphNode>`, `edges: Vec<BlockGraphEdge>`, `cycles: Vec<Vec<String>>` (over the **full corpus**, from `cycle_paths` — never the scoped subgraph), `total_nodes` (pre-truncation count), `truncated`. Derives `Serialize`. |
-| `BlockGraphNode` | One enriched block: `key`/`repo`/`id`/`title`/`status`, `lane: BlockLane`, `track`/`wave`/`priority`/`effective_priority`/`due`, `epics`, `layer` (longest path over resolved `depends_on` edges, `0` = no resolved prerequisites, terminates on a cycle via an on-stack recursion guard), `topo_index`, `ready`, `in_cycle`, `in_scope`, `external_deps`, `unmet_count`. Derives `Serialize`. |
+| `BlockGraphNode` | One enriched block: `key`/`repo`/`id`/`title`/`status`, `lane: BlockLane`, `track`/`wave`/`priority`/`effective_priority`/`due`, `epics`, `layer` (longest path over resolved `depends_on` edges, `0` = no resolved prerequisites, terminates on a cycle via an on-stack recursion guard), `topo_index`, `ready`, `in_cycle`, `in_scope`, `external_deps`, `unmet_count`, `dependent_count` (`u32`, corpus-wide count of distinct in-corpus `BlockedBy` dependents — `CrossRepo` edges excluded, deduped by `from` key, computed pre-scope so it is identical between an unscoped and a scoped export of the same node). Derives `Serialize`. |
 | `BlockGraphEdge` | One directed edge: `from`, `to_ref` (raw, as-authored), `kind: StateEdgeKind`, `target_node_id: Option<String>` (`Some` when resolved, `None` when dangling — a dangling edge is retained, never dropped), `blocking` (`false` when either endpoint is `closed`). Derives `Serialize`. |
 | `BlockLane` | `#[serde(rename_all = "snake_case")]` enum: `Now`/`Next`/`Blocked`/`Deferred` mirror `derive_focus`'s four lanes (with the owning file's repo slug prefixed onto each bare block ID before joining against node keys); `Closed` comes from the authored `TrackBlock.status == "closed"`; `Other` is the fallback for an unrecognised authored status. |
 | `BlockGraphScope` | The scope request: `tier: TierScope`, `epic: Option<String>`, `repo: Option<String>`, `include_closed`, `include_boundary`, `max_nodes`. |
@@ -600,12 +600,14 @@ Applied in order, strictly after full-corpus enrichment:
 #### Public library entry point
 
 `block_graph_brain(root: &Path, scope: &BlockGraphScope) -> anyhow::Result<BlockGraphExport>`
-(in `src/lib.rs`) resolves `brain.toml`, discovers and loads every `planning/state.json`
+(in `src/lib.rs`) resolves `brain.toml`, validates `scope.epic` against the HQ
+`epic_registry` when set — blank slug or an epic absent from the registry is a hard `Err`
+before any corpus loading happens — then discovers and loads every `planning/state.json`
 (`discover_state_files` → `load_state`, mirroring `emit_state`'s corpus-load pipeline),
 builds the `StateGraph`, and calls `build_block_graph_export`. An individual malformed
 `state.json` is skipped rather than failing the whole call, matching bastion's
-`assemble_board` posture; only an unresolvable brain root is a hard `Err`. The returned
-`BlockGraphExport` is a pure value — nothing is written to disk.
+`assemble_board` posture; only an unresolvable brain root or a failed epic-scope validation
+is a hard `Err`. The returned `BlockGraphExport` is a pure value — nothing is written to disk.
 
 ---
 
