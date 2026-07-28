@@ -493,6 +493,156 @@ mev emit-graph | jq '{nodes: (.nodes|length), edges: (.edges|length), leaves: (.
 
 ---
 
+### `emit-block-graph [flags] [path]`
+
+Emit the corpus-wide block-dependency graph — every discovered `planning/state.json` block,
+enriched with derived attention/priority/topology fields, filtered by an optional scope — as a
+JSON artifact.
+
+```bash
+mev emit-block-graph [--scope <hq|tier|repo|epic>] [--tier <NAME>] [--epic <SLUG>]
+                      [--repo <SLUG>] [--include-closed] [--include-boundary]
+                      [--max-nodes <N>] [--pretty] [path]
+```
+
+| Argument / Flag | Default | Description |
+|---|---|---|
+| `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
+| `--scope <hq\|tier\|repo\|epic>` | `hq` | Scope mode — see the table below |
+| `--tier <NAME>` | `core` | Tier name to scope to; consulted only when `--scope tier` is given |
+| `--epic <SLUG>` | unset | Epic slug to project onto; required when `--scope epic` is given. Overrides `--tier`/`--repo` rather than intersecting with them |
+| `--repo <SLUG>` | unset | Repo slug to intersect against; required when `--scope repo` is given |
+| `--include-closed` | off | Include `closed`-lane blocks in the exported node set |
+| `--include-boundary` | off | Re-add direct neighbours of the in-scope set as boundary nodes (`in_scope: false`); retains edges that cross the scope boundary |
+| `--max-nodes <N>` | unset (no truncation) | Cap the exported node list at `N` nodes (topo-ordered); sets `truncated: true` when the pre-truncation node count exceeds `N` |
+| `--pretty` | off | Emit pretty-printed (indented) JSON instead of compact JSON |
+
+`--scope` selects the mode:
+
+| `--scope` | Meaning | Companion flag |
+|---|---|---|
+| `hq` (default) | Every repo (`TierScope::All`) | — |
+| `tier` | Repos in `--tier` | `--tier <NAME>` (default `core`) |
+| `repo` | `TierScope::All` intersected with a single repo | `--repo <SLUG>` (required) |
+| `epic` | Epic projection; overrides `--tier`/`--repo` | `--epic <SLUG>` (required) |
+
+Resolves `brain.toml` by walking up from `path`. If no `brain.toml` is found, the process
+exits 1 with an error message on stderr (mentioning `brain.toml`).
+
+`mev emit-block-graph` is a **pure emit**: nothing is ever written to disk, no cache, no
+side effects. It does not re-derive the block graph — it is a serializer over
+`mev::block_graph_brain` / `build_block_graph_export`, and the output is emitted **verbatim**:
+no post-processing, no field reordering, no added or dropped keys. This is the CLI companion
+to bastion's `GET /api/blocks/graph` (`BA.17.A`) — node counts for a given scope must match
+that endpoint's.
+
+#### Output shape
+
+```json
+{
+  "version": "1",
+  "root": "/path/to/brain",
+  "scope": {
+    "tier": null,
+    "epic": null,
+    "repo": null,
+    "include_closed": false,
+    "include_boundary": false
+  },
+  "nodes": [
+    {
+      "key": "repo:BLOCK-ID",
+      "repo": "repo",
+      "id": "BLOCK-ID",
+      "title": "...",
+      "status": "open",
+      "lane": "next",
+      "track": "Phase 1",
+      "wave": 1,
+      "priority": 2,
+      "effective_priority": 2,
+      "due": null,
+      "epics": [],
+      "layer": 0,
+      "topo_index": 0,
+      "ready": true,
+      "in_cycle": false,
+      "in_scope": true,
+      "external_deps": [],
+      "unmet_count": 0,
+      "dependent_count": 0
+    }
+  ],
+  "edges": [
+    {
+      "from": "repo:BLOCK-ID",
+      "to_ref": "repo:OTHER-ID",
+      "kind": "blocked_by",
+      "target_node_id": "repo:OTHER-ID",
+      "blocking": true
+    }
+  ],
+  "cycles": [],
+  "total_nodes": 1,
+  "truncated": false
+}
+```
+
+#### Field guide
+
+`version`, `root`, `scope` (an echo of the resolved scope request), `nodes`, `edges`, `cycles`
+(over the **full corpus**, never the scoped subgraph), `total_nodes` (node count before any
+`--max-nodes` truncation), and `truncated`.
+
+Every node carries the full-corpus derivations that back the state-graph views:
+
+| Field | Description |
+|---|---|
+| `lane` | Derived attention lane: `now` / `next` / `blocked` / `deferred` / `closed` / `other` |
+| `layer` | Longest path over resolved `depends_on` edges (`0` = no resolved prerequisites) |
+| `topo_index` | Position in the full-corpus topological order |
+| `effective_priority` | Effective priority; absent when it never lands in the real `0..=3` range |
+| `in_scope` | `true` for a scope survivor, `false` for a node re-added only as an `--include-boundary` neighbour |
+| `unmet_count` | Count of unmet dependencies for a `blocked` node; `0` for every other lane |
+| `dependent_count` | Corpus-wide count of in-corpus blocks whose `BlockedBy` edges point at this node (`CrossRepo` edges excluded). Computed over the **full corpus before scope filtering**, exactly like `layer`, `topo_index`, and `effective_priority` — so it is **identical for a given node across a scoped and an unscoped export**, and reports `0` (never absent, never a sentinel) for a node nothing depends on |
+
+#### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Graph emitted successfully |
+| `1` | `brain.toml` not found, `--scope epic` given without `--epic`, `--scope repo` given without `--repo`, an unknown or blank `--epic` slug, or a serialization/runtime error |
+
+**Examples:**
+
+```bash
+# Compact JSON, whole corpus, from the current directory
+mev emit-block-graph
+
+# Pretty-printed JSON from an explicit brain root
+mev emit-block-graph --pretty ~/Dev/agentic-portfolio
+
+# Scope to one tier
+mev emit-block-graph --scope tier --tier core
+
+# Scope to one repo
+mev emit-block-graph --scope repo --repo mev
+
+# Project onto one epic
+mev emit-block-graph --scope epic --epic bastion-tui
+
+# Include closed blocks and boundary neighbours
+mev emit-block-graph --include-closed --include-boundary
+
+# Cap the node list and check whether it truncated
+mev emit-block-graph --max-nodes 50 | jq '.truncated'
+
+# Summary counts via jq (the program-plan smoke check)
+mev emit-block-graph --pretty ~/Dev/agentic-portfolio | jq '{v:.version, n:(.nodes|length), e:(.edges|length), cycles:(.cycles|length), truncated}'
+```
+
+---
+
 ### `emit-state [--write] [path]`
 
 Regenerate all derived views in the Brain corpus from the authored `tracks[]` DAG and write them in place (with `--write`) or report what would change (dry-run, without `--write`).
