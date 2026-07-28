@@ -202,6 +202,9 @@ impl BrainConfig {
     ///   fixed suffix [`crate::brain::state::discover_state_files`] uses for every
     ///   leaf repo (independent of the `status_file` field, which already embeds
     ///   the same `{repo_path}` prefix for its own `status.md` sibling).
+    /// - **`own_status_file`** — the entry's own `status_file` field, verbatim;
+    ///   the target `plan_status_frontmatter` writes for this repo's `now`/`next`/
+    ///   `blocked` scalars.
     /// - **`cache_doc`** — the entry's own `cache_doc` field, verbatim.
     /// - **`tier_rollup_status_file`** — the `status_file` of the `[[repos]]` entry
     ///   whose `slug` equals this repo's `tier` value (a "tier-container
@@ -227,6 +230,8 @@ impl BrainConfig {
             .join("planning")
             .join("state.json");
 
+        let own_status_file = PathBuf::from(&repo.status_file);
+
         let cache_doc = PathBuf::from(&repo.cache_doc);
 
         let tier_rollup_status_file = self
@@ -243,6 +248,7 @@ impl BrainConfig {
 
         Ok(ScopeDependencySet {
             own_state_json,
+            own_status_file,
             cache_doc,
             tier_rollup_status_file,
             hq_board_status_file,
@@ -258,6 +264,9 @@ impl BrainConfig {
 pub struct ScopeDependencySet {
     /// `{repo_path}/planning/state.json` — the repo's own leaf state file.
     pub own_state_json: PathBuf,
+    /// The repo's own `status_file` — its `status.md`, whose `now`/`next`/`blocked`
+    /// frontmatter scalars `plan_status_frontmatter` reconciles.
+    pub own_status_file: PathBuf,
     /// The repo's `cache_doc` (e.g. `docs/projects/<slug>.md`).
     pub cache_doc: PathBuf,
     /// The `status_file` of the repo's tier container, if the tier resolves to a
@@ -277,6 +286,7 @@ impl ScopeDependencySet {
     pub fn absolute_targets(&self, root: &Path) -> Vec<PathBuf> {
         let mut targets = vec![
             root.join(&self.own_state_json),
+            root.join(&self.own_status_file),
             root.join(&self.cache_doc),
             root.join(&self.hq_board_status_file),
         ];
@@ -608,6 +618,10 @@ deferred_days = 2
             deps.own_state_json,
             PathBuf::from("core/mev/planning/state.json")
         );
+        assert_eq!(
+            deps.own_status_file,
+            PathBuf::from("core/mev/planning/status.md")
+        );
         assert_eq!(deps.cache_doc, PathBuf::from("docs/projects/mev.md"));
         assert_eq!(
             deps.tier_rollup_status_file,
@@ -630,6 +644,10 @@ deferred_days = 2
         assert_eq!(
             deps.own_state_json,
             PathBuf::from("business/bastiel/planning/state.json")
+        );
+        assert_eq!(
+            deps.own_status_file,
+            PathBuf::from("business/bastiel/planning/status.md")
         );
         assert_eq!(deps.cache_doc, PathBuf::from("docs/projects/bastiel.md"));
         assert_eq!(
@@ -682,6 +700,7 @@ deferred_days = 2
         let root = PathBuf::from("/hq");
 
         assert!(deps.allows(&root, &root.join("core/mev/planning/state.json")));
+        assert!(deps.allows(&root, &root.join("core/mev/planning/status.md")));
         assert!(deps.allows(&root, &root.join("docs/projects/mev.md")));
         assert!(deps.allows(&root, &root.join("core/planning/status.md")));
         assert!(deps.allows(&root, &root.join("planning/status.md")));
@@ -694,6 +713,7 @@ deferred_days = 2
         let root = PathBuf::from("/hq");
 
         assert!(!deps.allows(&root, &root.join("business/bastiel/planning/state.json")));
+        assert!(!deps.allows(&root, &root.join("business/bastiel/planning/status.md")));
         assert!(!deps.allows(&root, &root.join("docs/projects/bastiel.md")));
         assert!(!deps.allows(&root, &root.join("business/planning/status.md")));
     }
@@ -701,13 +721,15 @@ deferred_days = 2
     #[test]
     fn scope_allows_no_tier_rollup_when_none() {
         // A tier-container self-entry has no further tier rollup — its target
-        // set has three entries, not four, and never allows a path that isn't
-        // one of them.
+        // set has four entries, not five, but still allows its own status_file
+        // (which happens to share a path with what would have been the tier
+        // rollup target, since 'core' is both leaf and tier-container for itself).
         let cfg = scoped_fixture_config();
         let deps = cfg.scope_dependencies("core").expect("core is registered");
         let root = PathBuf::from("/hq");
 
-        assert_eq!(deps.absolute_targets(&root).len(), 3);
-        assert!(!deps.allows(&root, &root.join("core/planning/status.md")));
+        assert_eq!(deps.absolute_targets(&root).len(), 4);
+        assert!(deps.allows(&root, &root.join("core/planning/status.md")));
+        assert!(!deps.allows(&root, &root.join("business/planning/status.md")));
     }
 }

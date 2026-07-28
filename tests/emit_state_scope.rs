@@ -357,6 +357,7 @@ fn scoped_write_leaves_unrelated_repos_byte_identical() {
     // Files a scoped `--scope mev` run is expected to touch.
     let expected_changed = [
         "core/mev/planning/state.json",
+        "core/mev/planning/status.md",
         "docs/projects/mev.md",
         "core/planning/status.md",
         "planning/status.md",
