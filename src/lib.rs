@@ -12,6 +12,10 @@ mod shared;
 pub mod theme;
 mod validator;
 pub use brain::BrainValidator;
+pub use brain::block_graph::{
+    BlockGraphEdge, BlockGraphExport, BlockGraphNode, BlockGraphScope, BlockGraphScopeEcho,
+    BlockLane, build_block_graph_export,
+};
 pub use brain::crawl::{MdFile, crawl_brain};
 pub use brain::emit::{
     EmitAction, EmitError, EmitPlan, apply_plan, plan_master_plan_tables, plan_state_json,
@@ -996,6 +1000,50 @@ pub fn graph_brain(root: &std::path::Path) -> anyhow::Result<GraphExport> {
     let (corpus, _crawl_diags) = crawl_corpus(root, &config);
     let artifact = build_graph(&corpus, &config);
     Ok(build_graph_export(root, &artifact))
+}
+
+/// Build the enriched block-graph export for a Brain corpus.
+///
+/// Discovers `brain.toml`, loads every discovered `planning/state.json` (skipping any
+/// individual file that fails to parse — this is a read-only compiler, not a writer, so
+/// it has no `E_EMIT_INCOMPLETE_CORPUS`-style write guard and no `write` flag; a partial
+/// corpus still yields a best-effort graph over whatever loaded), builds the
+/// `okf_core::StateGraph`, and delegates to [`build_block_graph_export`] for the
+/// enrichment + seven-stage scope pipeline. Mirrors [`graph_brain`]; this is a pure
+/// compiler — nothing is written to disk (D4). The caller (`MV.10.C`'s CLI subcommand or
+/// bastion's `BA.17.A` endpoint) serialises the result.
+///
+/// Returns an [`anyhow::Error`] only for a hard configuration error (`brain.toml` not
+/// found or unreadable) — an individual malformed `state.json` is skipped, not fatal,
+/// matching bastion's `assemble_board` posture.
+pub fn block_graph_brain(
+    root: &std::path::Path,
+    scope: &brain::block_graph::BlockGraphScope,
+) -> anyhow::Result<brain::block_graph::BlockGraphExport> {
+    use brain::config::find_brain_config;
+    use brain::state::{build_state_graph, discover_state_files, load_state};
+
+    let config = find_brain_config(root)
+        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
+
+    // 1. Discovery: find all planning/state.json files.
+    let (sources, _discovery_diags) = discover_state_files(root, &config);
+
+    // 2. Load each discovered file, skipping any that fail individually.
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    for src in &sources {
+        if let Ok(file) = load_state(&src.abs_path) {
+            loaded.push((src.clone(), file));
+        }
+    }
+
+    // 3. Build the block-dependency graph.
+    let graph = build_state_graph(&loaded);
+
+    // 4. Derive the enriched, scoped export.
+    Ok(build_block_graph_export(
+        root, &config, &graph, &loaded, scope,
+    ))
 }
 
 /// Generate an interactive HTML knowledge graph of the Brain corpus.
