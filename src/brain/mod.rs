@@ -5,6 +5,7 @@
 //! adds the `validate-brain` subcommand. Block J-crawl wires the registry-driven
 //! [`crawl::crawl_corpus`] multi-root walk here, replacing the single-root walk.
 
+pub mod block_graph;
 pub mod config;
 pub mod crawl;
 pub mod emit;
