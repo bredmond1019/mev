@@ -6,11 +6,12 @@
 //! `version`/`root` header, a `nodes`/`edges` body, a resolved-target field on edges,
 //! deterministic ordering, and a pure value returned (nothing written to disk).
 //!
-//! **Task 1** (this file's initial cut) computes full-corpus enrichment only — every
-//! node is `in_scope: true` and no scope filtering is applied yet. **Task 2** layers the
-//! seven-stage scope pipeline on top, strictly *after* enrichment, which is what
-//! guarantees a scoped export can never report a different `lane`, `effective_priority`,
-//! `layer`, or `topo_index` for a node than an unscoped export does.
+//! Every derivation runs over the **full corpus** first; the seven-stage scope pipeline
+//! (tier → repo → epic → closed → boundary → edges → truncate) is layered on top,
+//! strictly *after* enrichment, which is what guarantees a scoped export can never
+//! report a different `lane`, `effective_priority`, `layer`, or `topo_index` for a node
+//! than an unscoped export does. Epic scope overrides tier rather than intersecting
+//! with it.
 //!
 //! Enrichment sources are consumed, never re-derived: [`crate::brain::emit::topo_order`],
 //! [`crate::brain::state::cycle_paths`], [`crate::brain::state::effective_priorities`],
@@ -22,10 +23,10 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::brain::config::BrainConfig;
-use crate::brain::emit::topo_order;
+use crate::brain::emit::{epic_members, topo_order};
 use crate::brain::state::{
     BlockedBy, StateEdgeKind, StateFile, StateGraph, StateSource, TierScope, TrackBlock,
-    cycle_paths, derive_focus, effective_priorities, ready_order,
+    cycle_paths, derive_focus, derive_rollup, effective_priorities, ready_order,
 };
 
 // ---------------------------------------------------------------------------
@@ -92,8 +93,8 @@ pub struct BlockGraphNode {
     pub ready: bool,
     /// Whether this node participates in a `depends_on` cycle.
     pub in_cycle: bool,
-    /// Whether this node survives the scope pipeline (task 2). Always `true` in the
-    /// task-1 full-corpus enrichment.
+    /// Whether this node survives the scope pipeline's tier/repo/epic/closed stages.
+    /// `true` for a survivor, `false` for a node re-added only as a boundary neighbour.
     pub in_scope: bool,
     /// `what` strings from this block's `{type:"external"}` `depends_on` entries. No
     /// synthetic node is ever created for an external dependency.
@@ -178,12 +179,13 @@ pub struct BlockGraphExport {
 
 /// Build the enriched [`BlockGraphExport`] for a Brain corpus.
 ///
-/// Task 1: computes every full-corpus derivation and treats every node as `in_scope:
-/// true`; no filtering is applied. Task 2 layers the seven-stage scope pipeline on top of
-/// this function's output, strictly after enrichment.
+/// Computes every full-corpus derivation first, then applies the seven-stage scope
+/// pipeline (tier → repo → epic → closed → boundary → edges → truncate) strictly after
+/// enrichment, so a scoped export reports the same `lane`/`effective_priority`/`layer`/
+/// `topo_index` for a node as an unscoped export does.
 pub fn build_block_graph_export(
     root: &Path,
-    _config: &BrainConfig,
+    config: &BrainConfig,
     graph: &StateGraph,
     files: &[(StateSource, StateFile)],
     scope: &BlockGraphScope,
@@ -380,6 +382,106 @@ pub fn build_block_graph_export(
         })
         .collect();
 
+    // -----------------------------------------------------------------
+    // Seven-stage scope filter pipeline (task 2). Runs strictly AFTER every
+    // derivation above — a scoped node keeps the exact same lane, priority,
+    // layer, and topo_index it has in an unscoped export.
+    // -----------------------------------------------------------------
+
+    let node_meta: HashMap<String, (String, BlockLane)> = nodes
+        .iter()
+        .map(|n| (n.key.clone(), (n.repo.clone(), n.lane)))
+        .collect();
+
+    // Stage 1 — TIER: resolve in-scope repo slugs the same way bastion's
+    // `assemble_board` does, via `derive_rollup`.
+    let tier_repos: HashSet<String> = derive_rollup(&scope.tier, config, &[], graph, files)
+        .into_iter()
+        .map(|r| r.repo)
+        .collect();
+    let mut in_scope_keys: HashSet<String> = node_meta
+        .iter()
+        .filter(|(_, (repo, _))| tier_repos.contains(repo))
+        .map(|(k, _)| k.clone())
+        .collect();
+
+    // Stage 2 — REPO: intersect down to a single slug, if requested.
+    if let Some(repo) = &scope.repo {
+        in_scope_keys.retain(|k| node_meta.get(k).map(|(r, _)| r == repo).unwrap_or(false));
+    }
+
+    // Stage 3 — EPIC: overrides tier/repo entirely (a cross-repo projection),
+    // never intersects with them.
+    if let Some(epic_slug) = &scope.epic {
+        in_scope_keys = epic_members(graph, files, epic_slug)
+            .into_iter()
+            .map(|(repo, block)| format!("{repo}:{}", block.id))
+            .collect();
+    }
+
+    // Stage 4 — CLOSED: drop Closed-lane nodes unless explicitly included.
+    if !scope.include_closed {
+        in_scope_keys.retain(|k| {
+            node_meta
+                .get(k)
+                .map(|(_, lane)| *lane != BlockLane::Closed)
+                .unwrap_or(true)
+        });
+    }
+
+    // Stage 5 — BOUNDARY: re-add direct dependencies/dependents of the
+    // surviving set, flagged `in_scope: false`. Survivors keep `in_scope: true`.
+    let mut boundary_keys: HashSet<String> = HashSet::new();
+    if scope.include_boundary {
+        for edge in &edges {
+            let from_in = in_scope_keys.contains(&edge.from);
+            let to_in = edge
+                .target_node_id
+                .as_ref()
+                .is_some_and(|t| in_scope_keys.contains(t));
+            if from_in && !to_in {
+                if let Some(t) = &edge.target_node_id {
+                    boundary_keys.insert(t.clone());
+                }
+            } else if to_in && !from_in {
+                boundary_keys.insert(edge.from.clone());
+            }
+        }
+    }
+
+    let final_keys: HashSet<String> = in_scope_keys.union(&boundary_keys).cloned().collect();
+
+    let mut scoped_nodes: Vec<BlockGraphNode> = nodes
+        .into_iter()
+        .filter(|n| final_keys.contains(&n.key))
+        .map(|mut n| {
+            n.in_scope = in_scope_keys.contains(&n.key);
+            n
+        })
+        .collect();
+
+    // Stage 6 — EDGES: keep an edge when its `from` survives (in-scope or
+    // boundary) AND its `to_ref` either survives too or is dangling.
+    let scoped_edges: Vec<BlockGraphEdge> = edges
+        .into_iter()
+        .filter(|e| {
+            let from_ok = final_keys.contains(&e.from);
+            let to_ok = match &e.target_node_id {
+                Some(t) => final_keys.contains(t),
+                None => true, // dangling edges are always retained
+            };
+            from_ok && to_ok
+        })
+        .collect();
+
+    // Stage 7 — TRUNCATE: `total_nodes` holds the pre-truncation count; the
+    // (already topo-ordered) node list is then capped at `max_nodes`.
+    let total_nodes = scoped_nodes.len() as u32;
+    let truncated = scoped_nodes.len() > scope.max_nodes;
+    if truncated {
+        scoped_nodes.truncate(scope.max_nodes);
+    }
+
     let scope_echo = BlockGraphScopeEcho {
         tier: match &scope.tier {
             TierScope::All => None,
@@ -391,17 +493,15 @@ pub fn build_block_graph_export(
         include_boundary: scope.include_boundary,
     };
 
-    let total_nodes = nodes.len() as u32;
-
     BlockGraphExport {
         version: "1".to_string(),
         root: root.display().to_string(),
         scope: scope_echo,
-        nodes,
-        edges,
+        nodes: scoped_nodes,
+        edges: scoped_edges,
         cycles,
         total_nodes,
-        truncated: false,
+        truncated,
     }
 }
 
@@ -471,6 +571,24 @@ mod tests {
         }
     }
 
+    /// Config carrying a single `"repo"` entry, matching `src("repo")` — needed so
+    /// `TierScope::All` (via `derive_rollup`) resolves that repo as in-scope. All
+    /// single-repo unscoped-derivation tests use this rather than
+    /// `BrainConfig::default()`, whose empty `repos[]` would filter every node out.
+    fn single_repo_config() -> BrainConfig {
+        BrainConfig {
+            repos: vec![crate::brain::config::RepoEntry {
+                slug: "repo".to_string(),
+                tier: "core".to_string(),
+                repo_path: "repo".to_string(),
+                status_file: String::new(),
+                cache_doc: String::new(),
+                heading: String::new(),
+            }],
+            ..BrainConfig::default()
+        }
+    }
+
     fn dep(repo: &str, id: &str) -> BlockedBy {
         BlockedBy::Block {
             repo: repo.to_string(),
@@ -495,7 +613,7 @@ mod tests {
         let graph = build_state_graph(&files);
         let export = build_block_graph_export(
             Path::new("/hq"),
-            &BrainConfig::default(),
+            &single_repo_config(),
             &graph,
             &files,
             &default_scope(),
@@ -536,7 +654,7 @@ mod tests {
         let graph = build_state_graph(&files);
         let export = build_block_graph_export(
             Path::new("/hq"),
-            &BrainConfig::default(),
+            &single_repo_config(),
             &graph,
             &files,
             &default_scope(),
@@ -563,7 +681,7 @@ mod tests {
         let graph = build_state_graph(&files);
         let export = build_block_graph_export(
             Path::new("/hq"),
-            &BrainConfig::default(),
+            &single_repo_config(),
             &graph,
             &files,
             &default_scope(),
@@ -586,7 +704,7 @@ mod tests {
         let graph = build_state_graph(&files);
         let export = build_block_graph_export(
             Path::new("/hq"),
-            &BrainConfig::default(),
+            &single_repo_config(),
             &graph,
             &files,
             &default_scope(),
@@ -620,7 +738,7 @@ mod tests {
         let graph = build_state_graph(&files);
         let export = build_block_graph_export(
             Path::new("/hq"),
-            &BrainConfig::default(),
+            &single_repo_config(),
             &graph,
             &files,
             &default_scope(),
@@ -645,7 +763,7 @@ mod tests {
         let graph = build_state_graph(&files);
         let export = build_block_graph_export(
             Path::new("/hq"),
-            &BrainConfig::default(),
+            &single_repo_config(),
             &graph,
             &files,
             &default_scope(),
@@ -668,7 +786,7 @@ mod tests {
         let graph = build_state_graph(&files);
         let export = build_block_graph_export(
             Path::new("/hq"),
-            &BrainConfig::default(),
+            &single_repo_config(),
             &graph,
             &files,
             &default_scope(),
@@ -690,7 +808,7 @@ mod tests {
         let graph = build_state_graph(&files);
         let export = build_block_graph_export(
             Path::new("/hq"),
-            &BrainConfig::default(),
+            &single_repo_config(),
             &graph,
             &files,
             &default_scope(),
@@ -701,5 +819,278 @@ mod tests {
         }
         assert_eq!(export.version, "1");
         assert_eq!(export.root, "/hq");
+    }
+
+    // -----------------------------------------------------------------
+    // Task 2 — seven-stage scope filter pipeline
+    // -----------------------------------------------------------------
+
+    fn repo_entry(slug: &str, tier: &str) -> crate::brain::config::RepoEntry {
+        crate::brain::config::RepoEntry {
+            slug: slug.to_string(),
+            tier: tier.to_string(),
+            repo_path: slug.to_string(),
+            status_file: String::new(),
+            cache_doc: String::new(),
+            heading: String::new(),
+        }
+    }
+
+    fn two_repo_config() -> BrainConfig {
+        BrainConfig {
+            repos: vec![repo_entry("alpha", "core"), repo_entry("beta", "portfolio")],
+            ..BrainConfig::default()
+        }
+    }
+
+    /// Two repos (`alpha` in tier `core`, `beta` in tier `portfolio`), one block
+    /// each, no cross-repo edges — the shared fixture for the scoping tests below.
+    fn two_repo_files() -> Vec<(StateSource, StateFile)> {
+        let a = block("A1", Some("open"));
+        let b = block("B1", Some("open"));
+        vec![
+            (src("alpha"), project_file(vec![a])),
+            (src("beta"), project_file(vec![b])),
+        ]
+    }
+
+    #[test]
+    fn tier_scope_limits_to_repos_in_that_tier() {
+        let files = two_repo_files();
+        let graph = build_state_graph(&files);
+        let config = two_repo_config();
+        let mut scope = default_scope();
+        scope.tier = TierScope::Tier("core".to_string());
+
+        let export = build_block_graph_export(Path::new("/hq"), &config, &graph, &files, &scope);
+
+        assert_eq!(export.nodes.len(), 1);
+        assert_eq!(export.nodes[0].key, "alpha:A1");
+        assert_eq!(export.scope.tier, Some("core".to_string()));
+    }
+
+    #[test]
+    fn repo_scope_narrows_to_one_slug() {
+        let files = two_repo_files();
+        let graph = build_state_graph(&files);
+        let config = two_repo_config();
+        let mut scope = default_scope();
+        scope.repo = Some("beta".to_string());
+
+        let export = build_block_graph_export(Path::new("/hq"), &config, &graph, &files, &scope);
+
+        assert_eq!(export.nodes.len(), 1);
+        assert_eq!(export.nodes[0].key, "beta:B1");
+        assert_eq!(export.scope.repo, Some("beta".to_string()));
+    }
+
+    #[test]
+    fn epic_scope_overrides_tier() {
+        let mut a = block("A1", Some("open"));
+        a.epics = vec!["epic-x".to_string()];
+        let mut b = block("B1", Some("open"));
+        b.epics = vec!["epic-x".to_string()];
+        let files = vec![
+            (src("alpha"), project_file(vec![a])),
+            (src("beta"), project_file(vec![b])),
+        ];
+        let graph = build_state_graph(&files);
+        let config = two_repo_config();
+        let mut scope = default_scope();
+        // Tier "core" alone would exclude beta entirely; epic must override it.
+        scope.tier = TierScope::Tier("core".to_string());
+        scope.epic = Some("epic-x".to_string());
+
+        let export = build_block_graph_export(Path::new("/hq"), &config, &graph, &files, &scope);
+
+        let mut keys: Vec<&str> = export.nodes.iter().map(|n| n.key.as_str()).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["alpha:A1", "beta:B1"]);
+    }
+
+    #[test]
+    fn include_closed_toggle_changes_node_count() {
+        let open_block = block("A", Some("open"));
+        let closed_block = block("B", Some("closed"));
+        let file = project_file(vec![open_block, closed_block]);
+        let files = vec![(src("repo"), file)];
+        let graph = build_state_graph(&files);
+
+        let mut with_closed = default_scope();
+        with_closed.include_closed = true;
+        let export_with = build_block_graph_export(
+            Path::new("/hq"),
+            &single_repo_config(),
+            &graph,
+            &files,
+            &with_closed,
+        );
+        assert_eq!(export_with.nodes.len(), 2);
+
+        let mut without_closed = default_scope();
+        without_closed.include_closed = false;
+        let export_without = build_block_graph_export(
+            Path::new("/hq"),
+            &single_repo_config(),
+            &graph,
+            &files,
+            &without_closed,
+        );
+        assert_eq!(export_without.nodes.len(), 1);
+        assert_eq!(export_without.nodes[0].id, "A");
+    }
+
+    #[test]
+    fn include_boundary_adds_out_of_scope_nodes_and_retains_edges() {
+        let mut a = block("A", Some("open"));
+        a.depends_on = vec![dep("beta", "B1")];
+        let b = block("B1", Some("open"));
+        let files = vec![
+            (src("alpha"), project_file(vec![a])),
+            (src("beta"), project_file(vec![b])),
+        ];
+        let graph = build_state_graph(&files);
+        let config = two_repo_config();
+
+        // Scope to just "alpha" — "beta:B1" is a dependency but out of scope.
+        let mut scope = default_scope();
+        scope.repo = Some("alpha".to_string());
+        scope.include_boundary = false;
+        let export_no_boundary =
+            build_block_graph_export(Path::new("/hq"), &config, &graph, &files, &scope);
+        assert_eq!(export_no_boundary.nodes.len(), 1);
+        assert!(
+            export_no_boundary
+                .edges
+                .iter()
+                .all(|e| e.to_ref != "beta:B1")
+        );
+
+        scope.include_boundary = true;
+        let export_boundary =
+            build_block_graph_export(Path::new("/hq"), &config, &graph, &files, &scope);
+        assert_eq!(export_boundary.nodes.len(), 2);
+        let boundary_node = export_boundary
+            .nodes
+            .iter()
+            .find(|n| n.key == "beta:B1")
+            .expect("boundary node re-added");
+        assert!(!boundary_node.in_scope);
+        let scoped_node = export_boundary
+            .nodes
+            .iter()
+            .find(|n| n.key == "alpha:A")
+            .unwrap();
+        assert!(scoped_node.in_scope);
+        assert!(
+            export_boundary
+                .edges
+                .iter()
+                .any(|e| e.from == "alpha:A" && e.to_ref == "beta:B1"),
+            "boundary edge retained"
+        );
+    }
+
+    #[test]
+    fn max_nodes_sets_truncated_with_pre_truncation_total() {
+        let mut c = block("C", Some("open"));
+        c.depends_on = vec![dep("repo", "B")];
+        let mut b = block("B", Some("open"));
+        b.depends_on = vec![dep("repo", "A")];
+        let a = block("A", Some("open"));
+        let file = project_file(vec![a, b, c]);
+        let files = vec![(src("repo"), file)];
+        let graph = build_state_graph(&files);
+
+        let mut scope = default_scope();
+        scope.max_nodes = 1;
+        let export = build_block_graph_export(
+            Path::new("/hq"),
+            &single_repo_config(),
+            &graph,
+            &files,
+            &scope,
+        );
+
+        assert_eq!(export.total_nodes, 3);
+        assert!(export.truncated);
+        assert_eq!(export.nodes.len(), 1);
+
+        let mut untruncated_scope = default_scope();
+        untruncated_scope.max_nodes = usize::MAX;
+        let export_full = build_block_graph_export(
+            Path::new("/hq"),
+            &single_repo_config(),
+            &graph,
+            &files,
+            &untruncated_scope,
+        );
+        assert!(!export_full.truncated);
+        assert_eq!(export_full.total_nodes, 3);
+        assert_eq!(export_full.nodes.len(), 3);
+    }
+
+    #[test]
+    fn scoped_node_matches_unscoped_enrichment() {
+        let mut c = block("C", Some("open"));
+        c.depends_on = vec![dep("alpha", "A"), dep("beta", "B1")];
+        let a = block("A", Some("open"));
+        let b = block("B1", Some("open"));
+        let files = vec![
+            (src("alpha"), project_file(vec![a, c])),
+            (src("beta"), project_file(vec![b])),
+        ];
+        let graph = build_state_graph(&files);
+        let config = two_repo_config();
+
+        let unscoped =
+            build_block_graph_export(Path::new("/hq"), &config, &graph, &files, &default_scope());
+        let unscoped_node = unscoped
+            .nodes
+            .iter()
+            .find(|n| n.key == "alpha:A")
+            .unwrap()
+            .clone();
+
+        let mut scope = default_scope();
+        scope.repo = Some("alpha".to_string());
+        let scoped = build_block_graph_export(Path::new("/hq"), &config, &graph, &files, &scope);
+        let scoped_node = scoped
+            .nodes
+            .iter()
+            .find(|n| n.key == "alpha:A")
+            .unwrap()
+            .clone();
+
+        assert_eq!(scoped_node.lane, unscoped_node.lane);
+        assert_eq!(
+            scoped_node.effective_priority,
+            unscoped_node.effective_priority
+        );
+        assert_eq!(scoped_node.layer, unscoped_node.layer);
+        assert_eq!(scoped_node.topo_index, unscoped_node.topo_index);
+    }
+
+    #[test]
+    fn scope_echo_reflects_request() {
+        let files = two_repo_files();
+        let graph = build_state_graph(&files);
+        let config = two_repo_config();
+        let scope = BlockGraphScope {
+            tier: TierScope::Tier("core".to_string()),
+            epic: Some("epic-x".to_string()),
+            repo: Some("alpha".to_string()),
+            include_closed: false,
+            include_boundary: true,
+            max_nodes: 5,
+        };
+
+        let export = build_block_graph_export(Path::new("/hq"), &config, &graph, &files, &scope);
+
+        assert_eq!(export.scope.tier, Some("core".to_string()));
+        assert_eq!(export.scope.epic, Some("epic-x".to_string()));
+        assert_eq!(export.scope.repo, Some("alpha".to_string()));
+        assert!(!export.scope.include_closed);
+        assert!(export.scope.include_boundary);
     }
 }
