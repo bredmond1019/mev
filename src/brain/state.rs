@@ -1453,17 +1453,30 @@ pub fn check_rollup(
 // Cycle detection
 // ---------------------------------------------------------------------------
 
-/// Detect cycles in the `depends_on` edge subgraph of `graph`.
+/// A single cycle found in the `depends_on` subgraph.
+///
+/// `keys` holds the cycle's nodes in DFS traversal order, **without** the repeated
+/// closing node (i.e. the node that both starts and ends the cycle appears exactly
+/// once). `source_path` is the back-edge's `source_path` — where the diagnostic that
+/// reports this cycle should be anchored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CyclePath {
+    pub keys: Vec<String>,
+    pub source_path: std::path::PathBuf,
+}
+
+/// Find every cycle in the `depends_on` edge subgraph of `graph`.
 ///
 /// Performs a DFS over [`StateEdgeKind::BlockedBy`] edges only; [`StateEdgeKind::CrossRepo`]
 /// edges are intentionally excluded (they annotate inter-repo intent, not block ordering
 /// and are not part of the authoritative DAG).
 ///
-/// On detection of a back-edge, emits **`E_STATE_CYCLE`** naming the cycle path in the
-/// form `A → B → C → A`.  Each distinct cycle path is reported once.
+/// Results are deduplicated by **canonical rotation**: each cycle's `keys` are rotated so
+/// the lexicographically smallest key is first, and only the first cycle to produce a given
+/// rotated form is kept. Returned in discovery order.
 ///
 /// Returns an empty `Vec` when the `depends_on` subgraph is acyclic.
-pub fn detect_cycles(graph: &StateGraph) -> Vec<Diagnostic> {
+pub fn cycle_paths(graph: &StateGraph) -> Vec<CyclePath> {
     use std::collections::{HashMap, HashSet};
 
     // Build adjacency: from_key → Vec<(to_ref, source_path)>.
@@ -1481,40 +1494,58 @@ pub fn detect_cycles(graph: &StateGraph) -> Vec<Diagnostic> {
     }
 
     let mut visited: HashSet<String> = HashSet::new();
-    let mut diags: Vec<Diagnostic> = Vec::new();
-    let mut reported: HashSet<String> = HashSet::new();
+    let mut paths: Vec<CyclePath> = Vec::new();
+    let mut seen_rotations: HashSet<Vec<String>> = HashSet::new();
 
     // Iterate in a deterministic order (node-insertion order from the graph).
     let starts: Vec<String> = graph.nodes.iter().map(|n| n.key.clone()).collect();
     for start in &starts {
         if !visited.contains(start.as_str()) {
             let mut rec_stack: Vec<String> = Vec::new();
-            detect_cycles_dfs(
+            cycle_paths_dfs(
                 start.as_str(),
                 &adj,
                 &mut visited,
                 &mut rec_stack,
-                &mut diags,
-                &mut reported,
+                &mut paths,
+                &mut seen_rotations,
             );
         }
     }
 
-    diags
+    paths
 }
 
-/// DFS worker for [`detect_cycles`].
+/// Rotate `keys` so the lexicographically smallest entry is first, for canonical dedup.
+fn canonical_rotation(keys: &[String]) -> Vec<String> {
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let min_idx = keys
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.cmp(b))
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    keys[min_idx..]
+        .iter()
+        .chain(keys[..min_idx].iter())
+        .cloned()
+        .collect()
+}
+
+/// DFS worker for [`cycle_paths`].
 ///
 /// `rec_stack` tracks the current DFS path (nodes in the "gray" / visiting state).
 /// `visited` is the union of gray + black nodes (prevents re-visiting fully-explored nodes).
-/// `reported` deduplicates identical cycle-path strings so each cycle is emitted once.
-fn detect_cycles_dfs<'a>(
+/// `seen_rotations` deduplicates cycles by canonical rotation so each cycle is emitted once.
+fn cycle_paths_dfs<'a>(
     node: &'a str,
     adj: &std::collections::HashMap<&'a str, Vec<(&'a str, &'a std::path::Path)>>,
     visited: &mut std::collections::HashSet<String>,
     rec_stack: &mut Vec<String>,
-    diags: &mut Vec<Diagnostic>,
-    reported: &mut std::collections::HashSet<String>,
+    paths: &mut Vec<CyclePath>,
+    seen_rotations: &mut std::collections::HashSet<Vec<String>>,
 ) {
     visited.insert(node.to_string());
     rec_stack.push(node.to_string());
@@ -1522,25 +1553,56 @@ fn detect_cycles_dfs<'a>(
     if let Some(neighbors) = adj.get(node) {
         for (neighbor, source_path) in neighbors {
             if !visited.contains(*neighbor) {
-                detect_cycles_dfs(neighbor, adj, visited, rec_stack, diags, reported);
+                cycle_paths_dfs(neighbor, adj, visited, rec_stack, paths, seen_rotations);
             } else if let Some(pos) = rec_stack.iter().position(|n| n == neighbor) {
                 // Back-edge — `neighbor` is still on the recursion stack.
-                // Build the cycle path: stack[pos..] + closing arrow back to neighbor.
-                let cycle: Vec<&str> = rec_stack[pos..].iter().map(|s| s.as_str()).collect();
-                let path_str = format!("{} \u{2192} {}", cycle.join(" \u{2192} "), neighbor);
-                if !reported.contains(&path_str) {
-                    reported.insert(path_str.clone());
-                    diags.push(Diagnostic::error(
-                        *source_path,
-                        "E_STATE_CYCLE",
-                        format!("cycle detected in depends_on DAG: {path_str}"),
-                    ));
+                let cycle: Vec<String> = rec_stack[pos..].to_vec();
+                let rotated = canonical_rotation(&cycle);
+                if seen_rotations.insert(rotated) {
+                    paths.push(CyclePath {
+                        keys: cycle,
+                        source_path: source_path.to_path_buf(),
+                    });
                 }
             }
         }
     }
 
     rec_stack.pop();
+}
+
+/// Detect cycles in the `depends_on` edge subgraph of `graph`.
+///
+/// Performs a DFS over [`StateEdgeKind::BlockedBy`] edges only; [`StateEdgeKind::CrossRepo`]
+/// edges are intentionally excluded (they annotate inter-repo intent, not block ordering
+/// and are not part of the authoritative DAG).
+///
+/// On detection of a back-edge, emits **`E_STATE_CYCLE`** naming the cycle path in the
+/// form `A → B → C → A`.  Each distinct cycle path is reported once.
+///
+/// Returns an empty `Vec` when the `depends_on` subgraph is acyclic.
+pub fn detect_cycles(graph: &StateGraph) -> Vec<Diagnostic> {
+    use std::collections::HashSet;
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+    let mut reported: HashSet<String> = HashSet::new();
+
+    for cycle in cycle_paths(graph) {
+        let path_str = format!(
+            "{} \u{2192} {}",
+            cycle.keys.join(" \u{2192} "),
+            cycle.keys[0]
+        );
+        if reported.insert(path_str.clone()) {
+            diags.push(Diagnostic::error(
+                &cycle.source_path,
+                "E_STATE_CYCLE",
+                format!("cycle detected in depends_on DAG: {path_str}"),
+            ));
+        }
+    }
+
+    diags
 }
 
 // ---------------------------------------------------------------------------
@@ -4634,6 +4696,173 @@ mod tests {
         assert!(
             cycles.is_empty(),
             "CrossRepo edges must not trigger E_STATE_CYCLE, got: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 2 (MV.10.A) — cycle_paths tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cycle_paths_three_node_cycle_has_no_repeated_closing_node() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // a:X → b:Y → c:Z → a:X
+        let graph = make_cycle_graph(
+            dir.path(),
+            &[("a", "X"), ("b", "Y"), ("c", "Z")],
+            &[("a:X", "b:Y"), ("b:Y", "c:Z"), ("c:Z", "a:X")],
+        );
+
+        let paths = cycle_paths(&graph);
+        assert_eq!(paths.len(), 1, "expected exactly one cycle, got: {paths:?}");
+        let cycle = &paths[0];
+        assert_eq!(
+            cycle.keys.len(),
+            3,
+            "cycle keys should have length 3 (no repeated closing node), got: {:?}",
+            cycle.keys
+        );
+        let mut sorted = cycle.keys.clone();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            vec!["a:X".to_string(), "b:Y".to_string(), "c:Z".to_string()]
+        );
+        assert_eq!(cycle.source_path, dir.path().join("c.json"));
+    }
+
+    #[test]
+    fn cycle_paths_self_loop_has_single_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let graph = make_cycle_graph(dir.path(), &[("a", "X")], &[("a:X", "a:X")]);
+
+        let paths = cycle_paths(&graph);
+        assert_eq!(paths.len(), 1, "expected exactly one cycle, got: {paths:?}");
+        assert_eq!(
+            paths[0].keys.len(),
+            1,
+            "self-loop cycle keys should have length 1, got: {:?}",
+            paths[0].keys
+        );
+        assert_eq!(paths[0].keys, vec!["a:X".to_string()]);
+    }
+
+    #[test]
+    fn cycle_paths_dedups_by_canonical_rotation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Two entry points (a:X and b:Y) into the same 3-node cycle: a→b→c→a.
+        // Starting the DFS at a:X yields [a:X, b:Y, c:Z]; nothing else enters the
+        // cycle first here, but this test exercises that a single DFS produces one
+        // canonical-rotation entry for the cycle regardless of which node the
+        // back-edge closes on.
+        let graph = make_cycle_graph(
+            dir.path(),
+            &[("a", "X"), ("b", "Y"), ("c", "Z")],
+            &[("a:X", "b:Y"), ("b:Y", "c:Z"), ("c:Z", "a:X")],
+        );
+
+        let paths = cycle_paths(&graph);
+        assert_eq!(
+            paths.len(),
+            1,
+            "canonical-rotation dedup should collapse to one cycle, got: {paths:?}"
+        );
+
+        // Directly verify the rotation-dedup helper collapses rotated variants of the
+        // same cycle to the same canonical form.
+        let a = canonical_rotation(&["a:X".to_string(), "b:Y".to_string(), "c:Z".to_string()]);
+        let b = canonical_rotation(&["b:Y".to_string(), "c:Z".to_string(), "a:X".to_string()]);
+        let c = canonical_rotation(&["c:Z".to_string(), "a:X".to_string(), "b:Y".to_string()]);
+        assert_eq!(a, b);
+        assert_eq!(b, c);
+    }
+
+    #[test]
+    fn cycle_paths_cross_repo_edges_excluded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let node_vec = vec![
+            StateNode {
+                epics: Vec::new(),
+                key: "a:X".to_string(),
+                repo: "a".to_string(),
+                id: "X".to_string(),
+                title: "X".to_string(),
+                source_path: dir.path().join("a.json"),
+            },
+            StateNode {
+                epics: Vec::new(),
+                key: "b:Y".to_string(),
+                repo: "b".to_string(),
+                id: "Y".to_string(),
+                title: "Y".to_string(),
+                source_path: dir.path().join("b.json"),
+            },
+        ];
+        let edge_vec = vec![
+            StateEdge {
+                from: "a:X".to_string(),
+                to_ref: "b:Y".to_string(),
+                kind: StateEdgeKind::CrossRepo,
+                source_path: dir.path().join("brain.json"),
+            },
+            StateEdge {
+                from: "b:Y".to_string(),
+                to_ref: "a:X".to_string(),
+                kind: StateEdgeKind::CrossRepo,
+                source_path: dir.path().join("brain.json"),
+            },
+        ];
+        let graph = StateGraph {
+            nodes: node_vec,
+            edges: edge_vec,
+        };
+
+        let paths = cycle_paths(&graph);
+        assert!(
+            paths.is_empty(),
+            "CrossRepo edges must not produce a CyclePath, got: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn cycle_paths_and_detect_cycles_are_in_parity() {
+        // Every message detect_cycles emits must be exactly derivable from cycle_paths'
+        // output via the same formatting rule, proving the formatter composition is a
+        // behaviour-preserving refactor.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let graph = make_cycle_graph(
+            dir.path(),
+            &[("a", "X"), ("b", "Y"), ("c", "Z"), ("d", "W")],
+            &[
+                ("a:X", "b:Y"),
+                ("b:Y", "a:X"),
+                ("c:Z", "d:W"),
+                ("d:W", "c:Z"),
+            ],
+        );
+
+        let diags = detect_cycles(&graph);
+        let messages: std::collections::HashSet<String> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_CYCLE")
+            .map(|d| d.message.clone())
+            .collect();
+
+        let expected: std::collections::HashSet<String> = cycle_paths(&graph)
+            .iter()
+            .map(|cycle| {
+                let path_str = format!(
+                    "{} \u{2192} {}",
+                    cycle.keys.join(" \u{2192} "),
+                    cycle.keys[0]
+                );
+                format!("cycle detected in depends_on DAG: {path_str}")
+            })
+            .collect();
+
+        assert_eq!(
+            messages, expected,
+            "detect_cycles messages must be exactly derivable from cycle_paths"
         );
     }
 
