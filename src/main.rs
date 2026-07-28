@@ -3,9 +3,23 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use mev::Severity;
 use mev::theme;
+
+/// `--scope` mode for `mev emit-block-graph`. Maps onto
+/// [`mev::brain::block_graph::BlockGraphScope`]'s `tier`/`epic`/`repo` fields.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum BlockGraphScopeArg {
+    /// Every repo (`TierScope::All`).
+    Hq,
+    /// Repos in `--tier`.
+    Tier,
+    /// `--repo <SLUG>` intersected against the full corpus.
+    Repo,
+    /// `--epic <SLUG>` projection; overrides `--tier`/`--repo`.
+    Epic,
+}
 
 #[derive(Parser)]
 #[command(
@@ -164,6 +178,58 @@ enum Command {
         /// Defaults to the current directory.
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Emit pretty-printed (indented) JSON instead of compact JSON.
+        #[arg(long)]
+        pretty: bool,
+    },
+    /// Emit the corpus-wide block-dependency graph as a JSON artifact (Phase 10, Block C).
+    ///
+    /// Crawls the Brain corpus, resolves `brain.toml`, loads every discovered
+    /// `planning/state.json`, builds the block-dependency graph, and prints the enriched,
+    /// scoped `BlockGraphExport` JSON envelope to stdout. This is the CLI companion to
+    /// bastion's `GET /api/blocks/graph` (`BA.17.A`) — node counts for a given scope must
+    /// match that endpoint's. A pure emit — nothing is written to disk.
+    ///
+    /// `--scope` selects the mode:
+    ///   hq   (default) — every repo (`TierScope::All`)
+    ///   tier            — repos in `--tier` (default `core`)
+    ///   repo            — `--repo <SLUG>` intersected against the full corpus
+    ///   epic            — `--epic <SLUG>` projection; overrides `--tier`/`--repo`
+    ///
+    /// Output is compact JSON by default; pass --pretty for indented output.
+    ///
+    /// Exit codes:
+    ///   0 — graph emitted successfully
+    ///   1 — configuration error (brain.toml not found or unreadable), `--scope epic` given
+    ///       without `--epic`, `--scope repo` given without `--repo`, an unknown or blank
+    ///       `--epic` slug, or a serialization error
+    EmitBlockGraph {
+        /// Path to search from when locating brain.toml (walks up to find it).
+        /// Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Scope mode: hq (default, every repo), tier, repo, or epic.
+        #[arg(long, value_enum, default_value_t = BlockGraphScopeArg::Hq)]
+        scope: BlockGraphScopeArg,
+        /// Tier name to scope to; consulted only when --scope tier is given.
+        #[arg(long, default_value = "core")]
+        tier: String,
+        /// Epic slug to project onto; required when --scope epic is given. Overrides tier.
+        #[arg(long)]
+        epic: Option<String>,
+        /// Repo slug to intersect against; required when --scope repo is given.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Include closed blocks in the exported node set.
+        #[arg(long)]
+        include_closed: bool,
+        /// Include out-of-scope boundary nodes (edges into/out of scope are retained).
+        #[arg(long)]
+        include_boundary: bool,
+        /// Cap the exported node list at N nodes (topo-ordered); sets `truncated: true`
+        /// when the pre-truncation node count exceeds N. Omit for no truncation.
+        #[arg(long, value_name = "N")]
+        max_nodes: Option<usize>,
         /// Emit pretty-printed (indented) JSON instead of compact JSON.
         #[arg(long)]
         pretty: bool,
@@ -824,6 +890,84 @@ fn main() -> ExitCode {
                         }
                         Err(err) => {
                             eprintln!("error serializing graph: {err:#}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::EmitBlockGraph {
+            path,
+            scope,
+            tier,
+            epic,
+            repo,
+            include_closed,
+            include_boundary,
+            max_nodes,
+            pretty,
+        } => {
+            if scope == BlockGraphScopeArg::Epic && epic.is_none() {
+                eprintln!("error: --scope epic requires --epic <SLUG>");
+                return ExitCode::FAILURE;
+            }
+            if scope == BlockGraphScopeArg::Repo && repo.is_none() {
+                eprintln!("error: --scope repo requires --repo <SLUG>");
+                return ExitCode::FAILURE;
+            }
+
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let tier_scope = match scope {
+                BlockGraphScopeArg::Tier => mev::brain::state::TierScope::Tier(tier),
+                BlockGraphScopeArg::Hq | BlockGraphScopeArg::Repo | BlockGraphScopeArg::Epic => {
+                    mev::brain::state::TierScope::All
+                }
+            };
+            let repo_filter = if scope == BlockGraphScopeArg::Repo {
+                repo
+            } else {
+                None
+            };
+            let epic_filter = if scope == BlockGraphScopeArg::Epic {
+                epic
+            } else {
+                None
+            };
+
+            let block_scope = mev::brain::block_graph::BlockGraphScope {
+                tier: tier_scope,
+                epic: epic_filter,
+                repo: repo_filter,
+                include_closed,
+                include_boundary,
+                max_nodes: max_nodes.unwrap_or(usize::MAX),
+            };
+
+            match mev::block_graph_brain(&root, &block_scope) {
+                Ok(export) => {
+                    let json_result = if pretty {
+                        serde_json::to_string_pretty(&export)
+                    } else {
+                        serde_json::to_string(&export)
+                    };
+                    match json_result {
+                        Ok(s) => {
+                            println!("{s}");
+                            ExitCode::SUCCESS
+                        }
+                        Err(err) => {
+                            eprintln!("error serializing block graph: {err:#}");
                             ExitCode::FAILURE
                         }
                     }
