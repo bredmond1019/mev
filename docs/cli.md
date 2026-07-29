@@ -570,7 +570,8 @@ that endpoint's.
       "in_scope": true,
       "external_deps": [],
       "unmet_count": 0,
-      "dependent_count": 0
+      "dependent_count": 0,
+      "last_touched": null
     }
   ],
   "edges": [
@@ -605,6 +606,7 @@ Every node carries the full-corpus derivations that back the state-graph views:
 | `in_scope` | `true` for a scope survivor, `false` for a node re-added only as an `--include-boundary` neighbour |
 | `unmet_count` | Count of unmet dependencies for a `blocked` node; `0` for every other lane |
 | `dependent_count` | Corpus-wide count of in-corpus blocks whose `BlockedBy` edges point at this node (`CrossRepo` edges excluded). Computed over the **full corpus before scope filtering**, exactly like `layer`, `topo_index`, and `effective_priority` — so it is **identical for a given node across a scoped and an unscoped export**, and reports `0` (never absent, never a sentinel) for a node nothing depends on |
+| `last_touched` | Derived — never authored in any `state.json` — from the block's own on-disk SDLC run artifacts: `<spec-folder>/sdlc/sdlc-{flow,task,run,}-state.json` (all four kinds are read). The **newest** `updated_at` wins across every matched spec folder and every state-file kind, including folders under `planning/archive/`. Computed over the **full corpus before scope filtering**, exactly like `dependent_count` — so it is **identical for a given node across a scoped and an unscoped export**. `null` means the block has **never been worked**, not that it was worked long ago — no sentinel date and no `state.json.updated` fallback is ever substituted for a missing run |
 
 #### Exit codes
 
