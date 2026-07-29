@@ -39,7 +39,13 @@ is the current priority.
    atomic file in `planning/decisions/` and link back.
 5. **Verified identity / handles:** bredmond1019 (GitHub), learn-agentic-ai.com — treat these as the only authoritative
    identities/URLs; flag any other handle or profile link as unverified before publishing it.
-6. <!-- Add project-specific standing rules here (prompt handling, registries, deployment
+6. **Use `cargo nextest run`, never plain `cargo test`, for any test run you invoke yourself
+   during a task** (scoped: `cargo nextest run <module::path>`; full fast pass: `cargo nextest run
+   --lib`). 25 integration-test binaries make plain `cargo test` slow. The one exception is the
+   task explicitly designated to own full-suite validation for a spec — that task runs the real
+   `cargo test` / `cargo build --release` gates, per `planning/harness.json`'s `command` (not
+   `fastCommand`). See "Build / test / run" below for the full rationale.
+7. <!-- Add project-specific standing rules here (prompt handling, registries, deployment
    boundaries, code style, etc.). -->
 
 ## Known bugs
@@ -55,7 +61,11 @@ rustup show
 # build  — release binary at target/release/mev
 cargo build --release
 
-# test   — unit + integration (tests/); AUTHORITATIVE for the review verdict
+# test   — fast, use this over plain `cargo test` (25 integration test binaries make full
+# `cargo test` slow — nextest runs each as a parallel process instead of serially)
+cargo nextest run --lib --bins
+
+# full test — unit + integration (tests/); AUTHORITATIVE for the review verdict
 cargo test
 
 # lint/format gates (must pass before review)
@@ -66,6 +76,20 @@ cargo clippy -- -D warnings
 cargo run -- validate ../learn-ai/content/learn
 ```
 
+> **Always prefer `cargo nextest run --lib --bins` over plain `cargo test` in this repo.** This is
+> wired as the `fastCommand` on the `test` check in `planning/harness.json`, which the SDLC
+> engines use for per-task (`testDepth: "fast"`) runs — reach for it manually too whenever
+> iterating outside the harness. Requires `cargo-nextest` on PATH (`brew install cargo-nextest`);
+> `cargo test` remains the authoritative full-suite gate.
+>
+> **Scope even narrower while mid-task**: `cargo nextest run <module::path>` for just the touched
+> module. Only the task(s) explicitly owning full-suite validation for a spec should run the
+> full `cargo test` / `cargo build --release` gates.
+>
+> **`sccache` is wired in via `.cargo/config.toml`** (`rustc-wrapper = "sccache"`) — caches
+> compiled object code across builds so repeated compiles within an SDLC spec reuse work instead
+> of recompiling from scratch. Requires `sccache` on PATH (`brew install sccache`).
+>
 > The SDLC pipeline reads its validation suite from `planning/harness.json` (not from this
 > block). Keep the `<test>`/`<build>` commands here in sync with that file's
 > `validation.checks[]` so humans and the pipeline run the same thing.
