@@ -623,6 +623,7 @@ mod tests {
                 status_file: String::new(),
                 cache_doc: String::new(),
                 heading: String::new(),
+                prefix: None,
             }],
             ..BrainConfig::default()
         }
@@ -872,6 +873,7 @@ mod tests {
             status_file: String::new(),
             cache_doc: String::new(),
             heading: String::new(),
+            prefix: None,
         }
     }
 

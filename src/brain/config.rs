@@ -140,7 +140,7 @@ impl AttentionThresholds {
 }
 
 /// One `[[repos]]` entry in `brain.toml`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct RepoEntry {
     /// Short identifier used as the project vocabulary slug.
     pub slug: String,
@@ -159,6 +159,18 @@ pub struct RepoEntry {
     /// Heading used in the brain README quick-status table.
     #[serde(default)]
     pub heading: String,
+    /// Block-ID namespace for this repo (e.g. `"MV"` → block IDs `MV.10.D`).
+    ///
+    /// Authored in `brain.toml`; every `[[repos]]` entry in the live HQ config
+    /// declares one. Consumed by [`crate::brain::last_touched`] to resolve a block
+    /// ID against a spec folder whose name has the prefix stripped (mev writes
+    /// `10.C-emit-block-graph-cli` for block `MV.10.C`, while `engine-rs` writes
+    /// `EN.7.C-materialize-harvest-gate` for `EN.7.C`).
+    ///
+    /// `None` when the entry omits it — that degrades to "no prefix-stripped
+    /// candidate", never an error and never a diagnostic.
+    #[serde(default)]
+    pub prefix: Option<String>,
 }
 
 /// Top-level `brain.toml` config.
@@ -582,6 +594,7 @@ deferred_days = 2
             status_file: format!("{repo_path}/planning/status.md"),
             cache_doc: format!("docs/projects/{slug}.md"),
             heading: slug.to_string(),
+            prefix: None,
         }
     }
 
@@ -600,6 +613,7 @@ deferred_days = 2
                     status_file: "planning/status.md".to_string(),
                     cache_doc: "README.md".to_string(),
                     heading: "Company Brain".to_string(),
+                    prefix: None,
                 },
                 repo_entry("core", "_root", "core"),
                 repo_entry("mev", "core", "core/mev"),

@@ -74,6 +74,7 @@ fn three_unit_config() -> BrainConfig {
                 status_file: String::new(),
                 cache_doc: String::new(),
                 heading: String::new(),
+                prefix: None,
             },
             RepoEntry {
                 slug: "core".to_string(),
@@ -82,6 +83,7 @@ fn three_unit_config() -> BrainConfig {
                 status_file: String::new(),
                 cache_doc: String::new(),
                 heading: String::new(),
+                prefix: None,
             },
             RepoEntry {
                 slug: "mev".to_string(),
@@ -90,6 +92,7 @@ fn three_unit_config() -> BrainConfig {
                 status_file: String::new(),
                 cache_doc: String::new(),
                 heading: String::new(),
+                prefix: None,
             },
         ],
     }
