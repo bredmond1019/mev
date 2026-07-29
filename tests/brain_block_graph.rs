@@ -288,6 +288,14 @@ fn build_fixture(suffix: &str) -> std::path::PathBuf {
     dir
 }
 
+/// Write a minimal `sdlc-task-state.json` SDLC-run artifact under
+/// `root/rel_folder/sdlc/`, so `derive_last_touched` (Phase 10, Block MV.10.D) has a
+/// real on-disk spec folder to resolve for the given block.
+fn write_sdlc_run(root: &Path, rel_folder: &str, updated_at: &str) {
+    let rel = format!("{rel_folder}/sdlc/sdlc-task-state.json");
+    write_file(root, &rel, &format!(r#"{{"updated_at": "{updated_at}"}}"#));
+}
+
 fn node_keys(export: &mev::BlockGraphExport) -> Vec<String> {
     let mut keys: Vec<String> = export.nodes.iter().map(|n| n.key.clone()).collect();
     keys.sort();
@@ -599,6 +607,50 @@ fn dependent_count_identical_across_scoped_and_unscoped_export() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// `last_touched` is corpus-wide and scope-stable, mirroring
+/// `dependent_count_identical_across_scoped_and_unscoped_export` above: `gamma:G1`
+/// carries a real on-disk SDLC run artifact, and its `last_touched` must be identical
+/// whether the export is unscoped (`hq`) or scoped down to the `portfolio` tier (which
+/// still contains `gamma`) — the load-bearing scope-stability assertion for MV.10.D
+/// task 4.
+#[test]
+fn last_touched_identical_across_scoped_and_unscoped_export() {
+    let dir = build_fixture("last-touched-scope-stability");
+    write_sdlc_run(&dir, "gamma/planning/G1", "2026-07-10T10:00:00Z");
+
+    let unscoped = block_graph_brain(&dir, &default_scope()).expect("unscoped build must succeed");
+    let unscoped_g1 = unscoped
+        .nodes
+        .iter()
+        .find(|n| n.key == "gamma:G1")
+        .expect("gamma:G1 present in unscoped export");
+    assert_eq!(
+        unscoped_g1.last_touched.as_deref(),
+        Some("2026-07-10T10:00:00Z"),
+        "gamma:G1's on-disk SDLC run must be reported verbatim"
+    );
+
+    let mut scope = default_scope();
+    scope.tier = TierScope::Tier("portfolio".to_string());
+    let scoped = block_graph_brain(&dir, &scope).expect("portfolio-tier-scoped build must succeed");
+    let scoped_g1 = scoped
+        .nodes
+        .iter()
+        .find(|n| n.key == "gamma:G1")
+        .expect("gamma:G1 present in portfolio-tier-scoped export");
+
+    assert_eq!(
+        scoped_g1.last_touched, unscoped_g1.last_touched,
+        "last_touched must be identical across scoped and unscoped exports"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// `two_consecutive_builds_are_byte_identical` above already re-proves determinism with
+// `last_touched` present on every node (it diffs the full serialized export), so no
+// separate determinism test is needed for MV.10.D task 4.
 
 /// A registered epic slug still builds successfully and produces the same node set as
 /// the earlier `epic_scope_overrides_tier` assertion — the new validation step in
