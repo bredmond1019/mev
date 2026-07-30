@@ -10,6 +10,7 @@ skip_dirs = ["target", "node_modules", ".git", ".claude", ".repo-backups", ".age
 
 [[repos]]
 slug = "brain"
+prefix = "HQ"
 tier = "primary"
 repo_path = "."
 status_file = "planning/status.md"
@@ -18,6 +19,7 @@ heading = "Brain"
 
 [[repos]]
 slug = "mev"
+prefix = "MV"
 tier = "primary"
 repo_path = "core/mev"
 status_file = "planning/status.md"

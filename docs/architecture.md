@@ -38,7 +38,8 @@ src/
     ├── links.rs    ← LinkKind, LinkRef; extract_links(), check_links(), collect_doc_ids(), read_moves_pending(), check_moved_references() — Phase 3 Block K
     ├── structure.rs ← check_structure() — Phase 3 Block L (bidirectional index.md <-> directory structural coverage: orphan files, dangling rows)
     ├── manifest.rs ← ManifestEntry, Manifest, build_manifest() — Phase 3 Block Q (canonical corpus manifest for RAG indexer)
-    └── graph_emit.rs ← GraphExport, ExportedEdge, build_graph_export() (re-exported from okf-core, BA.15.12/D16) — Phase 3B Block R (graph-export envelope for the orchestrator's Postgres edges table, D4)
+    ├── graph_emit.rs ← GraphExport, ExportedEdge, build_graph_export() (re-exported from okf-core, BA.15.12/D16) — Phase 3B Block R (graph-export envelope for the orchestrator's Postgres edges table, D4)
+    └── last_touched.rs ← derive_last_touched() — Phase 10 Block MV.10.D (per-block last-touched timestamps derived corpus-wide, pre-scope, from on-disk SDLC run-state artifacts; newest `updated_at` wins across every matched spec folder/state-file kind, archive/ included; `null` when never worked, no sentinel fallback)
 └── doc/
     ├── mod.rs             ← module docs + re-exports — Phase 9 Block MV.9.A
     ├── materialize.rs     ← plan_document() — generic per-model doc planner
@@ -63,6 +64,7 @@ tests/
 ├── doc_cli.rs         ← integration tests for the `mev doc ...` CLI surface
 ├── emit_state_scope.rs ← integration tests for `emit-state --scope` (byte-identity of unvisited repos, unknown-slug diagnostic, unscoped-unchanged) — ticket-emit-state-scope-and-lock
 ├── emit_state_lock.rs ← integration tests for the advisory lock (contention, stale-lock reclaim) — ticket-emit-state-scope-and-lock
+├── brain_last_touched.rs ← integration tests for derive_last_touched() — Phase 10 Block MV.10.D (full-ID/bare-ID/prefix-stripped folder resolution, archive inclusion, newest-wins, determinism, read-only guarantee, consumption-path join)
 ├── smoke.rs           ← integration tests for the learn-ai validate() public API
 └── fixtures/
     └── brain.toml     ← minimal fixture — NOT the live brain.toml
@@ -545,8 +547,8 @@ Design principles (shared with `graph_emit.rs`):
 - **Pure output** — `build_block_graph_export` does not write to disk; it returns a value
   the caller (`MV.10.C`'s CLI subcommand or bastion's `BA.17.A` endpoint) serialises.
 - **No re-derivation** — every enrichment field is consumed from an existing primitive
-  (`topo_order`, `cycle_paths`, `effective_priorities`, `ready_order`, `derive_focus`) —
-  never recomputed independently. `external_deps` becomes node data (the `what` strings
+  (`topo_order`, `cycle_paths`, `effective_priorities`, `ready_order`, `derive_focus`,
+  `derive_last_touched`) — never recomputed independently. `external_deps` becomes node data (the `what` strings
   from `BlockedBy::External` entries); no synthetic node is ever created for an external
   dependency, so node count always equals the in-scope block count.
 - **Full corpus before scope** — every derivation (`lane`, `effective_priority`, `layer`,
@@ -591,7 +593,7 @@ Applied in order, strictly after full-corpus enrichment:
 | Type | Description |
 |---|---|
 | `BlockGraphExport` | The complete envelope: `version` (`"1"`), `root` (display path), `scope: BlockGraphScopeEcho`, `nodes: Vec<BlockGraphNode>`, `edges: Vec<BlockGraphEdge>`, `cycles: Vec<Vec<String>>` (over the **full corpus**, from `cycle_paths` — never the scoped subgraph), `total_nodes` (pre-truncation count), `truncated`. Derives `Serialize`. |
-| `BlockGraphNode` | One enriched block: `key`/`repo`/`id`/`title`/`status`, `lane: BlockLane`, `track`/`wave`/`priority`/`effective_priority`/`due`, `epics`, `layer` (longest path over resolved `depends_on` edges, `0` = no resolved prerequisites, terminates on a cycle via an on-stack recursion guard), `topo_index`, `ready`, `in_cycle`, `in_scope`, `external_deps`, `unmet_count`, `dependent_count` (`u32`, corpus-wide count of distinct in-corpus `BlockedBy` dependents — `CrossRepo` edges excluded, deduped by `from` key, computed pre-scope so it is identical between an unscoped and a scoped export of the same node). Derives `Serialize`. |
+| `BlockGraphNode` | One enriched block: `key`/`repo`/`id`/`title`/`status`, `lane: BlockLane`, `track`/`wave`/`priority`/`effective_priority`/`due`, `epics`, `layer` (longest path over resolved `depends_on` edges, `0` = no resolved prerequisites, terminates on a cycle via an on-stack recursion guard), `topo_index`, `ready`, `in_cycle`, `in_scope`, `external_deps`, `unmet_count`, `dependent_count` (`u32`, corpus-wide count of distinct in-corpus `BlockedBy` dependents — `CrossRepo` edges excluded, deduped by `from` key, computed pre-scope so it is identical between an unscoped and a scoped export of the same node), `last_touched: Option<String>` (`derive_last_touched`, Phase 10 Block MV.10.D — populated once per export before the scope pipeline, so it too is identical between a scoped and an unscoped export of the same node; `None` when the block has never been worked). Derives `Serialize`. |
 | `BlockGraphEdge` | One directed edge: `from`, `to_ref` (raw, as-authored), `kind: StateEdgeKind`, `target_node_id: Option<String>` (`Some` when resolved, `None` when dangling — a dangling edge is retained, never dropped), `blocking` (`false` when either endpoint is `closed`). Derives `Serialize`. |
 | `BlockLane` | `#[serde(rename_all = "snake_case")]` enum: `Now`/`Next`/`Blocked`/`Deferred` mirror `derive_focus`'s four lanes (with the owning file's repo slug prefixed onto each bare block ID before joining against node keys); `Closed` comes from the authored `TrackBlock.status == "closed"`; `Other` is the fallback for an unrecognised authored status. |
 | `BlockGraphScope` | The scope request: `tier: TierScope`, `epic: Option<String>`, `repo: Option<String>`, `include_closed`, `include_boundary`, `max_nodes`. |

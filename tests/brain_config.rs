@@ -88,6 +88,41 @@ fn repo_entry_fields_are_populated() {
     assert!(!brain_entry.cache_doc.is_empty());
 }
 
+#[test]
+fn repo_entry_parses_declared_prefix() {
+    let cfg = load_brain_config(&fixture_path()).expect("should parse fixture");
+    let mev_entry = cfg.repos.iter().find(|r| r.slug == "mev").unwrap();
+    assert_eq!(
+        mev_entry.prefix.as_deref(),
+        Some("MV"),
+        "a declared prefix must parse to Some(..)"
+    );
+}
+
+#[test]
+fn repo_entry_omitted_prefix_is_none_not_an_error() {
+    // An entry with no `prefix` key must load cleanly and yield `None` — a missing
+    // prefix degrades to "no prefix-stripped candidate", it is never a diagnostic.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("brain.toml");
+    std::fs::write(
+        &path,
+        r#"[[repos]]
+slug = "noprefix"
+tier = "core"
+repo_path = "core/noprefix"
+"#,
+    )
+    .unwrap();
+
+    let cfg = load_brain_config(&path).expect("a brain.toml with no prefix must still parse");
+    assert_eq!(cfg.repos.len(), 1);
+    assert!(
+        cfg.repos[0].prefix.is_none(),
+        "an omitted prefix must be None"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // BrainConfig::projects() tests
 // ---------------------------------------------------------------------------

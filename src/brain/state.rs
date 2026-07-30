@@ -3061,6 +3061,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "alpha".to_string(),
@@ -3069,6 +3070,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
             ],
         }
@@ -3143,6 +3145,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "core".to_string(),
@@ -3151,6 +3154,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "alpha".to_string(),
@@ -3159,6 +3163,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
             ],
         };
@@ -3220,6 +3225,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "re-rs".to_string(),
@@ -3228,6 +3234,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
             ],
         };
@@ -3260,6 +3267,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "alpha".to_string(),
@@ -3268,6 +3276,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "missing-repo".to_string(),
@@ -3276,6 +3285,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
             ],
         };
@@ -3370,6 +3380,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "core".to_string(),
@@ -3378,6 +3389,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "alpha".to_string(),
@@ -3386,6 +3398,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
             ],
         };
@@ -6497,6 +6510,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "alpha".to_string(),
@@ -6505,6 +6519,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "beta".to_string(),
@@ -6513,6 +6528,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "gamma".to_string(),
@@ -6521,6 +6537,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
             ],
         }
@@ -6580,6 +6597,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "business".to_string(),
@@ -6588,6 +6606,7 @@ mod tests {
                     status_file: "business/planning/status.md".to_string(),
                     cache_doc: "business/index.md".to_string(),
                     heading: "business Sub-Brain".to_string(),
+                    prefix: None,
                 },
             ],
         };
@@ -6968,6 +6987,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "beta".to_string(),
@@ -6976,6 +6996,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "alpha".to_string(),
@@ -6984,6 +7005,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
             ],
         };
@@ -7146,6 +7168,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "business".to_string(),
@@ -7154,6 +7177,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "alpha".to_string(),
@@ -7162,6 +7186,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
             ],
         };
@@ -7627,6 +7652,7 @@ mod check_epics_tests {
             status_file: String::new(),
             cache_doc: String::new(),
             heading: String::new(),
+            prefix: None,
         };
         BrainConfig {
             attention: Default::default(),

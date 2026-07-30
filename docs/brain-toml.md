@@ -109,6 +109,7 @@ The remaining fields are consumed by `mev validate-brain --sync` to check cross-
 | `status_file` | string | no | Path (relative to brain root) to the sub-repo's status file; must contain a `timestamp` RFC3339 scalar in its frontmatter — consumed by `--sync` |
 | `cache_doc` | string | no | Path (relative to brain root) to the brain cache doc for this repo; must contain a `synced_from` RFC3339 scalar in its frontmatter — consumed by `--sync` |
 | `heading` | string | no | Heading used in the brain README quick-status table |
+| `prefix` | string | no | Short block-ID prefix for this repo (e.g. `"MV"`, `"HQ"`) — used to resolve bare/prefix-stripped spec-folder names against this entry's blocks |
 
 ---
 

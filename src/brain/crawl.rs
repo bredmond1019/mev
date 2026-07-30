@@ -777,6 +777,7 @@ mod tests {
                 status_file: String::new(),
                 cache_doc: String::new(),
                 heading: String::new(),
+                prefix: None,
             }],
         }
     }
@@ -937,6 +938,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
                 RepoEntry {
                     slug: "sub".to_string(),
@@ -945,6 +947,7 @@ mod tests {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 },
             ],
         }

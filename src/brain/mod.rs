@@ -12,6 +12,7 @@ pub mod emit;
 pub mod epics;
 pub mod graph;
 pub mod graph_emit;
+pub mod last_touched;
 pub mod links;
 pub mod lock;
 pub mod manifest;

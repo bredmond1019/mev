@@ -306,6 +306,7 @@ mod tests {
                 status_file: status_file_rel.to_string(),
                 cache_doc: cache_doc_rel.to_string(),
                 heading: "Test Repo".to_string(),
+                prefix: None,
             }],
         }
     }

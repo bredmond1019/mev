@@ -631,6 +631,7 @@ mod task3_planners {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 })
                 .collect(),
             ..BrainConfig::default()
@@ -1288,6 +1289,7 @@ mod task3_planners {
                 status_file: status_file.to_string(),
                 cache_doc: cache_doc.to_string(),
                 heading: String::new(),
+                prefix: None,
             }],
             ..BrainConfig::default()
         }
@@ -4374,6 +4376,7 @@ mod task2_render_unified_board {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 })
                 .collect(),
             ..BrainConfig::default()
@@ -4785,6 +4788,7 @@ mod task2_plan_hq_board {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 })
                 .collect(),
             ..BrainConfig::default()
@@ -5130,6 +5134,7 @@ mod task2_plan_unified_board {
                     status_file: String::new(),
                     cache_doc: String::new(),
                     heading: String::new(),
+                    prefix: None,
                 })
                 .collect(),
             ..BrainConfig::default()
@@ -5869,6 +5874,7 @@ mod task_yaml_frontmatter_drift_tests {
                 status_file: "".to_string(), // fallback to sibling
                 cache_doc: "".to_string(),
                 heading: "".to_string(),
+                prefix: None,
             }],
             ..BrainConfig::default()
         };
@@ -7025,6 +7031,7 @@ mod attention_board {
             status_file: String::new(),
             cache_doc: String::new(),
             heading: String::new(),
+            prefix: None,
         }
     }
 
@@ -7584,6 +7591,7 @@ mod epic_emit {
                 status_file: String::new(),
                 cache_doc: String::new(),
                 heading: String::new(),
+                prefix: None,
             })
             .collect(),
             ..BrainConfig::default()
@@ -7998,6 +8006,7 @@ mod task2_scope_filter {
             status_file: format!("{repo_path}/planning/status.md"),
             cache_doc: format!("docs/projects/{slug}.md"),
             heading: slug.to_string(),
+            prefix: None,
         }
     }
 
@@ -8015,6 +8024,7 @@ mod task2_scope_filter {
                     status_file: "planning/status.md".to_string(),
                     cache_doc: "README.md".to_string(),
                     heading: "Company Brain".to_string(),
+                    prefix: None,
                 },
                 repo_entry("core", "_root", "core"),
                 repo_entry("mev", "core", "core/mev"),

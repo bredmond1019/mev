@@ -25,6 +25,7 @@ use serde::Serialize;
 
 use crate::brain::config::BrainConfig;
 use crate::brain::emit::{epic_members, topo_order};
+use crate::brain::last_touched::derive_last_touched;
 use crate::brain::state::{
     BlockedBy, StateEdgeKind, StateFile, StateGraph, StateSource, TierScope, TrackBlock,
     cycle_paths, derive_focus, derive_rollup, effective_priorities, ready_order,
@@ -110,6 +111,15 @@ pub struct BlockGraphNode {
     /// never absent, never a sentinel. Distinct `(from, to_ref)` pairs are deduped, so a
     /// duplicated authored `depends_on` entry cannot inflate the count.
     pub dependent_count: u32,
+    /// Timestamp of this block's most recent SDLC run artifact on disk, derived by
+    /// [`crate::brain::last_touched::derive_last_touched`]. Computed over the full
+    /// corpus before any scope filtering, so it is identical for a given node key
+    /// across a scoped and an unscoped export — mirrors `dependent_count`. `None`
+    /// means the block has **never** been worked, not that it was worked long ago;
+    /// never a sentinel date, never `state.json.updated`. Always serialized (no
+    /// `skip_serializing_if`) so a consumer can distinguish "no run" from "field not
+    /// understood".
+    pub last_touched: Option<String>,
 }
 
 /// One directed edge in the exported block graph.
@@ -325,6 +335,11 @@ pub fn build_block_graph_export(
         }
     }
 
+    // --- last_touched: corpus-wide SDLC-artifact recency, derived once here (before
+    // scope filtering) so it is identical for a given node key across a scoped and an
+    // unscoped export — same placement as dependent_count above. ---
+    let last_touched_map = derive_last_touched(root, config, files);
+
     // --- Assemble nodes, in topo_index order. ---
     let mut nodes: Vec<BlockGraphNode> = Vec::with_capacity(topo.len());
     for key in &topo {
@@ -383,6 +398,7 @@ pub fn build_block_graph_export(
                 .get(key.as_str())
                 .map(|s| s.len() as u32)
                 .unwrap_or(0),
+            last_touched: last_touched_map.get(key).cloned(),
         });
     }
 
@@ -623,6 +639,7 @@ mod tests {
                 status_file: String::new(),
                 cache_doc: String::new(),
                 heading: String::new(),
+                prefix: None,
             }],
             ..BrainConfig::default()
         }
@@ -872,6 +889,7 @@ mod tests {
             status_file: String::new(),
             cache_doc: String::new(),
             heading: String::new(),
+            prefix: None,
         }
     }
 
@@ -1290,6 +1308,77 @@ mod tests {
             scoped_count, unscoped_count,
             "dependent_count must be scope-stable"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Task 4 — last_touched
+    // -----------------------------------------------------------------
+
+    /// A `src()` fixture whose `abs_path` points at a real on-disk `planning/`
+    /// directory (task 4's `src(repo)` helper above uses a fake `/repo/planning/...`
+    /// path, which never resolves any folder — these tests need a real one for
+    /// `derive_last_touched` to find candidate spec folders under).
+    fn src_at(repo: &str, planning_dir: &std::path::Path) -> StateSource {
+        StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: planning_dir.join("state.json"),
+            expected_kind: "project",
+        }
+    }
+
+    fn write_run_state(spec_folder: &std::path::Path, updated_at: &str) {
+        let sdlc_dir = spec_folder.join("sdlc");
+        std::fs::create_dir_all(&sdlc_dir).unwrap();
+        std::fs::write(
+            sdlc_dir.join("sdlc-task-state.json"),
+            format!(r#"{{"updated_at": "{updated_at}"}}"#),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn last_touched_reports_the_run_timestamp_when_a_folder_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let planning = dir.path().join("planning");
+        let spec = planning.join("A");
+        std::fs::create_dir_all(&spec).unwrap();
+        write_run_state(&spec, "2026-07-01T10:00:00Z");
+
+        let a = block("A", Some("open"));
+        let files = vec![(src_at("repo", &planning), project_file(vec![a]))];
+        let graph = build_state_graph(&files);
+        let export = build_block_graph_export(
+            Path::new("/hq"),
+            &single_repo_config(),
+            &graph,
+            &files,
+            &default_scope(),
+        );
+
+        assert_eq!(
+            export.nodes[0].last_touched.as_deref(),
+            Some("2026-07-01T10:00:00Z")
+        );
+    }
+
+    #[test]
+    fn last_touched_is_none_when_no_folder_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let planning = dir.path().join("planning");
+        std::fs::create_dir_all(&planning).unwrap();
+
+        let a = block("A", Some("open"));
+        let files = vec![(src_at("repo", &planning), project_file(vec![a]))];
+        let graph = build_state_graph(&files);
+        let export = build_block_graph_export(
+            Path::new("/hq"),
+            &single_repo_config(),
+            &graph,
+            &files,
+            &default_scope(),
+        );
+
+        assert_eq!(export.nodes[0].last_touched, None);
     }
 
     #[test]

@@ -17,6 +17,44 @@ timestamp: "2026-07-28T23:10:00Z"
 
 ---
 
+## [run: 2026-07-29]
+
+### MV.10.D — Derive `last_touched` per block; PASS
+
+Ran `/sdlc-flow 10.D-derive-last-touched` on branch `10.D-derive-last-touched-flow`, 6 tasks all
+PASS, review verdict PASS. Task 1 added `RepoEntry.prefix: Option<String>` to `src/brain/config.rs`
+(54 struct literals repaired) so block IDs can resolve against prefix-stripped spec folders (mev's
+own convention). Task 2 added `src/brain/last_touched.rs` — `derive_last_touched(root, config,
+loaded) -> HashMap<String, String>`, keyed `"repo:id"`, reading all four SDLC state-file kinds
+(`sdlc-flow-state.json`/`sdlc-task-state.json`/`sdlc-run-state.json`/`sdlc-state.json`), resolving
+folders under full-ID, bare-ID, and prefix-stripped naming with a name-boundary match, walking
+`planning/archive/`, newest-`updated_at`-wins lexicographically, no fabricated fallback for
+never-started blocks. Task 3 added a 10-test integration suite covering all three folder-naming
+conventions in one fixture corpus. Task 4 wired `BlockGraphNode.last_touched: Option<String>`,
+populated corpus-wide before the scope pipeline (mirroring `dependent_count`'s precedent),
+scope-stable across scoped/unscoped exports. Task 5 documented the field in `docs/cli.md` and the
+HQ `docs/state/state-schema.md` as derived, never authored. Task 6 validated end to end: all four
+harness gates green, two consecutive `emit-block-graph` runs diff clean (nothing written), and a
+live-corpus smoke check confirmed non-null `last_touched` for `MV.10.C` (closed, under
+`--include-closed`) and `MV.3B.Q` (archived), and null for `BW.2.A` (never-started). Notable
+decision: the transport is a new public `mev` lookup function, not an addition to
+`okf_core::Block`/`derive_rollup`, so bastion's `BA.11.S` calls the same function rather than
+re-deriving or persisting a derived timestamp into `state.json`. Unblocks bastion's `BA.11.S`.
+
+Next: pick up `MV.ticket.distill-freshness-lane` (D35 freshness read + capped 4th Attention lane
+for stale distilled knowledge), or the next phase/block per `master-plan.md`.
+
+```
+f669736 docs: update docs for 10.D-derive-last-touched
+944e783 feat: implement 10.D-derive-last-touched-task5
+ab181b7 feat: implement 10.D-derive-last-touched-task4
+9791cd3 feat: implement 10.D-derive-last-touched-task3
+a852a20 feat: implement 10.D-derive-last-touched-task2
+1c0caa9 feat: implement 10.D-derive-last-touched-task1
+```
+
+---
+
 ## [run: 2026-07-28]
 
 ### MV.10.C — mev emit-block-graph CLI subcommand; PASS
