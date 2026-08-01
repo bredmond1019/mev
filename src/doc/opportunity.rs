@@ -299,11 +299,131 @@ pub fn plan_merge_contacts(slug: &str, contacts: &JsonValue, root: &Path) -> Emi
     plan_document(&opp, root)
 }
 
+/// Parse the canonical stage vocabulary from the contents of
+/// `business/docs/pipeline.md`, per [D58](../../docs/decisions/D58-pipeline-stage-vocabulary-home.md).
+///
+/// Looks for the `## Stages` heading (matched case-insensitively), then the
+/// first following line that carries backtick-wrapped tokens (e.g.
+/// `` `identified` → `researching` → … ``) and returns those tokens in
+/// document order. Separators between tokens (arrow, comma, whitespace) are
+/// insignificant — only the backtick-delimited spans are extracted. Stops
+/// scanning the section at the next `##` heading. Returns an empty vec when
+/// no such section/line is found.
+///
+/// This is a pure function — no filesystem access — so it can be unit
+/// tested directly. The filesystem read and brain-root resolution live in
+/// the caller.
+///
+/// This is a faithful port of bastion's `parse_stages`
+/// (`core/bastion/src/serve/handlers/pipeline.rs:194`) — the two must not
+/// diverge, since D58 makes `pipeline.md` the single source both engines
+/// read.
+pub fn parse_stages(pipeline_md: &str) -> Vec<String> {
+    let mut in_section = false;
+    for line in pipeline_md.lines() {
+        let trimmed = line.trim();
+        if let Some(heading) = trimmed.strip_prefix("## ") {
+            in_section = heading.trim().eq_ignore_ascii_case("stages");
+            continue;
+        }
+        if in_section && trimmed.contains('`') {
+            let tokens = backtick_tokens(trimmed);
+            if !tokens.is_empty() {
+                return tokens;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Extract every `` `token` `` substring from `line`, in order.
+fn backtick_tokens(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = line.char_indices().peekable();
+    while let Some((start, ch)) = chars.next() {
+        if ch != '`' {
+            continue;
+        }
+        let content_start = start + 1;
+        let mut content_end = None;
+        for (i, c) in chars.by_ref() {
+            if c == '`' {
+                content_end = Some(i);
+                break;
+            }
+        }
+        if let Some(end) = content_end {
+            let token = line[content_start..end].trim();
+            if !token.is_empty() {
+                out.push(token.to_string());
+            }
+        }
+    }
+    out
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const REAL_STAGES_MD: &str = "# Pipeline\n\n## Stages\n\n`identified` → `researching` → `contacted` → `conversation` → `proposal-sent` → `closed-won` → `closed-lost`\n\n---\n\n## Active Leads\n";
+
+    #[test]
+    fn parse_stages_reads_real_vocabulary_in_order() {
+        let stages = parse_stages(REAL_STAGES_MD);
+        assert_eq!(
+            stages,
+            vec![
+                "identified",
+                "researching",
+                "contacted",
+                "conversation",
+                "proposal-sent",
+                "closed-won",
+                "closed-lost",
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_stages_heading_match_is_case_insensitive() {
+        let md = "## stages\n\n`a` `b`\n";
+        assert_eq!(parse_stages(md), vec!["a", "b"]);
+
+        let md_upper = "## STAGES\n\n`a` `b`\n";
+        assert_eq!(parse_stages(md_upper), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn parse_stages_separators_are_insignificant() {
+        let arrow = "## Stages\n\n`a` → `b` → `c`\n";
+        let comma = "## Stages\n\n`a`, `b`, `c`\n";
+        let whitespace = "## Stages\n\n`a`   `b`   `c`\n";
+        let expected = vec!["a", "b", "c"];
+        assert_eq!(parse_stages(arrow), expected);
+        assert_eq!(parse_stages(comma), expected);
+        assert_eq!(parse_stages(whitespace), expected);
+    }
+
+    #[test]
+    fn parse_stages_only_first_backtick_line_is_consumed() {
+        let md = "## Stages\n\n`a` `b`\n\nSome prose mentioning `closed-won` again later.\n";
+        assert_eq!(parse_stages(md), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn parse_stages_no_backtick_line_before_next_heading_is_empty() {
+        let md = "## Stages\n\nplain prose, no tokens\n\n## Active Leads\n\n`x` `y`\n";
+        assert!(parse_stages(md).is_empty());
+    }
+
+    #[test]
+    fn parse_stages_backtick_line_before_heading_is_ignored() {
+        let md = "`x` `y`\n\n## Stages\n\n`a` `b`\n";
+        assert_eq!(parse_stages(md), vec!["a", "b"]);
+    }
 
     #[test]
     fn opportunity_kind_round_trips_through_str() {
