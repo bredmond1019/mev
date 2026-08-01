@@ -19,6 +19,61 @@ timestamp: "2026-08-01T00:00:00Z"
 
 ## [run: 2026-08-01]
 
+### Round 2 — carryover burn-down; every mev block is now closed
+
+- **What:** Ran the remaining Phase 11 follow-ons **from the main session** rather than delegating
+  them, which turned out to matter (see the harness finding below). Two new tickets authored and
+  shipped, both 4/4 tasks first attempt via `/sdlc-task`:
+  **`MV.ticket.epic-mutation-lock`** — `run_epic_status` (shared by `defer-epic`, `resume-epic`, and
+  `sync-epics`) now takes the same advisory lock as `emit-state` and `set-block-status`, placed after
+  `find_brain_root` and after the linked-worktree guard and bound to a named `_lock_guard` (a bare `_`
+  would drop it immediately, and the compiler would not catch that). Four CLI-level integration tests
+  in `tests/epic_lock.rs` assert the fixture's `state.json` files are **byte-identical** after a
+  refused write, which is the assertion that actually proves the fix. 884 tests.
+  **`MV.ticket.stage-vocab-from-pipeline`** — implements D58: retires the hardcoded `VALID_STAGES`
+  const and parses `business/docs/pipeline.md`'s `## Stages` line at runtime, with three distinct
+  diagnostics (missing file / unparseable section / empty vocabulary) so an unresolvable vocabulary
+  produces one file-level error rather than an `E_DOC_BAD_STAGE` per opportunity. 893 tests.
+  Also authored **D58** itself, the **`content` epic** and its four `business` blocks, and filed
+  **`bastion:BA.ticket.epic-weight-dto`**.
+- **Why:** These were the five carryovers left standing after round 1. Three are now cleared, one is
+  corrected, and one is filed as a block in the repo that owns it.
+- **The stage-vocabulary audit found FOUR copies, not the three the carryover recorded.** The fourth
+  is `business/docs/opportunities/index.md:35` — and it is the one mev's own doc comment cited as
+  "the contract", while bastion parses `pipeline.md` instead. So the two engines already disagreed
+  about *where* the contract lived even though their values happened to match. D58 names
+  `pipeline.md` canonical (it is the only copy with a live re-reading consumer, and the vocabulary is
+  a go-to-market decision that should not need a Rust release); that line now carries a
+  self-describing contract note, and `opportunities/index.md` is reduced to a pointer. Verified after
+  the fact that the contract note's own backticks do **not** break the parse — only the first
+  backtick-bearing line is consumed.
+- **Harness finding — round 1's diagnosis was wrong.** The `Workflow` engine is **not** unavailable;
+  it is available to the **main session** and unavailable to **delegated subagents**. Round 1
+  delegated both blocks and so concluded the engine was broken. Running `/sdlc-task` directly worked
+  immediately, including the full `sdlc/sdlc-task-state.json` trail the manual runs could not produce.
+  The carryover is corrected rather than cleared, because the failure is silent — a delegated subagent
+  reports success while quietly degrading to a manual drive with no state trail and no end-of-flow
+  review.
+- **State:** every block in mev's `state.json` is now `closed` — no open, in-progress, or deferred
+  work remains. Carryovers cleared: `epic-mutation-commands-unlocked`,
+  `content-work-not-block-tracked`, `stage-vocabulary-three-copies`. Corrected:
+  `sdlc-workflow-engine-unavailable`. Kept and annotated: `epic-weight-not-surfaced-by-bastion`.
+- **Refs:** `planning/phase-11-orchestration/notes.md`,
+  `docs/decisions/D58-pipeline-stage-vocabulary-home.md` (brain repo)
+
+```
+e7c6964 docs(cli): E_DOC_BAD_STAGE no longer references a fixed count of seven
+921e080 feat: implement ticket-stage-vocab-from-pipeline-task4
+00f23d9 feat: implement ticket-stage-vocab-from-pipeline-task3
+fcbf564 feat: implement ticket-stage-vocab-from-pipeline-task2
+9e45073 feat: implement ticket-stage-vocab-from-pipeline-task1
+ffeb516 feat: implement ticket-epic-mutation-lock-task3
+d954fd3 feat: implement ticket-epic-mutation-lock-task2
+e04dd7d feat: implement ticket-epic-mutation-lock-task1
+```
+
+---
+
 ### Phase 11 orchestrated end to end — MV.11.A + MV.11.B both PASS and merged
 
 - **What:** Drove the handoff's Phase 11 sequence to completion as an orchestrator, delegating each
