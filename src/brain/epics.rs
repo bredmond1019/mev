@@ -115,7 +115,11 @@ fn members_of<'a>(
 /// Uses `to_string_pretty` + a trailing newline, byte-for-byte the same shape
 /// `plan_state_json` writes — the corpus is already normalized to it, so an
 /// unchanged file produces no action and no churn.
-fn action_for(src: &StateSource, file: &StateFile, note: String) -> Option<EmitAction> {
+///
+/// `pub(crate)` because [`crate::brain::blocks`] is the sibling block-level
+/// planner and must serialize with byte-identical shape — duplicating this would
+/// let the two families drift apart on formatting.
+pub(crate) fn action_for(src: &StateSource, file: &StateFile, note: String) -> Option<EmitAction> {
     let mut new_content = serde_json::to_string_pretty(file).ok()?;
     new_content.push('\n');
 

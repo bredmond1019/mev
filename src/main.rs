@@ -295,6 +295,45 @@ enum Command {
         #[arg(long)]
         write: bool,
     },
+    /// Set one block's authored `status` in its repo's `planning/state.json`.
+    ///
+    /// The block-level counterpart to `defer-epic` / `resume-epic`: those move a whole
+    /// initiative, this moves exactly one block and nothing else. Status only — not
+    /// priority, not due, not a generic field setter.
+    ///
+    /// KEY is always `repo:id` (e.g. `mev:MV.10.A`). Block ids are only unique within
+    /// a repo, so an unqualified id is rejected (`E_BLOCK_BAD_KEY`) rather than guessed.
+    ///
+    /// Valid STATUS values: `open`, `in_progress`, `deferred`, `closed`.
+    /// `blocked` is deliberately NOT among them: it is a *derived* lane that emit-state
+    /// computes from unmet dependencies, and authoring it onto a block is exactly what
+    /// `E_STATE_AUTHORED_BLOCKED` rejects.
+    ///
+    /// Setting a block to the status it already has is a no-op success (exit 0, nothing
+    /// written).
+    ///
+    /// Dry-run by default; pass --write to apply. A successful --write also runs
+    /// `emit-state --write`, so `focus` and the boards are regenerated in the same
+    /// invocation rather than being left drifted.
+    ///
+    /// The intended caller is an engine-rs workflow node acting for bastion-web —
+    /// `bastion serve` stays read-only per D25, so block mutations are written here.
+    ///
+    /// Exit codes:
+    ///   0 — planned (dry-run), applied, or already at the target status
+    ///   1 — bad key, unauthorable status, unknown block, or a write failure
+    SetBlockStatus {
+        /// Block key in `repo:id` form, e.g. `mev:MV.10.A`.
+        key: String,
+        /// New authored status: open | in_progress | deferred | closed.
+        status: String,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Apply the edit. Without this the command prints what it would change.
+        #[arg(long)]
+        write: bool,
+    },
     /// Generate an interactive HTML visualization of the knowledge graph (graph.html)
     GenerateGraph {
         /// Path to search from when locating brain.toml. Defaults to the current directory.
@@ -836,6 +875,64 @@ fn main() -> ExitCode {
             write,
             cli.json,
         ),
+        Command::SetBlockStatus {
+            key,
+            status,
+            path,
+            write,
+        } => {
+            // Same worktree guard as emit-state: a --write here chains into emit-state,
+            // which resolves every repo's paths from brain.toml rather than CWD.
+            if write && mev::brain::config::is_linked_worktree(&path) {
+                eprintln!(
+                    "error: refusing to write from inside a linked git worktree ({}) — set-block-status chains into emit-state, which resolves derived-file paths from brain.toml, not CWD, so this would regenerate the MAIN checkout's files. Run from the main working tree instead.",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // Advisory lock, same contract as emit-state: only --write mutates the
+            // corpus, so only --write needs mutual exclusion. This command writes an
+            // *authored* field and then chains into emit-state, so racing it against a
+            // concurrent emit would let the derived views be regenerated mid-edit.
+            // Released via Drop on every exit path below.
+            let _lock_guard = if write {
+                match mev::brain::lock::acquire_lock(&root, mev::brain::lock::DEFAULT_LOCK_TIMEOUT)
+                {
+                    Ok(guard) => Some(guard),
+                    Err(mev::brain::lock::LockError::Held {
+                        holder_pid,
+                        lock_path,
+                        waited_secs,
+                    }) => {
+                        eprintln!(
+                            "error [E_EMIT_LOCK_HELD] another write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
+                            lock_path.display()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                    Err(e) => {
+                        eprintln!("error [E_EMIT_LOCK_HELD] {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                None
+            };
+            report_doc(
+                "set-block-status",
+                &root,
+                write,
+                cli.json,
+                mev::set_block_status(&root, &key, &status, write),
+            )
+        }
         Command::Manifest { path, pretty } => {
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,

@@ -6,6 +6,7 @@
 //! [`crawl::crawl_corpus`] multi-root walk here, replacing the single-root walk.
 
 pub mod block_graph;
+pub mod blocks;
 pub mod config;
 pub mod crawl;
 pub mod distill;

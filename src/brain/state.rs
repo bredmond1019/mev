@@ -282,7 +282,12 @@ const VALID_STATUSES: &[&str] = &["open", "in_progress", "blocked", "deferred", 
 /// `"deferred"`, by contrast, *is* authored: it is a deliberate human decision to park
 /// a block on the back burner, which nothing can derive. It is manual and sticky (no
 /// expiry date — edit back to `"open"` to resume).
-const VALID_TRACK_BLOCK_STATUSES: &[&str] = &["open", "in_progress", "deferred", "closed"];
+///
+/// `pub(crate)` so [`crate::brain::blocks::plan_set_block_status`] validates authored
+/// input against exactly this list rather than a copy that could drift — and, crucially,
+/// not against [`VALID_STATUSES`], which admits the derived-only `"blocked"`.
+pub(crate) const VALID_TRACK_BLOCK_STATUSES: &[&str] =
+    &["open", "in_progress", "deferred", "closed"];
 
 /// The focus lanes, in the order they are reported in diagnostics and boards.
 ///

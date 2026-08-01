@@ -35,6 +35,8 @@ src/
     ├── state.rs    ← serde schema, StateGraph, StateNode, StateEdge, StateSource, TierEntry, load_state(), build_state_graph() (re-exported from okf-core, BA.15.12/D15/D16); mev-local: discover_state_files(), check_schema(), check_state_graph(), check_rollup(), detect_cycles(), ready_order(), check_focus_drift(), derive_focus(), derive_rollup(), derive_cross_repo(), tier_scope_for(), derive_brain_focus(), check_epics(), derive_epic_focus(), derive_epic_edges() — Phase 3 Block P / P2 / T / MV.3B.U (v2: depends_on DAG, cycle detection, derived-blocked enforcement, backlog nodes, focus-drift warnings, single-source derivation helpers; MV.3B.U: tier-scoped non-destructive rollup + brain-focus union; epics: cross-repo initiative registry + membership integrity + derived cross-epic relationships)
     ├── distill.rs  ← DistilledEntry, parse_distilled(), distill_stale_age(), check_distill_staleness() — D35-distilled `knowledge.md`/`memory.md` entry parsing + the single shared staleness predicate feeding both `validate-brain`'s `W_DISTILL_STALE` warning and the `emit-state` Attention board's "Stale distilled knowledge" lane (distill-freshness-lane)
     ├── emit.rs     ← EmitError, EmitAction, EmitPlan, markers (WAVE_TABLE, PROJECT_CACHE, TIER_ROLLUP, HQ_BOARD, UNIFIED_BOARD); wave_order(), render_wave_table(), global_status_map(), splice_generated(), plan_state_json(), plan_master_plan_tables(), plan_project_caches(), plan_tier_rollups(), render_hq_board(), plan_hq_board(), render_unified_board(), plan_unified_board(), apply_plan(), filter_plan_by_scope() — Phase 3 Block T (derived-view generation: wave tables, focus regen, brain rollup; MV.4.A: cross-repo depends_on resolution via global_status_map; MV.4.B: project-cache + tier-rollup splice; MV.4.C: HQ root Operating Board splice; MV.6.B: priority-ranked unified NOW/NEXT/BLOCKED/DUE-SOON board splice; ticket-emit-state-scope-and-lock: filter_plan_by_scope() narrows an already-built EmitPlan down to one repo's ScopeDependencySet targets, applied after planning so scoping cannot change which actions the unscoped planners themselves would compute)
+    ├── epics.rs    ← EpicAction, plan_defer_epic(), plan_resume_epic(), plan_sync_epics(), action_for() (pub(crate), shared with blocks.rs) — epic-level *authored* mutation: park/un-park an initiative, cascading the HQ `epics[]` registry status and its member blocks' statuses together
+    ├── blocks.rs   ← plan_set_block_status() — block-level *authored* mutation (MV.11.B): sets exactly one `tracks[].blocks[].status` addressed by a `repo:id` key, validated against `VALID_TRACK_BLOCK_STATUSES` (never the derived-only `blocked`)
     ├── lock.rs     ← LockError, LockGuard, acquire_lock(), DEFAULT_LOCK_TIMEOUT — advisory lockfile (`<root>/.mev-emit.lock`) guarding `emit-state --write` against concurrent writers; stale (dead-pid) lockfiles are reclaimed automatically (ticket-emit-state-scope-and-lock)
     ├── links.rs    ← LinkKind, LinkRef; extract_links(), check_links(), collect_doc_ids(), read_moves_pending(), check_moved_references() — Phase 3 Block K
     ├── structure.rs ← check_structure() — Phase 3 Block L (bidirectional index.md <-> directory structural coverage: orphan files, dangling rows)
@@ -65,6 +67,7 @@ tests/
 ├── doc_cli.rs         ← integration tests for the `mev doc ...` CLI surface
 ├── emit_state_scope.rs ← integration tests for `emit-state --scope` (byte-identity of unvisited repos, unknown-slug diagnostic, unscoped-unchanged) — ticket-emit-state-scope-and-lock
 ├── emit_state_lock.rs ← integration tests for the advisory lock (contention, stale-lock reclaim) — ticket-emit-state-scope-and-lock
+├── set_block_status.rs ← integration tests for `mev set-block-status`, driving the real binary (happy path, byte-identical dry run, idempotent re-write, every rejection incl. `blocked`, and the chained-emit-state ripple) — MV.11.B
 ├── brain_last_touched.rs ← integration tests for derive_last_touched() — Phase 10 Block MV.10.D (full-ID/bare-ID/prefix-stripped folder resolution, archive inclusion, newest-wins, determinism, read-only guarantee, consumption-path join)
 ├── smoke.rs           ← integration tests for the learn-ai validate() public API
 └── fixtures/
@@ -424,6 +427,63 @@ constants as `pub const`s — `WAVE_TABLE`, `PROJECT_CACHE`, `TIER_ROLLUP`, `HQ_
 `emit_state(root: &Path, write: bool) -> anyhow::Result<Report>` (in `src/lib.rs`) resolves `brain.toml`, discovers and loads all state files, builds the graph, then runs the planners in a stable order, applies each plan with `apply_plan(write)`, and merges all diagnostics into a single `Report`. Invoked by `mev emit-state`. MV.4.E wired the `plan_project_caches`/`plan_tier_rollups`/`plan_hq_board` planners in; MV.6.B added `plan_unified_board`.
 
 **Ordering matters.** `plan_state_json`, `plan_master_plan_tables`, `plan_project_caches`, `plan_tier_rollups`, `plan_hq_board`, `plan_unified_board`, `plan_attention_board`, and `plan_brain_cache_watermarks` are each planned and applied immediately, one at a time — not planned as a batch and applied afterward. Every planner reads its target file fresh at call time, and several targets are shared (`status.md` carries `hq-board` + `unified-board` + `attention` for the HQ root, and `tier-rollup` + `attention` for a tier sub-brain); if all eight were planned before any of them wrote, a later planner would read the same pre-batch original as an earlier one and its write would silently drop the earlier planner's just-applied sentinel edit for that file (the `emit-state-same-file-batching` bug, fixed — see `same_file_batching_regression` in `tests/brain_emit.rs`). Interleaving plan+apply per planner means each one always reads whatever the previous ones already wrote. `loaded`/`graph` stay a single fixed in-memory snapshot for the whole run — only the on-disk *rendered documents* progress. `plan_epic_boards` / `plan_epic_sequences` run **after** all eight (they share `status.md` with the HQ/unified/attention boards, and `master-plan.md` with `plan_master_plan_tables`) — planned and applied together since they target disjoint files, so no ordering hazard between the two — and `plan_status_frontmatter` runs last of all for the same reason: each reads the already-updated text in write mode.
+
+---
+
+### Authored-state planners (`src/brain/epics.rs`, `src/brain/blocks.rs`)
+
+Everything `emit-state` writes is **derived** — regenerated from what you authored, and
+therefore safe to run unattended on a timer. The planners below are the exception: they
+write **authored** fields (human intent), which is exactly why they live behind explicit
+commands instead of inside `emit-state`. If a routine emit could silently rewrite intent,
+the authored/derived boundary the validator enforces everywhere else
+(`E_STATE_AUTHORED_BLOCKED`) would stop meaning anything.
+
+They form one family with one shape: each returns an `EmitPlan`, each mutates a **working
+copy** of the loaded corpus so a dry run cannot leak a mutation, each serializes through the
+shared `epics::action_for` (`to_string_pretty` + trailing newline, byte-identical to
+`plan_state_json`, so an unchanged file plans nothing), and each driver in `src/lib.rs`
+re-runs `emit_state(root, true, None)` after a successful `--write` so the derived surfaces
+never sit drifted from the edit that just landed.
+
+| Planner | Module | Signature | Notes |
+|---|---|---|---|
+| `plan_defer_epic` | `epics.rs` | `(&str, &BrainConfig, &[(StateSource, StateFile)]) -> EmitPlan` | Park an initiative: registry entry → `paused`, `open` members → `deferred`. `in_progress` members are left alone and reported (`W_EPIC_SKIPPED_IN_PROGRESS`); `closed` is never reopened. |
+| `plan_resume_epic` | `epics.rs` | same | The inverse: registry → `active`, `deferred` members → `open`. |
+| `plan_sync_epics` | `epics.rs` | `(&BrainConfig, &[(StateSource, StateFile)]) -> EmitPlan` | Reconcile the whole registry without naming a slug. Deliberately asymmetric — nothing is ever un-deferred automatically. `focused` counts as live alongside `active` (MV.11.A). |
+| `plan_set_block_status` | `blocks.rs` | `(&str, &str, &BrainConfig, &[(StateSource, StateFile)]) -> EmitPlan` | Block-level, one block, status only. See below. |
+
+**`plan_set_block_status`** (Phase 11, Block MV.11.B) is the block-level sibling of the epic
+cascade: where those move a whole initiative, this moves exactly one block's `status` and
+nothing else — not `priority`, not `due`, not a generic field setter, so the caller's contract
+stays precise instead of pushing per-field validation to runtime.
+
+- **Keys are `repo:id`**, the same `"{repo_slug}:{block_id}"` form `global_status_map` and
+  `effective_priorities` use. Block ids are only unique within a repo, so an unqualified id
+  raises `E_BLOCK_BAD_KEY` rather than being guessed at.
+- **Validated against `VALID_TRACK_BLOCK_STATUSES`** (`open` · `in_progress` · `deferred` ·
+  `closed`), lifted to `pub(crate)` for exactly this — and pointedly **not** against
+  `VALID_STATUSES`, which also admits `blocked`. `blocked` is a *derived* lane the emitter
+  stamps onto `focus.blocked[]` entries from unmet `depends_on` edges; authoring it onto a
+  `tracks[]` block is what `E_STATE_AUTHORED_BLOCKED` exists to reject, so accepting it here
+  would let the command write a value `validate-brain` immediately fails on. It is rejected
+  with `E_BLOCK_BAD_STATUS`.
+- **`E_BLOCK_NOT_FOUND`** when no loaded file owns the key; the message lists the known repo
+  slugs (from `BrainConfig::repos`) when the *repo* half is what failed to resolve.
+- **A no-op is success**, not an error: a block already at the target status plans zero
+  actions and zero diagnostics and exits `0`, matching `plan_document`'s idempotency guard.
+- At most **one action** is ever planned — the single file that owns the block.
+
+The driver `set_block_status(root, key, status, write)` in `src/lib.rs` mirrors `epic_status`
+exactly, including the `E_EMIT_INCOMPLETE_CORPUS` guard (a failed load could both hide the
+target block and let the chained emit regenerate cross-repo views from a partial corpus). The
+`main.rs` arm additionally carries the linked-worktree guard and takes the same
+`brain::lock` advisory lock `emit-state --write` takes, `--write` only.
+
+**Who calls it.** The intended consumer is an **engine-rs workflow node** invoking the CLI on
+bastion-web's behalf ("mark this done", "park this"). `bastion serve` is **read-only by
+decision (D25)** and stays that way, so the write lands in mev — the deterministic writer for
+the brain corpus. That workflow node is engine-rs work and is out of scope for mev.
 
 ---
 
