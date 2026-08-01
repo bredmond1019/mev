@@ -7867,6 +7867,7 @@ mod epic_emit {
             title: title.to_string(),
             description: None,
             status: Some(status.to_string()),
+            weight: None,
             plan: plan.map(|p| p.to_string()),
             repos: vec![],
         }
@@ -8060,6 +8061,36 @@ mod epic_emit {
         let out = &plan.actions[0].new_content;
         assert!(!out.contains("### Bastion OS"), "got:\n{out}");
         assert!(out.contains("### Bastion Web + UI"), "got:\n{out}");
+    }
+
+    #[test]
+    fn epic_board_renders_a_focused_epic_in_full() {
+        // `focused` is active-equivalent, so it must render as a full board — not
+        // collapsed like `paused`, and certainly not omitted like `complete`.
+        // The current-priority epic vanishing from the board is the worst case.
+        let tmp = tempfile::tempdir().unwrap();
+        let status_path = tmp.path().join("hq/planning/status.md");
+        std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        std::fs::write(&status_path, doc_with(markers::EPIC_BOARD)).unwrap();
+
+        let mut files = corpus(tmp.path());
+        files.push(hq(
+            tmp.path(),
+            "hq",
+            vec![
+                epic("bastion-os", "Bastion OS", "focused", None),
+                epic("bastion-web", "Bastion Web + UI", "active", None),
+            ],
+        ));
+        let graph = build_state_graph(&files);
+
+        let plan = plan_epic_boards(&files, &graph, &config());
+        let out = &plan.actions[0].new_content;
+        assert!(out.contains("### Bastion OS"), "got:\n{out}");
+        assert!(
+            out.contains("#### NOW"),
+            "a focused epic must get full lanes, not a collapsed one-liner, got:\n{out}"
+        );
     }
 
     #[test]

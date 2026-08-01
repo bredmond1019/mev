@@ -39,7 +39,7 @@
 //! - `W_STATE_CARRYOVER_STALE` — a `carryover[]` entry has aged past its per-kind threshold.
 //! - `W_STATE_BACKLOG_STALE` — an HQ `backlog[]` `idea`/`ready` node has aged past threshold.
 //! - `E_STATE_DUPLICATE_EPIC_SLUG` — two HQ `epics[]` entries share a `slug`.
-//! - `E_STATE_EPIC_BAD_STATUS` — an epic `status` ∉ `{active, paused, complete}`.
+//! - `E_STATE_EPIC_BAD_STATUS` — an epic `status` ∉ `{active, focused, paused, complete}`.
 //! - `E_STATE_EPIC_BAD_WEIGHT` — an epic `weight` is outside `0..=100`.
 //! - `E_STATE_UNKNOWN_EPIC` — a block's `epics[]` entry is not in the HQ registry.
 //! - `W_STATE_EPIC_REGISTRY_IGNORED` — a non-HQ file declares its own `epics[]`.
@@ -828,7 +828,15 @@ pub fn check_field_policy(src: &StateSource, file: &StateFile) -> Vec<Diagnostic
 // ---------------------------------------------------------------------------
 
 /// The valid values of an [`Epic`]'s `status` field.
-const EPIC_STATUSES: [&str; 3] = ["active", "paused", "complete"];
+///
+/// - `active` — in flight.
+/// - `focused` — the current priority; the web view's default filter. A
+///   refinement of `active`, not an alternative: everything that asks "is this
+///   epic live?" treats the two alike (see
+///   [`crate::brain::emit::EPIC_STATUS_FOCUSED`]).
+/// - `paused` — parked.
+/// - `complete` — finished.
+const EPIC_STATUSES: [&str; 4] = ["active", "focused", "paused", "complete"];
 
 /// The inclusive upper bound of an [`Epic`]'s authored `weight`.
 ///
@@ -7836,6 +7844,42 @@ mod check_epics_tests {
 }}"#
             ),
         )
+    }
+
+    #[test]
+    fn check_epics_accepts_every_status_in_the_vocabulary() {
+        // `focused` is the value added by MV.11.A; the other three predate it and
+        // must not regress.
+        for status in ["active", "focused", "paused", "complete"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let diags = check_epics(
+                &epic_config(),
+                &[hq_with_epic(
+                    dir.path(),
+                    &format!(r#"{{ "slug": "w", "title": "W", "status": "{status}" }}"#),
+                )],
+            );
+            assert!(
+                !locators(&diags).contains(&"E_STATE_EPIC_BAD_STATUS"),
+                "'{status}' is a valid epic status, got: {:?}",
+                locators(&diags)
+            );
+        }
+    }
+
+    #[test]
+    fn check_epics_still_rejects_a_near_miss_status() {
+        // The vocabulary grew, but it is still closed: `focus` (the noun) is not
+        // `focused` (the grammatical match for `paused`).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let diags = check_epics(
+            &epic_config(),
+            &[hq_with_epic(
+                dir.path(),
+                r#"{ "slug": "w", "title": "W", "status": "focus" }"#,
+            )],
+        );
+        assert_eq!(locators(&diags), vec!["E_STATE_EPIC_BAD_STATUS"]);
     }
 
     #[test]
