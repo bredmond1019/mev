@@ -514,6 +514,34 @@ fn run_epic_status(
         (None, _) => "sync-epics",
     };
 
+    // Advisory lock, same contract as emit-state/set-block-status: only --write mutates
+    // the corpus, so only --write needs mutual exclusion. This command writes an
+    // *authored* status field and then chains into emit-state, so racing it against a
+    // concurrent emit would let the derived views be regenerated mid-edit. Released via
+    // Drop on every exit path below.
+    let _lock_guard = if write {
+        match mev::brain::lock::acquire_lock(&root, mev::brain::lock::DEFAULT_LOCK_TIMEOUT) {
+            Ok(guard) => Some(guard),
+            Err(mev::brain::lock::LockError::Held {
+                holder_pid,
+                lock_path,
+                waited_secs,
+            }) => {
+                eprintln!(
+                    "error [E_EMIT_LOCK_HELD] another write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
+                    lock_path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                eprintln!("error [E_EMIT_LOCK_HELD] {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
+
     match mev::epic_status(&root, slug, action, write) {
         Ok(report) => {
             if json {
