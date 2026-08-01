@@ -661,6 +661,101 @@ pub fn epic_status(
     Ok(report)
 }
 
+/// Set one block's authored `status` (`mev set-block-status <repo:id> <status>`).
+///
+/// The block-level sibling of [`epic_status`], and deliberately the same shape:
+/// resolve `brain.toml`, discover + load every `state.json`, refuse to write
+/// against an incomplete corpus, plan via
+/// [`brain::blocks::plan_set_block_status`], then apply and re-run
+/// [`emit_state`] so the derived surfaces agree with the new authored value.
+///
+/// Dry-run by default: without `write` the proposed edit is reported as
+/// `W_EMIT_DRY_RUN` and nothing on disk is touched.
+///
+/// See the `brain::blocks` module docs for why the write lives in mev at all
+/// (`bastion serve` is read-only per D25) and why `blocked` is not authorable.
+pub fn set_block_status(
+    root: &std::path::Path,
+    key: &str,
+    status: &str,
+    write: bool,
+) -> anyhow::Result<Report> {
+    use brain::blocks::plan_set_block_status;
+    use brain::config::find_brain_config;
+    use brain::emit::apply_plan;
+    use brain::state::{StateLoadError, discover_state_files, load_state};
+
+    let mut report = Report::default();
+
+    let config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    let (sources, discovery_diags) = discover_state_files(root, &config);
+    report.diagnostics.extend(discovery_diags);
+
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    let mut load_failed = false;
+    for src in &sources {
+        match load_state(&src.abs_path) {
+            Ok(file) => loaded.push((src.clone(), file)),
+            Err(StateLoadError::Parse { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("state.json is not valid JSON or does not match the schema: {source}"),
+                ));
+            }
+            Err(StateLoadError::Io { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("could not read state.json: {source}"),
+                ));
+            }
+        }
+    }
+
+    // Same completeness guard as emit-state / epic_status. Two reasons here: the
+    // target block may live in the repo that failed to load (so we would report a
+    // spurious E_BLOCK_NOT_FOUND), and the --write path chains into emit-state,
+    // which must never regenerate cross-repo derived views from a partial corpus.
+    if write && load_failed {
+        report.diagnostics.push(Diagnostic::error(
+            root,
+            "E_EMIT_INCOMPLETE_CORPUS",
+            "refusing to write: at least one state.json failed to load, so the target block may \
+             be unresolvable and the chained emit-state would regenerate cross-repo views from a \
+             partial corpus"
+                .to_string(),
+        ));
+        return Ok(report);
+    }
+
+    let plan = plan_set_block_status(key, status, &config, &loaded);
+
+    let had_actions = !plan.actions.is_empty();
+    report.diagnostics.extend(apply_plan(&plan, write));
+
+    // Regenerate derived views so focus/boards agree with the authored edit.
+    if write && had_actions && !report.is_failure() {
+        let emit = emit_state(root, true, None)?;
+        report.diagnostics.extend(emit.diagnostics);
+    }
+
+    Ok(report)
+}
+
 /// Generate derived views for the Bastion Brain repo.
 ///
 /// `scope`, when `Some`, restricts every planner's *writes* (not its
