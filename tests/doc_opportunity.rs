@@ -27,6 +27,34 @@ fn opportunities_dir(root: &Path) -> std::path::PathBuf {
     dir
 }
 
+/// Mark `root` as a brain root — `find_brain_root` only checks for the
+/// file's existence, so an empty `brain.toml` is sufficient.
+fn write_brain_root(root: &Path) {
+    std::fs::write(root.join("brain.toml"), "").unwrap();
+}
+
+/// The default seven-stage vocabulary, formatted exactly as the real
+/// `business/docs/pipeline.md` production line — used by tests that don't
+/// care about a non-default vocabulary but do need `resolve_stage_vocabulary`
+/// to succeed.
+const DEFAULT_STAGES_LINE: &str = "`identified` → `researching` → `contacted` → `conversation` → `proposal-sent` → `closed-won` → `closed-lost`";
+
+/// Write `business/docs/pipeline.md` under `root` with a `## Stages` section
+/// carrying `stages_line` as the vocabulary line.
+fn write_pipeline_md(root: &Path, stages_line: &str) {
+    let dir = root.join("business/docs");
+    std::fs::create_dir_all(&dir).unwrap();
+    let content = format!("# Pipeline\n\n## Stages\n\n{stages_line}\n");
+    std::fs::write(dir.join("pipeline.md"), content).unwrap();
+}
+
+/// Full happy-path fixture: a brain root with the default seven-stage
+/// `pipeline.md` in place.
+fn default_pipeline_fixture(root: &Path) {
+    write_brain_root(root);
+    write_pipeline_md(root, DEFAULT_STAGES_LINE);
+}
+
 fn write_and_read(root: &Path, plan: mev::brain::emit::EmitPlan) -> String {
     let diags = apply_plan(&plan, true);
     assert!(
@@ -175,6 +203,7 @@ fn ingest_second_run_is_zero_action_noop() {
 fn set_stage_updates_stage_and_is_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     opportunities_dir(tmp.path());
+    default_pipeline_fixture(tmp.path());
     let brief = fixture_brief();
     let plan = plan_ingest(&brief, Some(OpportunityKind::Company), tmp.path());
     write_and_read(tmp.path(), plan);
@@ -192,6 +221,7 @@ fn set_stage_updates_stage_and_is_idempotent() {
 #[test]
 fn set_stage_rejects_unknown_stage() {
     let tmp = tempfile::tempdir().unwrap();
+    default_pipeline_fixture(tmp.path());
     let plan = plan_set_stage("anthropic", "bogus-stage", tmp.path());
     assert!(plan.actions.is_empty());
     assert_eq!(plan.diagnostics.len(), 1);
@@ -201,10 +231,99 @@ fn set_stage_rejects_unknown_stage() {
 #[test]
 fn set_stage_missing_file_errors() {
     let tmp = tempfile::tempdir().unwrap();
+    default_pipeline_fixture(tmp.path());
     let plan = plan_set_stage("ghost", "contacted", tmp.path());
     assert!(plan.actions.is_empty());
     assert_eq!(plan.diagnostics.len(), 1);
     assert_eq!(plan.diagnostics[0].locator, "E_DOC_NOT_FOUND");
+}
+
+// ── stage vocabulary read from pipeline.md (D58) ────────────────────────
+
+/// The load-bearing test: a fixture whose `pipeline.md` declares a
+/// non-default vocabulary (the seven defaults plus `on-hold`) must accept an
+/// opportunity authored with `stage: on-hold` and reject a stage that
+/// fixture does not declare. A fixture using the default seven would pass
+/// even against the old hardcoded `VALID_STAGES` const, so this is the only
+/// test that actually proves the vocabulary is read rather than compiled in.
+#[test]
+fn set_stage_non_default_vocabulary_changes_what_validates() {
+    let tmp = tempfile::tempdir().unwrap();
+    opportunities_dir(tmp.path());
+    write_brain_root(tmp.path());
+    write_pipeline_md(
+        tmp.path(),
+        "`identified` → `researching` → `contacted` → `conversation` → `proposal-sent` → \
+         `on-hold` → `closed-won` → `closed-lost`",
+    );
+    let brief = fixture_brief();
+    let plan = plan_ingest(&brief, Some(OpportunityKind::Company), tmp.path());
+    write_and_read(tmp.path(), plan);
+
+    // Accept: `on-hold` is declared only in this fixture's pipeline.md, not
+    // in the hardcoded default seven.
+    let plan = plan_set_stage("anthropic", "on-hold", tmp.path());
+    assert_eq!(
+        plan.actions.len(),
+        1,
+        "expected 'on-hold' to validate against this fixture's vocabulary"
+    );
+    let content = write_and_read(tmp.path(), plan);
+    assert!(content.contains("stage: on-hold"));
+
+    // Reject: a stage this fixture never declared.
+    let plan = plan_set_stage("anthropic", "nurturing", tmp.path());
+    assert!(plan.actions.is_empty());
+    assert_eq!(plan.diagnostics.len(), 1);
+    assert_eq!(plan.diagnostics[0].locator, "E_DOC_BAD_STAGE");
+}
+
+/// A fixture with no `business/docs/pipeline.md` at all (but a valid brain
+/// root) produces exactly one file-level diagnostic naming the file — never
+/// a panic, and never a per-opportunity storm.
+#[test]
+fn set_stage_missing_pipeline_md_yields_one_file_level_diagnostic() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_brain_root(tmp.path());
+    opportunities_dir(tmp.path());
+    let brief = fixture_brief();
+    let plan = plan_ingest(&brief, Some(OpportunityKind::Company), tmp.path());
+    write_and_read(tmp.path(), plan);
+
+    let plan = plan_set_stage("anthropic", "contacted", tmp.path());
+    assert!(plan.actions.is_empty());
+    assert_eq!(
+        plan.diagnostics.len(),
+        1,
+        "missing pipeline.md must yield exactly one file-level diagnostic, not one per opportunity"
+    );
+    assert_eq!(plan.diagnostics[0].locator, "E_DOC_PIPELINE_MD_MISSING");
+    assert!(plan.diagnostics[0].message.contains("pipeline.md"));
+}
+
+/// A `pipeline.md` with no parseable `## Stages` section produces the
+/// unparseable diagnostic, naming the file.
+#[test]
+fn set_stage_unparseable_pipeline_md_section_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_brain_root(tmp.path());
+    opportunities_dir(tmp.path());
+    let dir = tmp.path().join("business/docs");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("pipeline.md"),
+        "# Pipeline\n\nNo Stages section here.\n",
+    )
+    .unwrap();
+
+    let plan = plan_set_stage("anthropic", "contacted", tmp.path());
+    assert!(plan.actions.is_empty());
+    assert_eq!(plan.diagnostics.len(), 1);
+    assert_eq!(
+        plan.diagnostics[0].locator,
+        "E_DOC_PIPELINE_STAGES_UNPARSEABLE"
+    );
+    assert!(plan.diagnostics[0].message.contains("pipeline.md"));
 }
 
 // ── add-action ───────────────────────────────────────────────────────────

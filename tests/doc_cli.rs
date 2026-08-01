@@ -12,10 +12,20 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Build a fresh tempdir with a `brain.toml` marker (all `find_brain_root`
-/// requires) and an empty `business/docs/opportunities/` directory.
+/// requires), a `business/docs/pipeline.md` carrying the default seven-stage
+/// vocabulary (per D58 — `set-stage` resolves it from here, not from a
+/// hardcoded const), and an empty `business/docs/opportunities/` directory.
 fn setup_corpus() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join("brain.toml"), "").unwrap();
+    fs::create_dir_all(tmp.path().join("business/docs")).unwrap();
+    fs::write(
+        tmp.path().join("business/docs/pipeline.md"),
+        "# Pipeline\n\n## Stages\n\n\
+         `identified` → `researching` → `contacted` → `conversation` → \
+         `proposal-sent` → `closed-won` → `closed-lost`\n",
+    )
+    .unwrap();
     fs::create_dir_all(tmp.path().join("business/docs/opportunities")).unwrap();
     tmp
 }
