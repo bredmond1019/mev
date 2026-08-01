@@ -993,10 +993,22 @@ plan. The raw ingested payload is embedded as the first fenced `json` block in t
 
 #### `doc opportunity set-stage <slug> <stage>`
 
-Sets an existing Opportunity's `stage` field. `stage` must be one of the seven documented
-values: `identified | researching | contacted | conversation | proposal-sent | closed-won |
-closed-lost`; any other value pushes `E_DOC_BAD_STAGE` and plans nothing. Re-running with the
-same stage is a zero-action no-op (`W_DOC_UNCHANGED`).
+Sets an existing Opportunity's `stage` field. `stage` must be one of the values authored in
+`business/docs/pipeline.md`'s `## Stages` line — the vocabulary is **read from that file**, not
+compiled into `mev`, per [D58](../../../docs/decisions/D58-pipeline-stage-vocabulary-home.md)
+(the file's `## Stages` line is the single source both `mev` and bastion's `parse_stages` read).
+As documented today that line resolves to the seven values `identified | researching | contacted
+| conversation | proposal-sent | closed-won | closed-lost`, but that list can change without a
+`mev` release — only `pipeline.md` needs to change. `pipeline.md` is resolved from the brain root
+(walked upward from the target document's path), never from CWD. Any `stage` value outside the
+resolved vocabulary pushes `E_DOC_BAD_STAGE` and plans nothing. Re-running with the same stage is
+a zero-action no-op (`W_DOC_UNCHANGED`).
+
+Resolving the vocabulary itself can fail independently of the `stage` argument's validity — see
+`E_DOC_PIPELINE_ROOT_NOT_FOUND`, `E_DOC_PIPELINE_MD_MISSING`, and
+`E_DOC_PIPELINE_STAGES_UNPARSEABLE` in the diagnostics table below. Each names the file (or the
+search root) and plans nothing; none panics, and none degrades into flagging every stage as
+invalid.
 
 #### `doc opportunity add-action <slug>`
 
@@ -1042,7 +1054,10 @@ the existing value is empty. An already-merged contact is a zero-action no-op.
 | `E_DOC_BAD_INDEX_PATH` | Error | The model's `IndexIntent.index_path` has no parent directory component |
 | `E_DOC_UNKNOWN_INPUT_SHAPE` | Error | `ingest` input matches neither the company nor the prospecting-sweep shape and `--kind` was not given |
 | `E_DOC_UNKNOWN_MODEL` | Error | `materialize --model` is not one of `opportunity` \| `learning-artifact` \| `proposal` |
-| `E_DOC_BAD_STAGE` | Error | `set-stage`'s `stage` argument is not one of the seven documented values |
+| `E_DOC_BAD_STAGE` | Error | `set-stage`'s `stage` argument is not in the vocabulary parsed from `business/docs/pipeline.md`'s `## Stages` line (D58) |
+| `E_DOC_PIPELINE_ROOT_NOT_FOUND` | Error | No brain root (`brain.toml`) could be located above the target document's path, so `business/docs/pipeline.md` cannot be resolved to validate `stage` |
+| `E_DOC_PIPELINE_MD_MISSING` | Error | The brain root was found but `business/docs/pipeline.md` does not exist (or cannot be read) there |
+| `E_DOC_PIPELINE_STAGES_UNPARSEABLE` | Error | `business/docs/pipeline.md` exists but has no parseable `## Stages` section (missing heading, or no backtick-delimited tokens before the next heading) |
 | `E_DOC_NOT_FOUND` | Error | A mutator's target file is absent or unparsable |
 | `W_EMIT_DRY_RUN` / `I_EMIT_WROTE` | Warning | Reused unchanged from `apply_plan`'s write half — see `emit-state` above |
 

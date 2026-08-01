@@ -761,12 +761,26 @@ All four planners resolve their target file through the same `IndexIntent`-deriv
 | Function | Signature | Description |
 |---|---|---|
 | `plan_ingest` | `(&serde_json::Value, Option<OpportunityKind>, &Path) -> EmitPlan` | Builds an `Opportunity` from a raw payload and plans it via `plan_document`. `kind: None` auto-detects: `company_name` present → `Company`; `prospects`/`vertical` present → `ProspectingSweep`; neither → `E_DOC_UNKNOWN_INPUT_SHAPE`, no plan. `Company` dispatches to `Opportunity::from_company_brief`; `ProspectingSweep` to `Opportunity::from_prospecting_result`; `JobPosting` builds from the same brief shape with `kind: "job-posting"`. |
-| `plan_set_stage` | `(&str, &str, &Path) -> EmitPlan` | Loads the existing file, `parse_nested_frontmatter` + `Opportunity::from_frontmatter`, sets `stage` (validated against the seven documented values — an unknown value pushes `E_DOC_BAD_STAGE` and plans nothing), and re-plans via `plan_document`. |
+| `plan_set_stage` | `(&str, &str, &Path) -> EmitPlan` | Loads the existing file, `parse_nested_frontmatter` + `Opportunity::from_frontmatter`, resolves the stage vocabulary via `resolve_stage_vocabulary` (parsed from `business/docs/pipeline.md`'s `## Stages` line, per D58 — never a hardcoded const), sets `stage` if it is in that vocabulary (an unknown value pushes `E_DOC_BAD_STAGE` and plans nothing), and re-plans via `plan_document`. |
 | `plan_add_action` | `(&str, &str, &str, &str, &Path) -> EmitPlan` | Appends one `Action { at, kind, note }` to `actions[]`. An identical triple already present is not re-appended (the re-plan then becomes a `W_DOC_UNCHANGED` no-op via `plan_document`'s idempotency guard). |
 | `plan_merge_contacts` | `(&str, &serde_json::Value, &Path) -> EmitPlan` | Merges `Contact` entries into `contacts[]` matched on `name`: unions `emails`/`whatsapp`/`phones`/`links` (deduped, order-stable); fills `role`/`note` only when the existing value is empty, so an enriched field is never overwritten by a blank one. |
 
 All three mutators (`plan_set_stage`, `plan_add_action`, `plan_merge_contacts`) push
 `E_DOC_NOT_FOUND` and plan nothing when the target file is absent or unparsable.
+
+`resolve_stage_vocabulary(root: &Path) -> Result<Vec<String>, EmitPlan>` is the pure-adjacent
+resolution step behind `plan_set_stage`: it walks upward from `root` via `find_brain_root` to
+locate the brain root, reads `business/docs/pipeline.md` there, and parses its `## Stages` line
+with `parse_stages` (a faithful, comment-linked port of bastion's `parse_stages` in
+`core/bastion/src/serve/handlers/pipeline.rs`, per
+[D58](../../../docs/decisions/D58-pipeline-stage-vocabulary-home.md) — the vocabulary is a
+go-to-market decision authored in `pipeline.md`, not compiled into `mev`). `parse_stages` itself
+is pure (`&str -> Vec<String>`, no filesystem access) and unit-tested inline. Three distinct
+failure modes each produce a single file-level `EmitPlan` with no actions and one error
+diagnostic — never a panic, and never a per-opportunity `E_DOC_BAD_STAGE` storm from an empty
+vocabulary: no brain root found (`E_DOC_PIPELINE_ROOT_NOT_FOUND`), `pipeline.md` missing or
+unreadable (`E_DOC_PIPELINE_MD_MISSING`), and no parseable `## Stages` section or empty token
+list (`E_DOC_PIPELINE_STAGES_UNPARSEABLE`).
 
 | Type | Description |
 |---|---|
@@ -784,7 +798,10 @@ All three mutators (`plan_set_stage`, `plan_add_action`, `plan_merge_contacts`) 
 | `E_DOC_BAD_INDEX_PATH` | Error | The model's `IndexIntent.index_path` has no parent directory component. |
 | `E_DOC_UNKNOWN_INPUT_SHAPE` | Error | `ingest` input matches neither the company nor the prospecting-sweep shape, and no `--kind` was given. |
 | `E_DOC_UNKNOWN_MODEL` | Error | `doc materialize --model` is not one of `opportunity`\|`learning-artifact`\|`proposal`. |
-| `E_DOC_BAD_STAGE` | Error | `set-stage`'s stage argument is not one of the seven documented values. |
+| `E_DOC_BAD_STAGE` | Error | `set-stage`'s stage argument is not in the vocabulary parsed from `business/docs/pipeline.md`'s `## Stages` line (D58). |
+| `E_DOC_PIPELINE_ROOT_NOT_FOUND` | Error | No brain root (`brain.toml`) found above the target path; `business/docs/pipeline.md` cannot be resolved. |
+| `E_DOC_PIPELINE_MD_MISSING` | Error | The brain root was found but `business/docs/pipeline.md` does not exist (or cannot be read) there. |
+| `E_DOC_PIPELINE_STAGES_UNPARSEABLE` | Error | `business/docs/pipeline.md` exists but has no parseable `## Stages` section (missing heading, or no backtick-delimited tokens before the next heading). |
 | `E_DOC_NOT_FOUND` | Error | A mutator's target file is absent or unparsable. |
 
 `apply_plan`'s existing `W_EMIT_DRY_RUN` / `I_EMIT_WROTE` codes are reused unchanged for the
