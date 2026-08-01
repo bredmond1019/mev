@@ -44,6 +44,8 @@
 //! - `E_STATE_UNKNOWN_EPIC` — a block's `epics[]` entry is not in the HQ registry.
 //! - `W_STATE_EPIC_REGISTRY_IGNORED` — a non-HQ file declares its own `epics[]`.
 //! - `W_STATE_EPIC_EMPTY` — a registered epic has no member blocks.
+//! - `W_STATE_EPIC_ALL_CLOSED` — every member block is closed but the epic is not
+//!   `complete` (warn-only; never auto-flipped).
 //! - `W_STATE_EPIC_UNREACHABLE_DEP` — an unclosed epic block depends on an unclosed
 //!   block that belongs to no epic (a gate invisible on the epic's board).
 
@@ -884,7 +886,12 @@ pub(crate) fn epic_registry<'a>(
 ///    registry slug. This is what turns a typo into an error instead of a
 ///    silently-empty board.
 /// 6. **`W_STATE_EPIC_EMPTY`** — a registered epic has no member blocks.
-/// 7. **`W_STATE_EPIC_UNREACHABLE_DEP`** — an unclosed block in some epic
+/// 7. **`W_STATE_EPIC_ALL_CLOSED`** — every member block of a non-empty epic is
+///    authored `closed`, but the epic is not `complete`. **Warn-only by
+///    decision**: marking an initiative finished is an operator judgement, so
+///    this is deliberately *not* auto-flipped by `plan_sync_epics`. Do not
+///    "finish the feature" by automating it.
+/// 8. **`W_STATE_EPIC_UNREACHABLE_DEP`** — an unclosed block in some epic
 ///    `depends_on` an unclosed block belonging to no epic. That dependency gates
 ///    the epic but would never appear on its board — the silent-gate case.
 pub fn check_epics(config: &BrainConfig, files: &[(StateSource, StateFile)]) -> Vec<Diagnostic> {
@@ -964,12 +971,19 @@ pub fn check_epics(config: &BrainConfig, files: &[(StateSource, StateFile)]) -> 
         }
     }
 
-    // --- 5. Membership resolves; collect members for check 6 ---
+    // --- 5. Membership resolves; collect members for checks 6 and 7 ---
     let mut members: HashMap<&str, usize> = known.iter().map(|s| (*s, 0usize)).collect();
+    // Members NOT authored `closed`, per epic — the discriminator for check 7.
+    let mut unclosed: HashMap<&str, usize> = known.iter().map(|s| (*s, 0usize)).collect();
     for (src, file) in files {
         for track in &file.tracks {
             for block in &track.blocks {
                 for slug in &block.epics {
+                    if block.status.as_deref() != Some("closed")
+                        && let Some(count) = unclosed.get_mut(slug.as_str())
+                    {
+                        *count += 1;
+                    }
                     match members.get_mut(slug.as_str()) {
                         Some(count) => *count += 1,
                         None => diags.push(Diagnostic::error(
@@ -1009,7 +1023,41 @@ pub fn check_epics(config: &BrainConfig, files: &[(StateSource, StateFile)]) -> 
         }
     }
 
-    // --- 7. Silent gates: an unclosed dependency outside every epic ---
+    // --- 7. Every member closed, but the epic is not marked complete ---
+    //
+    // WARN-ONLY BY DECISION. Do **not** add an auto-flip to `plan_sync_epics`:
+    // declaring an initiative finished is an operator judgement (the last block
+    // closing is not the same as the goal being met), so mev surfaces it and
+    // stops. Automating this would not be "completing the feature".
+    for epic in registry {
+        let total = members.get(epic.slug.as_str()).copied().unwrap_or(0);
+        let live = unclosed.get(epic.slug.as_str()).copied().unwrap_or(0);
+        // `total > 0` keeps this disjoint from W_STATE_EPIC_EMPTY (check 6):
+        // a zero-member epic is vacuously "all closed" and must raise only that.
+        if total > 0 && live == 0 && epic.status.as_deref() != Some("complete") {
+            let path = files
+                .iter()
+                .find(|(_, f)| {
+                    f.kind == "brain" && matches!(tier_scope_for(f, config), TierScope::All)
+                })
+                .map(|(s, _)| s.abs_path.clone())
+                .unwrap_or_default();
+            diags.push(Diagnostic::warning(
+                &path,
+                "W_STATE_EPIC_ALL_CLOSED",
+                format!(
+                    "epic '{}' has all {} member block{} closed but is still '{}'; consider \
+                     flipping it to 'complete'",
+                    epic.slug,
+                    total,
+                    if total == 1 { "" } else { "s" },
+                    epic.status.as_deref().unwrap_or("active")
+                ),
+            ));
+        }
+    }
+
+    // --- 8. Silent gates: an unclosed dependency outside every epic ---
     let mut by_key: HashMap<String, &TrackBlock> = HashMap::new();
     for (src, file) in files {
         for track in &file.tracks {
@@ -7731,6 +7779,8 @@ mod check_epics_tests {
   "repo": "bastion", "kind": "project", "updated": "2026-07-24",
   "tracks": [{ "title": "P", "blocks": [
     { "id": "BA.11.K", "title": "board endpoint", "status": "closed",
+      "epics": ["bastion-os", "bastion-web"] },
+    { "id": "BA.11.L", "title": "still going", "status": "open",
       "epics": ["bastion-os", "bastion-web"] }
   ]}]
 }"#,
@@ -7941,6 +7991,120 @@ mod check_epics_tests {
             )],
         );
         assert_eq!(locators(&diags), vec!["E_STATE_EPIC_BAD_WEIGHT"]);
+    }
+
+    /// One HQ registry entry `(slug, status)` plus member blocks `(id, status)`,
+    /// all tagged into that epic.
+    fn hq_with_members(
+        dir: &Path,
+        epic_status: Option<&str>,
+        blocks: &[(&str, &str)],
+    ) -> (StateSource, StateFile) {
+        let status = epic_status
+            .map(|s| format!(r#", "status": "{s}""#))
+            .unwrap_or_default();
+        let block_json: Vec<String> = blocks
+            .iter()
+            .map(|(id, st)| {
+                format!(r#"{{ "id": "{id}", "title": "{id}", "status": "{st}", "epics": ["e"] }}"#)
+            })
+            .collect();
+        pair(
+            dir,
+            "brain",
+            &format!(
+                r#"{{
+  "repo": "hq", "kind": "brain", "updated": "2026-08-01",
+  "epics": [{{ "slug": "e", "title": "E"{status} }}],
+  "tracks": [{{ "title": "P", "blocks": [{}] }}]
+}}"#,
+                block_json.join(", ")
+            ),
+        )
+    }
+
+    #[test]
+    fn check_epics_warns_when_every_member_is_closed_but_the_epic_is_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (src, file) = hq_with_members(
+            dir.path(),
+            Some("active"),
+            &[("A.1", "closed"), ("A.2", "closed"), ("A.3", "closed")],
+        );
+        let hq_path = src.abs_path.clone();
+
+        let diags = check_epics(&epic_config(), &[(src, file)]);
+        assert_eq!(locators(&diags), vec!["W_STATE_EPIC_ALL_CLOSED"]);
+        assert_eq!(
+            diags[0].severity,
+            crate::Severity::Warning,
+            "flipping an epic to complete is an operator call; this must never fail the exit code"
+        );
+        assert_eq!(diags[0].file, hq_path);
+        assert!(
+            diags[0].message.contains("'e'"),
+            "the warning must name the epic: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn check_epics_is_silent_when_an_all_closed_epic_is_already_complete() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let diags = check_epics(
+            &epic_config(),
+            &[hq_with_members(
+                dir.path(),
+                Some("complete"),
+                &[("A.1", "closed"), ("A.2", "closed")],
+            )],
+        );
+        assert!(
+            diags.is_empty(),
+            "the epic is already marked finished; there is nothing to suggest, got: {:?}",
+            locators(&diags)
+        );
+    }
+
+    #[test]
+    fn check_epics_does_not_warn_all_closed_while_a_member_is_still_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let diags = check_epics(
+            &epic_config(),
+            &[hq_with_members(
+                dir.path(),
+                Some("active"),
+                &[("A.1", "closed"), ("A.2", "closed"), ("A.3", "open")],
+            )],
+        );
+        assert!(
+            !locators(&diags).contains(&"W_STATE_EPIC_ALL_CLOSED"),
+            "2-of-3 closed is ordinary in-flight work, got: {:?}",
+            locators(&diags)
+        );
+    }
+
+    #[test]
+    fn check_epics_never_reports_both_empty_and_all_closed() {
+        // A zero-member epic is vacuously "all closed"; without the total > 0
+        // guard it would raise both codes for the same situation.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let diags = check_epics(
+            &epic_config(),
+            &[hq_with_members(dir.path(), Some("active"), &[])],
+        );
+        assert_eq!(locators(&diags), vec!["W_STATE_EPIC_EMPTY"]);
+    }
+
+    #[test]
+    fn check_epics_warns_all_closed_for_an_epic_with_no_authored_status() {
+        // Absent status reads as `active` everywhere else, so it must warn too.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let diags = check_epics(
+            &epic_config(),
+            &[hq_with_members(dir.path(), None, &[("A.1", "closed")])],
+        );
+        assert_eq!(locators(&diags), vec!["W_STATE_EPIC_ALL_CLOSED"]);
     }
 
     #[test]
