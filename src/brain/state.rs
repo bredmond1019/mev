@@ -7953,7 +7953,7 @@ mod check_epics_tests {
             "the weight error is reported against the HQ state.json, like E_STATE_EPIC_BAD_STATUS"
         );
         assert!(
-            diags[0].message.contains('w') && diags[0].message.contains("101"),
+            diags[0].message.contains("'w'") && diags[0].message.contains("101"),
             "the diagnostic must name the epic and the offending value: {}",
             diags[0].message
         );
@@ -8045,6 +8045,30 @@ mod check_epics_tests {
             diags[0].message.contains("'e'"),
             "the warning must name the epic: {}",
             diags[0].message
+        );
+    }
+
+    #[test]
+    fn check_epics_warns_all_closed_for_a_paused_epic() {
+        // `complete` is the only status that silences the nudge. A `paused` epic whose
+        // every member has landed is still work that finished — it should be marked
+        // `complete`, not left parked. Pinned because "paused epics are already
+        // deliberately set aside, stop nagging" is a plausible future reading, and this
+        // spec chose the other one.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let diags = check_epics(
+            &epic_config(),
+            &[hq_with_members(
+                dir.path(),
+                Some("paused"),
+                &[("A.1", "closed"), ("A.2", "closed")],
+            )],
+        );
+        assert_eq!(
+            locators(&diags),
+            vec!["W_STATE_EPIC_ALL_CLOSED"],
+            "a paused epic with every member closed still gets the nudge, got: {:?}",
+            locators(&diags)
         );
     }
 

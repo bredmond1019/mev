@@ -864,6 +864,7 @@ pub fn render_epic_board(
 ) -> String {
     // Three-way split by authored status, not the old two-way filter:
     //   active (or absent)  → full board section
+    //   focused             → full board section (active-equivalent)
     //   paused              → ONE collapsed line, still visible
     //   complete            → dropped entirely
     // Parked work must stay visible enough that you remember it exists; a
