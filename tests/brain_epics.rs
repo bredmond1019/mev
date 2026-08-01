@@ -415,3 +415,48 @@ fn sync_epics_is_a_no_op_when_everything_already_agrees() {
         "a consistent corpus must plan zero actions: {report:?}"
     );
 }
+
+// ── focused (active-equivalent) ──────────────────────────────────────────────
+
+#[test]
+fn sync_epics_pauses_a_focused_epic_whose_work_is_all_deferred() {
+    // `focused` is a refinement of `active`, so the pause rule must fire on it
+    // identically — otherwise `focused` is a hole in the reconciler.
+    let dir = brain(
+        &[("AL.1.A", "deferred", "tui"), ("AL.1.B", "closed", "tui")],
+        &[("tui", "focused")],
+    );
+    let root = dir.path();
+
+    mev::epic_status(root, None, EpicAction::Defer, true).unwrap();
+
+    assert_eq!(status_of(&epic_statuses(root), "tui"), "paused");
+}
+
+#[test]
+fn sync_epics_never_pauses_a_focused_epic_that_still_has_live_work() {
+    let dir = brain(
+        &[("AL.1.A", "deferred", "tui"), ("AL.1.B", "open", "tui")],
+        &[("tui", "focused")],
+    );
+    let root = dir.path();
+
+    mev::epic_status(root, None, EpicAction::Defer, true).unwrap();
+
+    assert_eq!(
+        status_of(&epic_statuses(root), "tui"),
+        "focused",
+        "partially-deferred is normal; a focused epic must be no more eager to pause than an active one"
+    );
+}
+
+#[test]
+fn resume_epic_sets_active_never_focused() {
+    // Un-parking restores the epic to live; it does not promote it to priority.
+    let dir = brain(&[("AL.1.A", "deferred", "tui")], &[("tui", "paused")]);
+    let root = dir.path();
+
+    mev::epic_status(root, Some("tui"), EpicAction::Resume, true).unwrap();
+
+    assert_eq!(status_of(&epic_statuses(root), "tui"), "active");
+}

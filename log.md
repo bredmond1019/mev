@@ -19,6 +19,38 @@ timestamp: "2026-08-01T00:00:00Z"
 
 ## [run: 2026-08-01]
 
+### Triaged the bastion-web arch-review CR; decomposed Phase 11 (MV.11.A/B + content-epic chore)
+
+- **What:** Reviewed `planning/arch-review-asks-bastion-web/notes.md` against the real code and
+  found two defects: (1) its central routing claim — that the epic `weight` should "flow through
+  mev's rollup" — describes a code path that **does not exist** (`bastion/src/serve/handlers/epics.rs`
+  reads `okf_core::Epic` directly and documents "no rollup/graph"; `derive_rollup` never touches the
+  epic registry), and (2) the doc covered only two of the four asks its own HQ backlog entry
+  advertises. Rewrote the CR: four asks, a status table, correct per-repo ownership, and a triage
+  note. Added the evidence the original lacked — `EPIC_WEIGHTS` (`bastion-web/lib/board-view.ts:555-570`)
+  carries **11 keys against 13 epics**, so `brain-quality` and `outreach-machine` silently score at
+  the 60 fallback; the predicted drift has already happened twice. Verified the other two backlog
+  asks (`last_action_at`, terminal-stage flag) are already filed in **bastion's** CR addendum, and
+  that `last_action_at` is a pure bastion change (its `handlers/pipeline.rs` already parses
+  `actions[].at`; only the summary projection omits it). Recorded a finding neither CR had: the
+  pipeline stage vocabulary exists in **three** independent copies (mev's `VALID_STAGES`,
+  `pipeline.md` prose, bastion-web's `CLOSED_STAGES`). Fixed the CR's dangling `related`
+  (`epic-taxonomy-v2` → a spec `tasks.md`, which is never crawled); brain-wide graph errors 23 → 22.
+  Added two asks from the operator review — a `focused` epic status plus a warn-only
+  all-blocks-closed diagnostic, and `mev set-block-status` as the first block-level mutation. Then
+  decomposed the mev-side work into three specs (`epic-weight-and-status/`,
+  `ticket-set-block-status/`, `content-epic/`), registered `MV.11.A` / `MV.11.B` /
+  `MV.chore.content-epic` in `state.json` under a new Phase 11 track, and updated `planning/index.md`.
+  A corpus survey run for the content epic found the queue's regex matches **mostly false positives**
+  (brazilianportugui payments, engine-rs divestment) and that genuine content work is largely not
+  block-tracked at all — so that chore is parked on an operator membership call rather than specced
+  as executable. `validate-brain --state` 0 errors; `emit-state --write` propagated all three blocks.
+- **Why:** The CR was about to be promoted to a plan. Promoting it as written would have sent an
+  implementer looking for a rollup hop that does not exist, and would have silently dropped half its
+  scope. Planning-only session — no mev source changed.
+- **Refs:** `planning/arch-review-asks-bastion-web/notes.md`, `planning/handoff.md`,
+  `core/_planning/bastion/arch-review-asks-bastion-web/notes.md` (addendum)
+
 ### MV.ticket.distill-freshness-lane — Read D35's `freshness:` stamp; PASS
 
 Ran `/sdlc-flow distill-freshness-lane` on branch `distill-freshness-lane-flow`, 6 tasks all PASS,

@@ -747,7 +747,10 @@ fn render_due_soon_section(
 /// stop competing for attention. A `paused` epic does **not** drop off: it renders
 /// collapsed to a single marked line (see [`render_epic_board`]), because parked
 /// work still needs to be visible enough that you remember it exists.
-const RENDERED_EPIC_STATUSES: [&str; 1] = ["active"];
+/// `focused` is included because it is active-equivalent everywhere else (see
+/// [`EPIC_STATUS_FOCUSED`]); omitting it here would make the current-priority
+/// epic the one epic that renders nowhere at all.
+const RENDERED_EPIC_STATUSES: [&str; 2] = ["active", "focused"];
 
 /// Epic `status` values that render collapsed to a one-line summary instead of a
 /// full board section.
@@ -759,6 +762,17 @@ pub const EPIC_STATUS_PAUSED: &str = "paused";
 
 /// The authored epic status meaning "live".
 pub const EPIC_STATUS_ACTIVE: &str = "active";
+
+/// The authored epic status meaning "the current priority" — bastion-web's
+/// default filter.
+///
+/// It is a **refinement of `active`, not an alternative to it**: everywhere the
+/// reconciler asks "is this epic live?" (`plan_sync_epics`' pause rule, the
+/// epic-board render filter) `focused` must answer the same as `active`, or
+/// `focused` becomes a hole. Only the consumer-side "what should I look at
+/// first?" question distinguishes them. Note that resuming a paused epic sets
+/// `active`, never `focused`: un-parking is not a promotion to priority.
+pub const EPIC_STATUS_FOCUSED: &str = "focused";
 
 /// Counted progress for one epic: how many member blocks are in each state.
 pub struct EpicProgress {
@@ -850,6 +864,7 @@ pub fn render_epic_board(
 ) -> String {
     // Three-way split by authored status, not the old two-way filter:
     //   active (or absent)  → full board section
+    //   focused             → full board section (active-equivalent)
     //   paused              → ONE collapsed line, still visible
     //   complete            → dropped entirely
     // Parked work must stay visible enough that you remember it exists; a

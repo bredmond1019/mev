@@ -1,7 +1,8 @@
 //! Epic-level parking — the authored counterpart to a block's `deferred` status.
 //!
 //! An epic has its own lifecycle in the HQ `epics[]` registry (`active` ·
-//! `paused` · `complete`), and its member blocks have their own authored
+//! `focused` · `paused` · `complete`, where `focused` is an active-equivalent
+//! refinement meaning "current priority"), and its member blocks have their own authored
 //! statuses. Those two can drift: an epic marked `paused` whose blocks are still
 //! `open` keeps flooding `focus.next` even though the initiative is parked, and
 //! an epic whose work is entirely `deferred` still reads `active` on every board.
@@ -39,7 +40,8 @@ use okf_core::{Epic, StateFile, TrackBlock};
 use crate::Diagnostic;
 use crate::brain::config::BrainConfig;
 use crate::brain::emit::{
-    EPIC_STATUS_ACTIVE, EPIC_STATUS_PAUSED, EmitAction, EmitPlan, epic_progress,
+    EPIC_STATUS_ACTIVE, EPIC_STATUS_FOCUSED, EPIC_STATUS_PAUSED, EmitAction, EmitPlan,
+    epic_progress,
 };
 use crate::brain::state::{StateSource, TierScope, tier_scope_for};
 
@@ -262,7 +264,7 @@ pub fn plan_resume_epic(
 ///
 /// - An epic whose remaining work is entirely deferred
 ///   ([`crate::brain::emit::EpicProgress::is_fully_deferred`]) but which is still
-///   `active` → set `paused`.
+///   live — `active` **or** `focused` — → set `paused`.
 /// - An epic already `paused` that still has `open` members → defer them.
 ///
 /// Deliberately **not** symmetric about resuming: an `active` epic with some
@@ -287,7 +289,11 @@ pub fn plan_sync_epics(config: &BrainConfig, files: &[(StateSource, StateFile)])
         let status = status.unwrap_or_else(|| EPIC_STATUS_ACTIVE.to_string());
         let progress = epic_progress(&members_of(files, &slug));
 
-        let needs_pause = status == EPIC_STATUS_ACTIVE && progress.is_fully_deferred();
+        // `focused` is active-equivalent here on purpose: a focused epic whose
+        // remaining work is entirely deferred must pause exactly as an active one
+        // does, or `focused` becomes a hole in the reconciler.
+        let is_live = status == EPIC_STATUS_ACTIVE || status == EPIC_STATUS_FOCUSED;
+        let needs_pause = is_live && progress.is_fully_deferred();
         let needs_straggler_defer = status == EPIC_STATUS_PAUSED && progress.open > 0;
 
         if needs_pause || needs_straggler_defer {
