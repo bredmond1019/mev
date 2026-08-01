@@ -8,6 +8,7 @@
 pub mod block_graph;
 pub mod config;
 pub mod crawl;
+pub mod distill;
 pub mod emit;
 pub mod epics;
 pub mod graph;
