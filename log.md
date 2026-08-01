@@ -19,6 +19,56 @@ timestamp: "2026-08-01T00:00:00Z"
 
 ## [run: 2026-08-01]
 
+### Phase 11 orchestrated end to end — MV.11.A + MV.11.B both PASS and merged
+
+- **What:** Drove the handoff's Phase 11 sequence to completion as an orchestrator, delegating each
+  block to a subagent and reviewing before merge. **`MV.11.A — Epic weight + status vocabulary`**
+  (PR #24 → `a7020cd`): `weight: Option<u8>` on `okf_core::Epic` (okf-core `ff86475`,
+  `skip_serializing_if` so an absent weight stays byte-identical), `E_STATE_EPIC_BAD_WEIGHT` at an
+  inclusive max of 100, `focused` as a fourth epic status made active-equivalent in `plan_sync_epics`
+  (`complete` already existed and was not re-added; `plan_resume_epic` still sets `active`), and
+  warn-only `W_STATE_EPIC_ALL_CLOSED` guarded by `total > 0` so it cannot double-fire with
+  `W_STATE_EPIC_EMPTY`. Nothing touched `derive_rollup` — the CR's rollup hop does not exist. One
+  unspecced change was necessary and accepted: `render_epic_board` is a strict two-way partition that
+  **silently drops** any status in neither `RENDERED_EPIC_STATUSES` nor `COLLAPSED_EPIC_STATUSES`, so
+  a `focused` epic — the current-priority one — would have vanished from the board; `focused` was
+  added to the rendered list with a test. **`MV.11.B — mev set-block-status`** (PR #25 → `5478dc9`):
+  `src/brain/blocks.rs::plan_set_block_status`, one more sibling in the shipped `epics.rs` planner
+  family, behind `mev [--json] set-block-status <repo:id> <status> [path] [--write]` — dry-run by
+  default (verified at hash level to change zero bytes and create no lock file), `--write` taking the
+  worktree guard → advisory lock → incomplete-corpus guard → apply → chained `emit_state(write=true)`.
+  Validates against `VALID_TRACK_BLOCK_STATUSES` and rejects `blocked` as the derived-only lane it is;
+  unqualified ids rejected rather than guessed; no-op set is a clean exit 0. 880 tests green (from
+  857), all four gates green on merged `main`. Both blocks were then closed **using the command this
+  phase shipped**, which incidentally reconciled a stale derived surface in `orchestrator` (`OR.X2`
+  had been closed in its authored `tracks[]` without a re-emit — authored data untouched, only
+  `focus.next`, the wave table, and the status frontmatter). Live corpus: 0 errors, `emit-state` at a
+  fixed point. Repaired the cross-repo fallout in `bastion` (7 `Epic` struct literals, commit
+  `a2fd8d1`, local).
+- **Why:** The handoff had three specs authored and zero executed. Running them in sequence rather
+  than parallel avoided the `epics.rs` merge-conflict risk the specs were serialized for, and let
+  `MV.11.B` build on `MV.11.A`'s landed state instead of alongside it.
+- **Caveats recorded (three new carryovers, all needing attention):** the `Workflow` SDLC engine was
+  **unavailable to delegated subagents**, so both blocks were driven manually and neither produced an
+  `sdlc/` state trail or a formal end-of-flow review — an independent review agent was run in place of
+  each, both PASS, and both found real defects that were fixed before merge; `defer-epic` /
+  `resume-epic` / `sync-epics` still write **without** the advisory lock (`MV.11.B`'s spec wrongly
+  asserted they took it); and `Epic.weight` is **not yet readable by any consumer** — bastion's
+  `EpicDto` has no such field, so `MV.11.A` delivers no user-visible value until bastion projects it
+  and bastion-web drops its hardcoded `EPIC_WEIGHTS`. Also unmasked 6 pre-existing clippy lints in
+  bastion (previously hidden behind the compile error) and left one true-positive
+  `W_STATE_EPIC_ALL_CLOSED` unflipped on the live corpus: `state-graph-view` has all 7 members closed
+  but is still `active` — an authoring call, not an agent one.
+- **Refs:** `planning/phase-11-orchestration/notes.md` (full run detail), PRs
+  [#24](https://github.com/bredmond1019/mev/pull/24) / [#25](https://github.com/bredmond1019/mev/pull/25)
+
+```
+5478dc9 MV.11.B — mev set-block-status: the first block-level mutation (#25)
+a7020cd MV.11.A — Epic weight + status vocabulary (#24)
+```
+
+---
+
 ### Triaged the bastion-web arch-review CR; decomposed Phase 11 (MV.11.A/B + content-epic chore)
 
 - **What:** Reviewed `planning/arch-review-asks-bastion-web/notes.md` against the real code and
