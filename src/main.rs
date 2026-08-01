@@ -249,9 +249,16 @@ enum Command {
     /// `emit-state --write`, so `focus` and the boards are regenerated in the same
     /// invocation rather than being left drifted.
     ///
+    /// `--write` takes the same advisory lock at <root>/.mev-emit.lock that
+    /// `emit-state`/`set-block-status` take, before any file is touched. If another
+    /// live process already holds it, this fails with E_EMIT_LOCK_HELD (naming the
+    /// holder's pid) and writes nothing; a stale lock (owning process no longer
+    /// alive) is reclaimed automatically instead of blocking. Dry-run never takes
+    /// the lock and is unaffected by contention.
+    ///
     /// Exit codes:
     ///   0 — planned (dry-run) or applied successfully
-    ///   1 — unknown epic slug, no HQ registry, or a write failure
+    ///   1 — unknown epic slug, no HQ registry, a write failure, or E_EMIT_LOCK_HELD
     DeferEpic {
         /// Epic slug as it appears in the HQ `epics[]` registry (e.g. `bastion-tui`).
         slug: String,
@@ -266,6 +273,11 @@ enum Command {
     /// `deferred` member block to `open`. The inverse of `defer-epic`.
     ///
     /// Dry-run by default; pass --write to apply (which also re-runs emit-state).
+    ///
+    /// `--write` takes the same advisory lock at <root>/.mev-emit.lock as
+    /// `defer-epic`/`emit-state`/`set-block-status`; a held lock fails this with
+    /// E_EMIT_LOCK_HELD and writes nothing, a stale lock is reclaimed automatically,
+    /// and dry-run never takes the lock.
     ResumeEpic {
         /// Epic slug as it appears in the HQ `epics[]` registry.
         slug: String,
@@ -287,6 +299,11 @@ enum Command {
     /// normal state, so un-parking stays explicit via `resume-epic`.
     ///
     /// Dry-run by default; pass --write to apply (which also re-runs emit-state).
+    ///
+    /// `--write` takes the same advisory lock at <root>/.mev-emit.lock as
+    /// `defer-epic`/`resume-epic`/`emit-state`/`set-block-status`; a held lock fails
+    /// this with E_EMIT_LOCK_HELD and writes nothing, a stale lock is reclaimed
+    /// automatically, and dry-run never takes the lock.
     SyncEpics {
         /// Path to search from when locating brain.toml. Defaults to the current directory.
         #[arg(default_value = ".")]

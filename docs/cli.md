@@ -833,6 +833,15 @@ edits print as `W_EMIT_DRY_RUN` and nothing is touched. A successful `--write`
 additionally runs `emit-state --write`, so `focus`, the boards and the rollups are
 regenerated in the same invocation instead of being left drifted.
 
+**`--write` takes the same advisory lock `emit-state --write` and
+`set-block-status --write` take**, at `<root>/.mev-emit.lock`, before any file is
+touched — `defer-epic`, `resume-epic`, and `sync-epics` all share one dispatch
+function, so one lock acquisition covers all three. If another live process
+already holds it, the command fails with `E_EMIT_LOCK_HELD` (naming the holder's
+pid) and writes nothing; a lockfile whose owning process is no longer alive is
+reclaimed automatically instead of blocking forever. Dry-run (no `--write`) never
+takes the lock and is unaffected by contention.
+
 > **These, plus [`set-block-status`](#set-block-status-repoid-status---write-path),
 > are the only commands that write *authored* state.** Everything else mev writes is
 > derived. The cascade lives behind an explicit command precisely so `emit-state`
@@ -854,7 +863,8 @@ mev sync-epics --write
 
 Exit codes: `0` planned/applied successfully · `1` unknown epic slug
 (`E_EPIC_UNKNOWN`), no HQ registry (`E_EPIC_NO_REGISTRY`), an unreadable
-state.json (`E_EPIC_INCOMPLETE_CORPUS` on `--write`), or a write failure.
+state.json (`E_EPIC_INCOMPLETE_CORPUS` on `--write`), the advisory lock already
+held (`E_EMIT_LOCK_HELD` on `--write`), or a write failure.
 
 ---
 
