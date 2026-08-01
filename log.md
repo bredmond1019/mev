@@ -8,12 +8,53 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-07-28T23:10:00Z"
+timestamp: "2026-08-01T00:00:00Z"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## [run: 2026-08-01]
+
+### MV.ticket.distill-freshness-lane — Read D35's `freshness:` stamp; PASS
+
+Ran `/sdlc-flow distill-freshness-lane` on branch `distill-freshness-lane-flow`, 6 tasks all PASS,
+review verdict PASS. Task 1 extended `AttentionThresholds` (`src/brain/config.rs`) with
+`knowledge_days` (45) / `memory_days` (30) defaults and a `distill_threshold(stem)` helper (longest
+fallback for unknown stems). Task 2 added a new module `src/brain/distill.rs` with a hand-rolled line
+scanner (no new dependency) parsing D35-format `knowledge.md`/`memory.md` entries under both the
+`  source:` and `  - source:` (amistad) shapes, wrapped-claim recovery, and the shared predicate
+`distill_stale_age` (anchor = `max(date, freshness)`, strictly `>`, unparseable freshness never
+stale — mirrors `backlog_stale_age`); resolved a pre-existing `clippy::type_complexity` warning at
+`state.rs:7323` (unrelated to this spec) via a `PriorityBlockSpec` type alias so `--all-targets -D
+warnings` stayed green. Task 3 added `check_distill_staleness`, wired into `validate_brain_state` to
+emit a warning-severity `W_DISTILL_STALE` diagnostic per stale entry (silent skip if the file is
+absent; exit code unchanged), naming the three remedies (re-affirm / supersede / archive). Task 4 gave
+the Attention board a 4th, capped "Stale distilled knowledge" lane (10 rows + explicit "…and N more"),
+fed by a per-repo knowledge/memory read-once cache in `plan_attention_board`, reusing the identical
+tier-scoping predicate the carryover union uses, spliced into the existing `markers::ATTENTION` region
+(no new sentinel). Task 5 confirmed the mechanical 3→4 lane golden-test update was already covered by
+task 4's commit; no further changes needed. Task 6 closed D35's deferred freshness-format
+documentation thread and updated `docs/decisions/D35-memory-distillation-loop.md`,
+`docs/state/{overview,state-schema}.md`, and the `/attention` skill+command (root + all 5 tier
+mirrors) to document the lane's bump-freshness disposition — `/snooze`'s scope stays unchanged
+(carryover + backlog only, since distilled entries have no stable id); this task's changes are all
+brain-repo docs, committed in `agentic-portfolio`, not `core/mev`. All four harness gates green (842
+tests, up from 822); live-corpus `mev validate-brain --sync --graph --state --links --structure`: 0
+errors. No new frontmatter fields, no GC/summarizer, per the spec's explicit scope boundary.
+Next: pick the next phase/block per `master-plan.md`.
+
+```
+84cedf1 docs: update docs for distill-freshness-lane
+a08f59c feat: implement distill-freshness-lane-task4
+0d058e5 feat: implement distill-freshness-lane-task3
+71cf0b7 fix: fix pass 1 for distill-freshness-lane-task2
+4cda94f feat: implement distill-freshness-lane-task2
+dbfcd9c feat: add knowledge_days/memory_days attention thresholds
+```
 
 ---
 
