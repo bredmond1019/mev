@@ -858,7 +858,7 @@ state.json (`E_EPIC_INCOMPLETE_CORPUS` on `--write`), or a write failure.
 
 ---
 
-### `set-block-status <repo:id> <status> [--write] [path]`
+### `set-block-status <repo:id> <status> [path] [--write]`
 
 Set **one** block's authored `status` in its repo's `planning/state.json`. The
 block-level counterpart to the epic commands above: those move a whole initiative,
