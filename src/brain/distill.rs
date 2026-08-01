@@ -15,8 +15,11 @@
 //! `validate-brain` `W_DISTILL_STALE` warning and the `emit-state` Attention board's "Stale
 //! distilled knowledge" lane.
 
+use std::path::Path;
+
 use chrono::NaiveDate;
 
+use crate::Diagnostic;
 use crate::brain::config::AttentionThresholds;
 
 /// One D35-distilled entry, hand-parsed from a `knowledge.md` / `memory.md` body.
@@ -144,6 +147,58 @@ pub fn distill_stale_age(
     };
     let age = (today - anchor).num_days();
     (age > thresholds.distill_threshold(stem)).then_some(age)
+}
+
+/// `W_DISTILL_STALE` warnings for the `knowledge.md` / `memory.md` siblings of
+/// `planning_dir`, one per D35-distilled entry whose [`distill_stale_age`] exceeds its
+/// file's threshold.
+///
+/// A missing `knowledge.md` or `memory.md` is a **silent skip** — not a warning — because
+/// `base-template/scaffold/planning/` legitimately has neither file. WARNING severity
+/// only; this never flips the exit code (mirrors the `carryover`/`backlog` staleness
+/// contract at [`crate::brain::state::carryover_stale_age`]). The locator is
+/// `W_DISTILL_STALE` — a single shared locator, not a knowledge/memory pair, because the
+/// diagnostic's `file` path already names which of the two files is stale.
+///
+/// This is the `validate-brain` counterpart to the `emit-state` Attention board's "Stale
+/// distilled knowledge" lane — both read the exact same [`distill_stale_age`] predicate,
+/// so the board never shows an entry the warning didn't also fire on.
+pub fn check_distill_staleness(
+    planning_dir: &Path,
+    today: NaiveDate,
+    thresholds: &AttentionThresholds,
+) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+
+    for stem in ["knowledge", "memory"] {
+        let path = planning_dir.join(format!("{stem}.md"));
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue; // missing file -> silent skip, not a warning
+        };
+
+        for entry in parse_distilled(&contents) {
+            let Some(age) = distill_stale_age(&entry, today, thresholds, stem) else {
+                continue;
+            };
+            let threshold = thresholds.distill_threshold(stem);
+            let claim = if entry.claim.is_empty() {
+                "(no claim text found)".to_string()
+            } else {
+                entry.claim.clone()
+            };
+            diags.push(Diagnostic::warning(
+                &path,
+                "W_DISTILL_STALE",
+                format!(
+                    "distilled entry at line {} is {age}d old (threshold {threshold}d): {claim} \
+                     — re-affirm it (bump 'freshness'), supersede it, or archive it",
+                    entry.line
+                ),
+            ));
+        }
+    }
+
+    diags
 }
 
 #[cfg(test)]
