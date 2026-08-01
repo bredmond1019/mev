@@ -16,20 +16,13 @@ use okf_core::{Action, Contact, Opportunity, parse_nested_frontmatter};
 use serde_json::Value as JsonValue;
 
 use crate::Diagnostic;
+use crate::brain::config::find_brain_root;
 use crate::brain::emit::EmitPlan;
 use crate::doc::materialize::plan_document;
 
-/// The seven documented `stage` values from the
-/// `business/docs/opportunities/index.md` contract.
-pub const VALID_STAGES: [&str; 7] = [
-    "identified",
-    "researching",
-    "contacted",
-    "conversation",
-    "proposal-sent",
-    "closed-won",
-    "closed-lost",
-];
+/// Path to the pipeline stage vocabulary contract, relative to the brain root, per
+/// [D58](../../docs/decisions/D58-pipeline-stage-vocabulary-home.md).
+const PIPELINE_MD_RELATIVE: &str = "business/docs/pipeline.md";
 
 /// The three documented `kind` values an Opportunity can carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,12 +155,74 @@ pub fn plan_ingest(input: &JsonValue, kind: Option<OpportunityKind>, root: &Path
     plan_document(&opp, root)
 }
 
-/// Plan setting an existing opportunity's `stage`. Validates `stage` against
-/// [`VALID_STAGES`] — an unknown value raises `E_DOC_BAD_STAGE` and plans
-/// nothing. Re-running with the same stage is a zero-action no-op (via
-/// `plan_document`'s idempotency guard).
+/// Resolve the pipeline stage vocabulary from `business/docs/pipeline.md`, per
+/// [D58](../../docs/decisions/D58-pipeline-stage-vocabulary-home.md). `root` is walked
+/// upward (via [`find_brain_root`]) to locate the brain root — the vocabulary is never
+/// resolved from CWD.
+///
+/// Returns a single, distinctly-locatored error `EmitPlan` (no actions) — never a panic,
+/// and never a silently empty vocabulary — for each of the three failure modes:
+/// - `E_DOC_PIPELINE_ROOT_NOT_FOUND`: no brain root (`brain.toml`) could be located above
+///   `root`, so `pipeline.md` cannot be resolved.
+/// - `E_DOC_PIPELINE_MD_MISSING`: the brain root was found but `pipeline.md` does not
+///   exist (or cannot be read) there.
+/// - `E_DOC_PIPELINE_STAGES_UNPARSEABLE`: `pipeline.md` exists but yields no `## Stages`
+///   section, or that section carries no backtick-delimited tokens.
+fn resolve_stage_vocabulary(root: &Path) -> Result<Vec<String>, EmitPlan> {
+    let brain_root = find_brain_root(root).map_err(|e| EmitPlan {
+        actions: vec![],
+        diagnostics: vec![Diagnostic::error(
+            root,
+            "E_DOC_PIPELINE_ROOT_NOT_FOUND",
+            format!(
+                "could not locate the brain root (no brain.toml found above {}) to resolve {PIPELINE_MD_RELATIVE}: {e}",
+                root.display()
+            ),
+        )],
+    })?;
+
+    let pipeline_path = brain_root.join(PIPELINE_MD_RELATIVE);
+    let content = std::fs::read_to_string(&pipeline_path).map_err(|e| EmitPlan {
+        actions: vec![],
+        diagnostics: vec![Diagnostic::error(
+            pipeline_path.clone(),
+            "E_DOC_PIPELINE_MD_MISSING",
+            format!(
+                "could not read the stage vocabulary contract at {}: {e}",
+                pipeline_path.display()
+            ),
+        )],
+    })?;
+
+    let stages = parse_stages(&content);
+    if stages.is_empty() {
+        return Err(EmitPlan {
+            actions: vec![],
+            diagnostics: vec![Diagnostic::error(
+                pipeline_path.clone(),
+                "E_DOC_PIPELINE_STAGES_UNPARSEABLE",
+                format!(
+                    "no `## Stages` section with backtick-delimited tokens found in {}",
+                    pipeline_path.display()
+                ),
+            )],
+        });
+    }
+
+    Ok(stages)
+}
+
+/// Plan setting an existing opportunity's `stage`. Validates `stage` against the
+/// vocabulary parsed from `business/docs/pipeline.md` (see [`resolve_stage_vocabulary`])
+/// — an unknown value raises `E_DOC_BAD_STAGE` and plans nothing. Re-running with the
+/// same stage is a zero-action no-op (via `plan_document`'s idempotency guard).
 pub fn plan_set_stage(slug: &str, stage: &str, root: &Path) -> EmitPlan {
-    if !VALID_STAGES.contains(&stage) {
+    let valid_stages = match resolve_stage_vocabulary(root) {
+        Ok(stages) => stages,
+        Err(plan) => return plan,
+    };
+
+    if !valid_stages.iter().any(|s| s == stage) {
         return EmitPlan {
             actions: vec![],
             diagnostics: vec![Diagnostic::error(
@@ -175,7 +230,7 @@ pub fn plan_set_stage(slug: &str, stage: &str, root: &Path) -> EmitPlan {
                 "E_DOC_BAD_STAGE",
                 format!(
                     "'{stage}' is not a valid stage (expected one of: {})",
-                    VALID_STAGES.join(" | ")
+                    valid_stages.join(" | ")
                 ),
             )],
         };
