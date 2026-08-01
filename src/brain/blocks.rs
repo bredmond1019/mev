@@ -143,7 +143,7 @@ pub fn plan_set_block_status(
 
     let Some((fi, ti, bi)) = found else {
         let known: Vec<&str> = config.repos.iter().map(|r| r.slug.as_str()).collect();
-        let hint = if known.iter().any(|s| *s == repo_slug) {
+        let hint = if known.contains(&repo_slug) {
             format!("repo '{repo_slug}' has no block '{block_id}'")
         } else {
             format!(

@@ -833,10 +833,10 @@ edits print as `W_EMIT_DRY_RUN` and nothing is touched. A successful `--write`
 additionally runs `emit-state --write`, so `focus`, the boards and the rollups are
 regenerated in the same invocation instead of being left drifted.
 
-> **These are the only commands that write *authored* state.** Everything else mev
-> writes is derived. The cascade lives behind an explicit command precisely so
-> `emit-state` stays safe to run unattended — see `src/brain/epics.rs` for the
-> full rationale.
+> **These, plus [`set-block-status`](#set-block-status-repoid-status---write-path),
+> are the only commands that write *authored* state.** Everything else mev writes is
+> derived. The cascade lives behind an explicit command precisely so `emit-state`
+> stays safe to run unattended — see `src/brain/epics.rs` for the full rationale.
 
 ```bash
 # What would parking the TUI initiative change?
@@ -855,6 +855,80 @@ mev sync-epics --write
 Exit codes: `0` planned/applied successfully · `1` unknown epic slug
 (`E_EPIC_UNKNOWN`), no HQ registry (`E_EPIC_NO_REGISTRY`), an unreadable
 state.json (`E_EPIC_INCOMPLETE_CORPUS` on `--write`), or a write failure.
+
+---
+
+### `set-block-status <repo:id> <status> [--write] [path]`
+
+Set **one** block's authored `status` in its repo's `planning/state.json`. The
+block-level counterpart to the epic commands above: those move a whole initiative,
+this moves exactly one block and nothing else.
+
+**Status only.** Not `priority`, not `due`, not a generic `set-block-field`. The
+narrow surface keeps the caller's contract precise; a generic setter would push
+per-field validation to runtime.
+
+**The key is always `repo:id`** — e.g. `mev:MV.10.A` — the same
+`"{repo_slug}:{block_id}"` form `global_status_map` and `effective_priorities` use.
+Block ids are only unique *within* a repo, so an unqualified id is **rejected**
+rather than guessed at.
+
+| Status | Meaning |
+|---|---|
+| `open` | not started, a candidate for `next` |
+| `in_progress` | actively being worked (derives into `focus.now`) |
+| `deferred` | parked on the back burner (derives into `focus.deferred`) |
+| `closed` | done |
+
+> **`blocked` is not authorable, and this command rejects it.** `blocked` is a
+> *derived* lane: `emit-state` computes it from a block's unmet `depends_on` edges
+> and stamps it onto `focus.blocked[]` entries. Writing it onto a `tracks[]` block
+> is exactly what `validate-brain`'s `E_STATE_AUTHORED_BLOCKED` exists to catch, so
+> input is validated against `VALID_TRACK_BLOCK_STATUSES` (the four above) and not
+> against the wider `VALID_STATUSES`. Passing `blocked` fails with
+> `E_BLOCK_BAD_STATUS` and writes nothing.
+
+**Setting a block to the status it already has is a no-op success** — zero actions,
+zero diagnostics, exit `0`, nothing written. Running the same `--write` twice leaves
+the corpus byte-identical.
+
+**Dry-run by default**, exactly like the epic commands: without `--write` the
+proposed edit prints as `W_EMIT_DRY_RUN` and not a byte is touched. A successful
+`--write` takes the same advisory lock `emit-state --write` takes, refuses to run
+against an incomplete corpus (`E_EMIT_INCOMPLETE_CORPUS`), and then runs
+`emit-state --write` so `focus`, the boards and the rollups agree with the new
+authored value in the same invocation.
+
+**Who calls this.** The intended caller is an **engine-rs workflow node** invoking
+the CLI on bastion-web's behalf — "mark this done", "park this" from the web UI.
+`bastion serve` is **read-only by decision (D25)** and stays that way, so the write
+lands here in mev, the deterministic writer for the brain corpus. The workflow node
+itself is engine-rs work and is not part of this command's contract.
+
+```bash
+# What would closing MV.10.A change? (dry run — writes nothing)
+mev set-block-status mev:MV.10.A closed ~/Dev/agentic-portfolio
+
+# Apply it, and regenerate every derived view
+mev set-block-status mev:MV.10.A closed ~/Dev/agentic-portfolio --write
+
+# Park a single block without touching its epic
+mev set-block-status bella:BE.2.C deferred --write
+
+# Machine-readable
+mev --json set-block-status mev:MV.10.A in_progress --write
+```
+
+Exit codes: `0` planned (dry-run), applied, or already at the target status · `1`
+any error-severity diagnostic or a write failure.
+
+| Diagnostic | Cause |
+|---|---|
+| `E_BLOCK_BAD_KEY` | the key is not `repo:id` (a bare block id, or an empty half) |
+| `E_BLOCK_BAD_STATUS` | the status is not one of the four authorable values — this is what rejects `blocked` |
+| `E_BLOCK_NOT_FOUND` | no loaded `state.json` owns that `repo:id`; the message lists the known repo slugs when the repo half is the problem |
+| `E_EMIT_INCOMPLETE_CORPUS` | `--write` attempted while at least one `state.json` failed to load |
+| `E_EMIT_LOCK_HELD` | another mev write holds the brain-root advisory lock |
 
 ---
 
