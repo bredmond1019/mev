@@ -384,7 +384,8 @@ enum Command {
     ///   E_DOC_UNKNOWN_INPUT_SHAPE   — ingest input matches neither the company nor the
     ///                                 prospecting-sweep shape (pass --kind explicitly)
     ///   E_DOC_UNKNOWN_MODEL         — --model is not one of opportunity|learning-artifact|proposal
-    ///   E_DOC_BAD_STAGE             — set-stage stage is not one of the seven documented values
+    ///   E_DOC_BAD_STAGE             — set-stage stage is not in the vocabulary authored in
+    ///                                 business/docs/pipeline.md's `## Stages` line (D58)
     ///   E_DOC_NOT_FOUND             — a mutator's target file is absent or unparsable
     ///   W_EMIT_DRY_RUN / I_EMIT_WROTE — reused unchanged from `apply_plan`'s write half
     ///
