@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::brain::config::BrainConfig;
+use crate::brain::distill::{DistilledEntry, distill_stale_age, parse_distilled};
 use crate::brain::state::{
     Backlog, Block, BlockedBy, Carryover, CrossRepoEdge, Epic, EpicEdge, EpicEdges, Focus,
     RepoRollup, StateFile, StateGraph, StateSource, TierScope, TrackBlock, backlog_stale_age,
@@ -1136,27 +1137,62 @@ fn attention_snippet(text: &str, max: usize) -> String {
 
 /// Render one `## {heading}` Attention sub-lane from `rows` (already filtered to
 /// stale items). Rows are sorted oldest-first (largest age). Empty → `_none_`.
-fn render_attention_lane(heading: &str, mut rows: Vec<AttentionRow>) -> String {
+fn render_attention_lane(heading: &str, rows: Vec<AttentionRow>) -> String {
+    render_attention_lane_capped(heading, rows, usize::MAX)
+}
+
+/// Same as [`render_attention_lane`], but shows at most `cap` rows (oldest-first)
+/// and — when more than `cap` rows are stale — appends an explicit
+/// `…and N more` line stating the true count of hidden rows. Never truncates
+/// silently: the hidden count is always printed when rows are dropped.
+fn render_attention_lane_capped(heading: &str, mut rows: Vec<AttentionRow>, cap: usize) -> String {
     rows.sort_by_key(|r| std::cmp::Reverse(r.age));
     let mut lines = vec![format!("## {heading}")];
     if rows.is_empty() {
         lines.push("_none_".to_string());
     } else {
-        for row in rows {
+        let total = rows.len();
+        let shown = rows.into_iter().take(cap);
+        for row in shown {
             lines.push(format!("- [{}] {} — {}d", row.repo, row.detail, row.age));
+        }
+        if total > cap {
+            lines.push(format!("- …and {} more", total - cap));
         }
     }
     lines.join("\n")
 }
 
-/// Render the Attention board: three sub-lanes (Stale carryover / Aging backlog
-/// / Orphaned captures) built from the pre-scoped, repo-tagged inputs. Only
-/// items past their staleness threshold appear (the visible twin of the
-/// `W_STATE_*_STALE` warnings — same predicate). The `[<repo>]` tag is a
-/// separate axis from the unified board's `[BIZ]/[ENG]` tag.
+/// Cap applied to the "Stale distilled knowledge" lane — the 10 oldest entries
+/// render, with an explicit `…and N more` line for the rest. Required, not
+/// cosmetic: the June D35 fan-out cohort is large enough (hundreds of entries
+/// at some tiers) that an uncapped lane is a wall, not a triage surface.
+const DISTILL_LANE_CAP: usize = 10;
+
+/// Render the Attention board: four sub-lanes (Stale carryover / Aging backlog
+/// / Orphaned captures / Stale distilled knowledge) built from the pre-scoped,
+/// repo-tagged inputs. Only items past their staleness threshold appear (the
+/// visible twin of the `W_STATE_*_STALE` / `W_DISTILL_STALE` warnings — same
+/// predicates). The `[<repo>]` tag is a separate axis from the unified board's
+/// `[BIZ]/[ENG]` tag.
 pub fn render_attention_section(
     carryover: &[(String, &Carryover)],
     backlog: &[(String, &Backlog)],
+    today: chrono::NaiveDate,
+    thresholds: &crate::brain::config::AttentionThresholds,
+) -> String {
+    render_attention_section_with_distilled(carryover, backlog, &[], today, thresholds)
+}
+
+/// Full form of [`render_attention_section`] that also takes the pre-scoped,
+/// repo-tagged D35-distilled entries (`(repo, stem, &DistilledEntry)`) for the
+/// "Stale distilled knowledge" lane. `stem` is `"knowledge"` or `"memory"`,
+/// used to look up the entry's own threshold via
+/// [`crate::brain::config::AttentionThresholds::distill_threshold`].
+pub fn render_attention_section_with_distilled(
+    carryover: &[(String, &Carryover)],
+    backlog: &[(String, &Backlog)],
+    distilled: &[(String, &str, &DistilledEntry)],
     today: chrono::NaiveDate,
     thresholds: &crate::brain::config::AttentionThresholds,
 ) -> String {
@@ -1209,10 +1245,27 @@ pub fn render_attention_section(
         }
     }
 
+    let mut distill_rows: Vec<AttentionRow> = Vec::new();
+    for (repo, stem, entry) in distilled {
+        if let Some(age) = distill_stale_age(entry, today, thresholds, stem) {
+            let claim = if entry.claim.is_empty() {
+                "(no claim text found)".to_string()
+            } else {
+                entry.claim.clone()
+            };
+            distill_rows.push(AttentionRow {
+                repo: repo.clone(),
+                age,
+                detail: format!("{stem} — {}", attention_snippet(&claim, 80)),
+            });
+        }
+    }
+
     [
         render_attention_lane("Stale carryover", carry_rows),
         render_attention_lane("Aging backlog", backlog_rows),
         render_attention_lane("Orphaned captures", capture_rows),
+        render_attention_lane_capped("Stale distilled knowledge", distill_rows, DISTILL_LANE_CAP),
     ]
     .join("\n\n")
 }
@@ -2589,6 +2642,28 @@ pub fn plan_attention_board(
         .map(|(_, f)| f.backlog.as_slice())
         .unwrap_or(&[]);
 
+    // Read each repo's sibling `knowledge.md` / `memory.md` at most once, cached by
+    // `repo_slug` — the loop below is already O(files²) over the carryover union, and this
+    // cache keeps the distilled-entry gather from repeating those reads per board (perf
+    // note in the spec).
+    let mut distilled_cache: HashMap<String, Vec<(&'static str, DistilledEntry)>> = HashMap::new();
+    for (src, _) in files {
+        if distilled_cache.contains_key(&src.repo_slug) {
+            continue;
+        }
+        let Some(planning_dir) = src.abs_path.parent() else {
+            continue;
+        };
+        let mut entries = Vec::new();
+        for stem in ["knowledge", "memory"] {
+            let path = planning_dir.join(format!("{stem}.md"));
+            if let Ok(contents) = std::fs::read_to_string(&path) {
+                entries.extend(parse_distilled(&contents).into_iter().map(|e| (stem, e)));
+            }
+        }
+        distilled_cache.insert(src.repo_slug.clone(), entries);
+    }
+
     for (src, file) in files {
         if file.kind != "brain" {
             continue;
@@ -2620,6 +2695,26 @@ pub fn plan_attention_board(
             .map(|b| (b.repo.clone(), b))
             .collect();
 
+        // Scope the distilled-entry union (repo-tagged) to this board, using the IDENTICAL
+        // `include` predicate the carryover union above uses — tier scoping is free.
+        let mut distilled: Vec<(String, &str, &DistilledEntry)> = Vec::new();
+        for (s2, _f2) in files {
+            let include = match &scope {
+                TierScope::All => true,
+                TierScope::Tier(t) => {
+                    s2.repo_slug == src.repo_slug
+                        || tier_of_repo(&s2.repo_slug, config) == Some(t.as_str())
+                }
+            };
+            if include && let Some(entries) = distilled_cache.get(&s2.repo_slug) {
+                distilled.extend(
+                    entries
+                        .iter()
+                        .map(|(stem, entry)| (s2.repo_slug.clone(), *stem, entry)),
+                );
+            }
+        }
+
         let Some(planning_dir) = src.abs_path.parent() else {
             continue;
         };
@@ -2640,7 +2735,13 @@ pub fn plan_attention_board(
             }
         };
 
-        let board = render_attention_section(&carryover, &backlog, today, &config.attention);
+        let board = render_attention_section_with_distilled(
+            &carryover,
+            &backlog,
+            &distilled,
+            today,
+            &config.attention,
+        );
 
         match splice_generated(&original, markers::ATTENTION, &board) {
             Ok(new_content) => {

@@ -6961,7 +6961,10 @@ heading = "Alpha"
 // ===========================================================================
 mod attention_board {
     use mev::brain::config::{AttentionThresholds, BrainConfig, RepoEntry};
-    use mev::brain::emit::{plan_attention_board, render_attention_section};
+    use mev::brain::distill::DistilledEntry;
+    use mev::brain::emit::{
+        plan_attention_board, render_attention_section, render_attention_section_with_distilled,
+    };
     use mev::brain::state::{
         Backlog, BacklogOrigin, Carryover, CarryoverScope, StateFile, StateSource,
     };
@@ -7103,10 +7106,14 @@ mod attention_board {
     fn render_section_empty_lanes_are_none() {
         let out =
             render_attention_section(&[], &[], day("2026-07-15"), &AttentionThresholds::default());
+        assert!(
+            out.contains("## Stale distilled knowledge"),
+            "4th lane heading present even with no distilled entries: {out}"
+        );
         assert_eq!(
             out.matches("_none_").count(),
-            3,
-            "all three lanes empty: {out}"
+            4,
+            "all four lanes empty: {out}"
         );
     }
 
@@ -7279,6 +7286,215 @@ mod attention_board {
                 .iter()
                 .any(|d| d.locator == "W_EMIT_NO_SENTINEL"),
             "missing sentinel must warn"
+        );
+    }
+
+    fn distilled_entry(claim: &str, freshness: &str) -> DistilledEntry {
+        DistilledEntry {
+            claim: claim.to_string(),
+            date: Some(day(freshness)),
+            freshness: Some(day(freshness)),
+            line: 1,
+        }
+    }
+
+    #[test]
+    fn render_section_with_distilled_shows_stale_and_hides_fresh() {
+        let today = day("2026-08-01");
+        let cfg = AttentionThresholds::default(); // knowledge_days = 45
+
+        let stale = distilled_entry("Stale claim.", "2026-06-01"); // 61d old
+        let fresh = distilled_entry("Fresh claim.", "2026-07-30"); // 2d old
+        let distilled = vec![
+            ("mev".to_string(), "knowledge", &stale),
+            ("mev".to_string(), "memory", &fresh),
+        ];
+
+        let out = render_attention_section_with_distilled(&[], &[], &distilled, today, &cfg);
+
+        assert!(out.contains("## Stale distilled knowledge"));
+        assert!(
+            out.contains("Stale claim."),
+            "stale entry should show: {out}"
+        );
+        assert!(
+            !out.contains("Fresh claim."),
+            "fresh entry must be excluded: {out}"
+        );
+    }
+
+    #[test]
+    fn render_section_distilled_caps_at_ten_with_hidden_count() {
+        let today = day("2026-08-01");
+        let cfg = AttentionThresholds::default();
+
+        let entries: Vec<DistilledEntry> = (0..13)
+            .map(|i| distilled_entry(&format!("Claim {i}."), "2026-06-01"))
+            .collect();
+        let distilled: Vec<(String, &str, &DistilledEntry)> = entries
+            .iter()
+            .map(|e| ("mev".to_string(), "knowledge", e))
+            .collect();
+
+        let out = render_attention_section_with_distilled(&[], &[], &distilled, today, &cfg);
+
+        let lane = out
+            .split("## Stale distilled knowledge")
+            .nth(1)
+            .expect("lane present");
+        let row_count = lane.matches("Claim ").count();
+        assert_eq!(row_count, 10, "must cap at 10 rows: {lane}");
+        assert!(
+            lane.contains("…and 3 more"),
+            "must print the true hidden count: {lane}"
+        );
+    }
+
+    #[test]
+    fn plan_distilled_lane_is_tier_scoped_and_agrees_with_single_predicate() {
+        let tmp = tempfile::tempdir().unwrap();
+        for rel in ["planning", "core/planning", "side/planning"] {
+            let dir = tmp.path().join(rel);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("status.md"), sentinel_doc()).unwrap();
+        }
+
+        // "bastion" (core tier) and "amistad" (side tier) each carry a knowledge.md
+        // beside their state.json, as brain-scoped tier files would in the real corpus.
+        let bastion_dir = tmp.path().join("core/planning");
+        std::fs::write(
+            bastion_dir.join("knowledge.md"),
+            "- **Bastion stale claim.** Body.\n  \
+             source: log.md · date: 2026-06-01 · supersedes: — · freshness: 2026-06-01\n",
+        )
+        .unwrap();
+
+        let amistad_dir = tmp.path().join("side/planning");
+        std::fs::write(
+            amistad_dir.join("knowledge.md"),
+            "- **Amistad stale claim.** Body.\n  \
+             source: log.md · date: 2026-06-01 · supersedes: — · freshness: 2026-06-01\n",
+        )
+        .unwrap();
+
+        let hq = brain("hq", vec![], vec![]);
+        let core = brain("core", vec![], vec![]);
+        let side = brain("side", vec![], vec![]);
+
+        let src = |slug: &str, abs: PathBuf, kind: &'static str| StateSource {
+            repo_slug: slug.to_string(),
+            abs_path: abs,
+            expected_kind: kind,
+        };
+        let files = vec![
+            (
+                src("hq", tmp.path().join("planning/state.json"), "brain"),
+                hq,
+            ),
+            (
+                src("core", tmp.path().join("core/planning/state.json"), "brain"),
+                core,
+            ),
+            (
+                src("side", tmp.path().join("side/planning/state.json"), "brain"),
+                side,
+            ),
+        ];
+
+        let config = BrainConfig {
+            repos: vec![repo_entry("core", "core"), repo_entry("side", "side")],
+            ..Default::default()
+        };
+
+        let today = day("2026-08-01"); // 61d past the 2026-06-01 stamp, > 45d threshold
+
+        let plan = plan_attention_board(&files, &config, today);
+
+        let by_path = |needle: &str| -> String {
+            plan.actions
+                .iter()
+                .find(|a| a.path.to_string_lossy().contains(needle))
+                .unwrap_or_else(|| panic!("no action for {needle}"))
+                .new_content
+                .clone()
+        };
+
+        let hq_doc = by_path("/planning/status.md");
+        let core_doc = by_path("/core/planning/status.md");
+        let side_doc = by_path("/side/planning/status.md");
+
+        // HQ unions both.
+        assert!(hq_doc.contains("Bastion stale claim."));
+        assert!(hq_doc.contains("Amistad stale claim."));
+
+        // Core sees only its own.
+        assert!(core_doc.contains("Bastion stale claim."));
+        assert!(
+            !core_doc.contains("Amistad stale claim."),
+            "side entry leaked into core board: {core_doc}"
+        );
+
+        // Side sees only its own.
+        assert!(side_doc.contains("Amistad stale claim."));
+        assert!(
+            !side_doc.contains("Bastion stale claim."),
+            "core entry leaked into side board: {side_doc}"
+        );
+
+        // Single-predicate proof: the same entry the board renders also fires
+        // W_DISTILL_STALE via the shared distill_stale_age predicate.
+        use mev::brain::distill::{check_distill_staleness, parse_distilled};
+        let contents = std::fs::read_to_string(bastion_dir.join("knowledge.md")).unwrap();
+        let parsed = parse_distilled(&contents);
+        assert_eq!(parsed.len(), 1);
+        let diags = check_distill_staleness(&bastion_dir, today, &config.attention);
+        assert_eq!(diags.len(), 1, "warning must fire for the same entry");
+        assert_eq!(diags[0].locator, "W_DISTILL_STALE");
+    }
+
+    #[test]
+    fn plan_distilled_missing_file_is_silent_skip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("planning");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("status.md"), sentinel_doc()).unwrap();
+        // No knowledge.md / memory.md written at all.
+
+        let hq = brain("hq", vec![], vec![]);
+        let files = vec![(
+            StateSource {
+                repo_slug: "hq".to_string(),
+                abs_path: tmp.path().join("planning/state.json"),
+                expected_kind: "brain",
+            },
+            hq,
+        )];
+        let config = BrainConfig::default();
+
+        let plan = plan_attention_board(&files, &config, day("2026-08-01"));
+        assert!(
+            !plan
+                .diagnostics
+                .iter()
+                .any(|d| d.locator == "W_EMIT_NO_SENTINEL" && d.message.contains("knowledge")),
+            "missing knowledge/memory must not warn: {:?}",
+            plan.diagnostics
+        );
+        let hq_doc = &plan
+            .actions
+            .iter()
+            .find(|a| a.path.to_string_lossy().contains("/planning/status.md"))
+            .unwrap()
+            .new_content;
+        assert!(hq_doc.contains("## Stale distilled knowledge"));
+        assert!(
+            hq_doc
+                .split("## Stale distilled knowledge")
+                .nth(1)
+                .unwrap()
+                .trim_start()
+                .starts_with("_none_"),
+            "no distilled files -> empty lane: {hq_doc}"
         );
     }
 }

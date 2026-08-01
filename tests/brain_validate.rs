@@ -363,3 +363,103 @@ fn validate_brain_config_flip_changes_result() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// 6. validate_brain_state — W_DISTILL_STALE (Task 3)
+// ---------------------------------------------------------------------------
+
+/// Minimal `planning/state.json` (brain kind, root repo) so `discover_state_files` finds a
+/// planning dir at `root/planning/` — the sibling directory `knowledge.md`/`memory.md` live
+/// beside, per `check_distill_staleness`'s discovery contract.
+fn write_minimal_state_json(root: &Path) {
+    write_file(
+        root,
+        "planning/state.json",
+        r#"{
+  "repo": "brain",
+  "kind": "brain",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] }
+}
+"#,
+    );
+}
+
+#[test]
+fn validate_brain_state_fires_w_distill_stale_for_past_threshold_entry() {
+    let dir = temp_dir("distill-stale");
+    write_brain_toml(&dir);
+    write_minimal_state_json(&dir);
+
+    // knowledge.md's default threshold is 45 days — stamp far enough in the past that any
+    // reasonable "today" clears it.
+    write_file(
+        &dir,
+        "planning/knowledge.md",
+        "---\ntype: Reference\ntitle: Knowledge\ndescription: Distilled knowledge for the fixture.\n---\n\n\
+- **Some durable claim.** Elaboration text.\n  source: log.md · date: 2020-01-01 · supersedes: — · freshness: 2020-01-01\n",
+    );
+
+    let report = mev::validate_brain_state(&dir).expect("validate_brain_state should not error");
+
+    let distill_warnings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator == "W_DISTILL_STALE")
+        .collect();
+    assert_eq!(
+        distill_warnings.len(),
+        1,
+        "expected exactly one W_DISTILL_STALE warning, got: {:#?}",
+        report.diagnostics
+    );
+    assert_eq!(
+        format!("{}", distill_warnings[0].severity),
+        "warning",
+        "W_DISTILL_STALE must be warning severity, not error"
+    );
+
+    // Message names all three remedies.
+    let msg = &distill_warnings[0].message;
+    assert!(
+        msg.contains("re-affirm"),
+        "message missing 're-affirm': {msg}"
+    );
+    assert!(
+        msg.contains("supersede"),
+        "message missing 'supersede': {msg}"
+    );
+    assert!(msg.contains("archive"), "message missing 'archive': {msg}");
+
+    // Exit code is unchanged when only W_DISTILL_STALE fires — no errors present.
+    assert_eq!(
+        report.error_count(),
+        0,
+        "W_DISTILL_STALE must never flip the exit code; got errors: {:#?}",
+        report.diagnostics
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn validate_brain_state_missing_knowledge_and_memory_produces_no_distill_diagnostic() {
+    let dir = temp_dir("distill-missing-files");
+    write_brain_toml(&dir);
+    write_minimal_state_json(&dir);
+    // Deliberately no knowledge.md / memory.md written.
+
+    let report = mev::validate_brain_state(&dir).expect("validate_brain_state should not error");
+
+    let distill_diags: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator == "W_DISTILL_STALE")
+        .collect();
+    assert!(
+        distill_diags.is_empty(),
+        "expected no W_DISTILL_STALE diagnostics when knowledge.md/memory.md are absent, got: {distill_diags:#?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

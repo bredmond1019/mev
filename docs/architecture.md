@@ -6,7 +6,7 @@ doc_id: architecture
 layer: [factory]
 project: mev
 status: active
-keywords: [architecture, ContentValidator, Diagnostic, Report, modules, trait, mev]
+keywords: [architecture, ContentValidator, Diagnostic, Report, modules, trait, mev, distill]
 related: [cli-reference, brain-toml-config, okf-schema]
 ---
 
@@ -33,6 +33,7 @@ src/
     ├── sync.rs     ← (internal) sync helpers
     ├── graph.rs    ← EdgeKind, Edge, Node, Graph, GraphArtifact, EdgeResolution, resolve_edge (re-exported from okf-core, BA.15.12/D16), DocMeta; build_graph(), check_graph() — Phase 3 Block J (read_doc_metadata removed by D5 extract-once refactor in Block Q)
     ├── state.rs    ← serde schema, StateGraph, StateNode, StateEdge, StateSource, TierEntry, load_state(), build_state_graph() (re-exported from okf-core, BA.15.12/D15/D16); mev-local: discover_state_files(), check_schema(), check_state_graph(), check_rollup(), detect_cycles(), ready_order(), check_focus_drift(), derive_focus(), derive_rollup(), derive_cross_repo(), tier_scope_for(), derive_brain_focus(), check_epics(), derive_epic_focus(), derive_epic_edges() — Phase 3 Block P / P2 / T / MV.3B.U (v2: depends_on DAG, cycle detection, derived-blocked enforcement, backlog nodes, focus-drift warnings, single-source derivation helpers; MV.3B.U: tier-scoped non-destructive rollup + brain-focus union; epics: cross-repo initiative registry + membership integrity + derived cross-epic relationships)
+    ├── distill.rs  ← DistilledEntry, parse_distilled(), distill_stale_age(), check_distill_staleness() — D35-distilled `knowledge.md`/`memory.md` entry parsing + the single shared staleness predicate feeding both `validate-brain`'s `W_DISTILL_STALE` warning and the `emit-state` Attention board's "Stale distilled knowledge" lane (distill-freshness-lane)
     ├── emit.rs     ← EmitError, EmitAction, EmitPlan, markers (WAVE_TABLE, PROJECT_CACHE, TIER_ROLLUP, HQ_BOARD, UNIFIED_BOARD); wave_order(), render_wave_table(), global_status_map(), splice_generated(), plan_state_json(), plan_master_plan_tables(), plan_project_caches(), plan_tier_rollups(), render_hq_board(), plan_hq_board(), render_unified_board(), plan_unified_board(), apply_plan(), filter_plan_by_scope() — Phase 3 Block T (derived-view generation: wave tables, focus regen, brain rollup; MV.4.A: cross-repo depends_on resolution via global_status_map; MV.4.B: project-cache + tier-rollup splice; MV.4.C: HQ root Operating Board splice; MV.6.B: priority-ranked unified NOW/NEXT/BLOCKED/DUE-SOON board splice; ticket-emit-state-scope-and-lock: filter_plan_by_scope() narrows an already-built EmitPlan down to one repo's ScopeDependencySet targets, applied after planning so scoping cannot change which actions the unscoped planners themselves would compute)
     ├── lock.rs     ← LockError, LockGuard, acquire_lock(), DEFAULT_LOCK_TIMEOUT — advisory lockfile (`<root>/.mev-emit.lock`) guarding `emit-state --write` against concurrent writers; stale (dead-pid) lockfiles are reclaimed automatically (ticket-emit-state-scope-and-lock)
     ├── links.rs    ← LinkKind, LinkRef; extract_links(), check_links(), collect_doc_ids(), read_moves_pending(), check_moved_references() — Phase 3 Block K
@@ -56,8 +57,8 @@ tests/
 ├── brain_manifest.rs  ← integration tests for manifest_brain() end-to-end — Phase 3 Block Q
 ├── brain_okf.rs       ← integration tests for validate_md_file()
 ├── brain_state.rs     ← integration tests for validate_brain_state() end-to-end — Phase 3 Block P
+├── brain_validate.rs  ← integration tests for BrainValidator end-to-end, incl. check_distill_staleness()'s W_DISTILL_STALE wiring into validate_brain_state (distill-freshness-lane)
 ├── brain_structure.rs ← integration tests for validate_brain_structure() end-to-end — Phase 3 Block L
-├── brain_validate.rs  ← integration tests for BrainValidator end-to-end
 ├── doc_materialize.rs ← integration tests for plan_document() — Phase 9 Block MV.9.A
 ├── doc_index_reconcile.rs ← integration tests for plan_index_reconcile()
 ├── doc_opportunity.rs ← integration tests for the Opportunity command family
@@ -324,6 +325,45 @@ The state module discovers, loads, and validates all `planning/state.json` files
 #### Public library entry point
 
 `validate_brain_state(root: &Path) -> anyhow::Result<Report>` (in `src/lib.rs`) runs the full OKF schema pass followed by the multi-step state pipeline (discovery → load → schema → graph build + check → cycle detection → status consistency → backlog integrity → rollup → focus drift) and appends all state diagnostics to the same `Report`. Invoked by `mev validate-brain --state`.
+
+---
+
+### Distill module (`src/brain/distill.rs`) — distill-freshness-lane
+
+D35-distilled `knowledge.md` / `memory.md` entries are hand-authored Markdown, not a
+structured format:
+
+```text
+- **<claim / fact / convention / lesson>**
+  source: <path> · date: <ISO> · supersedes: <prior-entry | —> · freshness: <ISO>
+```
+
+(the `amistad` scope uses a `  - source:` variant instead of `  source:`). This module is the
+read side — a hand-rolled line scanner (mirroring `links::extract_links`'s convention: no
+`pulldown-cmark`/`comrak`/`regex` dependency) that recovers each entry's claim + dates, plus
+the single staleness predicate shared by `validate-brain`'s `W_DISTILL_STALE` warning and the
+`emit-state` Attention board's "Stale distilled knowledge" lane — so the board never shows an
+entry the warning didn't also fire on.
+
+#### Public functions
+
+| Function | Signature | Description |
+|---|---|---|
+| `parse_distilled` | `(&str) -> Vec<DistilledEntry>` | Hand-rolled line scanner over a `knowledge.md`/`memory.md` body. Accepts a line as an entry's provenance line when its trimmed form starts with `source:` or `- source:` AND contains `· freshness: `; fields are recovered by splitting on `·`. The claim is recovered by walking backwards to the nearest `- **` line (claims may wrap across multiple lines). Entries whose `freshness:` does not parse as an ISO date are skipped entirely — self-excluding the `freshness: <as-of>` template placeholder in D35's own prose. |
+| `distill_stale_age` | `(&DistilledEntry, chrono::NaiveDate, &AttentionThresholds, &str) -> Option<i64>` | `Some(age_days)` when the entry's anchor date (`max(date, freshness)`) is more than `stem`'s threshold (`"knowledge"` or `"memory"`, via `AttentionThresholds::distill_threshold`) days before `today`, else `None`. Strictly `>`, not `>=` (matches `state::carryover_stale_age`'s convention). An entry whose `freshness` did not parse can never age — no fallback anchor once absent (mirrors `state::backlog_stale_age`'s "no parseable date ⇒ never stale" rule). No snooze branch: entries have no stable id, and bumping `freshness:` already is the re-affirmation a snooze would otherwise provide. |
+| `check_distill_staleness` | `(&Path, chrono::NaiveDate, &AttentionThresholds) -> Vec<Diagnostic>` | `W_DISTILL_STALE` warnings for the `knowledge.md`/`memory.md` siblings of `planning_dir`, one per distilled entry whose `distill_stale_age` exceeds its file's threshold. A missing `knowledge.md` or `memory.md` is a silent skip, not a warning (`base-template/scaffold/planning/` legitimately has neither). Warning severity only — never flips the exit code. Wired into `validate_brain_state`. |
+
+#### Types
+
+| Type | Description |
+|---|---|
+| `DistilledEntry` | One parsed entry: `claim: String`, `date: Option<NaiveDate>` (authored `date:`), `freshness: Option<NaiveDate>` (authored `freshness:`), `line: usize` (1-indexed `source:` line, for diagnostics). |
+
+#### Diagnostic locators emitted by the distill module
+
+| Locator | Severity | Condition |
+|---|---|---|
+| `W_DISTILL_STALE` | Warning | A D35-distilled `knowledge.md`/`memory.md` entry's `distill_stale_age` exceeds its file's `[attention]` threshold (`knowledge_days` default 45, `memory_days` default 30 — see `AttentionThresholds` in `config.rs`); exit code is unchanged. |
 
 ---
 

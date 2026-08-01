@@ -7313,6 +7313,11 @@ mod tests {
     // effective_priorities (MV.7.A) — reverse-topo min-propagation
     // -----------------------------------------------------------------------
 
+    /// One test-fixture block: `(id, priority, depends_on)`, where each dep is
+    /// a `(repo, id)` pair. Named to defuse clippy's `type_complexity` lint on
+    /// the nested slice-of-tuples signature used by [`priority_pair`].
+    type PriorityBlockSpec<'a> = (&'a str, Option<u8>, &'a [(&'a str, &'a str)]);
+
     /// Build a leaf `(StateSource, StateFile)` with one track of blocks, each
     /// `(id, priority)`, and `depends_on` edges declared inline as
     /// `{type:"block", repo, id}` entries so [`build_state_graph`] can derive
@@ -7320,7 +7325,7 @@ mod tests {
     fn priority_pair(
         dir: &std::path::Path,
         repo: &str,
-        blocks: &[(&str, Option<u8>, &[(&str, &str)])],
+        blocks: &[PriorityBlockSpec],
     ) -> (StateSource, StateFile) {
         let block_json: Vec<String> = blocks
             .iter()

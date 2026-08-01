@@ -366,6 +366,7 @@ pub fn validate_brain_structure(root: &std::path::Path) -> anyhow::Result<Report
 /// doc for the `E_CONFIG_NOT_FOUND` fallback behaviour.
 pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     use brain::config::find_brain_config;
+    use brain::distill::check_distill_staleness;
     use brain::state::{
         StateLoadError, build_state_graph, check_backlog_integrity, check_backlog_staleness,
         check_carryover_staleness, check_epics, check_field_policy, check_focus_drift,
@@ -483,6 +484,23 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
         report
             .diagnostics
             .extend(check_backlog_staleness(src, file, today, &config.attention));
+    }
+
+    // 11. Distilled-knowledge staleness warnings — knowledge.md / memory.md siblings of
+    //     each discovered planning/state.json, deduplicated by planning dir (multiple
+    //     state.json discoveries can share the same directory). WARNING severity only.
+    let mut checked_dirs: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+    for (src, _file) in &loaded {
+        if let Some(planning_dir) = src.abs_path.parent()
+            && checked_dirs.insert(planning_dir.to_path_buf())
+        {
+            report.diagnostics.extend(check_distill_staleness(
+                planning_dir,
+                today,
+                &config.attention,
+            ));
+        }
     }
 
     Ok(report)

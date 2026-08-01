@@ -90,6 +90,13 @@ pub struct AttentionThresholds {
     /// `backlog[]` `idea`/`ready` nodes (default 7).
     #[serde(default = "default_backlog_days")]
     pub backlog_days: i64,
+    /// D35-distilled `knowledge.md` entries — durable conventions (default 45).
+    #[serde(default = "default_knowledge_days")]
+    pub knowledge_days: i64,
+    /// D35-distilled `memory.md` entries — episodic scar tissue, ages faster
+    /// than `knowledge.md` (default 30).
+    #[serde(default = "default_memory_days")]
+    pub memory_days: i64,
 }
 
 fn default_env_days() -> i64 {
@@ -107,6 +114,12 @@ fn default_constraint_days() -> i64 {
 fn default_backlog_days() -> i64 {
     7
 }
+fn default_knowledge_days() -> i64 {
+    45
+}
+fn default_memory_days() -> i64 {
+    30
+}
 
 impl Default for AttentionThresholds {
     fn default() -> Self {
@@ -116,6 +129,8 @@ impl Default for AttentionThresholds {
             known_issue_days: default_known_issue_days(),
             constraint_days: default_constraint_days(),
             backlog_days: default_backlog_days(),
+            knowledge_days: default_knowledge_days(),
+            memory_days: default_memory_days(),
         }
     }
 }
@@ -135,6 +150,19 @@ impl AttentionThresholds {
                 .max(self.constraint_days)
                 .max(self.deferred_days)
                 .max(self.env_days),
+        }
+    }
+
+    /// The staleness threshold (in days) for a D35-distilled entry from a
+    /// file whose stem is `stem` (`"knowledge"` or `"memory"`). An
+    /// unrecognised stem falls back to the longer of the two, mirroring
+    /// [`Self::carryover_threshold`]'s "novel kinds surface, but not
+    /// eagerly" fallback.
+    pub fn distill_threshold(&self, stem: &str) -> i64 {
+        match stem {
+            "knowledge" => self.knowledge_days,
+            "memory" => self.memory_days,
+            _ => self.knowledge_days.max(self.memory_days),
         }
     }
 }
@@ -500,10 +528,16 @@ mod tests {
         assert_eq!(cfg.attention.known_issue_days, 10);
         assert_eq!(cfg.attention.constraint_days, 10);
         assert_eq!(cfg.attention.backlog_days, 7);
+        assert_eq!(cfg.attention.knowledge_days, 45);
+        assert_eq!(cfg.attention.memory_days, 30);
         // Per-kind lookup + unknown-kind fallback (most conservative).
         assert_eq!(cfg.attention.carryover_threshold("env"), 3);
         assert_eq!(cfg.attention.carryover_threshold("deferred"), 5);
         assert_eq!(cfg.attention.carryover_threshold("mystery"), 10);
+        // Per-stem lookup + unknown-stem fallback (the longer of the two).
+        assert_eq!(cfg.attention.distill_threshold("knowledge"), 45);
+        assert_eq!(cfg.attention.distill_threshold("memory"), 30);
+        assert_eq!(cfg.attention.distill_threshold("mystery"), 45);
     }
 
     #[test]
@@ -516,6 +550,27 @@ deferred_days = 2
         assert_eq!(cfg.attention.deferred_days, 2);
         assert_eq!(cfg.attention.env_days, 3, "unset field keeps its default");
         assert_eq!(cfg.attention.backlog_days, 7);
+        assert_eq!(cfg.attention.knowledge_days, 45);
+        assert_eq!(cfg.attention.memory_days, 30);
+    }
+
+    #[test]
+    fn distill_threshold_partial_override_keeps_other_default() {
+        let toml = r#"
+[attention]
+knowledge_days = 20
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.attention.knowledge_days, 20);
+        assert_eq!(
+            cfg.attention.memory_days, 30,
+            "unset memory_days keeps its default"
+        );
+        assert_eq!(cfg.attention.distill_threshold("knowledge"), 20);
+        assert_eq!(cfg.attention.distill_threshold("memory"), 30);
+        // Unknown stem falls back to the longer of the two (now 30, since
+        // knowledge_days was overridden below memory_days).
+        assert_eq!(cfg.attention.distill_threshold("mystery"), 30);
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
