@@ -9,6 +9,10 @@
 //!
 //! # Diagnostic locator codes (Phase 3 Block K)
 //! - `E_LINK_DEAD_MARKDOWN` — a relative markdown `[text](path)` resolves to no file on disk.
+//! - `W_LINK_DEAD_EPHEMERAL` — a relative markdown `[text](path)` resolves to no file on disk,
+//!   but the target filename is a known ephemeral pattern (`handoff.md`, `tasks.md`, ...) that
+//!   is excluded from the corpus by design — see `crawl::is_ephemeral`. Downgraded from
+//!   `E_LINK_DEAD_MARKDOWN` since this is expected, not drift.
 //! - `E_LINK_DEAD_FILE_URI` — a `file://` URI resolves to no file on disk.
 //! - `E_LINK_DANGLING_WIKILINK` — a `[[wikilink]]` slug is not a known `doc_id`.
 //! - `E_LINK_MOVED_REFERENCE` — a reference still points at a path listed in `.brain-moves-pending`.
@@ -26,7 +30,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::Diagnostic;
-use crate::brain::crawl::Corpus;
+use crate::brain::crawl::{Corpus, is_ephemeral};
 
 // ---------------------------------------------------------------------------
 // Link model (D4 serializable)
@@ -333,15 +337,28 @@ pub fn check_links(corpus: &Corpus, _root: &Path, doc_ids: &HashSet<String>) -> 
                     let base = entry.path.parent().unwrap_or_else(|| Path::new("."));
                     let resolved = base.join(&link.target);
                     if !resolved.exists() {
-                        diags.push(Diagnostic::error(
-                            &entry.rel,
-                            "E_LINK_DEAD_MARKDOWN",
-                            format!(
-                                "dead markdown link: '{}' does not exist (resolved: '{}')",
-                                link.raw,
-                                resolved.display()
-                            ),
-                        ));
+                        let file_name = resolved.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        if is_ephemeral(file_name) {
+                            diags.push(Diagnostic::warning(
+                                &entry.rel,
+                                "W_LINK_DEAD_EPHEMERAL",
+                                format!(
+                                    "dead markdown link: '{}' does not exist (resolved: '{}') — target is an ephemeral file (e.g. tasks.md/handoff.md) excluded from the corpus by design",
+                                    link.raw,
+                                    resolved.display()
+                                ),
+                            ));
+                        } else {
+                            diags.push(Diagnostic::error(
+                                &entry.rel,
+                                "E_LINK_DEAD_MARKDOWN",
+                                format!(
+                                    "dead markdown link: '{}' does not exist (resolved: '{}')",
+                                    link.raw,
+                                    resolved.display()
+                                ),
+                            ));
+                        }
                     }
                 }
                 LinkKind::FileUri => {
@@ -697,6 +714,33 @@ mod tests {
         assert_eq!(diags.len(), 1, "expected 1 diagnostic, got: {diags:?}");
         assert_eq!(diags[0].locator, "E_LINK_DEAD_MARKDOWN");
         assert!(diags[0].message.contains("gone.md"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- dead relative markdown link to an ephemeral filename is downgraded to a warning ---
+
+    #[test]
+    fn dead_markdown_link_to_ephemeral_file_is_downgraded() {
+        let dir = crate::testsupport::unique_temp_dir("mev-links-dead-md-ephemeral");
+        std::fs::create_dir_all(dir.join("planning")).unwrap();
+
+        let entry = write_corpus_entry(
+            &dir,
+            "planning/index.md",
+            "Active session handoff: [handoff](handoff.md)",
+        );
+        let corpus = Corpus {
+            entries: vec![entry],
+            ephemeral_ids: Default::default(),
+        };
+        let doc_ids = HashSet::new();
+        let diags = check_links(&corpus, &dir, &doc_ids);
+
+        assert_eq!(diags.len(), 1, "expected 1 diagnostic, got: {diags:?}");
+        assert_eq!(diags[0].locator, "W_LINK_DEAD_EPHEMERAL");
+        assert_eq!(diags[0].severity, crate::Severity::Warning);
+        assert!(diags[0].message.contains("handoff.md"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
