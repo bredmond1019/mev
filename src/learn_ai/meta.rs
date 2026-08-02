@@ -487,8 +487,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp_dir(suffix: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("mev-meta-{suffix}"));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir(&format!("mev-meta-{suffix}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

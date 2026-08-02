@@ -22,8 +22,7 @@ use mev::{FileKind, Locale, Severity, validate_file};
 
 /// Create a fresh temp dir with a unique per-test suffix.
 fn temp_dir(suffix: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("mev-meta-integ-{suffix}"));
-    let _ = fs::remove_dir_all(&dir);
+    let dir = mev::testsupport::unique_temp_dir(&format!("mev-meta-integ-{suffix}"));
     fs::create_dir_all(&dir).unwrap();
     dir
 }

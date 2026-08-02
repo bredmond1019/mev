@@ -290,8 +290,7 @@ mod tests {
     // --- Helpers ---
 
     fn temp_dir(suffix: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("mev-okf-{suffix}"));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir(&format!("mev-okf-{suffix}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

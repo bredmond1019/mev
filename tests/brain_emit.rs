@@ -2219,8 +2219,7 @@ mod task4_emit_state {
     // -----------------------------------------------------------------------
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("mev-emit-state-{tag}"));
-        let _ = fs::remove_dir_all(&d);
+        let d = mev::testsupport::unique_temp_dir(&format!("mev-emit-state-{tag}"));
         fs::create_dir_all(&d).unwrap();
         d
     }
@@ -2565,8 +2564,7 @@ mod incomplete_corpus_guard {
     use std::path::Path;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("mev-incomplete-corpus-guard-{tag}"));
-        let _ = fs::remove_dir_all(&d);
+        let d = mev::testsupport::unique_temp_dir(&format!("mev-incomplete-corpus-guard-{tag}"));
         fs::create_dir_all(&d).unwrap();
         d
     }
@@ -2922,8 +2920,7 @@ mod task4_tier_scoping_integration {
     use std::path::Path;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("mev-tier-scoping-{tag}"));
-        let _ = fs::remove_dir_all(&d);
+        let d = mev::testsupport::unique_temp_dir(&format!("mev-tier-scoping-{tag}"));
         fs::create_dir_all(&d).unwrap();
         d
     }
@@ -3514,8 +3511,7 @@ mod mv4e_ripple {
     use std::path::Path;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("mev-mv4e-ripple-{tag}"));
-        let _ = fs::remove_dir_all(&d);
+        let d = mev::testsupport::unique_temp_dir(&format!("mev-mv4e-ripple-{tag}"));
         fs::create_dir_all(&d).unwrap();
         d
     }
@@ -5469,8 +5465,7 @@ mod task3_cli_worktree_guard {
     use std::process::Command;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("mev-emit-state-cli-guard-{tag}"));
-        let _ = fs::remove_dir_all(&d);
+        let d = mev::testsupport::unique_temp_dir(&format!("mev-emit-state-cli-guard-{tag}"));
         fs::create_dir_all(&d).unwrap();
         d
     }
@@ -5899,8 +5894,7 @@ mod task4_unified_board_integration {
     use std::path::Path;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("mev-unified-board-{tag}"));
-        let _ = fs::remove_dir_all(&d);
+        let d = mev::testsupport::unique_temp_dir(&format!("mev-unified-board-{tag}"));
         fs::create_dir_all(&d).unwrap();
         d
     }
@@ -6348,8 +6342,7 @@ mod same_file_batching_regression {
     use std::path::Path;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("mev-same-file-batching-{tag}"));
-        let _ = fs::remove_dir_all(&d);
+        let d = mev::testsupport::unique_temp_dir(&format!("mev-same-file-batching-{tag}"));
         fs::create_dir_all(&d).unwrap();
         d
     }
@@ -6522,8 +6515,7 @@ mod task_dual_role_focus_drift_integration {
     use std::path::Path;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("mev-dual-role-drift-{tag}"));
-        let _ = fs::remove_dir_all(&d);
+        let d = mev::testsupport::unique_temp_dir(&format!("mev-dual-role-drift-{tag}"));
         fs::create_dir_all(&d).unwrap();
         d
     }
@@ -6706,8 +6698,7 @@ mod task_state_load_error_surfacing {
     use std::path::Path;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("mev-state-load-error-{tag}"));
-        let _ = fs::remove_dir_all(&d);
+        let d = mev::testsupport::unique_temp_dir(&format!("mev-state-load-error-{tag}"));
         fs::create_dir_all(&d).unwrap();
         d
     }

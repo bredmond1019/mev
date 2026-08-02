@@ -23,8 +23,7 @@ use mev::brain::lock::acquire_lock;
 const LOCK_FILE_NAME: &str = ".mev-emit.lock";
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("mev-epic-lock-cli-{tag}"));
-    let _ = fs::remove_dir_all(&d);
+    let d = mev::testsupport::unique_temp_dir(&format!("mev-epic-lock-cli-{tag}"));
     fs::create_dir_all(&d).unwrap();
     d
 }
