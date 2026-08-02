@@ -679,8 +679,7 @@ mod tests {
 
     #[test]
     fn dead_markdown_link_is_flagged() {
-        let dir = std::env::temp_dir().join("mev-links-dead-md");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-dead-md");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         let entry = write_corpus_entry(
@@ -705,8 +704,7 @@ mod tests {
 
     #[test]
     fn live_markdown_link_passes() {
-        let dir = std::env::temp_dir().join("mev-links-live-md");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-live-md");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
         std::fs::create_dir_all(dir.join("planning")).unwrap();
         std::fs::write(dir.join("planning/status.md"), b"").unwrap();
@@ -731,8 +729,7 @@ mod tests {
 
     #[test]
     fn dead_file_uri_is_flagged() {
-        let dir = std::env::temp_dir().join("mev-links-dead-file-uri");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-dead-file-uri");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         // We reference an absolute path that definitely does not exist.
@@ -757,8 +754,7 @@ mod tests {
 
     #[test]
     fn live_file_uri_passes() {
-        let dir = std::env::temp_dir().join("mev-links-live-file-uri");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-live-file-uri");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         // Create the file first, then reference it.
@@ -785,8 +781,7 @@ mod tests {
 
     #[test]
     fn dangling_wikilink_is_flagged() {
-        let dir = std::env::temp_dir().join("mev-links-dangling-wiki");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-dangling-wiki");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         let entry = write_corpus_entry(&dir, "docs/page.md", "See [[unknown-slug]] here.");
@@ -808,8 +803,7 @@ mod tests {
 
     #[test]
     fn known_wikilink_passes() {
-        let dir = std::env::temp_dir().join("mev-links-known-wiki");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-known-wiki");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         let entry = write_corpus_entry(&dir, "docs/page.md", "See [[my-doc]] here.");
@@ -828,8 +822,7 @@ mod tests {
 
     #[test]
     fn external_and_anchor_links_never_flagged() {
-        let dir = std::env::temp_dir().join("mev-links-ext-anchor");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-ext-anchor");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         let content = concat!(
@@ -857,8 +850,7 @@ mod tests {
 
     #[test]
     fn collect_doc_ids_returns_authored_ids() {
-        let dir = std::env::temp_dir().join("mev-links-collect-ids");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-collect-ids");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         let content_a =
@@ -919,8 +911,7 @@ mod tests {
 
     #[test]
     fn moved_reference_is_flagged() {
-        let dir = std::env::temp_dir().join("mev-links-moved-ref");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-moved-ref");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         // Create a moved/deleted file reference in a doc (the target does NOT need to
@@ -957,8 +948,7 @@ mod tests {
 
     #[test]
     fn no_moves_pending_file_produces_no_diagnostics() {
-        let dir = std::env::temp_dir().join("mev-links-no-pending");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-no-pending");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         let entry = write_corpus_entry(
@@ -987,8 +977,7 @@ mod tests {
 
     #[test]
     fn moved_path_with_no_references_produces_no_diagnostics() {
-        let dir = std::env::temp_dir().join("mev-links-no-refs");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-no-refs");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         // Doc links to a DIFFERENT path, not the moved one.
@@ -1019,8 +1008,7 @@ mod tests {
 
     #[test]
     fn multiple_paths_on_one_line_are_collected() {
-        let dir = std::env::temp_dir().join("mev-links-multi-path");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-multi-path");
         std::fs::create_dir_all(&dir).unwrap();
 
         std::fs::write(
@@ -1042,8 +1030,7 @@ mod tests {
 
     #[test]
     fn moved_file_uri_reference_is_flagged() {
-        let dir = std::env::temp_dir().join("mev-links-moved-file-uri");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-moved-file-uri");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         // Construct an absolute file URI pointing at the moved path.

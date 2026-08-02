@@ -329,8 +329,7 @@ mod tests {
 
     #[test]
     fn in_sync_repo_produces_no_diagnostics() {
-        let dir = std::env::temp_dir().join("mev-sync-test-in-sync");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-sync-test-in-sync");
         std::fs::create_dir_all(&dir).unwrap();
 
         let ts = "2026-06-27T00:00:00Z";
@@ -350,8 +349,7 @@ mod tests {
 
     #[test]
     fn drifted_repo_produces_e_sync_drift() {
-        let dir = std::env::temp_dir().join("mev-sync-test-drift");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-sync-test-drift");
         std::fs::create_dir_all(&dir).unwrap();
 
         std::fs::write(
@@ -384,8 +382,7 @@ mod tests {
 
     #[test]
     fn missing_timestamp_produces_e_sync_watermark_missing() {
-        let dir = std::env::temp_dir().join("mev-sync-test-missing-ts");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-sync-test-missing-ts");
         std::fs::create_dir_all(&dir).unwrap();
 
         // status.md has no timestamp field
@@ -419,8 +416,7 @@ mod tests {
 
     #[test]
     fn date_only_watermark_produces_e_sync_watermark_malformed() {
-        let dir = std::env::temp_dir().join("mev-sync-test-malformed");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-sync-test-malformed");
         std::fs::create_dir_all(&dir).unwrap();
 
         // timestamp is date-only (not RFC3339)
@@ -454,8 +450,7 @@ mod tests {
 
     #[test]
     fn missing_status_file_produces_e_sync_file_missing() {
-        let dir = std::env::temp_dir().join("mev-sync-test-file-missing");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-sync-test-file-missing");
         std::fs::create_dir_all(&dir).unwrap();
 
         // Only create the cache doc; no status.md
@@ -484,8 +479,7 @@ mod tests {
 
     #[test]
     fn missing_cache_doc_produces_e_sync_file_missing() {
-        let dir = std::env::temp_dir().join("mev-sync-test-cache-missing");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-sync-test-cache-missing");
         std::fs::create_dir_all(&dir).unwrap();
 
         // Only create the status file; no cache.md
@@ -514,8 +508,7 @@ mod tests {
 
     #[test]
     fn re_aligning_cache_clears_drift_error() {
-        let dir = std::env::temp_dir().join("mev-sync-test-realign");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-sync-test-realign");
         std::fs::create_dir_all(&dir).unwrap();
 
         let ts = "2026-06-28T00:00:00Z";
@@ -548,8 +541,7 @@ mod tests {
 
     #[test]
     fn missing_synced_from_produces_e_sync_watermark_missing() {
-        let dir = std::env::temp_dir().join("mev-sync-test-missing-sf");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-sync-test-missing-sf");
         std::fs::create_dir_all(&dir).unwrap();
 
         std::fs::write(
@@ -587,8 +579,7 @@ mod tests {
 
     #[test]
     fn same_instant_across_offsets_produces_no_e_sync_drift() {
-        let dir = std::env::temp_dir().join("mev-sync-test-same-instant-cross-offset");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-sync-test-same-instant-cross-offset");
         std::fs::create_dir_all(&dir).unwrap();
 
         // 2026-06-27T00:00:00Z and 2026-06-26T21:00:00-03:00 denote the same instant.
@@ -616,8 +607,7 @@ mod tests {
 
     #[test]
     fn different_instant_across_offsets_produces_e_sync_drift() {
-        let dir = std::env::temp_dir().join("mev-sync-test-diff-instant-cross-offset");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-sync-test-diff-instant-cross-offset");
         std::fs::create_dir_all(&dir).unwrap();
 
         // 2026-06-27T00:00:00Z and 2026-06-27T00:00:00-03:00 denote different instants

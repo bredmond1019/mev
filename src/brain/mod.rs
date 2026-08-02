@@ -93,8 +93,7 @@ mod tests {
 
     #[test]
     fn brain_validator_crawl_empty_dir_returns_no_items() {
-        let dir = std::env::temp_dir().join("mev-brain-validator-crawl-test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-brain-validator-crawl-test");
         std::fs::create_dir_all(&dir).unwrap();
 
         let v = BrainValidator::new(BrainConfig::default());
@@ -113,8 +112,7 @@ mod tests {
 
     #[test]
     fn brain_validator_run_on_empty_dir_returns_empty_report() {
-        let dir = std::env::temp_dir().join("mev-brain-validator-run-test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-brain-validator-run-test");
         std::fs::create_dir_all(&dir).unwrap();
 
         let report = BrainValidator::new(BrainConfig::default()).run(&dir);
@@ -129,8 +127,7 @@ mod tests {
 
     #[test]
     fn brain_validator_skip_dirs_from_config_are_used() {
-        let dir = std::env::temp_dir().join("mev-brain-validator-skip-dirs-test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-brain-validator-skip-dirs-test");
         // Create planning/ with a file that should survive, and a skip_dir that should be pruned.
         std::fs::create_dir_all(dir.join("planning")).unwrap();
         let skip_dir = dir.join("my-skip-dir");

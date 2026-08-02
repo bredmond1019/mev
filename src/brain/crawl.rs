@@ -698,8 +698,7 @@ mod tests {
 
     #[test]
     fn corpus_entry_with_frontmatter_carries_metadata() {
-        let dir = std::env::temp_dir().join("mev-corpus-metadata-test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-corpus-metadata-test");
         std::fs::create_dir_all(dir.join("planning")).unwrap();
         // Write a file with valid OKF frontmatter.
         std::fs::write(
@@ -784,8 +783,7 @@ mod tests {
 
     #[test]
     fn corpus_includes_planning_and_docs_and_root_files() {
-        let dir = std::env::temp_dir().join("mev-corpus-basic");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-corpus-basic");
         std::fs::create_dir_all(dir.join("planning")).unwrap();
         std::fs::create_dir_all(dir.join("docs")).unwrap();
         std::fs::write(dir.join("README.md"), b"").unwrap();
@@ -816,8 +814,7 @@ mod tests {
 
     #[test]
     fn corpus_excludes_src_and_stray_root_md() {
-        let dir = std::env::temp_dir().join("mev-corpus-excludes");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-corpus-excludes");
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::create_dir_all(dir.join("planning")).unwrap();
         std::fs::write(dir.join("src/lib.md"), b"").unwrap();
@@ -841,8 +838,7 @@ mod tests {
 
     #[test]
     fn corpus_excludes_ephemeral_files() {
-        let dir = std::env::temp_dir().join("mev-corpus-ephemeral");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-corpus-ephemeral");
         std::fs::create_dir_all(dir.join("planning")).unwrap();
         std::fs::write(dir.join("planning/handoff.md"), b"").unwrap();
         std::fs::write(dir.join("planning/_draft.md"), b"").unwrap();
@@ -862,8 +858,7 @@ mod tests {
 
     #[test]
     fn corpus_entries_carry_scope() {
-        let dir = std::env::temp_dir().join("mev-corpus-scope");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-corpus-scope");
         std::fs::create_dir_all(dir.join("planning")).unwrap();
         std::fs::write(dir.join("planning/status.md"), b"").unwrap();
         std::fs::write(dir.join("README.md"), b"").unwrap();
@@ -885,8 +880,7 @@ mod tests {
 
     #[test]
     fn corpus_prunes_skip_dirs() {
-        let dir = std::env::temp_dir().join("mev-corpus-skip-dirs");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-corpus-skip-dirs");
         std::fs::create_dir_all(dir.join("planning")).unwrap();
         std::fs::create_dir_all(dir.join("trees/some-worktree/planning")).unwrap();
         std::fs::write(dir.join("planning/status.md"), b"").unwrap();
@@ -958,8 +952,7 @@ mod tests {
         // Pre-migration state: the sub-repo's planning/ is still a real directory. It is
         // reachable from BOTH the brain-root walk (pass 1) and the per-root walk (pass 2);
         // dedup must keep exactly one entry, scoped to the sub-repo slug.
-        let dir = std::env::temp_dir().join("mev-corpus-subrepo-real");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-corpus-subrepo-real");
         std::fs::create_dir_all(dir.join("sub/planning")).unwrap();
         std::fs::write(dir.join("sub/planning/status.md"), b"").unwrap();
 
@@ -993,8 +986,7 @@ mod tests {
         // `sub/planning` is a symlink into it. The brain-root walk (pass 1) will NOT follow
         // the interior symlink and prunes the vault by name, so only the per-root walk
         // (pass 2) recovers the file — under the sub-repo slug and at the symlinked rel.
-        let dir = std::env::temp_dir().join("mev-corpus-subrepo-symlink");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-corpus-subrepo-symlink");
         std::fs::create_dir_all(dir.join("_planning/sub")).unwrap();
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("_planning/sub/status.md"), b"").unwrap();
@@ -1036,8 +1028,7 @@ mod tests {
 
     #[test]
     fn has_nested_git_true_when_git_present() {
-        let dir = std::env::temp_dir().join("mev-brain-nested-git-test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-brain-nested-git-test");
         std::fs::create_dir_all(&dir).unwrap();
         // Create a .git marker inside the directory.
         std::fs::create_dir_all(dir.join(".git")).unwrap();
@@ -1049,8 +1040,7 @@ mod tests {
 
     #[test]
     fn has_nested_git_false_when_no_git() {
-        let dir = std::env::temp_dir().join("mev-brain-no-git-test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-brain-no-git-test");
         std::fs::create_dir_all(&dir).unwrap();
 
         assert!(!has_nested_git(&dir));
