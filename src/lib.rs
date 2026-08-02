@@ -9,6 +9,7 @@ pub mod brain;
 pub mod doc;
 mod learn_ai;
 mod shared;
+pub mod testsupport;
 pub mod theme;
 mod validator;
 pub use brain::BrainValidator;
