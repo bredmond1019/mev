@@ -8,12 +8,58 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-01T00:00:00Z"
+timestamp: "2026-08-02T09:15:06Z"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## [run: 2026-08-02]
+
+### `MV.chore.unique-temp-dirs-in-tests` — shipped, after the spec's own inventory proved wrong
+
+- **What:** Closed the last open block in mev. `/sdlc-task` ran the chore end to end from the main
+  session (5/5 tasks PASS, full `sdlc/sdlc-task-state.json` trail) and did exactly what the spec
+  asked: added `src/testsupport.rs::unique_temp_dir` — `pub` + `#[doc(hidden)]`, because `tests/`
+  compiles as a separate integration-test target that cannot link a `#[cfg(test)]` helper — built
+  from pid + nanos + a process-local `AtomicU64`, the counter carrying within-process uniqueness
+  (macOS `SystemTime` is only microsecond-resolution) and the differing pid closing the
+  cross-process hazard; then converted the 43 inventoried sites and deleted their destructive
+  `remove_dir_all` preambles.
+
+  **The engine passed and the hazard survived.** The spec's inventory came from a grep for
+  `temp_dir().join("<literal>")`, and that pattern turned out to be the *minority* of the risk:
+  23 files route their temp dirs through a shared local helper that builds a fixed name via
+  `format!` (`tests/brain_emit.rs` alone has 9) or takes the name as a variable
+  (`src/brain/structure.rs`'s `join(name)`) — invisible to that grep, and each still carrying the
+  destructive preamble. Running the actual failure mode proved it: two concurrent copies of the lib
+  test binary failed **2 of 3 iterations**, in `brain::okf` and `brain::structure` — neither file
+  even appearing in the spec's file list. Converted the 31 remaining sites (`7768bb0`), deleting the
+  preamble at each and keeping trailing cleanup; checked first that no test calls its helper twice
+  with the same name expecting a shared directory (none does, so converting each helper body is
+  safe). `src/brain/lock.rs`'s test helper had independently open-coded the same pid+counter logic
+  and now calls the shared helper, dropping its local `COUNTER`/`AtomicU64`.
+
+  Verification: all four gates green (fmt, clippy `-D warnings`, `cargo test` 895 passing / 0 failed
+  against a 893 baseline, release build), and the hazard reproduced-then-refuted directly —
+  5 rounds of concurrent lib-binary pairs plus 6 concurrent integration-binary pairs, **0 failures
+  in 22 runs**, against roughly 2-in-3 before.
+
+- **Why:** The chore existed because 43 test sites wiped a fixed-name temp dir before use, so two
+  concurrent test runs of this repo (two terminals, two agent sessions — routine here) destroy each
+  other's fixtures. It was a *latent* hazard with no recorded instance of firing, which is why it sat
+  queued behind roadmap work. The broader lesson is the one worth keeping: `/sdlc-task` validates
+  each task against its own acceptance criteria, not against the spec's stated purpose, so a spec
+  built on a faulty inventory returns a clean PASS while its goal remains unmet. Recorded as the
+  `sdlc-spec-acceptance-vs-purpose-gap` carryover, with the operational rule — re-derive any
+  grep-scoped inventory by a second independent method, and where a spec names a concrete failure
+  mode, reproduce that failure mode directly before and after.
+
+- **Refs:** `planning/chore-unique-temp-dirs-in-tests/tasks.md`; commits `580b4cc`, `a1a39e2`,
+  `f61efce` (engine), `7768bb0` (completion fix).
 
 ---
 
