@@ -10,8 +10,7 @@ use mev::{Diagnostic, Severity};
 
 #[test]
 fn empty_tree_produces_clean_report() {
-    let dir = std::env::temp_dir().join("mev-smoke-empty");
-    let _ = fs::remove_dir_all(&dir);
+    let dir = mev::testsupport::unique_temp_dir("mev-smoke-empty");
     fs::create_dir_all(&dir).unwrap();
 
     let report = mev::validate(&dir).unwrap();
@@ -39,8 +38,7 @@ fn diagnostic_severity_drives_failure() {
 /// struct-level error through `validate()`, confirming `validate_file` is wired in.
 #[test]
 fn validate_surfaces_struct_errors_for_invalid_module_json() {
-    let dir = std::env::temp_dir().join("mev-smoke-invalid-json");
-    let _ = fs::remove_dir_all(&dir);
+    let dir = mev::testsupport::unique_temp_dir("mev-smoke-invalid-json");
 
     // Build a minimal tree: valid filename, invalid JSON content.
     let module_dir = dir.join("paths/intro/modules");
@@ -70,8 +68,7 @@ fn validate_surfaces_struct_errors_for_invalid_module_json() {
 /// `validate()`, confirming the wiring does not introduce spurious diagnostics.
 #[test]
 fn validate_good_tree_has_no_errors() {
-    let dir = std::env::temp_dir().join("mev-smoke-good-tree");
-    let _ = fs::remove_dir_all(&dir);
+    let dir = mev::testsupport::unique_temp_dir("mev-smoke-good-tree");
 
     // Path metadata.json
     let path_dir = dir.join("paths/intro");

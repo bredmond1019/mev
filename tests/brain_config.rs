@@ -184,8 +184,7 @@ fn find_brain_config_returns_err_when_no_brain_toml() {
     // Create a temporary directory with no brain.toml in any ancestor up to the FS root.
     // We use a path that is guaranteed not to have a brain.toml ancestor: /tmp itself.
     // However, to be robust, we check that the error variant is NotFound.
-    let tmp = std::env::temp_dir().join("mev-find-brain-config-no-toml-test");
-    let _ = std::fs::remove_dir_all(&tmp);
+    let tmp = mev::testsupport::unique_temp_dir("mev-find-brain-config-no-toml-test");
     std::fs::create_dir_all(&tmp).expect("could not create temp dir");
 
     // Only treat as the expected error if tmp's ancestors don't contain brain.toml.
@@ -273,8 +272,7 @@ fn find_brain_root_canonicalizes_relative_input() {
 
 #[test]
 fn find_brain_root_returns_err_when_no_brain_toml() {
-    let tmp = std::env::temp_dir().join("mev-find-brain-root-no-toml");
-    let _ = std::fs::remove_dir_all(&tmp);
+    let tmp = mev::testsupport::unique_temp_dir("mev-find-brain-root-no-toml");
     std::fs::create_dir_all(&tmp).expect("could not create temp dir");
 
     let result = find_brain_root(&tmp);
