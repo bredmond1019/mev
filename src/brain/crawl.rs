@@ -74,6 +74,11 @@ pub struct CorpusEntry {
 #[derive(Debug, Default, serde::Serialize)]
 pub struct Corpus {
     pub entries: Vec<CorpusEntry>,
+    /// Qualified `scope:doc_id` ids belonging to ephemeral files (`handoff.md`, `tasks.md`,
+    /// etc.) that were excluded from `entries` but still carry a `doc_id`. Consumed by
+    /// `check_graph` to downgrade dangling `related:` refs that legitimately point at
+    /// churny/archived files instead of flagging them as drift. See `record_ephemeral_id`.
+    pub ephemeral_ids: std::collections::HashSet<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -242,7 +247,8 @@ fn rel_to_unit_root<'a>(rel: &'a Path, unit_repo_path: &str) -> Option<&'a Path>
 /// of that unit's corpus.
 ///
 /// Corpus membership rules (per the canonical spec decision):
-/// - The file is the unit-root `README.md` or `CLAUDE.md` (exactly at the unit root level).
+/// - The file is the unit-root `README.md`, `CLAUDE.md`, or `index.md` (exactly at the
+///   unit root level).
 /// - The file lives under the unit's `planning/` subtree.
 /// - The file lives under the unit's `docs/` subtree.
 ///
@@ -250,7 +256,10 @@ fn rel_to_unit_root<'a>(rel: &'a Path, unit_repo_path: &str) -> Option<&'a Path>
 /// is excluded.
 pub(crate) fn is_corpus_member(rel_to_unit: &Path) -> bool {
     // Root instruction files (exactly at the unit root).
-    if rel_to_unit == Path::new("README.md") || rel_to_unit == Path::new("CLAUDE.md") {
+    if rel_to_unit == Path::new("README.md")
+        || rel_to_unit == Path::new("CLAUDE.md")
+        || rel_to_unit == Path::new("index.md")
+    {
         return true;
     }
     // Under planning/ or docs/ (any depth).
@@ -281,12 +290,16 @@ pub(crate) fn is_ephemeral(file_name: &str) -> bool {
 /// 2. **Scope-resolved entries** — each [`CorpusEntry`] carries the stable slug of its owning
 ///    registry unit, resolved once here via [`crate::brain::scope::owning_unit`].
 /// 3. **Membership rule** — a file is included iff its path relative to its owning unit is
-///    under `planning/` or `docs/`, or it is the unit-root `README.md`/`CLAUDE.md`.
-/// 4. **Ephemeral exclusion** — `handoff.md` and `_`-prefixed files are dropped.
+///    under `planning/` or `docs/`, or it is the unit-root `README.md`/`CLAUDE.md`/`index.md`.
+/// 4. **Ephemeral exclusion** — `handoff.md`, `tasks.md`, `breakdown.md`, `worklog.md`, and
+///    `_`-prefixed files are dropped from full corpus membership, but their `doc_id` (if any)
+///    is still recorded in `Corpus::ephemeral_ids` so dangling `related:` refs pointing at
+///    them can be told apart from genuine drift (see `check_graph`'s ephemeral downgrade).
 /// 5. **Separate corpus + diagnostics** — the [`Corpus`] is returned as a first-class owned
 ///    value so callers (graph block, manifest emitter) can reuse it without re-crawling.
 pub fn crawl_corpus(root: &Path, config: &BrainConfig) -> (Corpus, Vec<Diagnostic>) {
     let mut entries = Vec::new();
+    let mut ephemeral_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut diags = Vec::new();
     // Dedup key = path relative to `root`. A file reachable from both the brain-root
     // walk (pass 1) and a per-root planning walk (pass 2) — which is true whenever a
@@ -339,6 +352,7 @@ pub fn crawl_corpus(root: &Path, config: &BrainConfig) -> (Corpus, Vec<Diagnosti
             config,
             &mut seen,
             &mut entries,
+            &mut ephemeral_ids,
             &mut diags,
         );
     }
@@ -383,12 +397,19 @@ pub fn crawl_corpus(root: &Path, config: &BrainConfig) -> (Corpus, Vec<Diagnosti
                 config,
                 &mut seen,
                 &mut entries,
+                &mut ephemeral_ids,
                 &mut diags,
             );
         }
     }
 
-    (Corpus { entries }, diags)
+    (
+        Corpus {
+            entries,
+            ephemeral_ids,
+        },
+        diags,
+    )
 }
 
 /// Test a single `.md` file for corpus membership and, if it qualifies, push a
@@ -405,6 +426,7 @@ fn collect_corpus_file(
     config: &BrainConfig,
     seen: &mut std::collections::HashSet<PathBuf>,
     entries: &mut Vec<CorpusEntry>,
+    ephemeral_ids: &mut std::collections::HashSet<String>,
     diags: &mut Vec<Diagnostic>,
 ) {
     // Only `.md` files.
@@ -414,8 +436,11 @@ fn collect_corpus_file(
 
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-    // Drop ephemeral files (handoff.md, _-prefixed) before the membership test.
+    // Drop ephemeral files (handoff.md, _-prefixed) from full corpus membership —
+    // but still record their `doc_id` (if any) so a dangling `related:` ref pointing
+    // at one can be told apart from genuine drift (see `record_ephemeral_id`).
     if is_ephemeral(file_name) {
+        record_ephemeral_id(path, root, config, ephemeral_ids);
         return;
     }
 
@@ -479,6 +504,49 @@ fn collect_corpus_file(
         scope,
         metadata,
     });
+}
+
+/// Parse just enough of an ephemeral file (`handoff.md`, `tasks.md`, etc.) to learn its
+/// `doc_id`, and record the qualified `scope:doc_id` in `ephemeral_ids`.
+///
+/// The file itself is never added as a [`CorpusEntry`] — ephemeral files churn or get
+/// archived too fast to index — but permanent docs legitimately `related:`-link to them
+/// (e.g. a decision pointing at the ticket's `tasks.md`). Without this, every such link
+/// would report `E_GRAPH_DANGLING_RELATED` forever, by construction, since the target can
+/// never appear in the corpus. Recording the id here lets `check_graph` downgrade those
+/// specific dangling edges to a warning instead of an error.
+fn record_ephemeral_id(
+    path: &Path,
+    root: &Path,
+    config: &BrainConfig,
+    ephemeral_ids: &mut std::collections::HashSet<String>,
+) {
+    let rel = match path.strip_prefix(root) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let (scope, unit_repo_path) = crate::brain::scope::owning_unit(rel, config);
+    let rel_unit = match rel_to_unit_root(rel, &unit_repo_path) {
+        Some(r) => r,
+        None => return,
+    };
+    // Ephemeral ids only matter within the same membership tree a real doc would need
+    // (planning/ or docs/) — no point recording e.g. a stray `_draft.md` under src/.
+    if !is_corpus_member(rel_unit) {
+        return;
+    }
+    let Some(contents) = std::fs::read_to_string(path).ok() else {
+        return;
+    };
+    let Some(yaml) = extract_frontmatter(&contents) else {
+        return;
+    };
+    let Ok(metadata) = serde_yaml::from_str::<OkfFrontmatter>(yaml) else {
+        return;
+    };
+    if let Some(doc_id) = metadata.doc_id.filter(|s| !s.trim().is_empty()) {
+        ephemeral_ids.insert(format!("{scope}:{doc_id}"));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -615,9 +683,14 @@ mod tests {
 
     #[test]
     fn stray_root_md_is_not_corpus_member() {
-        // A .md at the unit root that is not README.md or CLAUDE.md is excluded.
+        // A .md at the unit root that is not README.md/CLAUDE.md/index.md is excluded.
         assert!(!is_corpus_member(Path::new("NOTES.md")));
         assert!(!is_corpus_member(Path::new("random.md")));
+    }
+
+    #[test]
+    fn root_index_md_is_corpus_member() {
+        assert!(is_corpus_member(Path::new("index.md")));
     }
 
     #[test]
@@ -684,6 +757,7 @@ mod tests {
         };
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         let json = serde_json::to_string(&corpus).expect("corpus must serialize to JSON");
         assert!(json.contains("\"scope\":\"brain\""));
@@ -837,6 +911,25 @@ mod tests {
     }
 
     #[test]
+    fn root_level_index_md_is_included_in_corpus() {
+        let dir = crate::testsupport::unique_temp_dir("mev-corpus-root-index");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.md"), b"").unwrap();
+
+        let cfg = brain_only_config();
+        let (corpus, diags) = crawl_corpus(&dir, &cfg);
+        assert!(diags.is_empty(), "expected no diagnostics: {diags:?}");
+
+        let stems: Vec<&str> = corpus.entries.iter().map(|e| e.stem.as_str()).collect();
+        assert!(
+            stems.contains(&"index"),
+            "root-level index.md must be in corpus: {stems:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn corpus_excludes_ephemeral_files() {
         let dir = crate::testsupport::unique_temp_dir("mev-corpus-ephemeral");
         std::fs::create_dir_all(dir.join("planning")).unwrap();
@@ -852,6 +945,42 @@ mod tests {
         assert!(!stems.contains(&"handoff"), "handoff.md must be excluded");
         assert!(!stems.contains(&"_draft"), "_draft.md must be excluded");
         assert!(stems.contains(&"status"), "status.md must be included");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ephemeral_files_with_doc_id_are_recorded_in_ephemeral_ids() {
+        let dir = crate::testsupport::unique_temp_dir("mev-corpus-ephemeral-ids");
+        std::fs::create_dir_all(dir.join("planning/ticket-foo")).unwrap();
+        std::fs::write(
+            dir.join("planning/ticket-foo/tasks.md"),
+            "---\ndoc_id: ticket-foo\n---\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("planning/handoff.md"), b"# no frontmatter").unwrap();
+
+        let cfg = brain_only_config();
+        let (corpus, diags) = crawl_corpus(&dir, &cfg);
+        assert!(diags.is_empty(), "expected no diagnostics: {diags:?}");
+
+        assert!(
+            corpus.entries.iter().all(|e| e.stem != "tasks"),
+            "tasks.md must still be excluded from full corpus entries"
+        );
+        assert!(
+            corpus.ephemeral_ids.contains("brain:ticket-foo"),
+            "tasks.md's doc_id must be recorded: {:?}",
+            corpus.ephemeral_ids
+        );
+        assert!(
+            !corpus
+                .ephemeral_ids
+                .iter()
+                .any(|id| id.ends_with(":handoff")),
+            "handoff.md has no frontmatter/doc_id, nothing should be recorded for it: {:?}",
+            corpus.ephemeral_ids
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

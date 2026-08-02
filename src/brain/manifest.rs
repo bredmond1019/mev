@@ -209,6 +209,7 @@ mod tests {
                 make_entry_with_meta("planning/status.md", "brain", "mev-status", "MEV Status"),
                 make_entry_no_meta("README.md", "brain"),
             ],
+            ephemeral_ids: Default::default(),
         };
         let root = std::path::Path::new("/hq");
         let manifest = build_manifest(root, &corpus);
@@ -244,6 +245,7 @@ mod tests {
                 make_entry_with_meta("docs/index.md", "brain", "brain-index", "Brain Index"),
                 make_entry_no_meta("README.md", "brain"),
             ],
+            ephemeral_ids: Default::default(),
         };
         let root = std::path::Path::new("/hq");
         let manifest = build_manifest(root, &corpus);
@@ -274,7 +276,10 @@ mod tests {
 
     #[test]
     fn empty_corpus_produces_empty_manifest() {
-        let corpus = Corpus { entries: vec![] };
+        let corpus = Corpus {
+            entries: vec![],
+            ephemeral_ids: Default::default(),
+        };
         let root = std::path::Path::new("/hq");
         let manifest = build_manifest(root, &corpus);
 

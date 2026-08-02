@@ -248,7 +248,7 @@ pub fn validate_brain_graph(root: &std::path::Path) -> anyhow::Result<Report> {
     report.diagnostics.extend(crawl_diags);
 
     let artifact = build_graph(&corpus, &config);
-    let graph_diags = check_graph(&artifact);
+    let graph_diags = check_graph(&artifact, &corpus.ephemeral_ids);
     report.diagnostics.extend(graph_diags);
 
     Ok(report)

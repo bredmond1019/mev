@@ -220,7 +220,7 @@ fn export_resolution_matches_check_graph_diagnostics() {
     let (corpus, _crawl_diags) = crawl_corpus(&dir, &config);
     let artifact = build_graph(&corpus, &config);
 
-    let diags = check_graph(&artifact);
+    let diags = check_graph(&artifact, &corpus.ephemeral_ids);
     let export = build_graph_export(&dir, &artifact);
 
     assert_eq!(export.edges.len(), 3, "expected exactly 3 edges");

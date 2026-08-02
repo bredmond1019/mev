@@ -196,6 +196,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![index, status],
+            ephemeral_ids: Default::default(),
         };
         let diags = check_structure(&corpus, &dir);
         assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
@@ -214,6 +215,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![index, orphan],
+            ephemeral_ids: Default::default(),
         };
         let diags = check_structure(&corpus, &dir);
 
@@ -234,6 +236,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![index],
+            ephemeral_ids: Default::default(),
         };
         let diags = check_structure(&corpus, &dir);
 
@@ -256,6 +259,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![index, orphan],
+            ephemeral_ids: Default::default(),
         };
         let mut diags = check_structure(&corpus, &dir);
         diags.sort_by(|a, b| a.locator.cmp(&b.locator));
@@ -277,6 +281,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![lonely],
+            ephemeral_ids: Default::default(),
         };
         let diags = check_structure(&corpus, &dir);
         assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
@@ -295,6 +300,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![index, status],
+            ephemeral_ids: Default::default(),
         };
         let diags = check_structure(&corpus, &dir);
         assert!(
@@ -320,6 +326,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![index, orphan],
+            ephemeral_ids: Default::default(),
         };
         let diags = check_structure(&corpus, &dir);
 

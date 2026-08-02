@@ -59,7 +59,10 @@ mod tests {
     }
 
     fn corpus_from(entries: Vec<CorpusEntry>) -> Corpus {
-        Corpus { entries }
+        Corpus {
+            entries,
+            ephemeral_ids: Default::default(),
+        }
     }
 
     #[test]

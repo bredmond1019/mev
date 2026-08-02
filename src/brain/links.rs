@@ -689,6 +689,7 @@ mod tests {
         );
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         let doc_ids = HashSet::new();
         let diags = check_links(&corpus, &dir, &doc_ids);
@@ -716,6 +717,7 @@ mod tests {
         );
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         let doc_ids = HashSet::new();
         let diags = check_links(&corpus, &dir, &doc_ids);
@@ -740,6 +742,7 @@ mod tests {
         );
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         let doc_ids = HashSet::new();
         let diags = check_links(&corpus, &dir, &doc_ids);
@@ -768,6 +771,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         let doc_ids = HashSet::new();
         let diags = check_links(&corpus, &dir, &doc_ids);
@@ -787,6 +791,7 @@ mod tests {
         let entry = write_corpus_entry(&dir, "docs/page.md", "See [[unknown-slug]] here.");
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         // doc_ids does NOT contain "unknown-slug"
         let doc_ids: HashSet<String> = vec!["other-slug".to_string()].into_iter().collect();
@@ -809,6 +814,7 @@ mod tests {
         let entry = write_corpus_entry(&dir, "docs/page.md", "See [[my-doc]] here.");
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         let doc_ids: HashSet<String> = vec!["my-doc".to_string()].into_iter().collect();
         let diags = check_links(&corpus, &dir, &doc_ids);
@@ -834,6 +840,7 @@ mod tests {
         let entry = write_corpus_entry(&dir, "docs/page.md", content);
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         let doc_ids = HashSet::new();
         let diags = check_links(&corpus, &dir, &doc_ids);
@@ -865,6 +872,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![entry_a, entry_b, entry_c],
+            ephemeral_ids: Default::default(),
         };
 
         let ids = collect_doc_ids(&corpus);
@@ -893,6 +901,7 @@ mod tests {
         };
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         let doc_ids = HashSet::new();
         // Should not panic; should return no diagnostics (file skipped).
@@ -931,6 +940,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
 
         let moved = read_moves_pending(&dir);
@@ -958,6 +968,7 @@ mod tests {
         );
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
 
         // File does not exist — read_moves_pending should return empty.
@@ -995,6 +1006,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
 
         let moved = read_moves_pending(&dir);
@@ -1047,6 +1059,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
 
         let moved = read_moves_pending(&dir);
