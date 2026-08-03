@@ -62,6 +62,8 @@ fn block(id: &str, title: &str, status: Option<&str>, wave: Option<i64>) -> Trac
         depends_on: vec![],
         wave,
         origin: None,
+        note: None,
+        description: None,
     }
 }
 
@@ -90,6 +92,8 @@ fn block_with_dep(
         }],
         wave,
         origin: None,
+        note: None,
+        description: None,
     }
 }
 
@@ -661,6 +665,8 @@ mod task3_planners {
             depends_on: deps,
             wave,
             origin: None,
+            note: None,
+            description: None,
         }
     }
 
@@ -795,6 +801,8 @@ mod task3_planners {
                     depends_on: vec![],
                     wave: Some(1),
                     origin: None,
+                    note: None,
+                    description: None,
                 },
                 TrackBlock {
                     epics: Vec::new(),
@@ -808,6 +816,8 @@ mod task3_planners {
                     depends_on: vec![],
                     wave: Some(2),
                     origin: None,
+                    note: None,
+                    description: None,
                 },
             ],
         }];
@@ -4810,6 +4820,8 @@ mod task2_plan_hq_board {
             depends_on: deps,
             wave,
             origin: None,
+            note: None,
+            description: None,
         }
     }
 
@@ -5156,6 +5168,8 @@ mod task2_plan_unified_board {
             depends_on: deps,
             wave,
             origin: None,
+            note: None,
+            description: None,
         }
     }
 
@@ -5848,6 +5862,8 @@ mod task_yaml_frontmatter_drift_tests {
                     depends_on: vec![],
                     wave: Some(1),
                     origin: None,
+                    note: None,
+                    description: None,
                 }],
             }],
             repos: vec![],
@@ -7818,6 +7834,8 @@ mod epic_emit {
             depends_on: deps,
             wave: Some(wave),
             origin: None,
+            note: None,
+            description: None,
         }
     }
 

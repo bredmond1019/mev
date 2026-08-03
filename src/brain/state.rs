@@ -4997,6 +4997,8 @@ mod tests {
                 depends_on: deps.clone(),
                 wave: *wave,
                 origin: None,
+                note: None,
+                description: None,
             })
             .collect();
 
@@ -5416,6 +5418,8 @@ mod tests {
                 depends_on: deps.clone(),
                 wave: None,
                 origin: None,
+                note: None,
+                description: None,
             })
             .collect();
 
@@ -5725,6 +5729,8 @@ mod tests {
                 kind: "backlog".to_string(),
                 slug: "add-p2".to_string(),
             }),
+            note: None,
+            description: None,
         };
         let backlog_node = Backlog {
             slug: "add-p2".to_string(),
@@ -5998,6 +6004,8 @@ mod tests {
                 depends_on: deps.clone(),
                 wave: None,
                 origin: None,
+                note: None,
+                description: None,
             })
             .collect();
 
@@ -6478,6 +6486,8 @@ mod tests {
                         depends_on: vec![],
                         wave: None,
                         origin: None,
+                        note: None,
+                        description: None,
                     },
                     TrackBlock {
                         epics: Vec::new(),
@@ -6493,6 +6503,8 @@ mod tests {
                         }],
                         wave: None,
                         origin: None,
+                        note: None,
+                        description: None,
                     },
                 ],
             }],
@@ -7650,6 +7662,8 @@ mod check_field_policy_tests {
             due: None,
             sdlc_workflow: None,
             model: None,
+            note: None,
+            description: None,
         }
     }
 
