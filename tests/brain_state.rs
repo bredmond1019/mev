@@ -36,8 +36,7 @@ fn write_file(root: &Path, rel: &str, content: &str) {
 
 /// Make a fresh uniquely-named temp dir for a test and return its path.
 fn temp_dir(suffix: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("mev-brain-state-it-{suffix}"));
-    let _ = fs::remove_dir_all(&dir);
+    let dir = mev::testsupport::unique_temp_dir(&format!("mev-brain-state-it-{suffix}"));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -1258,6 +1257,63 @@ fn derive_rollup_stubs_when_only_a_brain_file_matches_the_slug() {
     assert!(rollups[0].now.is_empty());
     assert!(rollups[0].next.is_empty());
     assert!(rollups[0].blocked.is_empty());
+}
+
+#[test]
+fn derive_rollup_reproduces_a_brain_kind_childs_derived_focus() {
+    use mev::brain::state::{StateFile, StateSource, TierScope, build_state_graph, derive_rollup};
+
+    // Public-API-level counterpart to
+    // derive_rollup_brain_kind_file_yields_its_own_lane_contents: a
+    // registered repo whose loaded state file is `kind: "brain"` but carries
+    // its own non-empty `tracks[]` (the live shape for `business`/`core`/`hq`
+    // tier roots) must derive real lane contents through derive_rollup, not
+    // fall back to an empty stub.
+    let path = std::path::PathBuf::from("/tmp/business-state.json");
+    let json = serde_json::json!({
+        "repo": "business",
+        "kind": "brain",
+        "updated": "2026-08-03",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "tracks": [{
+            "title": "Business Ops",
+            "blocks": [
+                { "id": "BZ.1.A", "title": "In progress work", "status": "in_progress" },
+                { "id": "BZ.1.B", "title": "Ready work", "status": "open" }
+            ]
+        }]
+    });
+    let brain_file: StateFile = serde_json::from_value(json).expect("fixture must parse");
+    let brain_src = StateSource {
+        repo_slug: "business".to_string(),
+        abs_path: path,
+        expected_kind: "brain",
+    };
+    let files = vec![(brain_src, brain_file)];
+    let graph = build_state_graph(&files);
+    let config = make_config_with_repo("business", "core");
+
+    let rollups = derive_rollup(
+        &TierScope::Tier("core".to_string()),
+        &config,
+        &[],
+        &graph,
+        &files,
+    );
+
+    assert_eq!(rollups.len(), 1, "one child -> one rollup entry");
+    let rollup = &rollups[0];
+    assert_eq!(rollup.repo, "business");
+
+    assert_eq!(rollup.now.len(), 1);
+    assert_eq!(rollup.now[0].id, "BZ.1.A");
+    assert_eq!(rollup.now[0].status.as_deref(), Some("in_progress"));
+
+    assert_eq!(rollup.next.len(), 1);
+    assert_eq!(rollup.next[0].id, "BZ.1.B");
+
+    assert!(rollup.blocked.is_empty());
+    assert_eq!(rollup.tier.as_deref(), Some("core"));
 }
 
 #[test]

@@ -397,6 +397,41 @@ enum Command {
         #[command(subcommand)]
         command: DocCommand,
     },
+    /// Fleet-wide, read-only sweep of every discovered `planning/state.json`'s
+    /// `carryover[]` array (`MV.ticket.carryover-sweep-command`).
+    ///
+    /// Resolves `brain.toml`, discovers and loads every repo's `planning/state.json`, and
+    /// evaluates each `carryover[]` entry's `clears_when` predicate where it is
+    /// machine-checkable, sorting the fleet into three lanes:
+    ///   cleared        — every extracted reference is satisfied; a recommendation to
+    ///                     delete the entry, never an automatic deletion
+    ///   actionable     — at least one extracted reference is unsatisfied; the unmet
+    ///                     reference(s) are named
+    ///   not-evaluable  — no reference could be extracted (prose predicate, or no
+    ///                     `clears_when` at all)
+    ///
+    /// Two evaluable predicate classes only: block references (`related[]` edges plus
+    /// prose block IDs that resolve to exactly one corpus node) and path-existence
+    /// references (only when `clears_when` contains the word "exists"). References are
+    /// combined conjunctively (AND) even when the prose says "or" — the safe failure
+    /// direction. Never writes anything.
+    ///
+    /// Exit codes:
+    ///   0 — sweep completed, regardless of how many entries land in any lane
+    ///   1 — brain.toml not found/unreadable, an unknown --repo slug, or a serialization
+    ///       error under --json
+    Carryover {
+        /// Path to search from when locating brain.toml (walks up to find it).
+        /// Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Restrict the sweep to one repo's carryover[] entries.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Emit the CarryoverReport as compact JSON instead of a human summary.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -695,6 +730,68 @@ fn print_diagnostic(d: &mev::Diagnostic) {
         d.file.display(),
         theme::message(&d.message),
     );
+}
+
+/// Human-readable, lane-grouped summary for `mev carryover`'s default (non-`--json`) output.
+fn print_carryover_report(report: &mev::CarryoverReport) {
+    println!(
+        "carryover sweep: {} total — {} cleared, {} actionable, {} not-evaluable",
+        report.total, report.cleared, report.actionable, report.not_evaluable
+    );
+
+    for lane in [
+        mev::CarryoverLane::Cleared,
+        mev::CarryoverLane::Actionable,
+        mev::CarryoverLane::NotEvaluable,
+    ] {
+        let entries: Vec<&mev::CarryoverVerdict> =
+            report.entries.iter().filter(|e| e.lane == lane).collect();
+        if entries.is_empty() {
+            continue;
+        }
+        let lane_label = match lane {
+            mev::CarryoverLane::Cleared => "CLEARED",
+            mev::CarryoverLane::Actionable => "ACTIONABLE",
+            mev::CarryoverLane::NotEvaluable => "NOT-EVALUABLE",
+        };
+        println!("\n{lane_label} ({}):", entries.len());
+        for entry in entries {
+            let age = match entry.age_days {
+                Some(d) if entry.stale => format!(" ({d}d, stale)"),
+                Some(d) => format!(" ({d}d)"),
+                None => String::new(),
+            };
+            println!(
+                "  {}:{} [{}]{age} — {}",
+                entry.repo, entry.slug, entry.kind, entry.text
+            );
+            match lane {
+                mev::CarryoverLane::Actionable => {
+                    for r in &entry.refs {
+                        let (label, satisfied) = match r {
+                            mev::CarryoverRef::Block { key, satisfied } => (key.clone(), satisfied),
+                            mev::CarryoverRef::Path { path, satisfied } => {
+                                (path.clone(), satisfied)
+                            }
+                        };
+                        if !satisfied {
+                            println!("      unmet: {label}");
+                        }
+                    }
+                }
+                mev::CarryoverLane::NotEvaluable => {
+                    let reason = match entry.reason {
+                        Some(mev::NotEvaluableReason::Prose) => "prose",
+                        Some(mev::NotEvaluableReason::NoPredicate) => "no-predicate",
+                        Some(mev::NotEvaluableReason::AmbiguousReference) => "ambiguous-reference",
+                        None => "unknown",
+                    };
+                    println!("      reason: {reason}");
+                }
+                mev::CarryoverLane::Cleared => {}
+            }
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -1238,6 +1335,38 @@ fn main() -> ExitCode {
                 }
             },
         },
+        Command::Carryover { path, repo, json } => {
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match mev::carryover_sweep(&root, repo.as_deref()) {
+                Ok(report) => {
+                    if json || cli.json {
+                        match serde_json::to_string(&report) {
+                            Ok(s) => {
+                                println!("{s}");
+                                ExitCode::SUCCESS
+                            }
+                            Err(err) => {
+                                eprintln!("error serializing carryover report: {err:#}");
+                                ExitCode::FAILURE
+                            }
+                        }
+                    } else {
+                        print_carryover_report(&report);
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Command::GenerateGraph { path, out } => {
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,

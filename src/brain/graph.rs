@@ -147,9 +147,16 @@ pub fn build_graph(corpus: &Corpus, _config: &BrainConfig) -> GraphArtifact {
 /// Returns a `Vec<Diagnostic>` using the graph locator vocabulary:
 /// - `E_GRAPH_DUPLICATE_DOC_ID` — two or more nodes share one canonical `scope:doc_id`.
 /// - `E_GRAPH_DANGLING_RELATED` — a `related:` entry resolves to no node and no leaf.
+/// - `W_GRAPH_RELATED_EPHEMERAL` — a `related:` entry resolves to nothing in the corpus,
+///   but the id belongs to a known ephemeral file (`handoff.md`, `tasks.md`, ...) that is
+///   excluded from the corpus by design — see `Corpus::ephemeral_ids`. Downgraded from
+///   `E_GRAPH_DANGLING_RELATED` since this is expected, not drift.
 /// - `W_GRAPH_LEAF_TARGET` — a `related:` entry resolves to a real file with no `doc_id`.
 /// - `W_GRAPH_ISOLATED_NODE` — a node (has `doc_id`) has zero outbound `related:` edges.
-pub fn check_graph(artifact: &GraphArtifact) -> Vec<Diagnostic> {
+///
+/// `ephemeral_ids` is `Corpus::ephemeral_ids` from the same crawl that produced `artifact`
+/// (via `build_graph`) — passed separately since it lives on `Corpus`, not `GraphArtifact`.
+pub fn check_graph(artifact: &GraphArtifact, ephemeral_ids: &HashSet<String>) -> Vec<Diagnostic> {
     let mut diags: Vec<Diagnostic> = Vec::new();
 
     // --- Uniqueness: duplicate canonical ids ---
@@ -195,6 +202,16 @@ pub fn check_graph(artifact: &GraphArtifact) -> Vec<Diagnostic> {
                     "W_GRAPH_LEAF_TARGET",
                     format!(
                         "related target `{}` (resolved: `{qualified}`) is a leaf file (no `doc_id`)",
+                        edge.to_ref
+                    ),
+                ));
+            }
+            EdgeResolution::Dangling { qualified } if ephemeral_ids.contains(&qualified) => {
+                diags.push(Diagnostic::warning(
+                    referrer_rel,
+                    "W_GRAPH_RELATED_EPHEMERAL",
+                    format!(
+                        "related target `{}` (resolved: `{qualified}`) is an ephemeral file (e.g. tasks.md/handoff.md) excluded from the corpus by design",
                         edge.to_ref
                     ),
                 ));
@@ -273,7 +290,10 @@ mod tests {
     }
 
     fn corpus_from(entries: Vec<CorpusEntry>) -> Corpus {
-        Corpus { entries }
+        Corpus {
+            entries,
+            ephemeral_ids: Default::default(),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -375,7 +395,7 @@ mod tests {
         // node_map only keeps first occurrence, but nodes vec has both
         // because build_graph inserts them both.
         // We must verify check_graph catches the duplicate.
-        let diags = check_graph(&artifact);
+        let diags = check_graph(&artifact, &HashSet::new());
         let errors: Vec<_> = diags
             .iter()
             .filter(|d| d.locator == "E_GRAPH_DUPLICATE_DOC_ID")
@@ -395,7 +415,7 @@ mod tests {
         let e2 = make_entry(&dir, "mev", "k2.md", "---\ndoc_id: knowledge\n---");
         let corpus = corpus_from(vec![e1, e2]);
         let artifact = build_graph(&corpus, &BrainConfig::default());
-        let diags = check_graph(&artifact);
+        let diags = check_graph(&artifact, &HashSet::new());
         let dup_errors: Vec<_> = diags
             .iter()
             .filter(|d| d.locator == "E_GRAPH_DUPLICATE_DOC_ID")
@@ -418,7 +438,7 @@ mod tests {
         let e2 = make_entry(&dir, "brain", "b.md", "---\ndoc_id: beta\n---");
         let corpus = corpus_from(vec![e1, e2]);
         let artifact = build_graph(&corpus, &BrainConfig::default());
-        let diags = check_graph(&artifact);
+        let diags = check_graph(&artifact, &HashSet::new());
         // beta has no related: of its own, so it legitimately trips
         // W_GRAPH_ISOLATED_NODE; that's not what this test is about.
         let resolution_diags: Vec<_> = diags
@@ -443,7 +463,7 @@ mod tests {
         let e2 = make_entry(&dir, "mev", "t.md", "---\ndoc_id: target\n---");
         let corpus = corpus_from(vec![e1, e2]);
         let artifact = build_graph(&corpus, &BrainConfig::default());
-        let diags = check_graph(&artifact);
+        let diags = check_graph(&artifact, &HashSet::new());
         // target has no related: of its own, so it legitimately trips
         // W_GRAPH_ISOLATED_NODE; that's not what this test is about.
         let resolution_diags: Vec<_> = diags
@@ -467,7 +487,7 @@ mod tests {
         );
         let corpus = corpus_from(vec![e1]);
         let artifact = build_graph(&corpus, &BrainConfig::default());
-        let diags = check_graph(&artifact);
+        let diags = check_graph(&artifact, &HashSet::new());
         let dangling: Vec<_> = diags
             .iter()
             .filter(|d| {
@@ -476,6 +496,43 @@ mod tests {
             .collect();
         assert_eq!(dangling.len(), 1, "expected dangling error: {diags:?}");
         assert!(dangling[0].message.contains("typo-nonexistent"));
+    }
+
+    #[test]
+    fn related_to_known_ephemeral_target_is_warning_not_error() {
+        // e1 references "ticket-foo", a doc_id that lives in a tasks.md file — deliberately
+        // excluded from the corpus (see `record_ephemeral_id`) so it never became a node.
+        // Passing its qualified id via `ephemeral_ids` must downgrade the dangling edge to
+        // a warning instead of E_GRAPH_DANGLING_RELATED.
+        let dir = TempDir::new().unwrap();
+        let e1 = make_entry(
+            &dir,
+            "brain",
+            "a.md",
+            "---\ndoc_id: alpha\nrelated:\n  - ticket-foo\n---",
+        );
+        let corpus = corpus_from(vec![e1]);
+        let artifact = build_graph(&corpus, &BrainConfig::default());
+        let mut ephemeral_ids = HashSet::new();
+        ephemeral_ids.insert("brain:ticket-foo".to_string());
+        let diags = check_graph(&artifact, &ephemeral_ids);
+
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == crate::Severity::Error)
+            .collect();
+        assert!(errors.is_empty(), "expected no errors: {diags:?}");
+
+        let ephemeral_warnings: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_GRAPH_RELATED_EPHEMERAL")
+            .collect();
+        assert_eq!(
+            ephemeral_warnings.len(),
+            1,
+            "expected one ephemeral warning: {diags:?}"
+        );
+        assert!(ephemeral_warnings[0].message.contains("ticket-foo"));
     }
 
     #[test]
@@ -491,7 +548,7 @@ mod tests {
         let e2 = make_entry(&dir, "brain", "leaf-stem.md", "# No frontmatter");
         let corpus = corpus_from(vec![e1, e2]);
         let artifact = build_graph(&corpus, &BrainConfig::default());
-        let diags = check_graph(&artifact);
+        let diags = check_graph(&artifact, &HashSet::new());
         let warnings: Vec<_> = diags
             .iter()
             .filter(|d| d.severity == crate::Severity::Warning)
@@ -523,7 +580,7 @@ mod tests {
         let e2 = make_entry(&dir, "mev", "t.md", "---\ndoc_id: mev-target\n---");
         let corpus = corpus_from(vec![e1, e2]);
         let artifact = build_graph(&corpus, &BrainConfig::default());
-        let diags = check_graph(&artifact);
+        let diags = check_graph(&artifact, &HashSet::new());
         // bare "mev-target" resolves to "brain:mev-target" which does not exist
         let dangling: Vec<_> = diags
             .iter()
@@ -549,7 +606,7 @@ mod tests {
         let e1 = make_entry(&dir, "brain", "a.md", "---\ndoc_id: alpha\n---");
         let corpus = corpus_from(vec![e1]);
         let artifact = build_graph(&corpus, &BrainConfig::default());
-        let diags = check_graph(&artifact);
+        let diags = check_graph(&artifact, &HashSet::new());
         let isolated: Vec<_> = diags
             .iter()
             .filter(|d| {
@@ -572,7 +629,7 @@ mod tests {
         let e2 = make_entry(&dir, "brain", "b.md", "---\ndoc_id: beta\n---");
         let corpus = corpus_from(vec![e1, e2]);
         let artifact = build_graph(&corpus, &BrainConfig::default());
-        let diags = check_graph(&artifact);
+        let diags = check_graph(&artifact, &HashSet::new());
         // alpha has an outbound related: entry — must not be flagged isolated.
         let alpha_isolated = diags
             .iter()

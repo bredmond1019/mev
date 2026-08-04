@@ -11,6 +11,11 @@
 //!   referenced by that directory's `index.md`. Located at the orphan file.
 //! - `E_STRUCT_DANGLING_ROW` — an `index.md` row (markdown or `file://` link)
 //!   whose target does not exist on disk. Located at the `index.md`.
+//! - `W_STRUCT_DANGLING_ROW_EPHEMERAL` — an `index.md` row whose target does not
+//!   exist on disk, but the target filename is a known ephemeral pattern
+//!   (`handoff.md`, `tasks.md`, ...) excluded from the corpus by design — see
+//!   `crawl::is_ephemeral`. Downgraded from `E_STRUCT_DANGLING_ROW` since this is
+//!   expected, not drift (e.g. the standard "delete after consuming" handoff row).
 //!
 //! Directories with no `index.md` corpus member are skipped entirely — no
 //! coverage obligation, so no orphan flags. `[[wikilink]]`, external
@@ -21,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::Diagnostic;
-use crate::brain::crawl::{Corpus, CorpusEntry};
+use crate::brain::crawl::{Corpus, CorpusEntry, is_ephemeral};
 use crate::brain::links::{self, LinkKind};
 
 // ---------------------------------------------------------------------------
@@ -113,15 +118,28 @@ pub fn check_structure(corpus: &Corpus, root: &Path) -> Vec<Diagnostic> {
             covered.insert(resolved.clone());
 
             if !resolved.exists() {
-                diags.push(Diagnostic::error(
-                    &index_entry.rel,
-                    "E_STRUCT_DANGLING_ROW",
-                    format!(
-                        "index.md row points at a nonexistent file: '{}' (resolved: '{}')",
-                        link.raw,
-                        resolved.display()
-                    ),
-                ));
+                let file_name = resolved.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if is_ephemeral(file_name) {
+                    diags.push(Diagnostic::warning(
+                        &index_entry.rel,
+                        "W_STRUCT_DANGLING_ROW_EPHEMERAL",
+                        format!(
+                            "index.md row points at a nonexistent file: '{}' (resolved: '{}') — target is an ephemeral file (e.g. tasks.md/handoff.md) excluded from the corpus by design",
+                            link.raw,
+                            resolved.display()
+                        ),
+                    ));
+                } else {
+                    diags.push(Diagnostic::error(
+                        &index_entry.rel,
+                        "E_STRUCT_DANGLING_ROW",
+                        format!(
+                            "index.md row points at a nonexistent file: '{}' (resolved: '{}')",
+                            link.raw,
+                            resolved.display()
+                        ),
+                    ));
+                }
             }
         }
 
@@ -180,8 +198,7 @@ mod tests {
     }
 
     fn tmp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(name);
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir(name);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -197,6 +214,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![index, status],
+            ephemeral_ids: Default::default(),
         };
         let diags = check_structure(&corpus, &dir);
         assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
@@ -215,6 +233,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![index, orphan],
+            ephemeral_ids: Default::default(),
         };
         let diags = check_structure(&corpus, &dir);
 
@@ -235,6 +254,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![index],
+            ephemeral_ids: Default::default(),
         };
         let diags = check_structure(&corpus, &dir);
 
@@ -242,6 +262,29 @@ mod tests {
         assert_eq!(diags[0].locator, "E_STRUCT_DANGLING_ROW");
         assert_eq!(diags[0].file, PathBuf::from("docs/index.md"));
         assert!(diags[0].message.contains("gone.md"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- dangling row pointing at an ephemeral filename is downgraded to a warning ---
+
+    #[test]
+    fn dangling_row_to_ephemeral_file_is_downgraded() {
+        let dir = tmp_dir("mev-structure-dangling-ephemeral");
+
+        let index = write_corpus_entry(&dir, "docs/index.md", "See [handoff](handoff.md).");
+
+        let corpus = Corpus {
+            entries: vec![index],
+            ephemeral_ids: Default::default(),
+        };
+        let diags = check_structure(&corpus, &dir);
+
+        assert_eq!(diags.len(), 1, "expected 1 diagnostic, got: {diags:?}");
+        assert_eq!(diags[0].locator, "W_STRUCT_DANGLING_ROW_EPHEMERAL");
+        assert_eq!(diags[0].severity, crate::Severity::Warning);
+        assert_eq!(diags[0].file, PathBuf::from("docs/index.md"));
+        assert!(diags[0].message.contains("handoff.md"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -257,6 +300,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![index, orphan],
+            ephemeral_ids: Default::default(),
         };
         let mut diags = check_structure(&corpus, &dir);
         diags.sort_by(|a, b| a.locator.cmp(&b.locator));
@@ -278,6 +322,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![lonely],
+            ephemeral_ids: Default::default(),
         };
         let diags = check_structure(&corpus, &dir);
         assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
@@ -296,6 +341,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![index, status],
+            ephemeral_ids: Default::default(),
         };
         let diags = check_structure(&corpus, &dir);
         assert!(
@@ -321,6 +367,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![index, orphan],
+            ephemeral_ids: Default::default(),
         };
         let diags = check_structure(&corpus, &dir);
 

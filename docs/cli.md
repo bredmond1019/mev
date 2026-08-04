@@ -1095,6 +1095,92 @@ mev --json doc opportunity ingest --input company-brief.json
 
 ---
 
+### `carryover [--repo <slug>] [--json] [path]`
+
+Fleet-wide, **read-only** sweep of every discovered `planning/state.json`'s `carryover[]`
+array. Evaluates each entry's `clears_when` predicate where it is machine-checkable and sorts
+the fleet into three lanes.
+
+```bash
+mev carryover [--repo <SLUG>] [--json] [path]
+```
+
+| Argument / Flag | Default | Description |
+|---|---|---|
+| `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
+| `--repo <SLUG>` | unset | Restrict the sweep to one repo's `carryover[]` entries. An unknown slug is a hard error naming the valid slugs |
+| `--json` | off | Emit the `CarryoverReport` as compact JSON instead of the human, lane-grouped summary |
+
+Resolves `brain.toml` by walking up from `path`, discovers and loads every repo's
+`planning/state.json` (individual load failures are skipped, not fatal), and evaluates every
+`carryover[]` entry against the corpus.
+
+**`mev carryover` never writes anything.** No `--write` flag exists for this subcommand. The
+`cleared` lane is a recommendation for a human (or a later, separately specced mutation
+command) to act on — it is never an automatic deletion.
+
+#### The three lanes
+
+| Lane | Meaning |
+|---|---|
+| `cleared` | At least one reference was extracted from the entry and **every** extracted reference is currently satisfied — a recommendation to delete the entry |
+| `actionable` | At least one reference was extracted, but **at least one** is unsatisfied — the specific unmet reference(s) are named so a reader can act without re-reading the predicate |
+| `not-evaluable` | No reference could be extracted. Reason `prose` (a `clears_when` is present but is pure prose, or a bare block ID matched more than one repo and was dropped as ambiguous) or `no-predicate` (`clears_when` is `None`) |
+
+#### The two evaluable predicate classes
+
+Only two classes of `clears_when` predicate are ever machine-evaluated; anything else falls
+into `not-evaluable` rather than being guessed at:
+
+- **Block references** — two sources, both resolved against the loaded corpus:
+  1. `related[]` entries with `type == "block"` (structured edges — always used).
+  2. Block IDs matched in the `clears_when` prose by a strict grammar
+     (`[A-Z]{2,3}\.(?:\d+\.[A-Z0-9]+|ticket\.[a-z0-9][a-z0-9-]*|chore\.[a-z0-9][a-z0-9-]*)`).
+     A match is kept only when it resolves to exactly one node in the loaded corpus
+     (preferring the carryover's own scope repo when the bare ID is ambiguous); an ID that
+     resolves to nodes in more than one repo is dropped and the entry is reported
+     `not-evaluable` with reason `AmbiguousReference` rather than guessed at. An unresolvable
+     token is simply not a block reference and is discarded silently.
+  A block reference is satisfied when its node's authored status is `closed`.
+- **Path-existence references** — extracted only when the `clears_when` text contains the
+  literal word `exists`. Whitespace-delimited tokens containing `/` and ending in one of
+  `.md .rs .py .sh .ts .tsx .json .toml` are resolved against the brain root and against the
+  owning repo's `repo_path`; satisfied when either resolves to an existing file.
+
+**All extracted references are combined conjunctively (AND), even when the prose says "or".**
+This is a deliberate, safe-failure-direction bias: it can mis-report a genuinely-cleared
+`or`-predicate as `actionable`, but it can never mis-report an unmet dependency as `cleared`.
+Disjunction parsing is out of scope.
+
+Every reported entry also carries its repo, slug, kind, `age_days`, and a `stale` flag derived
+from the existing `carryover_stale_age` helper (honouring `reviewed` / `snoozed_until`) — no
+staleness logic is reimplemented here.
+
+#### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Sweep completed successfully, regardless of how many entries land in any lane |
+| `1` | `brain.toml` not found/unreadable, an unknown `--repo` slug, or a serialization error under `--json` |
+
+**Examples:**
+
+```bash
+# Human, lane-grouped summary of the whole fleet
+mev carryover
+
+# Machine-readable JSON envelope
+mev carryover --json
+
+# Restrict to one repo
+mev carryover --repo mev
+
+# From an explicit brain root
+mev carryover ~/Dev/agentic-portfolio
+```
+
+---
+
 ## Exit codes
 
 | Code | Meaning |

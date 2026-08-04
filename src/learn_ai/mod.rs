@@ -58,8 +58,7 @@ mod tests {
     fn learn_ai_validator_crawl_returns_items_and_diags() {
         // Point at a temp dir with no content — the crawl should return an empty corpus
         // and no diagnostics (the root itself is not a "paths/" subtree).
-        let dir = std::env::temp_dir().join("mev-learn-ai-crawl-test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-learn-ai-crawl-test");
         std::fs::create_dir_all(&dir).unwrap();
 
         let v = LearnAiValidator;
@@ -98,8 +97,7 @@ mod tests {
 
     #[test]
     fn learn_ai_validator_run_on_empty_dir_returns_empty_report() {
-        let dir = std::env::temp_dir().join("mev-learn-ai-run-test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-learn-ai-run-test");
         std::fs::create_dir_all(&dir).unwrap();
 
         let report = LearnAiValidator.run(&dir);

@@ -19,8 +19,7 @@ use mev::{BrainValidator, MdFile, Severity, validate_md_file};
 // ---------------------------------------------------------------------------
 
 fn temp_dir(suffix: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("mev-brain-okf-it-{suffix}"));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = mev::testsupport::unique_temp_dir(&format!("mev-brain-okf-it-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

@@ -9,6 +9,10 @@
 //!
 //! # Diagnostic locator codes (Phase 3 Block K)
 //! - `E_LINK_DEAD_MARKDOWN` — a relative markdown `[text](path)` resolves to no file on disk.
+//! - `W_LINK_DEAD_EPHEMERAL` — a relative markdown `[text](path)` resolves to no file on disk,
+//!   but the target filename is a known ephemeral pattern (`handoff.md`, `tasks.md`, ...) that
+//!   is excluded from the corpus by design — see `crawl::is_ephemeral`. Downgraded from
+//!   `E_LINK_DEAD_MARKDOWN` since this is expected, not drift.
 //! - `E_LINK_DEAD_FILE_URI` — a `file://` URI resolves to no file on disk.
 //! - `E_LINK_DANGLING_WIKILINK` — a `[[wikilink]]` slug is not a known `doc_id`.
 //! - `E_LINK_MOVED_REFERENCE` — a reference still points at a path listed in `.brain-moves-pending`.
@@ -26,7 +30,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::Diagnostic;
-use crate::brain::crawl::Corpus;
+use crate::brain::crawl::{Corpus, is_ephemeral};
 
 // ---------------------------------------------------------------------------
 // Link model (D4 serializable)
@@ -333,15 +337,28 @@ pub fn check_links(corpus: &Corpus, _root: &Path, doc_ids: &HashSet<String>) -> 
                     let base = entry.path.parent().unwrap_or_else(|| Path::new("."));
                     let resolved = base.join(&link.target);
                     if !resolved.exists() {
-                        diags.push(Diagnostic::error(
-                            &entry.rel,
-                            "E_LINK_DEAD_MARKDOWN",
-                            format!(
-                                "dead markdown link: '{}' does not exist (resolved: '{}')",
-                                link.raw,
-                                resolved.display()
-                            ),
-                        ));
+                        let file_name = resolved.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        if is_ephemeral(file_name) {
+                            diags.push(Diagnostic::warning(
+                                &entry.rel,
+                                "W_LINK_DEAD_EPHEMERAL",
+                                format!(
+                                    "dead markdown link: '{}' does not exist (resolved: '{}') — target is an ephemeral file (e.g. tasks.md/handoff.md) excluded from the corpus by design",
+                                    link.raw,
+                                    resolved.display()
+                                ),
+                            ));
+                        } else {
+                            diags.push(Diagnostic::error(
+                                &entry.rel,
+                                "E_LINK_DEAD_MARKDOWN",
+                                format!(
+                                    "dead markdown link: '{}' does not exist (resolved: '{}')",
+                                    link.raw,
+                                    resolved.display()
+                                ),
+                            ));
+                        }
                     }
                 }
                 LinkKind::FileUri => {
@@ -679,8 +696,7 @@ mod tests {
 
     #[test]
     fn dead_markdown_link_is_flagged() {
-        let dir = std::env::temp_dir().join("mev-links-dead-md");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-dead-md");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         let entry = write_corpus_entry(
@@ -690,6 +706,7 @@ mod tests {
         );
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         let doc_ids = HashSet::new();
         let diags = check_links(&corpus, &dir, &doc_ids);
@@ -701,12 +718,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // --- dead relative markdown link to an ephemeral filename is downgraded to a warning ---
+
+    #[test]
+    fn dead_markdown_link_to_ephemeral_file_is_downgraded() {
+        let dir = crate::testsupport::unique_temp_dir("mev-links-dead-md-ephemeral");
+        std::fs::create_dir_all(dir.join("planning")).unwrap();
+
+        let entry = write_corpus_entry(
+            &dir,
+            "planning/index.md",
+            "Active session handoff: [handoff](handoff.md)",
+        );
+        let corpus = Corpus {
+            entries: vec![entry],
+            ephemeral_ids: Default::default(),
+        };
+        let doc_ids = HashSet::new();
+        let diags = check_links(&corpus, &dir, &doc_ids);
+
+        assert_eq!(diags.len(), 1, "expected 1 diagnostic, got: {diags:?}");
+        assert_eq!(diags[0].locator, "W_LINK_DEAD_EPHEMERAL");
+        assert_eq!(diags[0].severity, crate::Severity::Warning);
+        assert!(diags[0].message.contains("handoff.md"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // --- live relative markdown link does NOT produce a diagnostic ---
 
     #[test]
     fn live_markdown_link_passes() {
-        let dir = std::env::temp_dir().join("mev-links-live-md");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-live-md");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
         std::fs::create_dir_all(dir.join("planning")).unwrap();
         std::fs::write(dir.join("planning/status.md"), b"").unwrap();
@@ -718,6 +761,7 @@ mod tests {
         );
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         let doc_ids = HashSet::new();
         let diags = check_links(&corpus, &dir, &doc_ids);
@@ -731,8 +775,7 @@ mod tests {
 
     #[test]
     fn dead_file_uri_is_flagged() {
-        let dir = std::env::temp_dir().join("mev-links-dead-file-uri");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-dead-file-uri");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         // We reference an absolute path that definitely does not exist.
@@ -743,6 +786,7 @@ mod tests {
         );
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         let doc_ids = HashSet::new();
         let diags = check_links(&corpus, &dir, &doc_ids);
@@ -757,8 +801,7 @@ mod tests {
 
     #[test]
     fn live_file_uri_passes() {
-        let dir = std::env::temp_dir().join("mev-links-live-file-uri");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-live-file-uri");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         // Create the file first, then reference it.
@@ -772,6 +815,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         let doc_ids = HashSet::new();
         let diags = check_links(&corpus, &dir, &doc_ids);
@@ -785,13 +829,13 @@ mod tests {
 
     #[test]
     fn dangling_wikilink_is_flagged() {
-        let dir = std::env::temp_dir().join("mev-links-dangling-wiki");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-dangling-wiki");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         let entry = write_corpus_entry(&dir, "docs/page.md", "See [[unknown-slug]] here.");
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         // doc_ids does NOT contain "unknown-slug"
         let doc_ids: HashSet<String> = vec!["other-slug".to_string()].into_iter().collect();
@@ -808,13 +852,13 @@ mod tests {
 
     #[test]
     fn known_wikilink_passes() {
-        let dir = std::env::temp_dir().join("mev-links-known-wiki");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-known-wiki");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         let entry = write_corpus_entry(&dir, "docs/page.md", "See [[my-doc]] here.");
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         let doc_ids: HashSet<String> = vec!["my-doc".to_string()].into_iter().collect();
         let diags = check_links(&corpus, &dir, &doc_ids);
@@ -828,8 +872,7 @@ mod tests {
 
     #[test]
     fn external_and_anchor_links_never_flagged() {
-        let dir = std::env::temp_dir().join("mev-links-ext-anchor");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-ext-anchor");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         let content = concat!(
@@ -841,6 +884,7 @@ mod tests {
         let entry = write_corpus_entry(&dir, "docs/page.md", content);
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         let doc_ids = HashSet::new();
         let diags = check_links(&corpus, &dir, &doc_ids);
@@ -857,8 +901,7 @@ mod tests {
 
     #[test]
     fn collect_doc_ids_returns_authored_ids() {
-        let dir = std::env::temp_dir().join("mev-links-collect-ids");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-collect-ids");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         let content_a =
@@ -873,6 +916,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![entry_a, entry_b, entry_c],
+            ephemeral_ids: Default::default(),
         };
 
         let ids = collect_doc_ids(&corpus);
@@ -901,6 +945,7 @@ mod tests {
         };
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
         let doc_ids = HashSet::new();
         // Should not panic; should return no diagnostics (file skipped).
@@ -919,8 +964,7 @@ mod tests {
 
     #[test]
     fn moved_reference_is_flagged() {
-        let dir = std::env::temp_dir().join("mev-links-moved-ref");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-moved-ref");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         // Create a moved/deleted file reference in a doc (the target does NOT need to
@@ -940,6 +984,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
 
         let moved = read_moves_pending(&dir);
@@ -957,8 +1002,7 @@ mod tests {
 
     #[test]
     fn no_moves_pending_file_produces_no_diagnostics() {
-        let dir = std::env::temp_dir().join("mev-links-no-pending");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-no-pending");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         let entry = write_corpus_entry(
@@ -968,6 +1012,7 @@ mod tests {
         );
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
 
         // File does not exist — read_moves_pending should return empty.
@@ -987,8 +1032,7 @@ mod tests {
 
     #[test]
     fn moved_path_with_no_references_produces_no_diagnostics() {
-        let dir = std::env::temp_dir().join("mev-links-no-refs");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-no-refs");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         // Doc links to a DIFFERENT path, not the moved one.
@@ -1006,6 +1050,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
 
         let moved = read_moves_pending(&dir);
@@ -1019,8 +1064,7 @@ mod tests {
 
     #[test]
     fn multiple_paths_on_one_line_are_collected() {
-        let dir = std::env::temp_dir().join("mev-links-multi-path");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-multi-path");
         std::fs::create_dir_all(&dir).unwrap();
 
         std::fs::write(
@@ -1042,8 +1086,7 @@ mod tests {
 
     #[test]
     fn moved_file_uri_reference_is_flagged() {
-        let dir = std::env::temp_dir().join("mev-links-moved-file-uri");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testsupport::unique_temp_dir("mev-links-moved-file-uri");
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
         // Construct an absolute file URI pointing at the moved path.
@@ -1060,6 +1103,7 @@ mod tests {
 
         let corpus = Corpus {
             entries: vec![entry],
+            ephemeral_ids: Default::default(),
         };
 
         let moved = read_moves_pending(&dir);

@@ -46,8 +46,7 @@ fn write_json(root: &Path, rel: &str, value: &serde_json::Value) {
 }
 
 fn temp_dir(suffix: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("mev-brain-last-touched-{suffix}"));
-    let _ = fs::remove_dir_all(&dir);
+    let dir = mev::testsupport::unique_temp_dir(&format!("mev-brain-last-touched-{suffix}"));
     fs::create_dir_all(&dir).unwrap();
     dir
 }

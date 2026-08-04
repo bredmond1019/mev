@@ -30,8 +30,7 @@ fn write_file(root: &Path, rel: &str, content: &str) {
 
 /// Create a fresh temp dir (removing any leftovers from a prior run).
 fn temp_dir(suffix: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("mev-brain-links-{suffix}"));
-    let _ = fs::remove_dir_all(&dir);
+    let dir = mev::testsupport::unique_temp_dir(&format!("mev-brain-links-{suffix}"));
     fs::create_dir_all(&dir).unwrap();
     dir
 }

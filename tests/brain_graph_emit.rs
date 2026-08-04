@@ -19,8 +19,7 @@ fn write_file(root: &Path, rel: &str, content: &str) {
 
 /// Create a fresh temp dir (removing any leftovers from a prior run).
 fn temp_dir(suffix: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("mev-brain-graph-emit-{suffix}"));
-    let _ = fs::remove_dir_all(&dir);
+    let dir = mev::testsupport::unique_temp_dir(&format!("mev-brain-graph-emit-{suffix}"));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -221,7 +220,7 @@ fn export_resolution_matches_check_graph_diagnostics() {
     let (corpus, _crawl_diags) = crawl_corpus(&dir, &config);
     let artifact = build_graph(&corpus, &config);
 
-    let diags = check_graph(&artifact);
+    let diags = check_graph(&artifact, &corpus.ephemeral_ids);
     let export = build_graph_export(&dir, &artifact);
 
     assert_eq!(export.edges.len(), 3, "expected exactly 3 edges");

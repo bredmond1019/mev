@@ -321,7 +321,10 @@ pub fn parse_state_date(s: &str) -> Option<chrono::NaiveDate> {
 /// The effective staleness anchor for an item: the latest of its `created` and
 /// (optional) `reviewed` dates that parses. `None` when no date parses (the
 /// item cannot age — the malformed date is surfaced separately as an error).
-fn staleness_anchor(created: Option<&str>, reviewed: Option<&str>) -> Option<chrono::NaiveDate> {
+pub(crate) fn staleness_anchor(
+    created: Option<&str>,
+    reviewed: Option<&str>,
+) -> Option<chrono::NaiveDate> {
     let c = created.and_then(parse_state_date);
     let r = reviewed.and_then(parse_state_date);
     match (c, r) {
@@ -335,7 +338,7 @@ fn staleness_anchor(created: Option<&str>, reviewed: Option<&str>) -> Option<chr
 /// Whether an item is currently snoozed: `snoozed_until` parses to a date that
 /// is still in the future (`today < snoozed_until`). An absent or unparseable
 /// value is not snoozed.
-fn is_snoozed(snoozed_until: Option<&str>, today: chrono::NaiveDate) -> bool {
+pub(crate) fn is_snoozed(snoozed_until: Option<&str>, today: chrono::NaiveDate) -> bool {
     snoozed_until
         .and_then(parse_state_date)
         .is_some_and(|d| today < d)
@@ -2367,6 +2370,29 @@ pub fn tier_scope_for(brain_file: &StateFile, config: &BrainConfig) -> TierScope
     }
 }
 
+/// Resolve a configured repo's loaded state file, honoring the dual-role rule.
+///
+/// A registered repo is either a leaf (`kind: "project"`) or a tier sub-brain
+/// root (`kind: "brain"`, `tier = "_root"` in brain.toml) that carries its own
+/// authored `tracks[]` (e.g. `business`'s "Business Ops" BZ.* track, D43).
+/// Both fold into the union the same way; a "brain" entry with empty
+/// `tracks[]` is a no-op via `derive_focus`'s short-circuit, so this is
+/// byte-identical for the pure container tiers (core, side, client,
+/// portfolio).
+///
+/// This is the **only** place the string literals `"project"` / `"brain"`
+/// are compared for repo-state resolution — every call site (`derive_rollup`,
+/// `derive_brain_focus`) resolves through this helper so the rule cannot
+/// drift between them again.
+pub(crate) fn resolve_repo_state_file<'a>(
+    files: &'a [(StateSource, StateFile)],
+    repo_slug: &str,
+) -> Option<&'a (StateSource, StateFile)> {
+    files
+        .iter()
+        .find(|(src, f)| src.repo_slug == repo_slug && (f.kind == "project" || f.kind == "brain"))
+}
+
 // ---------------------------------------------------------------------------
 // Rollup derivation (MV.3B.T, tier-scoped in MV.3B.U)
 // ---------------------------------------------------------------------------
@@ -2375,8 +2401,9 @@ pub fn tier_scope_for(brain_file: &StateFile, config: &BrainConfig) -> TierScope
 ///
 /// Iterates the **in-scope** `config.repos[]` entries (filtered by `scope`, in
 /// config order) and, for each, produces one [`RepoRollup`]:
-/// - If a loadable `kind == "project"` child exists in `files` for that slug,
-///   derive its headline via [`derive_focus`] (as before) and set
+/// - If a loadable child (resolved via [`resolve_repo_state_file`] — either
+///   `kind == "project"` or `kind == "brain"`) exists in `files` for that
+///   slug, derive its headline via [`derive_focus`] (as before) and set
 ///   `tier: Some(<config tier>)`.
 /// - Else if `existing` (the brain file's current `repos[]`) already has an
 ///   entry for that slug, **preserve it verbatim** (backfilling `tier` from
@@ -2401,9 +2428,7 @@ pub fn derive_rollup(
 
     in_scope
         .map(|entry| {
-            let child = files
-                .iter()
-                .find(|(src, f)| src.repo_slug == entry.slug && f.kind == "project");
+            let child = resolve_repo_state_file(files, &entry.slug);
 
             if let Some((src, file)) = child {
                 let derived = derive_focus(src, file, graph, files);
@@ -2602,16 +2627,7 @@ pub fn derive_brain_focus(
     let mut seen_deferred: HashSet<(String, String)> = HashSet::new();
 
     for entry in in_scope {
-        // A registered repo is either a leaf ("project") or a tier sub-brain
-        // root ("brain", `tier = "_root"` in brain.toml) that carries its own
-        // authored `tracks[]` (e.g. `business`'s "Business Ops" BZ.* track,
-        // D43). Both fold into the union the same way; a "brain" entry with
-        // empty `tracks[]` is a no-op via `derive_focus`'s short-circuit, so
-        // this is byte-identical for the pure container tiers (core, side,
-        // client, portfolio).
-        let child = files.iter().find(|(src, f)| {
-            src.repo_slug == entry.slug && (f.kind == "project" || f.kind == "brain")
-        });
+        let child = resolve_repo_state_file(files, &entry.slug);
 
         let Some((src, file)) = child else {
             continue;
@@ -4997,6 +5013,8 @@ mod tests {
                 depends_on: deps.clone(),
                 wave: *wave,
                 origin: None,
+                note: None,
+                description: None,
             })
             .collect();
 
@@ -5416,6 +5434,8 @@ mod tests {
                 depends_on: deps.clone(),
                 wave: None,
                 origin: None,
+                note: None,
+                description: None,
             })
             .collect();
 
@@ -5725,6 +5745,8 @@ mod tests {
                 kind: "backlog".to_string(),
                 slug: "add-p2".to_string(),
             }),
+            note: None,
+            description: None,
         };
         let backlog_node = Backlog {
             slug: "add-p2".to_string(),
@@ -5998,6 +6020,8 @@ mod tests {
                 depends_on: deps.clone(),
                 wave: None,
                 origin: None,
+                note: None,
+                description: None,
             })
             .collect();
 
@@ -6478,6 +6502,8 @@ mod tests {
                         depends_on: vec![],
                         wave: None,
                         origin: None,
+                        note: None,
+                        description: None,
                     },
                     TrackBlock {
                         epics: Vec::new(),
@@ -6493,6 +6519,8 @@ mod tests {
                         }],
                         wave: None,
                         origin: None,
+                        note: None,
+                        description: None,
                     },
                 ],
             }],
@@ -6854,6 +6882,108 @@ mod tests {
                 rollup.repo
             );
         }
+    }
+
+    #[test]
+    fn derive_rollup_brain_kind_file_yields_its_own_lane_contents() {
+        // The regression this ticket exists for: a configured repo whose
+        // loaded state file is `kind: "brain"` but carries its own non-empty
+        // `tracks[]` (a dual-role tier-brain root, e.g. `business`/`core`/`hq`
+        // in the live fleet) must still derive real lane CONTENTS via
+        // `resolve_repo_state_file` — not fall through to an empty stub.
+        // `derive_rollup_hq_scope_includes_every_tier` only asserts the repo
+        // list and would pass even against the pre-fix predicate; this test
+        // asserts block-id contents, which the pre-fix `f.kind == "project"`
+        // filter could never produce for a "brain" file.
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let dir = tempfile::tempdir().expect("tempdir");
+        // dual_role_brain_pair builds a kind: "brain" file with one
+        // in_progress block (-> now) and one open block with an unmet
+        // external dep (-> blocked), ids prefixed with the uppercased slug.
+        let pair_alpha = dual_role_brain_pair(dir.path(), "alpha");
+        let files = vec![pair_alpha];
+        let graph = build_state_graph(&files);
+
+        let rollups = derive_rollup(&scope, &config, &[], &graph, &files);
+
+        let alpha = rollups
+            .iter()
+            .find(|r| r.repo == "alpha")
+            .expect("alpha rollup entry must exist");
+        assert_eq!(
+            alpha.now.len(),
+            1,
+            "brain-kind file's own in_progress block must land in now"
+        );
+        assert_eq!(alpha.now[0].id, "ALPHA.1.A");
+        assert_eq!(
+            alpha.blocked.len(),
+            1,
+            "brain-kind file's own blocked block must land in blocked"
+        );
+        assert_eq!(alpha.blocked[0].id, "ALPHA.1.B");
+        assert_eq!(alpha.tier.as_deref(), Some("core"));
+    }
+
+    #[test]
+    fn derive_rollup_brain_kind_file_with_empty_tracks_still_yields_empty_lanes() {
+        // No-regression guarantee for pure container tiers (core, side,
+        // client, portfolio): a `kind: "brain"` file with an EMPTY
+        // `tracks[]` must still yield empty lanes — resolving it via
+        // `resolve_repo_state_file` derives real (not stub) output, but
+        // deriving over zero tracks is a no-op.
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair_alpha = empty_brain_pair(dir.path(), "alpha");
+        let files = vec![pair_alpha];
+        let graph = build_state_graph(&files);
+
+        let rollups = derive_rollup(&scope, &config, &[], &graph, &files);
+
+        let alpha = rollups
+            .iter()
+            .find(|r| r.repo == "alpha")
+            .expect("alpha rollup entry must exist");
+        assert!(alpha.now.is_empty());
+        assert!(alpha.next.is_empty());
+        assert!(alpha.blocked.is_empty());
+        assert!(alpha.deferred.is_empty());
+        assert_eq!(alpha.tier.as_deref(), Some("core"));
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_repo_state_file — the shared dual-role resolution helper
+    // (MV.ticket.derive-rollup-dual-role-drift task 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_repo_state_file_resolves_project_and_brain_kinds_and_rejects_unknown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let leaf = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let brain = dual_role_brain_pair(dir.path(), "business");
+        let files = vec![leaf, brain];
+
+        let resolved_project = resolve_repo_state_file(&files, "alpha");
+        assert!(
+            resolved_project.is_some(),
+            "expected a kind: \"project\" file to resolve"
+        );
+        assert_eq!(resolved_project.unwrap().1.kind, "project");
+
+        let resolved_brain = resolve_repo_state_file(&files, "business");
+        assert!(
+            resolved_brain.is_some(),
+            "expected a kind: \"brain\" file to resolve"
+        );
+        assert_eq!(resolved_brain.unwrap().1.kind, "brain");
+
+        let resolved_unknown = resolve_repo_state_file(&files, "does-not-exist");
+        assert!(
+            resolved_unknown.is_none(),
+            "expected an unregistered repo slug to return None"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -7650,6 +7780,8 @@ mod check_field_policy_tests {
             due: None,
             sdlc_workflow: None,
             model: None,
+            note: None,
+            description: None,
         }
     }
 

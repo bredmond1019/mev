@@ -26,8 +26,7 @@ fn write_file(root: &Path, rel: &str, content: &str) {
 
 /// Make a fresh uniquely-named temp dir for a test and return its path.
 fn temp_dir(suffix: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("mev-brain-sync-it-{suffix}"));
-    let _ = fs::remove_dir_all(&dir);
+    let dir = mev::testsupport::unique_temp_dir(&format!("mev-brain-sync-it-{suffix}"));
     fs::create_dir_all(&dir).unwrap();
     dir
 }

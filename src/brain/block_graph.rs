@@ -592,6 +592,8 @@ mod tests {
             sdlc_workflow: None,
             model: None,
             epics: Vec::new(),
+            note: None,
+            description: None,
         }
     }
 

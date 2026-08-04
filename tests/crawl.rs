@@ -22,8 +22,7 @@ fn touch(root: &Path, rel: &str) {
 
 /// Make a fresh temp dir with a unique name for this test.
 fn temp_dir(suffix: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("mev-crawl-{suffix}"));
-    let _ = fs::remove_dir_all(&dir);
+    let dir = mev::testsupport::unique_temp_dir(&format!("mev-crawl-{suffix}"));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
