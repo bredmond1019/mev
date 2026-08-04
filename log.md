@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-04T03:20:00Z"
+timestamp: "2026-08-04T17:20:00Z"
 ---
 
 # Log — mev
@@ -18,6 +18,32 @@ timestamp: "2026-08-04T03:20:00Z"
 ---
 
 ## [run: 2026-08-04]
+
+### `ticket-migrate-extra-literals-to-default-spread` shipped + a stale-binary class closed fleet-wide
+- **What:** Migrated all 101 explicit `extra: Default::default()` sites to `..Default::default()`
+  (0 remaining; diff an exact 1:1 line swap), closing the block via `mev set-block-status --write`.
+  `/sdlc-task` bailed on task 4 for an environmental reason, not a defect — `toolchain-freshness`
+  reads the live repo from inside fixture-scoped conformance assertions, so an unrelated in-flight
+  harness sync turned the tree dirty and reddened two tests. Migration verified independently on a
+  stashed-clean tree (1042 pass, fmt + `clippy --all-targets` clean). Then closed the class that
+  chasing it exposed: `hooks/pre-push` (brain `1f00eaa9`) now prints a non-blocking advisory when
+  the installed `mev`'s build stamp differs from its source HEAD, reusing the `toolchain-freshness`
+  signal that already existed but that nothing acted on. 5 new hook tests (49 pass), incl. a
+  minimal-PATH runner so the absent-binary case can't fall through to a real installed mev.
+  Distributed via `sync_downstream_harness.py --apply` — 48 files across 17 repos, committed in 15.
+  Also: base-template@`777ec3b` harness sync landed in mev + bastion; `.mev-history/` gitignored in
+  HQ with 11 leaked snapshots untracked; two dangling `related:` refs qualified; okf-core carryover
+  scope fixed.
+- **Why:** `mev` is the fleet writer — `emit-state --write` rewrites derived files across every
+  repo in `brain.toml`, invoked from `PATH` by `/log-work` and `scripts/routine.sh`. The
+  append-only writer shipped, merged, and closed **while `~/.cargo/bin/mev` still held a pre-merge
+  build**, so every real write ran without the safety net the ticket had just added, and nothing
+  surfaced it. Root cause: `build_and_install.sh` reinstalls only on *pulled* commits, so the
+  authoring machine is the one that drifts. Detection already existed; nothing was listening.
+- **Refs:** `planning/ticket-migrate-extra-literals-to-default-spread/tasks.md`; carryover
+  `mev-install-trigger-misses-locally-authored-commits`,
+  `conformance-fixture-tests-depend-on-live-repo-state`,
+  `append-only-writer-restore-path-unexercised-live`
 
 ### `ticket-append-only-emit-state-writer` shipped (full spec, 7 tasks, PASS)
 
