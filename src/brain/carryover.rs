@@ -577,7 +577,6 @@ mod tests {
 
     fn carryover(related: Vec<BlockedBy>, own_repo: Option<&str>) -> Carryover {
         Carryover {
-            extra: Default::default(),
             slug: "test-slug".to_string(),
             scope: scope(own_repo),
             kind: "deferred".to_string(),
@@ -587,6 +586,7 @@ mod tests {
             created: "2026-01-01".to_string(),
             reviewed: None,
             snoozed_until: None,
+            ..Default::default()
         }
     }
 
@@ -781,18 +781,15 @@ mod tests {
 
     fn state_file(repo: &str, blocks: Vec<(&str, &str)>, carryover: Vec<Carryover>) -> StateFile {
         StateFile {
-            extra: Default::default(),
             repo: repo.to_string(),
             kind: "project".to_string(),
             updated: "2026-08-01".to_string(),
             focus: Default::default(),
             tracks: vec![okf_core::Track {
-                extra: Default::default(),
                 title: "wave 1".to_string(),
                 blocks: blocks
                     .into_iter()
                     .map(|(id, status)| okf_core::TrackBlock {
-                        extra: Default::default(),
                         id: id.to_string(),
                         title: "a block".to_string(),
                         status: Some(status.to_string()),
@@ -806,8 +803,10 @@ mod tests {
                         sdlc_workflow: None,
                         model: None,
                         epics: Vec::new(),
+                        ..Default::default()
                     })
                     .collect(),
+                ..Default::default()
             }],
             repos: Vec::new(),
             cross_repo: Vec::new(),
@@ -816,6 +815,7 @@ mod tests {
             note: None,
             backlog: Vec::new(),
             carryover,
+            ..Default::default()
         }
     }
 
@@ -829,7 +829,6 @@ mod tests {
         snoozed_until: Option<&str>,
     ) -> Carryover {
         Carryover {
-            extra: Default::default(),
             slug: slug.to_string(),
             scope: CarryoverScope {
                 repo: None,
@@ -843,6 +842,7 @@ mod tests {
             created: created.to_string(),
             reviewed: reviewed.map(str::to_string),
             snoozed_until: snoozed_until.map(str::to_string),
+            ..Default::default()
         }
     }
 
