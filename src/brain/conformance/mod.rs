@@ -12,6 +12,8 @@
 //! file owns only the shared types, the FNV-1a digest, the `compare_sides` helper every
 //! set-parity check reuses, and the [`run_checks`] driver.
 
+mod backlog;
+
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -96,7 +98,11 @@ pub struct ConformanceCheck {
 /// The full registry of conformance checks. Adding a check is adding one entry here plus
 /// its own file — nothing else changes.
 pub fn all_checks() -> Vec<ConformanceCheck> {
-    Vec::new()
+    vec![ConformanceCheck {
+        name: "backlog-parity",
+        description: "HQ planning/backlog.md ## Active + ## Promoted vs state.json backlog[]",
+        run: backlog::run,
+    }]
 }
 
 /// FNV-1a 64-bit digest of `items`, joined with `\n` in the order given (the caller is
@@ -323,13 +329,14 @@ mod tests {
     }
 
     #[test]
-    fn run_checks_empty_registry_is_ok() {
+    fn run_checks_runs_every_registered_check() {
         let c = ctx();
         let report = run_checks(&c, None).unwrap();
-        assert_eq!(report.results.len(), 0);
-        assert_eq!(report.drift_count, 0);
-        assert_eq!(report.pass_count, 0);
-        assert_eq!(report.not_evaluable_count, 0);
+        assert_eq!(report.results.len(), all_checks().len());
+        assert_eq!(
+            report.drift_count + report.pass_count + report.not_evaluable_count,
+            report.results.len()
+        );
     }
 
     #[test]
