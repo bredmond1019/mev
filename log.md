@@ -19,6 +19,42 @@ timestamp: "2026-08-02T09:15:06Z"
 
 ## [run: 2026-08-03]
 
+### `ticket-conformance-check-registry` — BAILED at task 1/9: pre-existing baseline compile break
+
+`/sdlc-flow` ran tasks 1 through 9 of `ticket-conformance-check-registry` (`mev conformance` — a
+registry of named drift checks over facts kept in two places, modeled on qm's conformance command).
+Task 1 implemented the registry scaffold in `src/brain/conformance/mod.rs`:
+`CheckStatus`/`FactSide`/`CheckOutcome`/`CheckResult`/`ConformanceReport`/`ConformanceCtx`/
+`ConformanceCheck` types, an in-house FNV-1a `digest()`, a shared `compare_sides()` verdict body,
+and the `all_checks()`/`run_checks()` driver (registry left empty — the four seed checks were slated
+for tasks 2-5), registered via `pub mod conformance;` in `src/brain/mod.rs`, with 9 new unit tests
+passing in isolation. The run **BAILED** before task 2 began: the branch's baseline fails to build
+independently of this task's diff — `okf_core::StateFile`/`Track`/`TrackBlock` now require an
+`extra: serde_json::Map<String, serde_json::Value>` field that dozens of struct literals across
+`src/brain/state.rs`, `src/brain/block_graph.rs`, `src/brain/carryover.rs`, and `tests/brain_emit.rs`
+(and others) don't provide, producing 103 compile errors. This was confirmed pre-existing via
+`git stash` before task 1's edit landed, and is an upstream `okf-core` contract change this ticket's
+spec doesn't address. Notable decision: `compare_sides()` emits an explicit "digests differ though
+item sets match" finding for the edge case where digests diverge but the two sorted item sets are
+identical, so `drift` never reports zero findings. Next: a dedicated task/spec to backfill `extra`
+fields across the codebase (state.rs, block_graph.rs, carryover.rs, and their tests) so the baseline
+compiles again, then resume `ticket-conformance-check-registry` from task 2.
+
+```
+a572fae feat: implement ticket-conformance-check-registry-task1
+2524ea5 fix(carryover): gate block refs on a closure verb; drop related[] from the verdict
+dcb9554 Merge pull request #26 from bredmond1019/ticket-carryover-sweep-command-flow
+f5bdf8d chore: wrap up ticket-carryover-sweep-command
+02266aa feat: implement ticket-carryover-sweep-command-task5
+9d14c4a feat: implement ticket-carryover-sweep-command-task4
+2705f67 feat: implement ticket-carryover-sweep-command-task3
+7574706 feat: implement ticket-carryover-sweep-command-task2
+```
+
+---
+
+## [run: 2026-08-03]
+
 ### `MV.ticket.carryover-sweep-command` — `mev carryover`, a read-only fleet-wide carryover sweep
 
 - **What:** Shipped the full spec end to end via `/sdlc-flow` (6/6 tasks PASS, one attempt each,
