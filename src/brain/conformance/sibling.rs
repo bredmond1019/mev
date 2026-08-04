@@ -699,6 +699,148 @@ mod tests {
         assert_ne!(outcome.status, CheckStatus::Pass);
     }
 
+    // --- Task 5: prove the check fails — regression fixtures against SIBLING_RULES --
+    //
+    // These tests deliberately look up the rule in `SIBLING_RULES` (not a test-local
+    // `SiblingRule` literal) so a future edit that weakens or removes a registered rule
+    // — e.g. dropping `forbidden`, or pointing `shared_helper` at the wrong name — makes
+    // one of these tests fail rather than leaving the registered rule silently
+    // unenforceable.
+
+    fn registered_rule(name: &str) -> &'static SiblingRule {
+        SIBLING_RULES
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("rule `{name}` not registered in SIBLING_RULES"))
+    }
+
+    #[test]
+    fn rule1_regression_reinlined_predicate_and_dropped_helper() {
+        let rule = registered_rule("dual-role-repo-resolution");
+        // derive_rollup regresses: re-inlines the forbidden `f.kind == "project"` check
+        // and no longer calls `resolve_repo_state_file` at all — exactly the incident
+        // this rule exists to catch. derive_brain_focus stays correct.
+        let sources = vec![src(
+            "src/brain/state.rs",
+            "fn derive_rollup() {\n    \
+                 if f.kind == \"project\" {\n        \
+                     // regressed: no longer routes through the shared helper\n    \
+                 }\n\
+             }\n\
+             fn derive_brain_focus() {\n    \
+                 resolve_repo_state_file();\n\
+             }\n\
+             fn dual_role_rule_holds_for_both_resolvers() {\n    \
+                 derive_rollup();\n    \
+                 derive_brain_focus();\n\
+             }\n",
+        )];
+        let findings = scan_rule(rule, &sources);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == FindingKind::ForbiddenInlined && f.member == "derive_rollup"),
+            "expected forbidden-inlined for derive_rollup: {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == FindingKind::HelperNotCalled && f.member == "derive_rollup"),
+            "expected helper-not-called for derive_rollup: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn rule1_regression_covering_test_drops_a_member() {
+        let rule = registered_rule("dual-role-repo-resolution");
+        // Both members stay correct, but the covering test regresses to exercise only
+        // derive_rollup — the "asserted against BOTH" guarantee is broken.
+        let sources = vec![src(
+            "src/brain/state.rs",
+            "fn derive_rollup() {\n    \
+                 resolve_repo_state_file();\n\
+             }\n\
+             fn derive_brain_focus() {\n    \
+                 resolve_repo_state_file();\n\
+             }\n\
+             fn dual_role_rule_holds_for_both_resolvers() {\n    \
+                 derive_rollup();\n\
+             }\n",
+        )];
+        let findings = scan_rule(rule, &sources);
+        let finding = findings
+            .iter()
+            .find(|f| f.kind == FindingKind::TestNotCovering)
+            .unwrap_or_else(|| panic!("expected test-not-covering: {findings:?}"));
+        assert!(finding.message.contains("derive_brain_focus"));
+    }
+
+    #[test]
+    fn rule1_regression_member_renamed_away() {
+        let rule = registered_rule("dual-role-repo-resolution");
+        // derive_brain_focus was renamed (or deleted) without updating the rule.
+        let sources = vec![src(
+            "src/brain/state.rs",
+            "fn derive_rollup() {\n    \
+                 resolve_repo_state_file();\n\
+             }\n\
+             fn derive_brain_focus_renamed() {\n    \
+                 resolve_repo_state_file();\n\
+             }\n\
+             fn dual_role_rule_holds_for_both_resolvers() {\n    \
+                 derive_rollup();\n    \
+                 derive_brain_focus_renamed();\n\
+             }\n",
+        )];
+        let findings = scan_rule(rule, &sources);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == FindingKind::MissingMember && f.member == "derive_brain_focus"),
+            "expected missing-member for derive_brain_focus: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn rule2_regression_inline_map_construction_drops_helper() {
+        let rule = registered_rule("block-status-map-construction");
+        // check_status_consistency regresses back to rebuilding the map inline instead
+        // of calling block_status_map — the second-instance defect this rule guards.
+        let sources = vec![src(
+            "src/brain/state.rs",
+            "fn check_status_consistency() {\n    \
+                 let mut status_map = HashMap::new();\n    \
+                 status_map.insert(key, val);\n\
+             }\n\
+             fn ready_order() {\n    \
+                 block_status_map();\n\
+             }\n\
+             fn derive_focus() {\n    \
+                 block_status_map();\n\
+             }\n\
+             fn all_status_consumers_agree_on_one_fixture() {\n    \
+                 check_status_consistency();\n    \
+                 ready_order();\n    \
+                 derive_focus();\n\
+             }\n",
+        )];
+        let findings = scan_rule(rule, &sources);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == FindingKind::HelperNotCalled
+                    && f.member == "check_status_consistency"),
+            "expected helper-not-called for check_status_consistency: {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == FindingKind::ForbiddenInlined
+                    && f.member == "check_status_consistency"),
+            "expected forbidden-inlined for check_status_consistency: {findings:?}"
+        );
+    }
+
     #[test]
     fn run_uses_real_stamped_source_dir_without_panicking() {
         let ctx = ConformanceCtx {
