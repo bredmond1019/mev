@@ -103,8 +103,8 @@ fn write_epic_doc(root: &Path) {
 }
 
 /// Build the full corpus fixture: `brain.toml` + HQ `state.json` (`backlog[]` + `epics[]`)
-/// + `planning/backlog.md` + `core/planning/epics/index.md` + the per-epic doc — every
-/// side both disk-backed checks read is present and matching.
+/// plus `planning/backlog.md`, `core/planning/epics/index.md`, and the per-epic doc —
+/// every side both disk-backed checks read is present and matching.
 fn write_full_clean_fixture(root: &Path) {
     write_brain_toml(root);
     write_hq_state_full(root);

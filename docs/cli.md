@@ -1227,6 +1227,83 @@ mev conformance ~/Dev/agentic-portfolio
 | `epics-index-parity` | `core/planning/epics/index.md` rows as `(slug, status)`, where `slug` is resolved from the row's link target against the registry's own `epics[].plan` pointers (falling back to the link stem only when no `plan` value matches) | HQ `epics[]` registry as `(slug, status)` pairs, `status` being the registry's status field | A `(slug, status)` pair present on only one side — including an epic in `epics[]` with no index row, or an index row whose status disagrees with the registry. The check also asserts every registry epic's `plan` target exists on disk |
 | `project-cache-watermark` | Each `docs/projects/<project>.md` frontmatter `synced_from` | The sub-repo's real `planning/status.md` frontmatter `timestamp` | Delegates entirely to `crate::brain::sync::check_sync` (the same logic behind `mev validate-brain --sync`) — this check is an **adapter**, not a reimplementation, and surfaces that function's `E_SYNC_DRIFT` / `E_SYNC_WATERMARK_MISSING` / `E_SYNC_WATERMARK_MALFORMED` / `E_SYNC_FILE_MISSING` diagnostics verbatim rather than re-parsing RFC3339 timestamps itself |
 | `toolchain-freshness` | The running `mev` binary's compiled-in build stamp (`MEV_BUILD_GIT_SHA`, `MEV_BUILD_DIRTY`, `MEV_BUILD_SOURCE_DIR` — stamped into the binary by `build.rs` via `cargo:rustc-env` at compile time) | `git rev-parse HEAD` run in `MEV_BUILD_SOURCE_DIR` right now | A different live SHA than the stamped one ("the running binary is behind its source; rebuild"), or the same SHA but the build was dirty (a distinct drift message) |
+| `sibling-rule-coverage` | The declared `SIBLING_RULES` table (`src/brain/conformance/sibling.rs`) — each rule's name + members | Source-text analysis of every `.rs` file under `<MEV_BUILD_SOURCE_DIR>/src` and `/tests` | Any of four findings on any rule: a member function that no longer routes through its `shared_helper`, re-inlines a `forbidden` predicate, has gone missing outright, or has lost its `covering_test`'s coverage of every member — see below |
+
+#### `sibling-rule-coverage` — a rule taught to one function must be taught to its sibling
+
+`derive_brain_focus` and `derive_rollup` both resolve a repo's state file and both must honour
+the **dual-role rule** (a registered repo is either a leaf `kind: "project"` or a tier sub-brain
+root `kind: "brain"` carrying its own authored `tracks[]`). The first learned the rule; the
+second kept hard-filtering `kind == "project"` and stayed silently wrong for months — blind to
+`business`'s 22 open blocks and `hq`'s 9 — because nothing checked that a rule taught to one
+sibling was taught to the other. `sibling-rule-coverage` is that check, generalized: it declares
+a table of sibling-function pairs (or triples) that must all route through one shared helper,
+must never re-inline the predicate that helper replaced, and must all be exercised together by
+one covering test.
+
+Unlike the other checks (which compare two independently-maintained facts), this one is
+**source-text analysis over the crate's own source** — the defect class is always "one call site
+was edited and its sibling was not," which is directly visible in the text. No `syn`/AST parsing;
+brace-depth counting over the crate's `.rs` files is sufficient and dependency-free.
+
+**The `SiblingRule` fields** (`src/brain/conformance/sibling.rs`):
+
+| Field | Meaning |
+|---|---|
+| `name` | Stable rule name, e.g. `"dual-role-repo-resolution"` |
+| `invariant` | One sentence describing the shared rule, quoted verbatim in every finding |
+| `members` | The function names that must all agree on the invariant |
+| `shared_helper` | The function every member's body must call |
+| `forbidden` | Inline substrings that must never reappear in a member's body — the pattern the shared helper was extracted to eliminate |
+| `covering_test` | The name of a test whose body must mention every member — the "asserted against BOTH" proof |
+
+**The four failure modes**, each a distinct named finding:
+
+| Finding | Meaning |
+|---|---|
+| `missing-member` | A declared member function no longer exists in the source — the rule is stale; fix the rule or the rename |
+| `helper-not-called` | A member's body does not mention `shared_helper` — the exact regression: someone re-implemented the rule locally |
+| `forbidden-inlined` | A member's body contains one of the rule's `forbidden` substrings |
+| `test-not-covering` | `covering_test` is absent, or present but does not mention every member |
+
+Every finding's message names the rule, the member, and quotes the invariant verbatim.
+
+**Not-evaluable, not drift, on a missing source tree:** the check locates the source via the
+`MEV_BUILD_GIT_SHA`/`MEV_BUILD_SOURCE_DIR` build stamp (the same one `toolchain-freshness` uses).
+If that variable is unset, `unknown`, or points at a missing directory, the whole check reports
+`not-evaluable` — it never guesses a `pass`. Within a rule that *is* evaluable, a member whose
+body cannot be located (function not found, or unbalanced braces) reports `missing-member`
+rather than passing silently — the check never fails open.
+
+**The two registered rules:**
+
+1. **`dual-role-repo-resolution`** — *"A registered repo resolves to its state file whether that
+   file is `kind: \"project\"` (leaf) or `kind: \"brain\"` (tier sub-brain root carrying its own
+   authored `tracks[]`)."* Members: `derive_rollup`, `derive_brain_focus`. Shared helper:
+   `resolve_repo_state_file`. Forbidden: `f.kind == "project"`. Covering test:
+   `dual_role_rule_holds_for_both_resolvers` (`tests/sibling_rules.rs`).
+2. **`block-status-map-construction`** — *"Authored block status is looked up through one
+   `\"{repo}:{id}\"` map built by `block_status_map`; no call site rebuilds it inline."* Members:
+   `check_status_consistency`, `ready_order`, `derive_focus`. Shared helper: `block_status_map`.
+   Forbidden: `status_map.insert(`. Covering test: `all_status_consumers_agree_on_one_fixture`
+   (`tests/sibling_rules.rs`).
+
+**Registering a new sibling rule** — add one `SiblingRule` literal to `SIBLING_RULES` in
+`src/brain/conformance/sibling.rs`, nothing else:
+
+1. Name the invariant in one sentence — it will be quoted verbatim in every finding.
+2. List the `members` that must agree on it.
+3. Name (or extract, if it doesn't exist yet) the `shared_helper` every member must call.
+4. Name the `forbidden` inline substring(s) the shared helper was extracted to eliminate.
+5. Write (or reuse) a `covering_test` whose body mentions every member literally, and point
+   `covering_test` at its name.
+
+The registry is declarative — the CLI wiring, `--check` dispatch, and the four-finding-mode scan
+logic all iterate `SIBLING_RULES` generically.
+
+```bash
+mev conformance --check sibling-rule-coverage
+```
 
 #### Pass / drift / not-evaluable
 

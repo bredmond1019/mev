@@ -19,6 +19,62 @@ timestamp: "2026-08-02T09:15:06Z"
 
 ## [run: 2026-08-04]
 
+### `MV.ticket.sibling-rule-coverage` — sibling-rule-coverage conformance check: a rule taught to one function must be taught to its sibling
+
+- **What:** Shipped the full spec end to end via `/sdlc-flow` (7/7 tasks PASS, one attempt each,
+  final review verdict PASS). Task 1 scaffolded `src/brain/conformance/sibling.rs` — the
+  `SiblingRule`/`Finding`/`FindingKind` types, a word-boundary-safe `extract_fn_body`
+  (string/comment-aware brace-depth extraction), and `scan_rule` producing the four named findings
+  (`missing-member`, `helper-not-called`, `forbidden-inlined`, `test-not-covering`), registered as
+  the `sibling-rule-coverage` check in `all_checks()`. Task 2 wired `run()` to discover `.rs` files
+  under the `MEV_BUILD_SOURCE_DIR` build stamp, evaluate `SIBLING_RULES` via `scan_rule`, and never
+  return `Pass` when the source tree is unreachable (`NotEvaluable` instead); registered rule 1,
+  `dual-role-repo-resolution` (`derive_rollup`/`derive_brain_focus`, the worked example from the
+  epic). Task 3 added `tests/sibling_rules.rs::dual_role_rule_holds_for_both_resolvers`, a
+  parametrized fixture proving both resolvers honour the dual-role rule against one mixed-kind
+  (brain + project) config. Task 4 extracted `block_status_map` in `src/brain/state.rs`
+  (behaviour-preserving — byte-identical map contents) and pointed `check_status_consistency`,
+  `ready_order`, and `derive_focus` at it, then registered rule 2,
+  `block-status-map-construction`, with covering test `all_status_consumers_agree_on_one_fixture`.
+  Task 5 added five synthetic-regression unit tests exercising the two registered rules directly
+  against source-string fixtures for all four failure modes, so a future refactor of the real
+  source can't make the tests vacuous. Task 6 documented the check in `docs/cli.md` (table row,
+  `SiblingRule` fields, all four failure modes, both registered rules, and step-by-step
+  registration instructions for a new rule). Task 7 ran the full validation suite (fmt, clippy,
+  `cargo test`, release build) plus a live `mev conformance --check sibling-rule-coverage` run
+  against the real source — all green, both rules pass.
+- **Why it matters:** Closes the defect class the epic was created for — `derive_brain_focus`
+  learned the dual-role rule and `derive_rollup` did not, blinding every API consumer to
+  `business`'s 22 open blocks and `hq`'s 9 for months, silently. The check now makes the next such
+  instance loud (a distinct, named finding) instead of silent.
+- **Notable decisions:** `Finding` is a struct (not a bare `String`) so callers can filter/assert by
+  kind while the message still carries the invariant-quoting text; `extract_fn_body` returns only
+  the `{ ... }` body (not the signature); `discover_sources` returns `None` (not an empty `Vec`) for
+  both the literal `unknown` stamp and a non-existent directory, keeping `NotEvaluable` the only
+  path when source can't be read; regression tests look up rules via `SIBLING_RULES.iter().find(...)`
+  against the live registry rather than test-local `SiblingRule` literals, per the task's explicit
+  requirement.
+- **Verdict:** PASS (review, 1 attempt). No mev-tracked spec remains open — see
+  `planning/status.md` for parked/deferred candidates.
+
+Next: pick up `MV.chore.content-epic` (deferred, operator call) or a candidate from outside mev
+(`bastion:BA.ticket.epic-weight-dto`, the orchestrator `load_brain_edges.py` follow-up).
+
+```
+89b7b70 feat: implement ticket-sibling-rule-coverage-task6
+fa93f30 feat: implement ticket-sibling-rule-coverage-task5
+b58d30a feat: implement ticket-sibling-rule-coverage-task4
+6dda15f feat: implement ticket-sibling-rule-coverage-task3
+79b133b feat: implement ticket-sibling-rule-coverage-task2
+de212a7 feat: implement ticket-sibling-rule-coverage-task1
+e94553f fix(tests): indent a doc list continuation flagged by clippy --all-targets
+12904e2 Merge pull request #28 from bredmond1019/ticket-conformance-check-registry-flow
+```
+
+---
+
+## [run: 2026-08-04]
+
 ### `MV.ticket.conformance-check-registry` — `mev conformance`, a registry of named drift checks over facts kept in two places
 
 - **What:** Shipped the full spec end to end via `/sdlc-flow` (9/9 tasks PASS, one attempt each,

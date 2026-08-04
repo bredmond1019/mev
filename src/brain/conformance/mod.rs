@@ -15,6 +15,7 @@
 mod backlog;
 mod epics_index;
 mod project_cache;
+mod sibling;
 mod toolchain;
 
 use serde::Serialize;
@@ -121,6 +122,11 @@ pub fn all_checks() -> Vec<ConformanceCheck> {
             name: "toolchain-freshness",
             description: "the running mev binary's compiled-in build stamp vs its source tree's current HEAD",
             run: toolchain::run,
+        },
+        ConformanceCheck {
+            name: "sibling-rule-coverage",
+            description: "declared sibling-function pairs vs whether both route through their shared helper, avoid the forbidden inline pattern, and share a covering test",
+            run: sibling::run,
         },
     ]
 }
