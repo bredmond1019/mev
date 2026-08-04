@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-02T09:15:06Z"
+timestamp: "2026-08-04T03:20:00Z"
 ---
 
 # Log — mev
@@ -18,6 +18,61 @@ timestamp: "2026-08-02T09:15:06Z"
 ---
 
 ## [run: 2026-08-04]
+
+### Orchestrated chain — the four `bullet-proof-software` mev tickets, 4/4 closed
+
+- **What:** Drove `MV.ticket.derive-rollup-dual-role-drift` → `carryover-sweep-command` →
+  `conformance-check-registry` → `sibling-rule-coverage` end to end in one session (specs authored
+  here, engines run per block; per-block detail in the entries below). Net new: **`mev carryover`**
+  (read-only fleet sweep over 57 `carryover[]` entries in 12 repos, evaluating `clears_when`) and
+  **`mev conformance`** (5 registered drift checks, exit 1 on drift). The `derive_rollup` fix is
+  visible in data — `business` went from all-zero live lanes to **12 next / 10 blocked** and `brain`
+  to 10 next in `repos[]`, which is what `GET /api/board` reads; the P0 revenue chain is finally on
+  the API board. Closed out with `emit-state --write` from a freshly-built binary:
+  `validate-brain --state` 0 errors, authored block notes 22 before / 22 after.
+
+  **Four defects found, three of them in fully-green work:**
+  1. **A false `cleared`** from my own carryover spec (6/6 PASS, review PASS). A block ID in
+     `clears_when` was read as "clears when it closes" even for *"one of the two `BA.0.A` blocks is
+     **renamed**"* — `BA.0.A` is closed, so the sweep advised deleting a live `known_issue`. Also
+     `related[]` (a see-also) was driving the verdict. Fixed with a closure-verb gate + the new
+     `no-closure-verb` reason; `cleared` 14 → 6. Settled as **D11**.
+  2. **A cross-repo break** — a concurrent `okf-core` lane landed `OK.3.A`/`OK.3.B` mid-run, adding
+     a non-`Option` `extra` capture field to shared structs; 101 downstream literals stopped
+     compiling and block 3 bailed. `cargo build` stayed green — only test code constructs those
+     literals. Backfilled, block re-run clean. **Second occurrence of this class** (the first was
+     `Epic`/bastion in Phase 11); filed upstream in the HQ backlog with `#[derive(Default)]` as the
+     recommendation.
+  3. **A blind gate** — `harness.json` runs `cargo clippy -- -D warnings`, which skips test targets,
+     so a lint violation in `tests/brain_conformance.rs` landed green. `--all-targets` catches it.
+  4. **A spec error caught before it ran** — `epics-index-parity` would have hardcoded
+     `core/planning/epics/<slug>.md`, emitting a false missing-doc finding for
+     `bullet-proof-software` (whose `plan` points outside that directory). Rewritten to join on the
+     authored `epics[].plan` pointer.
+
+  Verified the sibling check against the real regression, not just fixtures: re-inlining
+  `f.kind == "project"` into `derive_rollup` produced two findings (`helper-not-called`,
+  `forbidden-inlined`) with the invariant quoted verbatim. It catches the exact bug that started the
+  chain.
+
+- **Why:** The `bullet-proof-software` epic exists because a fix applied to one of two sibling code
+  paths was closed on the evidence of the half that was checked — leaving `business`'s 22 open
+  blocks invisible to every API consumer for months. These four tickets close that instance and make
+  the class loud. Every one of the four defects above was found by **reading real output, not a
+  green checkmark** — which is the epic's thesis, tested against the chain implementing it.
+
+- **Refs:** [`planning/orchestrate-2026-08-03/notes.md`](planning/orchestrate-2026-08-03/notes.md)
+  (decisions D-1…D-8, issues I-1…I-13) · PRs
+  [#26](https://github.com/bredmond1019/mev/pull/26) ·
+  [#28](https://github.com/bredmond1019/mev/pull/28) ·
+  [#29](https://github.com/bredmond1019/mev/pull/29) ·
+  [D11](planning/decisions/D11-destructive-verdicts-resolve-away-from-harm.md) ·
+  [D10](planning/decisions/D10-spec-inventory-second-derivation.md) (recurred as defect 1)
+
+  **Left open on purpose:** the two live `epics-index-parity` drifts (`brain-engine` reads
+  `complete` in the index vs `active` in the registry; `bullet-proof-software`, the focused epic,
+  has no index row) — kept as the check's first-run evidence, now surfaced by a command instead of
+  by luck.
 
 ### `MV.ticket.sibling-rule-coverage` — sibling-rule-coverage conformance check: a rule taught to one function must be taught to its sibling
 
@@ -70,10 +125,6 @@ de212a7 feat: implement ticket-sibling-rule-coverage-task1
 e94553f fix(tests): indent a doc list continuation flagged by clippy --all-targets
 12904e2 Merge pull request #28 from bredmond1019/ticket-conformance-check-registry-flow
 ```
-
----
-
-## [run: 2026-08-04]
 
 ### `MV.ticket.conformance-check-registry` — `mev conformance`, a registry of named drift checks over facts kept in two places
 
