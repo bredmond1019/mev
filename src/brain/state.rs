@@ -2367,6 +2367,29 @@ pub fn tier_scope_for(brain_file: &StateFile, config: &BrainConfig) -> TierScope
     }
 }
 
+/// Resolve a configured repo's loaded state file, honoring the dual-role rule.
+///
+/// A registered repo is either a leaf (`kind: "project"`) or a tier sub-brain
+/// root (`kind: "brain"`, `tier = "_root"` in brain.toml) that carries its own
+/// authored `tracks[]` (e.g. `business`'s "Business Ops" BZ.* track, D43).
+/// Both fold into the union the same way; a "brain" entry with empty
+/// `tracks[]` is a no-op via `derive_focus`'s short-circuit, so this is
+/// byte-identical for the pure container tiers (core, side, client,
+/// portfolio).
+///
+/// This is the **only** place the string literals `"project"` / `"brain"`
+/// are compared for repo-state resolution — every call site (`derive_rollup`,
+/// `derive_brain_focus`) resolves through this helper so the rule cannot
+/// drift between them again.
+pub(crate) fn resolve_repo_state_file<'a>(
+    files: &'a [(StateSource, StateFile)],
+    repo_slug: &str,
+) -> Option<&'a (StateSource, StateFile)> {
+    files
+        .iter()
+        .find(|(src, f)| src.repo_slug == repo_slug && (f.kind == "project" || f.kind == "brain"))
+}
+
 // ---------------------------------------------------------------------------
 // Rollup derivation (MV.3B.T, tier-scoped in MV.3B.U)
 // ---------------------------------------------------------------------------
@@ -2602,16 +2625,7 @@ pub fn derive_brain_focus(
     let mut seen_deferred: HashSet<(String, String)> = HashSet::new();
 
     for entry in in_scope {
-        // A registered repo is either a leaf ("project") or a tier sub-brain
-        // root ("brain", `tier = "_root"` in brain.toml) that carries its own
-        // authored `tracks[]` (e.g. `business`'s "Business Ops" BZ.* track,
-        // D43). Both fold into the union the same way; a "brain" entry with
-        // empty `tracks[]` is a no-op via `derive_focus`'s short-circuit, so
-        // this is byte-identical for the pure container tiers (core, side,
-        // client, portfolio).
-        let child = files.iter().find(|(src, f)| {
-            src.repo_slug == entry.slug && (f.kind == "project" || f.kind == "brain")
-        });
+        let child = resolve_repo_state_file(files, &entry.slug);
 
         let Some((src, file)) = child else {
             continue;
@@ -6866,6 +6880,39 @@ mod tests {
                 rollup.repo
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_repo_state_file — the shared dual-role resolution helper
+    // (MV.ticket.derive-rollup-dual-role-drift task 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_repo_state_file_resolves_project_and_brain_kinds_and_rejects_unknown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let leaf = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let brain = dual_role_brain_pair(dir.path(), "business");
+        let files = vec![leaf, brain];
+
+        let resolved_project = resolve_repo_state_file(&files, "alpha");
+        assert!(
+            resolved_project.is_some(),
+            "expected a kind: \"project\" file to resolve"
+        );
+        assert_eq!(resolved_project.unwrap().1.kind, "project");
+
+        let resolved_brain = resolve_repo_state_file(&files, "business");
+        assert!(
+            resolved_brain.is_some(),
+            "expected a kind: \"brain\" file to resolve"
+        );
+        assert_eq!(resolved_brain.unwrap().1.kind, "brain");
+
+        let resolved_unknown = resolve_repo_state_file(&files, "does-not-exist");
+        assert!(
+            resolved_unknown.is_none(),
+            "expected an unregistered repo slug to return None"
+        );
     }
 
     // -----------------------------------------------------------------------
