@@ -21,6 +21,10 @@ pub use brain::carryover::{
     CarryoverLane, CarryoverRef, CarryoverReport, CarryoverVerdict, NotEvaluableReason,
     evaluate_carryover,
 };
+pub use brain::conformance::{
+    CheckOutcome, CheckResult, CheckStatus, ConformanceCheck, ConformanceCtx, ConformanceReport,
+    FactSide, all_checks, run_checks,
+};
 pub use brain::crawl::{MdFile, crawl_brain};
 pub use brain::emit::{
     EmitAction, EmitError, EmitPlan, apply_plan, plan_master_plan_tables, plan_state_json,
@@ -1274,6 +1278,50 @@ pub fn carryover_sweep(
         &config.attention,
         repo_filter,
     ))
+}
+
+/// `mev conformance` driver — runs the registry of named drift checks over facts kept in
+/// two places (`MV.ticket.conformance-check-registry`).
+///
+/// Modelled directly on [`block_graph_brain`]: resolves `brain.toml`, discovers and loads
+/// every `planning/state.json` (skipping any file that fails to parse individually — a
+/// partial corpus still yields a best-effort report over whatever loaded), builds a
+/// [`brain::conformance::ConformanceCtx`], and delegates to
+/// [`brain::conformance::run_checks`] for the registry pass. `only` narrows the run to one
+/// named check (`--check`), erroring with the valid names on an unknown one.
+///
+/// Returns an [`anyhow::Error`] only for a hard configuration error (`brain.toml` not
+/// found/unreadable, or an unknown `--check` name) — an individual malformed
+/// `state.json` is skipped, not fatal.
+pub fn conformance(
+    root: &std::path::Path,
+    only: Option<&str>,
+) -> anyhow::Result<brain::conformance::ConformanceReport> {
+    use brain::config::find_brain_config;
+    use brain::state::{discover_state_files, load_state};
+
+    let config = find_brain_config(root)
+        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
+
+    // 1. Discovery: find all planning/state.json files.
+    let (sources, _discovery_diags) = discover_state_files(root, &config);
+
+    // 2. Load each discovered file, skipping any that fail individually.
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    for src in &sources {
+        if let Ok(file) = load_state(&src.abs_path) {
+            loaded.push((src.clone(), file));
+        }
+    }
+
+    // 3. Build the shared context and run the registry.
+    let ctx = brain::conformance::ConformanceCtx {
+        root: root.to_path_buf(),
+        config,
+        files: loaded,
+    };
+
+    run_checks(&ctx, only)
 }
 
 /// Machine-readable envelope emitted by the `--json` flag for any `mev` subcommand.

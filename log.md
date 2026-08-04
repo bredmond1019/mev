@@ -17,6 +17,62 @@ timestamp: "2026-08-02T09:15:06Z"
 
 ---
 
+## [run: 2026-08-04]
+
+### `MV.ticket.conformance-check-registry` — `mev conformance`, a registry of named drift checks over facts kept in two places
+
+- **What:** Shipped the full spec end to end via `/sdlc-flow` (9/9 tasks PASS, one attempt each,
+  final review verdict PASS). Task 1 scaffolded the registry core in
+  `src/brain/conformance/mod.rs` — `CheckStatus`/`FactSide`/`CheckOutcome`/`CheckResult`/
+  `ConformanceReport`/`ConformanceCtx`/`ConformanceCheck`, an in-house FNV-1a `digest()` (no new
+  crate dependency), a shared `compare_sides()`, and `all_checks()`/`run_checks()`. Tasks 2-5 each
+  registered one seed check as a sibling file: `backlog.rs` (`planning/backlog.md` `## Active` +
+  `## Promoted` vs `state.json backlog[]`, joined on exact ticket title), `epics_index.rs`
+  (`core/planning/epics/index.md` vs the HQ `epics[]` registry, joined on the registry's own
+  `plan` pointer resolved brain-root-relative with a plan-relative fallback for out-of-directory
+  docs like `bullet-proof-software`, plus a per-epic doc-exists assertion), `project_cache.rs` (a
+  thin adapter over the existing `brain::sync::check_sync` — delegation, not reimplementation),
+  and `toolchain.rs` (a new `build.rs` stamps `MEV_BUILD_GIT_SHA`/`MEV_BUILD_DIRTY`/
+  `MEV_BUILD_SOURCE_DIR` into the binary, never failing the build when git is unavailable; the
+  check compares the compiled-in SHA against the live source tree's current HEAD — the incident
+  check the epic was created for). Task 6 wired a `mev::conformance` driver in `lib.rs` (modelled
+  on `block_graph_brain`) to a new `mev conformance [--check <name>] [--json] [path]` CLI
+  subcommand with a lane-style human renderer, reusing the drift-exit-code pattern from
+  `carryover` (0 pass/not-evaluable, 1 on any drift). Task 7 extended `tests/brain_conformance.rs`
+  with a full temp-dir corpus fixture (clean fixture, seeded backlog-title drift, single-check
+  filtering, tally-sums-to-results-len) on top of task 6's driver-wiring tests. Task 8 documented
+  the subcommand in `docs/cli.md`. Task 9 ran the full validation suite (fmt, clippy, `cargo
+  test`, release build — all green) and a live run against the real brain root, which confirmed
+  the two expected live drifts exactly (`bullet-proof-software` present in the registry with no
+  index row; `brain-engine` reading `complete` in the index against `active` in the registry) with
+  zero false missing-doc findings, exit code 1 as the drift-gate contract requires. This run
+  started clean off a separately-fixed baseline: an earlier attempt at this same ticket had bailed
+  at task 1 on a pre-existing fleet-wide `okf_core::extra` compile break (103 errors across
+  `state.rs`/`block_graph.rs`/`carryover.rs`/`tests/brain_emit.rs`), fixed out-of-band in
+  `de81724` (101 struct literals backfilled) before this run began. Clears the blocker on
+  `MV.ticket.sibling-rule-coverage`, which is now the only open mev-tracked spec.
+- **Decisions:** delegation over reimplementation for `project-cache-watermark`; plan-relative
+  fallback (not a hardcoded directory) for `epics-index-parity`'s link resolution, verified against
+  the live `bullet-proof-software` out-of-directory case; `build.rs` never fails the build when git
+  is missing, stamping `unknown` instead, per the toolchain check's not-evaluable contract.
+- **Verdict:** PASS (review attempt 1, no findings).
+
+Next: run `MV.ticket.sibling-rule-coverage` — a rule taught to one function must be taught to its
+sibling, worked example already on file (`derive_brain_focus`/`derive_rollup`'s dual-role rule).
+
+```
+1882a72 feat: implement ticket-conformance-check-registry-task8
+9554a32 feat: implement ticket-conformance-check-registry-task7
+6947bcf feat: implement ticket-conformance-check-registry-task6
+77defcb feat: implement ticket-conformance-check-registry-task5
+2cffa86 feat: implement ticket-conformance-check-registry-task4
+8ff582b feat: implement ticket-conformance-check-registry-task3
+7ecd1c6 feat: implement ticket-conformance-check-registry-task2
+2c2dc67 feat: implement ticket-conformance-check-registry-task1
+```
+
+---
+
 ## [run: 2026-08-03]
 
 ### `MV.ticket.carryover-sweep-command` — `mev carryover`, a read-only fleet-wide carryover sweep

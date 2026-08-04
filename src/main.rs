@@ -432,6 +432,41 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run the registry of named drift checks over facts kept in two places
+    /// (`MV.ticket.conformance-check-registry`).
+    ///
+    /// Each registered check canonicalizes and digests both sides of a duplicated fact
+    /// and reports divergence with the concrete set difference. Four checks ship today:
+    ///   backlog-parity           — HQ planning/backlog.md ## Active + ## Promoted vs
+    ///                               state.json backlog[]
+    ///   epics-index-parity       — core/planning/epics/index.md vs the HQ epics[] registry
+    ///   project-cache-watermark  — docs/projects/<project>.md synced_from vs the sub-repo's
+    ///                               real planning/status.md timestamp (an adapter over
+    ///                               `mev validate-brain --sync`)
+    ///   toolchain-freshness      — the running mev binary's compiled-in build stamp vs its
+    ///                               source tree's current HEAD
+    ///
+    /// Each check reports one of three statuses: pass (both sides match), drift (the
+    /// sides diverge — see the findings for the concrete set difference), or
+    /// not-evaluable (the check's inputs were absent; never a substitute for drift).
+    ///
+    /// Exit codes:
+    ///   0 — every check reported pass or not-evaluable
+    ///   1 — at least one check reported drift
+    ///   1 — brain.toml not found/unreadable, an unknown --check name, or a serialization
+    ///       error under --json
+    Conformance {
+        /// Path to search from when locating brain.toml (walks up to find it).
+        /// Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Run exactly one named check instead of the full registry.
+        #[arg(long)]
+        check: Option<String>,
+        /// Emit the ConformanceReport as compact JSON instead of a human summary.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -784,6 +819,7 @@ fn print_carryover_report(report: &mev::CarryoverReport) {
                         Some(mev::NotEvaluableReason::Prose) => "prose",
                         Some(mev::NotEvaluableReason::NoPredicate) => "no-predicate",
                         Some(mev::NotEvaluableReason::AmbiguousReference) => "ambiguous-reference",
+                        Some(mev::NotEvaluableReason::NoClosureVerb) => "no-closure-verb",
                         None => "unknown",
                     };
                     println!("      reason: {reason}");
@@ -792,6 +828,59 @@ fn print_carryover_report(report: &mev::CarryoverReport) {
             }
         }
     }
+}
+
+/// Human-readable, one-block-per-check summary for `mev conformance`'s default
+/// (non-`--json`) output.
+fn print_conformance_report(report: &mev::ConformanceReport) {
+    for result in &report.results {
+        let status_label = match result.outcome.status {
+            mev::CheckStatus::Pass => "PASS",
+            mev::CheckStatus::Drift => "DRIFT",
+            mev::CheckStatus::NotEvaluable => "NOT-EVALUABLE",
+        };
+        println!(
+            "\n{} [{status_label}] — {}",
+            result.name, result.description
+        );
+        if let Some(left) = &result.outcome.left {
+            println!(
+                "  {} ({} items): {}",
+                left.label,
+                left.items.len(),
+                left.digest
+            );
+        }
+        if let Some(right) = &result.outcome.right {
+            println!(
+                "  {} ({} items): {}",
+                right.label,
+                right.items.len(),
+                right.digest
+            );
+        }
+        match result.outcome.status {
+            mev::CheckStatus::Drift => {
+                for finding in &result.outcome.findings {
+                    println!("    {finding}");
+                }
+            }
+            mev::CheckStatus::NotEvaluable => {
+                if let Some(reason) = &result.outcome.reason {
+                    println!("    reason: {reason}");
+                }
+            }
+            mev::CheckStatus::Pass => {}
+        }
+    }
+
+    println!(
+        "\nconformance: {} check(s) — {} pass, {} drift, {} not-evaluable",
+        report.results.len(),
+        report.pass_count,
+        report.drift_count,
+        report.not_evaluable_count
+    );
 }
 
 fn main() -> ExitCode {
@@ -1358,6 +1447,42 @@ fn main() -> ExitCode {
                         }
                     } else {
                         print_carryover_report(&report);
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::Conformance { path, check, json } => {
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match mev::conformance(&root, check.as_deref()) {
+                Ok(report) => {
+                    let drift = report.drift_count > 0;
+                    if json || cli.json {
+                        match serde_json::to_string(&report) {
+                            Ok(s) => {
+                                println!("{s}");
+                            }
+                            Err(err) => {
+                                eprintln!("error serializing conformance report: {err:#}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    } else {
+                        print_conformance_report(&report);
+                    }
+                    if drift {
+                        ExitCode::FAILURE
+                    } else {
                         ExitCode::SUCCESS
                     }
                 }

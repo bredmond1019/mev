@@ -5002,6 +5002,7 @@ mod tests {
         let track_blocks: Vec<TrackBlock> = blocks
             .iter()
             .map(|(id, status, wave, deps)| TrackBlock {
+                extra: Default::default(),
                 epics: Vec::new(),
                 due: None,
                 priority: None,
@@ -5020,12 +5021,14 @@ mod tests {
 
         let path = dir.join(format!("{repo}-state.json"));
         let file = StateFile {
+            extra: Default::default(),
             epics: Vec::new(),
             repo: repo.to_string(),
             kind: "project".to_string(),
             updated: "2026-06-30".to_string(),
             focus: Focus::default(),
             tracks: vec![Track {
+                extra: Default::default(),
                 title: "Phase 1".to_string(),
                 blocks: track_blocks,
             }],
@@ -5423,6 +5426,7 @@ mod tests {
         let track_blocks: Vec<TrackBlock> = blocks
             .iter()
             .map(|(id, status, deps)| TrackBlock {
+                extra: Default::default(),
                 epics: Vec::new(),
                 due: None,
                 priority: None,
@@ -5441,12 +5445,14 @@ mod tests {
 
         let path = dir.join(format!("{repo}-state.json"));
         let file = StateFile {
+            extra: Default::default(),
             epics: Vec::new(),
             repo: repo.to_string(),
             kind: "project".to_string(),
             updated: "2026-06-30".to_string(),
             focus: Focus::default(),
             tracks: vec![Track {
+                extra: Default::default(),
                 title: "Phase 1".to_string(),
                 blocks: track_blocks,
             }],
@@ -5596,6 +5602,7 @@ mod tests {
     ) -> (StateSource, StateFile) {
         let path = dir.join(format!("{repo}-state.json"));
         let file = StateFile {
+            extra: Default::default(),
             epics: Vec::new(),
             repo: repo.to_string(),
             kind: "brain".to_string(),
@@ -5605,6 +5612,7 @@ mod tests {
                 vec![]
             } else {
                 vec![Track {
+                    extra: Default::default(),
                     title: "Phase 1".to_string(),
                     blocks: track_blocks,
                 }]
@@ -5731,6 +5739,7 @@ mod tests {
         // The origin back-pointer is structural metadata — the integrity check validates
         // that the block exists in tracks[], not that it carries an origin field.
         let real_block = TrackBlock {
+            extra: Default::default(),
             epics: Vec::new(),
             due: None,
             priority: None,
@@ -5763,12 +5772,14 @@ mod tests {
         // Two files: a mev leaf (owns the track block) and hq brain (owns the backlog node).
         let mev_path = dir.path().join("mev-state.json");
         let mev_file = StateFile {
+            extra: Default::default(),
             epics: Vec::new(),
             repo: "mev".to_string(),
             kind: "project".to_string(),
             updated: "2026-06-30".to_string(),
             focus: Focus::default(),
             tracks: vec![Track {
+                extra: Default::default(),
                 title: "Phase 3".to_string(),
                 blocks: vec![real_block],
             }],
@@ -5829,6 +5840,7 @@ mod tests {
         };
 
         StateFile {
+            extra: Default::default(),
             epics: Vec::new(),
             repo: "hq".to_string(),
             kind: "brain".to_string(),
@@ -5879,6 +5891,7 @@ mod tests {
         };
 
         StateFile {
+            extra: Default::default(),
             epics: Vec::new(),
             repo: slug.to_string(),
             kind: "project".to_string(),
@@ -6009,6 +6022,7 @@ mod tests {
         let track_blocks: Vec<TrackBlock> = blocks
             .iter()
             .map(|(id, status, deps)| TrackBlock {
+                extra: Default::default(),
                 epics: Vec::new(),
                 due: None,
                 priority: None,
@@ -6043,6 +6057,7 @@ mod tests {
 
         let path = dir.join(format!("{repo}-drift-state.json"));
         let file = StateFile {
+            extra: Default::default(),
             epics: Vec::new(),
             repo: repo.to_string(),
             kind: "project".to_string(),
@@ -6054,6 +6069,7 @@ mod tests {
                 deferred: Vec::new(),
             },
             tracks: vec![Track {
+                extra: Default::default(),
                 title: "Phase 1".to_string(),
                 blocks: track_blocks,
             }],
@@ -6318,6 +6334,7 @@ mod tests {
         let path = dir.path().join("brain-state.json");
         // Brain file: non-empty focus but no tracks[] — skip.
         let file = StateFile {
+            extra: Default::default(),
             epics: Vec::new(),
             repo: "hq".to_string(),
             kind: "brain".to_string(),
@@ -6477,6 +6494,7 @@ mod tests {
             blocked_by: vec![],
         };
         let self_file = StateFile {
+            extra: Default::default(),
             epics: Vec::new(),
             repo: "core".to_string(),
             kind: "brain".to_string(),
@@ -6488,9 +6506,11 @@ mod tests {
                 deferred: Vec::new(),
             },
             tracks: vec![Track {
+                extra: Default::default(),
                 title: "Own Track".to_string(),
                 blocks: vec![
                     TrackBlock {
+                        extra: Default::default(),
                         epics: Vec::new(),
                         due: None,
                         priority: None,
@@ -6506,6 +6526,7 @@ mod tests {
                         description: None,
                     },
                     TrackBlock {
+                        extra: Default::default(),
                         epics: Vec::new(),
                         due: None,
                         priority: None,
@@ -6660,6 +6681,7 @@ mod tests {
 
     fn brain_state_file(repo: &str, repos: Vec<RepoRollup>) -> StateFile {
         StateFile {
+            extra: Default::default(),
             epics: Vec::new(),
             repo: repo.to_string(),
             kind: "brain".to_string(),
@@ -7769,6 +7791,7 @@ mod check_field_policy_tests {
 
     fn base_block() -> okf_core::TrackBlock {
         okf_core::TrackBlock {
+            extra: Default::default(),
             epics: Vec::new(),
             id: "B.1".to_string(),
             title: "Test".to_string(),
