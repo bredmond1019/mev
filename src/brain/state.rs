@@ -6881,6 +6881,75 @@ mod tests {
         }
     }
 
+    #[test]
+    fn derive_rollup_brain_kind_file_yields_its_own_lane_contents() {
+        // The regression this ticket exists for: a configured repo whose
+        // loaded state file is `kind: "brain"` but carries its own non-empty
+        // `tracks[]` (a dual-role tier-brain root, e.g. `business`/`core`/`hq`
+        // in the live fleet) must still derive real lane CONTENTS via
+        // `resolve_repo_state_file` — not fall through to an empty stub.
+        // `derive_rollup_hq_scope_includes_every_tier` only asserts the repo
+        // list and would pass even against the pre-fix predicate; this test
+        // asserts block-id contents, which the pre-fix `f.kind == "project"`
+        // filter could never produce for a "brain" file.
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let dir = tempfile::tempdir().expect("tempdir");
+        // dual_role_brain_pair builds a kind: "brain" file with one
+        // in_progress block (-> now) and one open block with an unmet
+        // external dep (-> blocked), ids prefixed with the uppercased slug.
+        let pair_alpha = dual_role_brain_pair(dir.path(), "alpha");
+        let files = vec![pair_alpha];
+        let graph = build_state_graph(&files);
+
+        let rollups = derive_rollup(&scope, &config, &[], &graph, &files);
+
+        let alpha = rollups
+            .iter()
+            .find(|r| r.repo == "alpha")
+            .expect("alpha rollup entry must exist");
+        assert_eq!(
+            alpha.now.len(),
+            1,
+            "brain-kind file's own in_progress block must land in now"
+        );
+        assert_eq!(alpha.now[0].id, "ALPHA.1.A");
+        assert_eq!(
+            alpha.blocked.len(),
+            1,
+            "brain-kind file's own blocked block must land in blocked"
+        );
+        assert_eq!(alpha.blocked[0].id, "ALPHA.1.B");
+        assert_eq!(alpha.tier.as_deref(), Some("core"));
+    }
+
+    #[test]
+    fn derive_rollup_brain_kind_file_with_empty_tracks_still_yields_empty_lanes() {
+        // No-regression guarantee for pure container tiers (core, side,
+        // client, portfolio): a `kind: "brain"` file with an EMPTY
+        // `tracks[]` must still yield empty lanes — resolving it via
+        // `resolve_repo_state_file` derives real (not stub) output, but
+        // deriving over zero tracks is a no-op.
+        let config = make_mixed_tier_config();
+        let scope = TierScope::Tier("core".to_string());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair_alpha = empty_brain_pair(dir.path(), "alpha");
+        let files = vec![pair_alpha];
+        let graph = build_state_graph(&files);
+
+        let rollups = derive_rollup(&scope, &config, &[], &graph, &files);
+
+        let alpha = rollups
+            .iter()
+            .find(|r| r.repo == "alpha")
+            .expect("alpha rollup entry must exist");
+        assert!(alpha.now.is_empty());
+        assert!(alpha.next.is_empty());
+        assert!(alpha.blocked.is_empty());
+        assert!(alpha.deferred.is_empty());
+        assert_eq!(alpha.tier.as_deref(), Some("core"));
+    }
+
     // -----------------------------------------------------------------------
     // resolve_repo_state_file — the shared dual-role resolution helper
     // (MV.ticket.derive-rollup-dual-role-drift task 1)
