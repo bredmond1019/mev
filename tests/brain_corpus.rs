@@ -47,6 +47,7 @@ fn temp_dir(suffix: &str) -> std::path::PathBuf {
 fn three_unit_config() -> BrainConfig {
     BrainConfig {
         attention: Default::default(),
+        history: Default::default(),
         vocab: VocabConfig::default(),
         crawl: CrawlConfig {
             skip_dirs: vec![

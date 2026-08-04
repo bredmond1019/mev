@@ -644,6 +644,7 @@ mod task3_planners {
     fn config_with_repos(entries: &[(&str, &str)]) -> BrainConfig {
         BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             repos: entries
                 .iter()
                 .map(|(slug, tier)| RepoEntry {
@@ -1322,6 +1323,7 @@ mod task3_planners {
     ) -> BrainConfig {
         BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             repos: vec![RepoEntry {
                 slug: slug.to_string(),
                 tier: tier.to_string(),
@@ -4412,6 +4414,7 @@ mod task2_render_unified_board {
     fn config_with_repos(entries: &[(&str, &str)]) -> BrainConfig {
         BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             repos: entries
                 .iter()
                 .map(|(slug, tier)| RepoEntry {
@@ -4824,6 +4827,7 @@ mod task2_plan_hq_board {
     fn config_with_repos(entries: &[(&str, &str)]) -> BrainConfig {
         BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             repos: entries
                 .iter()
                 .map(|(slug, tier)| RepoEntry {
@@ -5177,6 +5181,7 @@ mod task2_plan_unified_board {
     fn config_with_repos(entries: &[(&str, &str)]) -> BrainConfig {
         BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             repos: entries
                 .iter()
                 .map(|(slug, tier)| RepoEntry {
@@ -5930,6 +5935,7 @@ mod task_yaml_frontmatter_drift_tests {
         let graph = build_state_graph(&files);
         let config = BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             repos: vec![RepoEntry {
                 slug: "myrepo".to_string(),
                 tier: "core".to_string(),
@@ -7864,6 +7870,7 @@ mod epic_emit {
     fn config() -> BrainConfig {
         BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             repos: [
                 ("hq", "_root"),
                 ("core", "_root"),

@@ -16,6 +16,7 @@ pub mod emit;
 pub mod epics;
 pub mod graph;
 pub mod graph_emit;
+pub mod history;
 pub mod last_touched;
 pub mod links;
 pub mod lock;
@@ -141,6 +142,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig};
         let config = BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             crawl: CrawlConfig {
                 skip_dirs: vec!["my-skip-dir".to_string()],
             },

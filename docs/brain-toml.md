@@ -113,6 +113,27 @@ The remaining fields are consumed by `mev validate-brain --sync` to check cross-
 
 ---
 
+## `[history]`
+
+Controls the append-only revision-history writer that `apply_plan()` (the single write point behind `emit-state --write`, the doc materializer, the Opportunity family, and the index reconciler) runs before every overwrite. See `mev state-history` for the read-back CLI.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `true` | Whether a file's prior content is snapshotted before it is overwritten. |
+| `keep` | integer | `10` | Maximum revisions retained per file; the oldest are pruned once this cap is exceeded. |
+
+```toml
+[history]
+enabled = true
+keep    = 10
+```
+
+An absent `[history]` table is equivalent to the example above — history is on, capped at 10 revisions per file.
+
+Setting `enabled = false` disables snapshotting entirely. The write itself stays atomic (temp file + rename) either way; what you lose is the recovery path — a bad derived write (a rollup that silently drops a repo, a materializer regression, etc.) becomes unrecoverable instead of restorable via `mev state-history --restore`.
+
+---
+
 ## Lookup order
 
 `find_brain_config(root)` walks up from `root`, checking for `brain.toml` at each level:

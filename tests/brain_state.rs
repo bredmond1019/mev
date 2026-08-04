@@ -1157,6 +1157,7 @@ fn make_config_with_repo(slug: &str, tier: &str) -> mev::brain::config::BrainCon
     use mev::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
     BrainConfig {
         attention: Default::default(),
+        history: Default::default(),
         vocab: VocabConfig::default(),
         crawl: CrawlConfig::default(),
         repos: vec![RepoEntry {

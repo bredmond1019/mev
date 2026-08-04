@@ -19,6 +19,7 @@
 //! entry point (`emit_state`).
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -2861,10 +2862,33 @@ pub fn plan_status_frontmatter(
 
 /// Execute a plan.
 ///
-/// When `write` is `true`, writes each action's `new_content` to its `path` and
-/// emits a `I_EMIT_WROTE` (Warning severity) diagnostic per file.  When `false`
-/// (dry-run), writes nothing and emits a `W_EMIT_DRY_RUN` diagnostic per planned
-/// action.  Always passes through the plan's own diagnostics.
+/// When `write` is `true`, each action is applied atomically and (for an
+/// existing file) append-only-snapshotted first:
+///
+/// 1. **Snapshot.** If `action.path` already exists, its prior bytes are read
+///    and — unless `[history].enabled = false` in the nearest `brain.toml`
+///    (walked up from `action.path` via [`crate::brain::config::find_brain_root`])
+///    — recorded as a new revision via [`crate::brain::history::record_revision`],
+///    then pruned to `[history].keep` (default 10) via
+///    [`crate::brain::history::prune`]. A brand-new file has no prior content
+///    to lose, so no revision is recorded for it. The `[history]` resolution is
+///    cached per brain root for the lifetime of one `apply_plan` call — a plan
+///    can carry dozens of actions across a handful of roots and `brain.toml` is
+///    not re-read per action. A snapshot or prune failure never aborts the
+///    write: it emits a `W_HISTORY_FAILED` (Warning) diagnostic and the primary
+///    write still proceeds — history is a safety net, never a new failure mode.
+/// 2. **Atomic write.** The new content is written to a temp file in the
+///    destination's own directory (never the system temp dir — a cross-device
+///    `rename` fails) and then renamed over `action.path`, so a partially
+///    written file is never observable at the destination path. The temp file
+///    is cleaned up on any error path so a failed write leaves no litter. On
+///    success this emits `I_EMIT_WROTE`; on a real IO failure on the primary
+///    write it emits `E_EMIT_WRITE_FAILED` (Error).
+///
+/// When `write` is `false` (dry-run), nothing is read or written — no history
+/// dir is created, no temp file, no prune — and a `W_EMIT_DRY_RUN` diagnostic
+/// is emitted per planned action instead. Always passes through the plan's own
+/// diagnostics.
 ///
 /// `I_EMIT_WROTE` and `W_EMIT_DRY_RUN` use Warning severity (no info level
 /// exists in [`crate::Diagnostic`]) so they surface in the reporter without
@@ -2873,28 +2897,290 @@ pub fn plan_status_frontmatter(
 pub fn apply_plan(plan: &EmitPlan, write: bool) -> Vec<crate::Diagnostic> {
     let mut diags = plan.diagnostics.clone();
 
-    for action in &plan.actions {
-        if write {
-            match std::fs::write(&action.path, action.new_content.as_bytes()) {
-                Ok(()) => diags.push(crate::Diagnostic::warning(
-                    &action.path,
-                    "I_EMIT_WROTE",
-                    format!("wrote: {}", action.note),
-                )),
-                Err(e) => diags.push(crate::Diagnostic::error(
-                    &action.path,
-                    "E_EMIT_WRITE_FAILED",
-                    format!("failed to write {}: {e}", action.path.display()),
-                )),
-            }
-        } else {
+    if !write {
+        for action in &plan.actions {
             diags.push(crate::Diagnostic::warning(
                 &action.path,
                 "W_EMIT_DRY_RUN",
                 format!("would write (dry-run): {}", action.note),
             ));
         }
+        return diags;
+    }
+
+    // Cache resolved [history] config per brain root so a plan spanning many
+    // actions across a handful of roots doesn't re-read brain.toml per action.
+    let mut history_config_cache: HashMap<PathBuf, crate::brain::config::HistoryConfig> =
+        HashMap::new();
+
+    for action in &plan.actions {
+        // Step 1: snapshot the prior content of an existing file before it is
+        // overwritten. A brand-new file has nothing prior to lose.
+        if let Ok(prior) = std::fs::read(&action.path) {
+            let history_cfg = resolve_history_config(&action.path, &mut history_config_cache);
+            if history_cfg.enabled {
+                match crate::brain::history::record_revision(&action.path, &prior) {
+                    Ok(_) => {
+                        if let Err(e) = crate::brain::history::prune(&action.path, history_cfg.keep)
+                        {
+                            diags.push(crate::Diagnostic::warning(
+                                &action.path,
+                                "W_HISTORY_FAILED",
+                                format!(
+                                    "failed to prune history for {}: {e}",
+                                    action.path.display()
+                                ),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        diags.push(crate::Diagnostic::warning(
+                            &action.path,
+                            "W_HISTORY_FAILED",
+                            format!(
+                                "failed to record history for {}: {e}",
+                                action.path.display()
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Step 2: write atomically — temp file in the destination's own
+        // directory, then rename over the destination.
+        match write_atomic(&action.path, action.new_content.as_bytes()) {
+            Ok(()) => diags.push(crate::Diagnostic::warning(
+                &action.path,
+                "I_EMIT_WROTE",
+                format!("wrote: {}", action.note),
+            )),
+            Err(e) => diags.push(crate::Diagnostic::error(
+                &action.path,
+                "E_EMIT_WRITE_FAILED",
+                format!("failed to write {}: {e}", action.path.display()),
+            )),
+        }
     }
 
     diags
+}
+
+/// Resolve the `[history]` config for `path` by walking up from it looking for
+/// `brain.toml`, caching the result per resolved brain root in `cache`.
+///
+/// No `brain.toml` found (or it fails to parse) resolves to
+/// [`crate::brain::config::HistoryConfig::default`] — the same "absent table
+/// means defaults, never an error" contract `brain.toml` itself carries for an
+/// absent `[history]` section.
+fn resolve_history_config(
+    path: &Path,
+    cache: &mut HashMap<PathBuf, crate::brain::config::HistoryConfig>,
+) -> crate::brain::config::HistoryConfig {
+    // Empty PathBuf is the cache key for "no brain root found from this path" —
+    // never a real brain root, since find_brain_root always returns an
+    // absolute, non-empty directory when it succeeds.
+    let root = crate::brain::config::find_brain_root(path).unwrap_or_else(|_| PathBuf::new());
+
+    if let Some(cfg) = cache.get(&root) {
+        return cfg.clone();
+    }
+
+    let cfg = if root.as_os_str().is_empty() {
+        crate::brain::config::HistoryConfig::default()
+    } else {
+        crate::brain::config::load_brain_config(&root.join("brain.toml"))
+            .map(|c| c.history)
+            .unwrap_or_default()
+    };
+
+    cache.insert(root, cfg.clone());
+    cfg
+}
+
+/// Write `content` to `path` atomically: a temp file in `path`'s own directory
+/// followed by `std::fs::rename` over `path`.
+///
+/// The temp file lives beside the destination (never the system temp dir) so
+/// the final `rename` is same-filesystem and therefore atomic. On any error —
+/// creating the temp file, writing it, or renaming it — the temp file is
+/// removed (best-effort) so a failed write never leaves litter behind.
+///
+/// `pub` (not module-private) so `mev state-history --restore` (`src/main.rs`)
+/// can reuse the exact same atomic-write helper `apply_plan` uses rather than
+/// duplicating it — see `planning/ticket-append-only-emit-state-writer/tasks.md`
+/// Task 4.
+pub fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("emit-output");
+    let temp_path = dir.join(format!(".{file_name}.mev-tmp-{}", std::process::id()));
+
+    let write_result = std::fs::write(&temp_path, content);
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(e);
+    }
+
+    if let Err(e) = std::fs::rename(&temp_path, path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(e);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod apply_plan_history_tests {
+    use super::*;
+
+    fn fixture_dir(tag: &str) -> PathBuf {
+        let dir = crate::testsupport::unique_temp_dir(&format!("mev-apply-plan-{tag}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn plan_for(path: &Path, new_content: &str) -> EmitPlan {
+        EmitPlan {
+            actions: vec![EmitAction {
+                path: path.to_path_buf(),
+                new_content: new_content.to_string(),
+                note: "test".to_string(),
+            }],
+            diagnostics: vec![],
+        }
+    }
+
+    #[test]
+    fn overwriting_existing_file_records_exactly_one_revision_of_prior_content() {
+        let dir = fixture_dir("overwrite-one-rev");
+        let target = dir.join("state.json");
+        std::fs::write(&target, b"prior content").unwrap();
+
+        let plan = plan_for(&target, "new content");
+        let diags = apply_plan(&plan, true);
+
+        assert!(diags.iter().any(|d| d.locator == "I_EMIT_WROTE"));
+        assert!(!diags.iter().any(|d| d.locator == "W_HISTORY_FAILED"));
+
+        let revisions = crate::brain::history::list_revisions(&target).unwrap();
+        assert_eq!(revisions.len(), 1, "expected exactly one recorded revision");
+        assert_eq!(revisions[0].seq, 1);
+
+        let snapshot = crate::brain::history::read_revision(&target, 1).unwrap();
+        assert_eq!(
+            snapshot, b"prior content",
+            "revision must hold PRIOR content"
+        );
+
+        let after = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(after, "new content");
+    }
+
+    #[test]
+    fn creating_new_file_records_zero_revisions() {
+        let dir = fixture_dir("new-file-zero-rev");
+        let target = dir.join("brand-new.json");
+        assert!(!target.exists());
+
+        let plan = plan_for(&target, "fresh content");
+        let diags = apply_plan(&plan, true);
+
+        assert!(diags.iter().any(|d| d.locator == "I_EMIT_WROTE"));
+        let revisions = crate::brain::history::list_revisions(&target).unwrap();
+        assert_eq!(
+            revisions.len(),
+            0,
+            "a brand-new file has no prior content to snapshot"
+        );
+    }
+
+    #[test]
+    fn dry_run_creates_no_history_dir_and_no_temp_files() {
+        let dir = fixture_dir("dry-run-side-effect-free");
+        let target = dir.join("state.json");
+        std::fs::write(&target, b"prior content").unwrap();
+
+        let plan = plan_for(&target, "new content");
+        let diags = apply_plan(&plan, false);
+
+        assert!(diags.iter().any(|d| d.locator == "W_EMIT_DRY_RUN"));
+
+        let history_dir = crate::brain::history::history_dir(&target);
+        assert!(
+            !history_dir.exists(),
+            "dry-run must not create a history dir"
+        );
+
+        let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(entries.len(), 1, "dry-run must leave no temp files behind");
+
+        let after = std::fs::read(&target).unwrap();
+        assert_eq!(after, b"prior content", "dry-run must not touch the file");
+    }
+
+    #[test]
+    fn second_overwrite_yields_seq_two_while_seq_one_is_untouched() {
+        let dir = fixture_dir("second-overwrite-seq-two");
+        let target = dir.join("state.json");
+        std::fs::write(&target, b"version one").unwrap();
+
+        apply_plan(&plan_for(&target, "version two"), true);
+        apply_plan(&plan_for(&target, "version three"), true);
+
+        let revisions = crate::brain::history::list_revisions(&target).unwrap();
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(revisions[0].seq, 1);
+        assert_eq!(revisions[1].seq, 2);
+
+        let rev1 = crate::brain::history::read_revision(&target, 1).unwrap();
+        assert_eq!(rev1, b"version one");
+        let rev2 = crate::brain::history::read_revision(&target, 2).unwrap();
+        assert_eq!(rev2, b"version two");
+
+        let current = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(current, "version three");
+    }
+
+    #[test]
+    fn successful_write_leaves_no_leftover_temp_files() {
+        let dir = fixture_dir("no-leftover-temp");
+        let target = dir.join("state.json");
+        std::fs::write(&target, b"prior content").unwrap();
+
+        apply_plan(&plan_for(&target, "new content"), true);
+
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().to_string();
+            assert!(
+                name == "state.json" || name == ".mev-history",
+                "unexpected leftover entry: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_disabled_writes_file_but_records_nothing() {
+        let dir = fixture_dir("history-disabled");
+        std::fs::write(dir.join("brain.toml"), "[history]\nenabled = false\n").unwrap();
+        let target = dir.join("state.json");
+        std::fs::write(&target, b"prior content").unwrap();
+
+        let plan = plan_for(&target, "new content");
+        let diags = apply_plan(&plan, true);
+
+        assert!(diags.iter().any(|d| d.locator == "I_EMIT_WROTE"));
+        let revisions = crate::brain::history::list_revisions(&target).unwrap();
+        assert_eq!(
+            revisions.len(),
+            0,
+            "history disabled must record no revisions"
+        );
+
+        let after = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(after, "new content", "the write itself must still proceed");
+    }
 }
