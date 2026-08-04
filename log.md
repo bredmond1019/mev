@@ -17,6 +17,53 @@ timestamp: "2026-08-02T09:15:06Z"
 
 ---
 
+## [run: 2026-08-03]
+
+### `MV.ticket.carryover-sweep-command` — `mev carryover`, a read-only fleet-wide carryover sweep
+
+- **What:** Shipped the full spec end to end via `/sdlc-flow` (6/6 tasks PASS, one attempt each,
+  final review verdict PASS). Added `src/brain/carryover.rs` — the `CarryoverReport`/`Verdict`/
+  `Ref`/`Lane` model plus three extractors: `block_refs_from_related` (structured `related[]`
+  edges, always used), `block_refs_from_prose` (a hand-written char-scanner grammar matcher for
+  block IDs in `clears_when` prose, deliberately avoiding any regex dependency per the ticket's
+  constraint, keeping only matches that resolve to exactly one corpus node), and
+  `path_refs_from_prose` (Class B — path tokens extracted only when `clears_when` contains the
+  literal word "exists"). `evaluate_carryover` combines both classes **conjunctively (AND, even
+  when the prose reads "or")** — the deliberately safe failure direction — into the three-lane
+  verdict (`Cleared`/`Actionable`/`NotEvaluable`), reusing `carryover_stale_age`/
+  `staleness_anchor`/`is_snoozed` from `state.rs` (widened `pub(crate)`) rather than re-deriving
+  date/staleness logic. The `carryover_sweep` driver in `src/lib.rs` mirrors `block_graph_brain`'s
+  shape (discover → load → build status/repo-path maps → evaluate) and is wired to a new
+  `mev carryover [--repo <slug>] [--json]` CLI subcommand with a lane-grouped human renderer.
+  16 unit tests plus a new `tests/brain_carryover.rs` integration suite (temp-dir two-repo
+  fixture proving cross-repo block-status resolution, prose-only `NotEvaluable`, `--repo`
+  filtering, and total-equals-sum-of-lanes) — all four harness gates green (fmt, clippy
+  `-D warnings`, full `cargo test`, release build). `docs/cli.md` documents the subcommand, its
+  two predicate classes, the three lanes, and exit codes. Live sweep against the real brain
+  corpus confirmed the spec's own inventory: **57 carryover entries — 14 cleared, 13 actionable,
+  30 not-evaluable.** No genuine deviations from spec; task decisions (e.g. widening two
+  `state.rs` helpers to `pub(crate)`, sourcing `repo_paths` from `BrainConfig` rather than
+  `StateSource`) were implementation choices within the spec's own guidance, not scope changes —
+  no amendment-log entries filed.
+
+  Closes the carryover-visibility gap the epic-burn-down round surfaced: entries were previously
+  only visible per-repo, one file at a time, and at least one (`core-system-review-content-
+  inventory-gap`) had silently cleared weeks earlier with nobody noticing. `MV.ticket.conformance-
+  check-registry` (the other STRAND C substrate ticket) remains the only open mev-tracked spec.
+
+  Next: pick up `MV.ticket.conformance-check-registry` — `mev conformance`, a registry of named
+  drift checks over facts kept in two places.
+
+```
+02266aa feat: implement ticket-carryover-sweep-command-task5
+9d14c4a feat: implement ticket-carryover-sweep-command-task4
+2705f67 feat: implement ticket-carryover-sweep-command-task3
+7574706 feat: implement ticket-carryover-sweep-command-task2
+8583513 feat: implement ticket-carryover-sweep-command-task1
+```
+
+---
+
 ## [run: 2026-08-02]
 
 ### `MV.chore.unique-temp-dirs-in-tests` — shipped, after the spec's own inventory proved wrong
