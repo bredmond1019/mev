@@ -29,10 +29,13 @@ pub use brain::crawl::{MdFile, crawl_brain};
 pub use brain::emit::{
     EmitAction, EmitError, EmitPlan, apply_plan, plan_master_plan_tables, plan_state_json,
     plan_status_frontmatter, reconcile_status_scalars, render_wave_table, splice_generated,
-    wave_order,
+    wave_order, write_atomic,
 };
 pub use brain::graph::{Graph, build_graph, check_graph};
 pub use brain::graph_emit::{GraphExport, build_graph_export};
+pub use brain::history::{
+    HistoryError, Revision, history_dir, list_revisions, prune, read_revision, record_revision,
+};
 pub use brain::links::{
     LinkKind, LinkRef, check_links, check_moved_references, collect_doc_ids, extract_links,
     read_moves_pending,

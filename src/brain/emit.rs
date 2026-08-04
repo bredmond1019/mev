@@ -3005,7 +3005,12 @@ fn resolve_history_config(
 /// the final `rename` is same-filesystem and therefore atomic. On any error —
 /// creating the temp file, writing it, or renaming it — the temp file is
 /// removed (best-effort) so a failed write never leaves litter behind.
-fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
+///
+/// `pub` (not module-private) so `mev state-history --restore` (`src/main.rs`)
+/// can reuse the exact same atomic-write helper `apply_plan` uses rather than
+/// duplicating it — see `planning/ticket-append-only-emit-state-writer/tasks.md`
+/// Task 4.
+pub fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path
         .file_name()

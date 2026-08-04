@@ -29,7 +29,7 @@ use thiserror::Error;
 const HISTORY_DIR_NAME: &str = ".mev-history";
 
 /// A single recorded revision of a file's prior content.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Revision {
     /// Monotonic sequence number for this file, starting at 1.
     pub seq: u32,

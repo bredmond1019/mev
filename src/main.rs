@@ -160,6 +160,44 @@ enum Command {
         #[arg(long, value_name = "REPO")]
         scope: Option<String>,
     },
+    /// List (or restore) the append-only revision history `apply_plan()` records for
+    /// one file every time it overwrites existing content (see `emit-state`'s
+    /// "Revision history" note above, and `mev::brain::history`).
+    ///
+    /// Default (no `--restore`): prints that file's revisions NEWEST FIRST — seq, UTC
+    /// timestamp, byte size. A file with no recorded revisions prints an explicit
+    /// "no revisions recorded" message and exits successfully (an empty history is a
+    /// normal state, not an error). Read-only: never takes the advisory lock.
+    ///
+    /// `--restore <SEQ>`: first snapshots the file's current on-disk content as a new
+    /// revision (so a wrong restore is itself undoable via a second restore), then
+    /// writes revision `<SEQ>`'s content back to `<path>` atomically via the same
+    /// temp-file + rename helper `apply_plan()` uses. Mutates the file, so it takes
+    /// the same advisory lock at `<root>/.mev-emit.lock` that `emit-state --write`
+    /// takes, and the same linked-worktree guard.
+    ///
+    /// Diagnostic codes:
+    ///   E_EMIT_LINKED_WORKTREE — --restore invoked from inside a linked git worktree;
+    ///                            refused before the lock is taken.
+    ///   E_EMIT_LOCK_HELD       — --restore could not acquire the advisory lock because
+    ///                            another live write process already holds it (exit 1);
+    ///                            a stale lock (owning process no longer alive) is
+    ///                            reclaimed automatically instead.
+    ///   W_HISTORY_FAILED       — the pre-restore snapshot could not be recorded; the
+    ///                            restore itself still proceeds (history is a safety
+    ///                            net, never a new way for restore to fail).
+    ///
+    /// Exit codes:
+    ///   0 — revisions listed, "no revisions recorded", or restore applied
+    ///   1 — no revision `<SEQ>` on disk (names the valid seq range), E_EMIT_LOCK_HELD,
+    ///       a linked-worktree refusal, or an IO failure reading/writing the file
+    StateHistory {
+        /// The file whose revision history to list or restore (e.g. planning/state.json).
+        path: PathBuf,
+        /// Restore revision SEQ's content back to `path` instead of listing.
+        #[arg(long, value_name = "SEQ")]
+        restore: Option<u32>,
+    },
     /// Emit the `scope:doc_id` knowledge graph as a JSON artifact (Phase 3B, Block R).
     ///
     /// Crawls the Brain repo, resolves `brain.toml`, builds the knowledge graph (nodes,
@@ -562,6 +600,166 @@ enum OpportunityCommand {
         #[arg(long)]
         write: bool,
     },
+}
+
+/// Dispatch for `mev state-history <path> [--restore SEQ]`.
+///
+/// `path` names the *target file itself* (e.g. `planning/state.json`), not a brain
+/// root to search from — every other subcommand's `path` walks up looking for
+/// `brain.toml`; this one already knows exactly which file's history it wants. The
+/// worktree guard and the advisory lock, both of which shell out to `git`/read
+/// `brain.toml`, resolve from `path`'s *parent directory* instead — `git -C <file>`
+/// is not meaningful.
+fn run_state_history(path: &std::path::Path, restore: Option<u32>, json: bool) -> ExitCode {
+    match restore {
+        None => {
+            // Read-only: list revisions, newest first. Never takes the lock.
+            let mut revisions = match mev::brain::history::list_revisions(path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            revisions.reverse(); // ascending -> newest first
+
+            if json {
+                match serde_json::to_string_pretty(&revisions) {
+                    Ok(s) => println!("{s}"),
+                    Err(err) => {
+                        eprintln!("error serializing JSON: {err:#}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else if revisions.is_empty() {
+                println!("no revisions recorded for {}", path.display());
+            } else {
+                for r in &revisions {
+                    println!("{:>6}  {}  {} bytes", r.seq, r.recorded_at, r.bytes);
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Some(seq) => {
+            let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+
+            if mev::brain::config::is_linked_worktree(dir) {
+                eprintln!(
+                    "error: refusing to run state-history --restore from inside a linked git worktree ({}) — restore resolves the advisory lock and brain.toml from the target file's own directory, not CWD, so restoring from a worktree would silently race the MAIN checkout's writers. Run `mev state-history --restore` from the main working tree instead.",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+
+            let root = match mev::brain::config::find_brain_root(dir) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            // Advisory lock: --restore mutates a derived file and must not interleave
+            // with a concurrent `emit-state --write` (or another restore).
+            let _lock_guard = match mev::brain::lock::acquire_lock(
+                &root,
+                mev::brain::lock::DEFAULT_LOCK_TIMEOUT,
+            ) {
+                Ok(guard) => guard,
+                Err(mev::brain::lock::LockError::Held {
+                    holder_pid,
+                    lock_path,
+                    waited_secs,
+                }) => {
+                    eprintln!(
+                        "error [E_EMIT_LOCK_HELD] another write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
+                        lock_path.display()
+                    );
+                    return ExitCode::FAILURE;
+                }
+                Err(e) => {
+                    eprintln!("error [E_EMIT_LOCK_HELD] {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let revisions = match mev::brain::history::list_revisions(path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if revisions.is_empty() {
+                println!("no revisions recorded for {}", path.display());
+                return ExitCode::SUCCESS;
+            }
+            let min_seq = revisions.first().map(|r| r.seq).unwrap_or(0);
+            let max_seq = revisions.last().map(|r| r.seq).unwrap_or(0);
+            if !revisions.iter().any(|r| r.seq == seq) {
+                eprintln!(
+                    "error: no revision {seq} recorded for {}; valid range is {min_seq}..={max_seq}",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+
+            let restored_content = match mev::brain::history::read_revision(path, seq) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            // First record the current on-disk content as a new revision, so a wrong
+            // restore is itself undoable — a snapshot failure never blocks the
+            // restore (history is a safety net, never a new failure mode).
+            let pre_restore_revision = match std::fs::read(path) {
+                Ok(current) => match mev::brain::history::record_revision(path, &current) {
+                    Ok(rev) => Some(rev),
+                    Err(e) => {
+                        eprintln!(
+                            "warning [W_HISTORY_FAILED]: failed to record pre-restore revision for {}: {e}",
+                            path.display()
+                        );
+                        None
+                    }
+                },
+                Err(_) => None, // nothing on disk yet to snapshot
+            };
+
+            if let Err(e) = mev::write_atomic(path, &restored_content) {
+                eprintln!("error: failed to write {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+
+            if json {
+                let out = serde_json::json!({
+                    "restored_seq": seq,
+                    "path": path.display().to_string(),
+                    "pre_restore_revision": pre_restore_revision,
+                });
+                match serde_json::to_string_pretty(&out) {
+                    Ok(s) => println!("{s}"),
+                    Err(err) => {
+                        eprintln!("error serializing JSON: {err:#}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                match &pre_restore_revision {
+                    Some(rev) => println!(
+                        "restored revision {seq} to {} (pre-restore content saved as revision {})",
+                        path.display(),
+                        rev.seq
+                    ),
+                    None => println!("restored revision {seq} to {}", path.display()),
+                }
+            }
+            ExitCode::SUCCESS
+        }
+    }
 }
 
 /// Shared dispatch for `defer-epic` / `resume-epic` / `sync-epics`.
@@ -1086,6 +1284,7 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::StateHistory { path, restore } => run_state_history(&path, restore, cli.json),
         Command::DeferEpic { slug, path, write } => run_epic_status(
             &path,
             Some(&slug),
