@@ -19,6 +19,43 @@ timestamp: "2026-08-04T03:20:00Z"
 
 ## [run: 2026-08-04]
 
+### `ticket-append-only-emit-state-writer` shipped (full spec, 7 tasks, PASS)
+
+`apply_plan()` (`src/brain/emit.rs`) converted from a destructive in-place `std::fs::write` into an
+atomic, append-only writer. New `src/brain/history.rs` adds a self-contained append-only revision
+store (`record_revision`/`list_revisions`/`read_revision`/`prune`/`history_dir`) under
+`<dir>/.mev-history/<name>/`, with per-file monotonic `seq` recomputed by scanning the directory on
+every call. A new `[history]` `brain.toml` section (`enabled=true`/`keep=10` defaults) controls it.
+`apply_plan()` now snapshots any existing file's prior content before overwrite (skipped when
+`[history].enabled=false`), prunes to `keep`, and writes atomically via a same-directory temp file +
+rename, emitting a non-fatal `W_HISTORY_FAILED` diagnostic on snapshot/prune failure — existing
+diagnostics and the public signature are unchanged. New `mev state-history <path> [--restore SEQ]`
+CLI command lists a file's revisions newest-first or restores one atomically with a pre-restore
+safety snapshot, under the same advisory lock and linked-worktree guard as `emit-state --write`.
+`tests/state_history.rs` proves the mechanism end to end (dropped-content recovery, ascending
+revisions, no-op emits recording nothing, `keep` capping retention, dry-run leaving history untouched,
+restore itself recording a new revision). `docs/cli.md` and `docs/brain-toml.md` updated;
+`.mev-history/` gitignored. All four harness gates green; live `mev emit-state` dry-run confirmed no
+`.mev-history/` is created on a dry run. Closes okf-core's D-4 follow-on — a bad derived write is now
+recoverable instead of destructive. Two amendment-logged deviations (collateral `BrainConfig` literal
+updates in task 2; task 4 deferring its dedicated integration test to task 5's already-scoped file).
+No mev-tracked spec remains open.
+
+```
+7ad34d1 docs: update docs for ticket-append-only-emit-state-writer
+cc865f3 feat: implement ticket-append-only-emit-state-writer-task6
+50c9d40 feat: implement ticket-append-only-emit-state-writer-task5
+0229e67 feat: implement ticket-append-only-emit-state-writer-task4
+3e1376a feat: implement ticket-append-only-emit-state-writer-task3
+6cd9c9c feat: implement ticket-append-only-emit-state-writer-task2
+17052f7 feat: implement ticket-append-only-emit-state-writer-task1
+```
+
+Next: no mev-tracked spec remains open; check `planning/backlog.md` / `/attention` for the next
+candidate.
+
+---
+
 ### Orchestrated chain — the four `bullet-proof-software` mev tickets, 4/4 closed
 
 - **What:** Drove `MV.ticket.derive-rollup-dual-role-drift` → `carryover-sweep-command` →
