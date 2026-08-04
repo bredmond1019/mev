@@ -117,6 +117,7 @@ fn empty_self_pair(dir: &Path, repo: &str) -> (StateSource, StateFile) {
 fn mixed_kind_config() -> BrainConfig {
     BrainConfig {
         attention: Default::default(),
+        history: Default::default(),
         vocab: VocabConfig::default(),
         crawl: CrawlConfig::default(),
         repos: vec![

@@ -348,6 +348,7 @@ mod tests {
             .collect();
         BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             vocab: VocabConfig { layer, status },
             crawl: CrawlConfig::default(),
             repos,

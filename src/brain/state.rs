@@ -3147,6 +3147,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -3231,6 +3232,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -3311,6 +3313,7 @@ mod tests {
 
         let config = BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -3353,6 +3356,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -3466,6 +3470,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -6671,6 +6676,7 @@ mod tests {
         use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -6759,6 +6765,7 @@ mod tests {
         // its own tier (not `All`, which would spuriously target it as HQ).
         let config = BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -7251,6 +7258,7 @@ mod tests {
         // listing must not produce a duplicate (repo, id) block in focus.now.
         let config = BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -7432,6 +7440,7 @@ mod tests {
         use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -7938,6 +7947,7 @@ mod check_epics_tests {
         };
         BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![

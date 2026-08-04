@@ -167,6 +167,41 @@ impl AttentionThresholds {
     }
 }
 
+/// `[history]` section of `brain.toml` — the append-only revision-history
+/// writer's retention/enable knob (see [`crate::brain::history`]).
+///
+/// An absent `[history]` table yields all defaults via [`Default`]: history is
+/// on, capped at 10 revisions per file. Turning `enabled` off disables
+/// snapshotting entirely — `apply_plan`'s atomic write still happens, but a
+/// bad derived write is no longer recoverable via `mev state-history`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HistoryConfig {
+    /// Whether `apply_plan` snapshots a file's prior content before
+    /// overwriting it (default `true`).
+    #[serde(default = "default_history_enabled")]
+    pub enabled: bool,
+    /// Maximum revisions retained per file before the oldest are pruned
+    /// (default 10).
+    #[serde(default = "default_history_keep")]
+    pub keep: usize,
+}
+
+fn default_history_enabled() -> bool {
+    true
+}
+fn default_history_keep() -> usize {
+    10
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_history_enabled(),
+            keep: default_history_keep(),
+        }
+    }
+}
+
 /// One `[[repos]]` entry in `brain.toml`.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct RepoEntry {
@@ -217,6 +252,10 @@ pub struct BrainConfig {
     /// `[attention]` section — staleness thresholds for the Attention surface.
     #[serde(default)]
     pub attention: AttentionThresholds,
+    /// `[history]` section — retention/enable knob for the append-only
+    /// revision-history writer.
+    #[serde(default)]
+    pub history: HistoryConfig,
     /// `[[repos]]` entries.
     #[serde(default)]
     pub repos: Vec<RepoEntry>,
@@ -573,6 +612,40 @@ knowledge_days = 20
         assert_eq!(cfg.attention.distill_threshold("mystery"), 30);
     }
 
+    #[test]
+    fn history_config_default_when_section_absent() {
+        // The fixture brain.toml has no [history] table → all defaults.
+        let cfg = load_brain_config(&fixture_path()).expect("should parse fixture");
+        assert!(cfg.history.enabled, "history should default to enabled");
+        assert_eq!(cfg.history.keep, 10);
+    }
+
+    #[test]
+    fn history_config_explicit_table_overrides_both() {
+        let toml = r#"
+[history]
+enabled = false
+keep = 3
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert!(!cfg.history.enabled);
+        assert_eq!(cfg.history.keep, 3);
+    }
+
+    #[test]
+    fn history_config_partial_table_keeps_enabled_default() {
+        let toml = r#"
+[history]
+keep = 25
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.history.keep, 25);
+        assert!(
+            cfg.history.enabled,
+            "unset enabled keeps its default of true"
+        );
+    }
+
     fn run_git(dir: &Path, args: &[&str]) {
         let status = std::process::Command::new("git")
             .arg("-C")
@@ -660,6 +733,7 @@ knowledge_days = 20
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             attention: AttentionThresholds::default(),
+            history: HistoryConfig::default(),
             repos: vec![
                 RepoEntry {
                     slug: "brain".to_string(),

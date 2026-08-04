@@ -99,6 +99,7 @@ mod tests {
     fn three_unit_config() -> BrainConfig {
         BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -218,6 +219,7 @@ mod tests {
         // Minimal two-unit config (brain + mev) — a brain-level file falls back to brain.
         let cfg = BrainConfig {
             attention: Default::default(),
+            history: Default::default(),
             repos: vec![
                 RepoEntry {
                     slug: "brain".to_string(),
