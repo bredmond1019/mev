@@ -13,6 +13,7 @@
 //! set-parity check reuses, and the [`run_checks`] driver.
 
 mod backlog;
+mod epics_index;
 
 use serde::Serialize;
 use std::path::PathBuf;
@@ -98,11 +99,18 @@ pub struct ConformanceCheck {
 /// The full registry of conformance checks. Adding a check is adding one entry here plus
 /// its own file — nothing else changes.
 pub fn all_checks() -> Vec<ConformanceCheck> {
-    vec![ConformanceCheck {
-        name: "backlog-parity",
-        description: "HQ planning/backlog.md ## Active + ## Promoted vs state.json backlog[]",
-        run: backlog::run,
-    }]
+    vec![
+        ConformanceCheck {
+            name: "backlog-parity",
+            description: "HQ planning/backlog.md ## Active + ## Promoted vs state.json backlog[]",
+            run: backlog::run,
+        },
+        ConformanceCheck {
+            name: "epics-index-parity",
+            description: "HQ state.json epics[] vs core/planning/epics/index.md",
+            run: epics_index::run,
+        },
+    ]
 }
 
 /// FNV-1a 64-bit digest of `items`, joined with `\n` in the order given (the caller is
