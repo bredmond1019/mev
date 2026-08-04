@@ -7,6 +7,7 @@
 
 pub mod block_graph;
 pub mod blocks;
+pub mod carryover;
 pub mod config;
 pub mod crawl;
 pub mod distill;
