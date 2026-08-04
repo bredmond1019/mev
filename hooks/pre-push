@@ -378,12 +378,65 @@ for c in checks:
 }
 
 # =========================================================================================
-# Run both stages; block if either fails.
+# Advisory — is the INSTALLED `mev` binary stale vs its source tree? Never blocks.
+#
+# Why this is worth noise: `mev` is the fleet's WRITER. `mev emit-state --write` rewrites
+# derived files across every repo in brain.toml, and both `/log-work` and
+# scripts/routine.sh invoke it from PATH. A stale install therefore keeps writing with
+# whatever derivation logic it was built with, silently.
+#
+# This is not hypothetical. On 2026-08-04 the append-only revision-history writer
+# (MV.ticket.append-only-emit-state-writer) shipped, merged, and closed — while
+# ~/.cargo/bin/mev still held a pre-merge build. Every real `emit-state --write` for hours
+# afterward ran WITHOUT the safety net the ticket had just added, and nothing surfaced it.
+#
+# Why it goes stale on THIS machine specifically: scripts/build_and_install.sh reinstalls a
+# binary only when git_sync.sh PULLED new commits for its repo. Commits AUTHORED locally
+# never trip that condition — so the machine doing the work is exactly the one that drifts,
+# while the Mac Mini self-heals on its next cron pull.
+#
+# Detection is free: mev's own `toolchain-freshness` conformance check already compares its
+# compiled-in build stamp (MEV_BUILD_GIT_SHA) against its source tree's live HEAD. Nothing
+# was acting on the result. This just says it out loud, once per push (~50ms).
+#
+# Advisory ONLY — a stale binary is not a reason to refuse a push. It is a reason to tell
+# you before cron next runs it. Same contract as every other soft path in this hook.
+# =========================================================================================
+advisory_mev_freshness() {
+  command -v mev >/dev/null 2>&1 || return 0   # not installed here — nothing to be stale
+
+  local out
+  out="$(mev conformance 2>/dev/null)" || return 0   # a probe failure must never matter
+
+  case "$out" in
+    *"toolchain-freshness [DRIFT]"*) ;;
+    *) return 0 ;;
+  esac
+
+  echo "" >&2
+  echo "pre-push: NOTICE — the installed 'mev' binary is STALE vs its source tree." >&2
+  printf '%s\n' "$out" \
+    | grep -A3 'toolchain-freshness \[DRIFT\]' \
+    | sed 's/^/pre-push:   /' >&2
+  echo "pre-push:" >&2
+  echo "pre-push:   mev is the fleet writer — a stale copy runs 'emit-state --write' with" >&2
+  echo "pre-push:   old derivation logic against every repo in brain.toml. Refresh with:" >&2
+  echo "pre-push:     cargo install --path core/mev --force" >&2
+  echo "" >&2
+  return 0
+}
+
+# =========================================================================================
+# Run both stages; block if either fails. The freshness advisory runs after them so it is
+# the last thing on screen rather than buried under stage output — and it runs on the
+# blocked path too, since a stale writer is worth knowing about either way.
 # =========================================================================================
 rc1=0
 stage1_validate_brain || rc1=$?
 rc2=0
 stage2_repo_gates || rc2=$?
+
+advisory_mev_freshness
 
 if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ]; then
   exit 1

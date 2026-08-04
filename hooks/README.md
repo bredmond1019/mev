@@ -206,6 +206,40 @@ already carry a real `planning/harness.json` with `gates: true` checks (the SDLC
 repo's git must be pointed at `hooks/` (`git config core.hooksPath hooks`, same as stage 1 —
 there's only one `pre-push` file, one switch enables both stages together).
 
+### `pre-push` — advisory: is the installed `mev` binary stale?
+
+After both stages, the hook prints a **notice** (never a block) when the `mev` on `PATH` was built
+from a different commit than its source tree's current `HEAD`.
+
+**Why this is worth the noise.** `mev` is the fleet's *writer* — `mev emit-state --write` rewrites
+derived files across every repo in `brain.toml`, and both `/log-work` and `scripts/routine.sh`
+invoke it from `PATH`. A stale install keeps writing with whatever derivation logic it was built
+with, silently.
+
+This is not hypothetical. On 2026-08-04 the append-only revision-history writer
+(`MV.ticket.append-only-emit-state-writer`) shipped, merged, and closed — while `~/.cargo/bin/mev`
+still held a pre-merge build. Every real `emit-state --write` for hours afterward ran *without* the
+safety net the ticket had just added, and nothing surfaced it.
+
+**Why it drifts on the machine doing the work.** `scripts/build_and_install.sh` reinstalls a binary
+only when `git_sync.sh` **pulled** new commits for its repo. Commits **authored** locally never trip
+that condition — so the authoring machine is exactly the one that goes stale, while the Mac Mini
+self-heals on its next cron pull.
+
+Detection is free: mev's own `toolchain-freshness` conformance check already compares its
+compiled-in `MEV_BUILD_GIT_SHA` against the live tree's `HEAD` (~50ms). Nothing was acting on the
+result; this just says it out loud, once per push. The fix it prints:
+
+```bash
+cargo install --path core/mev --force
+```
+
+Advisory only, and it degrades like everything else here: `mev` not installed → silent; `mev`
+present but failing → silent; binary current → silent. It also prints on the **blocked** path, since
+a stale writer is worth knowing about either way. Note this covers `mev` and not `bastion`:
+`~/.local/bin/bastion` is a symlink into `core/bastion/target/release/`, so it auto-tracks every
+release build, and bastion exposes no equivalent self-check.
+
 ## Testing
 
 Both hooks have self-contained regression tests — throwaway git repos, no real database, no

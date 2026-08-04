@@ -63,6 +63,26 @@ exit 0
 SH
 chmod +x "$BIN/bastion"
 
+# `mev` shim for the binary-freshness advisory. MEV_SHIM_MODE=drift|pass (default pass).
+# Only the `toolchain-freshness [...]` marker line matters to the hook; the detail lines
+# exist so the test also covers the grep -A3 excerpt that gets echoed back to the user.
+cat > "$BIN/mev" <<'SH'
+#!/usr/bin/env bash
+case "${MEV_SHIM_MODE:-pass}" in
+  drift)
+    echo "toolchain-freshness [DRIFT] — compiled-in build stamp vs source tree HEAD"
+    echo "  compiled-in build stamp (2 items): aaaaaaaaaaaaaaaa"
+    echo "  live source tree HEAD (1 items): bbbbbbbbbbbbbbbb"
+    echo "    the running binary was built from aaaaaaa but the source is now at bbbbbbb"
+    ;;
+  *)
+    echo "toolchain-freshness [PASS] — compiled-in build stamp vs source tree HEAD"
+    ;;
+esac
+exit 0
+SH
+chmod +x "$BIN/mev"
+
 new_repo() { # new_repo <dir>
   local d="$1"
   mkdir -p "$d"
@@ -78,6 +98,16 @@ new_repo() { # new_repo <dir>
 run_hook() { # run_hook <dir> -> sets HOOK_RC, HOOK_OUT
   local d="$1"
   HOOK_OUT="$(cd "$d" && PATH="$BIN:$PATH" ./hooks/pre-push 2>&1)"
+  HOOK_RC=$?
+}
+
+# Same as run_hook but with a MINIMAL PATH — $BIN plus the system dirs only, deliberately
+# excluding ~/.cargo/bin. Needed for the "binary absent" case: with the inherited PATH,
+# hiding $BIN/mev would just fall through to the developer's real installed mev and the
+# test would assert nothing.
+run_hook_isolated() { # run_hook_isolated <dir> -> sets HOOK_RC, HOOK_OUT
+  local d="$1"
+  HOOK_OUT="$(cd "$d" && PATH="$BIN:/usr/bin:/bin" ./hooks/pre-push 2>&1)"
   HOOK_RC=$?
 }
 
@@ -352,6 +382,41 @@ echo '{"errors": 0}' > "$R15/hooks/validate-baseline.json"
 mkdir -p "$R15/.git"; printf 'not json{' > "$R15/.git/validate-last-good.json"
 BASTION_SHIM_ERRORS="1 0 0 0 0" run_hook "$R15"   # total 1 > baseline 0
 { [ "$HOOK_RC" -eq 1 ]; }; check "last-good: corrupt file falls back to baseline and still blocks" $?
+
+# --- Case 16: a stale mev binary warns loudly but NEVER blocks the push ---
+R16="$WORK/r16"; new_repo "$R16"
+echo '{"errors": 5, "updated": "2026-07-31"}' > "$R16/hooks/validate-baseline.json"
+MEV_SHIM_MODE=drift BASTION_SHIM_ERRORS="0 0 0 0 0" run_hook "$R16"
+{ [ "$HOOK_RC" -eq 0 ] && printf '%s' "$HOOK_OUT" | grep -q "installed 'mev' binary is STALE"; }
+check "mev freshness: stale binary warns but never blocks" $?
+
+# --- Case 17: the drift excerpt and the remediation command both reach the user ---
+{ printf '%s' "$HOOK_OUT" | grep -q "the running binary was built from" \
+  && printf '%s' "$HOOK_OUT" | grep -q "cargo install --path core/mev --force"; }
+check "mev freshness: prints the drift detail and the fix command" $?
+
+# --- Case 18: a current mev binary stays silent (no noise on the common path) ---
+R18="$WORK/r18"; new_repo "$R18"
+echo '{"errors": 5, "updated": "2026-07-31"}' > "$R18/hooks/validate-baseline.json"
+MEV_SHIM_MODE=pass BASTION_SHIM_ERRORS="0 0 0 0 0" run_hook "$R18"
+{ [ "$HOOK_RC" -eq 0 ] && ! printf '%s' "$HOOK_OUT" | grep -q "STALE"; }
+check "mev freshness: current binary stays silent" $?
+
+# --- Case 19: mev not installed at all is not an error (degrade, don't fail) ---
+R19="$WORK/r19"; new_repo "$R19"
+echo '{"errors": 5, "updated": "2026-07-31"}' > "$R19/hooks/validate-baseline.json"
+mv "$BIN/mev" "$BIN/mev.hidden"
+BASTION_SHIM_ERRORS="0 0 0 0 0" run_hook_isolated "$R19"
+mv "$BIN/mev.hidden" "$BIN/mev"
+{ [ "$HOOK_RC" -eq 0 ] && ! printf '%s' "$HOOK_OUT" | grep -q "STALE"; }
+check "mev freshness: absent binary is not an error" $?
+
+# --- Case 20: the advisory still fires on the BLOCKED path (stale writer matters either way) ---
+R20="$WORK/r20"; new_repo "$R20"
+echo '{"errors": 0, "updated": "2026-07-31"}' > "$R20/hooks/validate-baseline.json"
+MEV_SHIM_MODE=drift BASTION_SHIM_ERRORS="3 0 0 0 0" run_hook "$R20"   # total 3 > baseline 0
+{ [ "$HOOK_RC" -eq 1 ] && printf '%s' "$HOOK_OUT" | grep -q "installed 'mev' binary is STALE"; }
+check "mev freshness: advisory still prints when the push is blocked" $?
 
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL PASS"; else echo "FAILURES"; fi
