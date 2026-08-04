@@ -581,6 +581,7 @@ mod tests {
 
     fn block(id: &str, status: Option<&str>) -> TrackBlock {
         TrackBlock {
+            extra: Default::default(),
             id: id.to_string(),
             title: format!("Block {id}"),
             status: status.map(|s| s.to_string()),
@@ -599,11 +600,13 @@ mod tests {
 
     fn project_file(blocks: Vec<TrackBlock>) -> StateFile {
         StateFile {
+            extra: Default::default(),
             repo: "test".to_string(),
             kind: "project".to_string(),
             updated: "2026-01-01".to_string(),
             focus: Focus::default(),
             tracks: vec![Track {
+                extra: Default::default(),
                 title: "Phase 1".to_string(),
                 blocks,
             }],

@@ -577,6 +577,7 @@ mod tests {
 
     fn carryover(related: Vec<BlockedBy>, own_repo: Option<&str>) -> Carryover {
         Carryover {
+            extra: Default::default(),
             slug: "test-slug".to_string(),
             scope: scope(own_repo),
             kind: "deferred".to_string(),
@@ -780,15 +781,18 @@ mod tests {
 
     fn state_file(repo: &str, blocks: Vec<(&str, &str)>, carryover: Vec<Carryover>) -> StateFile {
         StateFile {
+            extra: Default::default(),
             repo: repo.to_string(),
             kind: "project".to_string(),
             updated: "2026-08-01".to_string(),
             focus: Default::default(),
             tracks: vec![okf_core::Track {
+                extra: Default::default(),
                 title: "wave 1".to_string(),
                 blocks: blocks
                     .into_iter()
                     .map(|(id, status)| okf_core::TrackBlock {
+                        extra: Default::default(),
                         id: id.to_string(),
                         title: "a block".to_string(),
                         status: Some(status.to_string()),
@@ -825,6 +829,7 @@ mod tests {
         snoozed_until: Option<&str>,
     ) -> Carryover {
         Carryover {
+            extra: Default::default(),
             slug: slug.to_string(),
             scope: CarryoverScope {
                 repo: None,
