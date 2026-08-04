@@ -9,6 +9,7 @@ trees/
 .env
 *.sqlite
 state.json
+.mev-history/
 # `/planning` (not `planning/`): a trailing slash matches directories only, but
 # planning is now a symlink into the brain-owned vault (../_planning/mev). Anchor
 # without a trailing slash so the symlink itself is ignored and never committed here.

@@ -801,6 +801,96 @@ mev --json emit-state
 mev --json emit-state --write ~/Dev/agentic-portfolio
 ```
 
+#### Revision history
+
+Every `--write` overwrite of an existing file goes through `apply_plan()`'s append-only writer
+(see `mev state-history` below): before the new content lands, the file's **prior** content is
+snapshotted to `<dir>/.mev-history/<filename>/<seq>__<timestamp>`, then the write itself lands
+atomically (temp file in the destination's own directory, then `fs::rename`). Creating a
+brand-new file records no revision — there is no prior content to lose. A snapshot/prune failure
+emits `W_HISTORY_FAILED` and does not block the primary write; history is a safety net, never a
+new way for `emit-state` to fail. Snapshotting is controlled by the `[history]` table in
+`brain.toml` (`enabled`, `keep`) — see `docs/brain-toml.md`. Dry-run remains fully side-effect-free:
+no history directory is created and nothing is written.
+
+---
+
+### `state-history <path> [--restore <seq>]`
+
+List (or restore) the append-only revision history `apply_plan()` records for one file every time
+it overwrites existing content. This is the read-back half of the "Revision history" note on
+`emit-state` above — a snapshot nobody can retrieve is inert, so `state-history` is what makes a
+bad derived write recoverable.
+
+```bash
+mev state-history <path> [--restore <seq>]
+```
+
+| Argument / Flag | Default | Description |
+|---|---|---|
+| `path` | required | The file whose revision history to list or restore (e.g. `planning/state.json`), not a brain root to search from — every other subcommand's `path` walks up looking for `brain.toml`; this one already knows exactly which file's history it wants. |
+| `--restore <seq>` | unset (list mode) | Restore revision `<seq>`'s content back to `path` instead of listing. |
+
+#### List mode (default)
+
+Read-only; never takes the advisory lock. Prints that file's revisions **newest first** — seq,
+UTC timestamp, byte size:
+
+```
+     2  20260804T120501Z  842 bytes
+     1  20260804T091203Z  798 bytes
+```
+
+A file with no recorded revisions prints an explicit `no revisions recorded for <path>` message
+and exits successfully — an empty history is a normal state, not an error. `--json` emits a
+compact/pretty JSON array of `{seq, recorded_at, bytes}` records, newest first.
+
+#### `--restore <seq>`
+
+Reads revision `<seq>`, first records the file's **current** on-disk content as a new revision
+(so a wrong restore is itself undoable via a second restore), then writes revision `<seq>`'s
+content back to `<path>` atomically via the same temp-file + rename helper `apply_plan()` uses.
+Prints what was restored and what the pre-restore content was saved as (or the JSON equivalent
+under `--json`: `restored_seq`, `path`, `pre_restore_revision`).
+
+Because it mutates the file, `--restore` takes the same advisory lock at `<root>/.mev-emit.lock`
+that `emit-state --write` takes (resolved from `path`'s own parent directory, walking up to find
+`brain.toml`), and the same linked-worktree guard — refusing to run from inside a linked git
+worktree with the same shape of message `emit-state --write` gives. List mode is read-only and
+skips both checks, exactly like emit-state's dry-run.
+
+An unknown `--restore <seq>` fails, naming the valid seq range. A path with no revisions and
+`--restore` given still exits successfully with the "no revisions recorded" message — there is
+nothing to restore.
+
+#### Diagnostic codes
+
+| Locator | Severity | Condition |
+|---|---|---|
+| `W_HISTORY_FAILED` | Warning | The pre-restore snapshot could not be recorded; the restore itself still proceeds (history is a safety net, never a new way for restore to fail) |
+| `E_EMIT_LINKED_WORKTREE` | Error | `--restore` invoked from inside a linked git worktree; refused before the lock is taken |
+| `E_EMIT_LOCK_HELD` | Error | `--restore` could not acquire the advisory lock because another live write process already holds it (names the holder pid); a stale lock (owning process no longer alive) is reclaimed automatically instead |
+
+#### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Revisions listed, "no revisions recorded", or restore applied |
+| `1` | No revision `<seq>` on disk (names the valid seq range), `E_EMIT_LOCK_HELD`, a linked-worktree refusal, or an IO failure reading/writing the file |
+
+**Examples:**
+
+```bash
+# List a file's revision history, newest first
+mev state-history planning/state.json
+
+# Machine-readable listing
+mev --json state-history planning/state.json
+
+# Restore revision 1 (also snapshots the current content first)
+mev state-history planning/state.json --restore 1
+```
+
 ---
 
 ### `defer-epic <slug> [--write] [path]` · `resume-epic <slug> [--write] [path]` · `sync-epics [--write] [path]`
