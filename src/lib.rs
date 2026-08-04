@@ -17,6 +17,10 @@ pub use brain::block_graph::{
     BlockGraphEdge, BlockGraphExport, BlockGraphNode, BlockGraphScope, BlockGraphScopeEcho,
     BlockLane, build_block_graph_export,
 };
+pub use brain::carryover::{
+    CarryoverLane, CarryoverRef, CarryoverReport, CarryoverVerdict, NotEvaluableReason,
+    evaluate_carryover,
+};
 pub use brain::crawl::{MdFile, crawl_brain};
 pub use brain::emit::{
     EmitAction, EmitError, EmitPlan, apply_plan, plan_master_plan_tables, plan_state_json,
@@ -1183,6 +1187,93 @@ pub fn visualize_brain(root: &std::path::Path, out_dir: Option<PathBuf>) -> anyh
 
     let manifest = manifest_brain(root)?;
     brain::visualize::generate_graph_visual(&manifest, &out)
+}
+
+/// Fleet-wide, read-only `carryover[]` sweep driver — the `mev carryover` entry point.
+///
+/// Modelled directly on [`block_graph_brain`]: resolves `brain.toml`, discovers every
+/// `planning/state.json`, loads each one (skipping individual load failures rather than
+/// failing the whole sweep), builds a `"{repo}:{id}"` → authored-status map from each
+/// loaded file's `tracks[]` (the same shape [`brain::state::check_status_consistency`]
+/// builds locally), builds a `{repo_slug}` → repo root path map from the resolved
+/// `BrainConfig`'s `[[repos]]` entries (the HQ root itself keyed by its own slug), and
+/// delegates to [`evaluate_carryover`] for the lane assignment. `today` is taken from the
+/// local wall clock; thresholds come from the resolved config's `[attention]` section.
+///
+/// Never writes anything — this is a pure read + report.
+pub fn carryover_sweep(
+    root: &std::path::Path,
+    repo_filter: Option<&str>,
+) -> anyhow::Result<brain::carryover::CarryoverReport> {
+    use brain::config::find_brain_config;
+    use brain::state::{discover_state_files, load_state};
+
+    let config = find_brain_config(root)
+        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
+
+    // 1. Discovery: find all planning/state.json files.
+    let (sources, _discovery_diags) = discover_state_files(root, &config);
+
+    // 2. Load each discovered file, skipping any that fail individually.
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    for src in &sources {
+        if let Ok(file) = load_state(&src.abs_path) {
+            loaded.push((src.clone(), file));
+        }
+    }
+
+    // 3. Validate --repo against the discovered repo slugs before doing any work.
+    if let Some(slug) = repo_filter
+        && !sources.iter().any(|s| s.repo_slug == slug)
+    {
+        let mut valid_slugs: Vec<&str> = sources.iter().map(|s| s.repo_slug.as_str()).collect();
+        valid_slugs.sort_unstable();
+        valid_slugs.dedup();
+        return Err(anyhow::anyhow!(
+            "unknown --repo slug '{slug}'; valid slugs: {}",
+            valid_slugs.join(", ")
+        ));
+    }
+
+    // 4. Build the "{repo}:{id}" -> authored status map from tracks[].
+    let mut status_map: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    for (src, file) in &loaded {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let key = format!("{}:{}", src.repo_slug, block.id);
+                status_map.insert(key, block.status.clone());
+            }
+        }
+    }
+
+    // 5. Build the repo slug -> repo root path map, so Class B path refs can resolve
+    //    against the owning repo in addition to the brain root.
+    let mut repo_paths: std::collections::HashMap<String, PathBuf> =
+        std::collections::HashMap::new();
+    for repo in &config.repos {
+        let repo_root = if repo.repo_path == "." || repo.repo_path.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(&repo.repo_path)
+        };
+        repo_paths.insert(repo.slug.clone(), repo_root);
+    }
+
+    // 6. Evaluate.
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    Ok(evaluate_carryover(
+        &loaded,
+        &status_map,
+        root,
+        &repo_paths,
+        &today,
+        &config.attention,
+        repo_filter,
+    ))
 }
 
 /// Machine-readable envelope emitted by the `--json` flag for any `mev` subcommand.
