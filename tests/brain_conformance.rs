@@ -34,6 +34,85 @@ skip_dirs = ["target", "node_modules", ".git"]
     fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
 }
 
+/// Serialize `value` as pretty JSON and write it to `root/rel`.
+fn write_json(root: &Path, rel: &str, value: &serde_json::Value) {
+    write_file(root, rel, &serde_json::to_string_pretty(value).unwrap());
+}
+
+/// Create a file at `root/rel` (creating parent dirs as needed) with `content`.
+fn write_file(root: &Path, rel: &str, content: &str) {
+    let full = root.join(rel);
+    fs::create_dir_all(full.parent().unwrap()).unwrap();
+    fs::write(&full, content.as_bytes()).unwrap();
+}
+
+/// Write the HQ brain `planning/state.json` with one backlog title (`"Ticket One"`) and
+/// one epic (`alpha`, status `active`, `plan` pointing inside `core/planning/epics/`) — the
+/// full corpus shape `backlog-parity` and `epics-index-parity` both read from.
+fn write_hq_state_full(root: &Path) {
+    let state = serde_json::json!({
+        "repo": "hq",
+        "kind": "brain",
+        "updated": "2026-08-03",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "backlog": [
+            {
+                "slug": "ticket-one",
+                "title": "Ticket One",
+                "repo": "cross-repo",
+                "type": "improvement",
+                "status": "idea"
+            }
+        ],
+        "epics": [
+            {
+                "slug": "alpha",
+                "title": "Alpha Epic",
+                "status": "active",
+                "plan": "core/planning/epics/alpha.md"
+            }
+        ]
+    });
+    write_json(root, "planning/state.json", &state);
+}
+
+/// Write `planning/backlog.md` whose `## Active` title matches the JSON side
+/// (`"Ticket One"`) — `## Superseded`/`## Shipped` are present but empty to exercise the
+/// section filter without affecting parity.
+fn write_backlog_md_matching(root: &Path) {
+    write_file(
+        root,
+        "planning/backlog.md",
+        "## Active\n\n### [2026-08-01] Ticket One\nbody\n\n## Promoted\n\n## Superseded\n\n## Shipped\n",
+    );
+}
+
+/// Write `core/planning/epics/index.md` with one row matching the `alpha` epic.
+fn write_epics_index_matching(root: &Path) {
+    write_file(
+        root,
+        "core/planning/epics/index.md",
+        "| Doc | Epic | Status | Repos |\n|---|---|---|---|\n\
+         | [alpha.md](alpha.md) | **Alpha Epic** | `active` | `mev` |\n",
+    );
+}
+
+/// Write the per-epic doc the `alpha` epic's `plan` points at.
+fn write_epic_doc(root: &Path) {
+    write_file(root, "core/planning/epics/alpha.md", "# Alpha Epic\n");
+}
+
+/// Build the full corpus fixture: `brain.toml` + HQ `state.json` (`backlog[]` + `epics[]`)
+/// + `planning/backlog.md` + `core/planning/epics/index.md` + the per-epic doc — every
+/// side both disk-backed checks read is present and matching.
+fn write_full_clean_fixture(root: &Path) {
+    write_brain_toml(root);
+    write_hq_state_full(root);
+    write_backlog_md_matching(root);
+    write_epics_index_matching(root);
+    write_epic_doc(root);
+}
+
 #[test]
 fn conformance_runs_every_registered_check() {
     let dir = temp_dir("all-checks");
@@ -133,6 +212,114 @@ fn conformance_errors_when_brain_toml_is_missing() {
     // block_graph_brain / carryover_sweep's contract.
     let err = mev::conformance(&dir, None).unwrap_err();
     assert!(err.to_string().contains("brain.toml"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Full corpus fixture — clean fixture, seeded drift, single-check filter, tallies.
+// ---------------------------------------------------------------------------
+
+/// An all-clean full corpus fixture (matching `backlog[]`/`backlog.md` and
+/// `epics[]`/index.md sides) reports zero drift. `project-cache-watermark` and
+/// `toolchain-freshness` have no matching inputs in this fixture and are expected to be
+/// `not-evaluable`, never `drift`.
+#[test]
+fn full_fixture_reports_zero_drift() {
+    let dir = temp_dir("full-clean");
+    write_full_clean_fixture(&dir);
+
+    let report = mev::conformance(&dir, None).expect("conformance should not error");
+
+    assert_eq!(
+        report.drift_count, 0,
+        "clean full corpus fixture should report zero drift, got: {:#?}",
+        report.results
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Seeding one backlog title into `backlog.md` that has no `state.json backlog[]`
+/// counterpart is detected as exactly one drifting check (`backlog-parity`), and the
+/// offending title is named in its findings.
+#[test]
+fn seeded_backlog_title_drift_is_detected_and_named() {
+    let dir = temp_dir("seeded-backlog-drift");
+    write_full_clean_fixture(&dir);
+
+    // Overwrite backlog.md with an extra markdown-only title that has no state.json
+    // backlog[] counterpart.
+    write_file(
+        &dir,
+        "planning/backlog.md",
+        "## Active\n\n### [2026-08-01] Ticket One\nbody\n\n### [2026-08-02] Markdown Only Ticket\nbody\n\n## Promoted\n\n## Superseded\n\n## Shipped\n",
+    );
+
+    let report = mev::conformance(&dir, None).expect("conformance should not error");
+
+    let drifting: Vec<_> = report
+        .results
+        .iter()
+        .filter(|r| r.outcome.status == mev::CheckStatus::Drift)
+        .collect();
+
+    assert_eq!(
+        drifting.len(),
+        1,
+        "expected exactly one drifting check, got: {:#?}",
+        report.results
+    );
+    assert_eq!(drifting[0].name, "backlog-parity");
+    assert!(
+        drifting[0]
+            .outcome
+            .findings
+            .iter()
+            .any(|f| f.contains("Markdown Only Ticket")),
+        "backlog-parity findings should name the offending title, got: {:#?}",
+        drifting[0].outcome.findings
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// `only = Some("epics-index-parity")` over the full corpus fixture runs exactly that one
+/// check and it passes (both sides match).
+#[test]
+fn only_filter_over_full_fixture_runs_exactly_one_check() {
+    let dir = temp_dir("full-only-filter");
+    write_full_clean_fixture(&dir);
+
+    let report = mev::conformance(&dir, Some("epics-index-parity"))
+        .expect("conformance with a valid --check name should not error");
+
+    assert_eq!(
+        report.results.len(),
+        1,
+        "expected exactly one result, got: {:#?}",
+        report.results
+    );
+    assert_eq!(report.results[0].name, "epics-index-parity");
+    assert_eq!(report.results[0].outcome.status, mev::CheckStatus::Pass);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The full corpus fixture's report tallies still sum to the number of results.
+#[test]
+fn full_fixture_tallies_sum_to_results_len() {
+    let dir = temp_dir("full-tallies");
+    write_full_clean_fixture(&dir);
+
+    let report = mev::conformance(&dir, None).expect("conformance should not error");
+
+    assert_eq!(
+        report.pass_count + report.drift_count + report.not_evaluable_count,
+        report.results.len(),
+        "tallies must sum to the number of results, got report: {:#?}",
+        report
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
