@@ -52,17 +52,28 @@ pub struct SiblingRule {
     pub covering_test: &'static str,
 }
 
-/// The declared table of sibling rules. Populated by later tasks in this ticket.
-pub const SIBLING_RULES: &[SiblingRule] = &[SiblingRule {
-    name: "dual-role-repo-resolution",
-    invariant: "A registered repo resolves to its state file whether that file is \
-                kind: \"project\" (leaf) or kind: \"brain\" (tier sub-brain root carrying \
-                its own authored tracks[]).",
-    members: &["derive_rollup", "derive_brain_focus"],
-    shared_helper: "resolve_repo_state_file",
-    forbidden: &["f.kind == \"project\""],
-    covering_test: "dual_role_rule_holds_for_both_resolvers",
-}];
+/// The declared table of sibling rules.
+pub const SIBLING_RULES: &[SiblingRule] = &[
+    SiblingRule {
+        name: "dual-role-repo-resolution",
+        invariant: "A registered repo resolves to its state file whether that file is \
+                    kind: \"project\" (leaf) or kind: \"brain\" (tier sub-brain root carrying \
+                    its own authored tracks[]).",
+        members: &["derive_rollup", "derive_brain_focus"],
+        shared_helper: "resolve_repo_state_file",
+        forbidden: &["f.kind == \"project\""],
+        covering_test: "dual_role_rule_holds_for_both_resolvers",
+    },
+    SiblingRule {
+        name: "block-status-map-construction",
+        invariant: "Authored block status is looked up through one \"{repo}:{id}\" map \
+                    built by block_status_map; no call site rebuilds it inline.",
+        members: &["check_status_consistency", "ready_order", "derive_focus"],
+        shared_helper: "block_status_map",
+        forbidden: &["status_map.insert("],
+        covering_test: "all_status_consumers_agree_on_one_fixture",
+    },
+];
 
 /// The four failure modes `scan_rule` can report for a rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

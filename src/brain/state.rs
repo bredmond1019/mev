@@ -49,6 +49,7 @@
 //! - `W_STATE_EPIC_UNREACHABLE_DEP` — an unclosed epic block depends on an unclosed
 //!   block that belongs to no epic (a gate invisible on the epic's board).
 
+use std::collections::HashMap;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
@@ -1285,6 +1286,30 @@ pub fn check_state_graph(
 // Status-consistency check (Task 4)
 // ---------------------------------------------------------------------------
 
+/// Build the canonical `"{repo}:{id}" → authored status` lookup used by every consumer
+/// that needs to resolve a block's authored status by its cross-repo key.
+///
+/// This is the **single owner** of that derivation — [`check_status_consistency`],
+/// [`ready_order`], and [`derive_focus`] all call this instead of rebuilding the map
+/// inline, so the three cannot drift out of agreement with one another (the
+/// `block-status-map-construction` sibling-rule-coverage check enforces this).
+///
+/// `None` means the block's authored `status` field is absent (treated as `"open"` by
+/// callers); a key missing from the map entirely means no loaded file declares that
+/// `repo:id` at all.
+pub fn block_status_map(files: &[(StateSource, StateFile)]) -> HashMap<String, Option<String>> {
+    let mut status_map: HashMap<String, Option<String>> = HashMap::new();
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let key = format!("{}:{}", src.repo_slug, block.id);
+                status_map.insert(key, block.status.clone());
+            }
+        }
+    }
+    status_map
+}
+
 /// Check that no `closed` block depends on a non-`closed` block.
 ///
 /// A block that declares `status: "closed"` with a `{type:"block"}` entry in its
@@ -1295,18 +1320,8 @@ pub fn check_state_graph(
 /// target does not exist in any loaded file are silently skipped here — they are
 /// already reported as `E_STATE_DANGLING_BLOCKED_BY` by [`check_state_graph`].
 pub fn check_status_consistency(files: &[(StateSource, StateFile)]) -> Vec<Diagnostic> {
-    use std::collections::HashMap;
-
-    // Build a status lookup: "repo:id" → authored status (None = absent = treated as open).
-    let mut status_map: HashMap<String, Option<String>> = HashMap::new();
-    for (src, file) in files {
-        for track in &file.tracks {
-            for block in &track.blocks {
-                let key = format!("{}:{}", src.repo_slug, block.id);
-                status_map.insert(key, block.status.clone());
-            }
-        }
-    }
+    // Status lookup: "repo:id" → authored status (None = absent = treated as open).
+    let status_map = block_status_map(files);
 
     let mut diags: Vec<Diagnostic> = Vec::new();
 
@@ -1839,18 +1854,8 @@ pub fn effective_priorities(
 ///
 /// This function is **standalone and public** — do not inline it into any check function.
 pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> Vec<String> {
-    use std::collections::HashMap;
-
     // Status lookup: "repo:id" → authored status (None = absent = open).
-    let mut status_map: HashMap<String, Option<String>> = HashMap::new();
-    for (src, file) in files {
-        for track in &file.tracks {
-            for block in &track.blocks {
-                let key = format!("{}:{}", src.repo_slug, block.id);
-                status_map.insert(key, block.status.clone());
-            }
-        }
-    }
+    let status_map = block_status_map(files);
 
     // Collect (wave, iteration_order, "repo:id") for every ready open block.
     let mut ready: Vec<(i64, usize, String)> = Vec::new();
@@ -1967,22 +1972,12 @@ pub fn derive_focus(
     graph: &StateGraph,
     files: &[(StateSource, StateFile)],
 ) -> DerivedFocus {
-    use std::collections::HashMap;
-
     if file.tracks.is_empty() {
         return DerivedFocus::default();
     }
 
-    // Build a status map: "repo:id" → authored status (None = absent = open).
-    let mut status_map: HashMap<String, Option<String>> = HashMap::new();
-    for (s, f) in files {
-        for track in &f.tracks {
-            for block in &track.blocks {
-                let key = format!("{}:{}", s.repo_slug, block.id);
-                status_map.insert(key, block.status.clone());
-            }
-        }
-    }
+    // Status map: "repo:id" → authored status (None = absent = open).
+    let status_map = block_status_map(files);
 
     let mut now: Vec<String> = Vec::new();
     let mut blocked: Vec<(String, Vec<BlockedBy>)> = Vec::new();
@@ -2266,8 +2261,6 @@ pub struct EpicEdges {
 /// callers can render either the live gates or the complete relationship map.
 /// Use [`EpicEdge::blocking`] to tell them apart.
 pub fn derive_epic_edges(files: &[(StateSource, StateFile)], slug: &str) -> EpicEdges {
-    use std::collections::HashMap;
-
     let mut by_key: HashMap<String, &TrackBlock> = HashMap::new();
     for (src, file) in files {
         for track in &file.tracks {
@@ -5590,6 +5583,48 @@ mod tests {
             errs.is_empty(),
             "dangling dep (not in any loaded file) should not produce \
              E_STATE_STATUS_INCONSISTENT (that's check_state_graph's job), got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn block_status_map_matches_previous_inline_construction() {
+        // Two-repo fixture: block_status_map must produce the exact "repo:id" -> status
+        // map that check_status_consistency, ready_order, and derive_focus all used to
+        // build inline before the MV.ticket.sibling-rule-coverage extraction.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let alpha = make_consistency_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("open"), vec![]),
+                ("AL.1.B", Some("closed"), vec![]),
+            ],
+        );
+        let beta = make_consistency_pair(
+            dir.path(),
+            "beta",
+            &[
+                ("BE.1.A", None, vec![]),
+                ("BE.1.B", Some("deferred"), vec![]),
+            ],
+        );
+        let files = vec![alpha, beta];
+
+        let map = block_status_map(&files);
+
+        assert_eq!(
+            map.len(),
+            4,
+            "expected exactly four repo:id keys, got: {map:?}"
+        );
+        assert_eq!(map.get("alpha:AL.1.A"), Some(&Some("open".to_string())));
+        assert_eq!(map.get("alpha:AL.1.B"), Some(&Some("closed".to_string())));
+        assert_eq!(map.get("beta:BE.1.A"), Some(&None));
+        assert_eq!(map.get("beta:BE.1.B"), Some(&Some("deferred".to_string())));
+        assert_eq!(
+            map.get("alpha:AL.1.GHOST"),
+            None,
+            "unknown key must be absent, not None-valued"
         );
     }
 

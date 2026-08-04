@@ -18,7 +18,8 @@ use std::path::Path;
 
 use mev::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
 use mev::brain::state::{
-    StateFile, StateGraph, StateSource, TierScope, derive_brain_focus, derive_rollup,
+    StateFile, StateGraph, StateSource, TierScope, check_status_consistency, derive_brain_focus,
+    derive_focus, derive_rollup, ready_order,
 };
 
 /// Make a fresh uniquely-named temp dir for a test and return its path.
@@ -205,5 +206,86 @@ fn dual_role_rule_holds_for_both_resolvers() {
         leaf_entry.now.iter().any(|b| b.id == "LEAFALPHA.1.A"),
         "derive_rollup must still resolve the kind:\"project\" leaf, got: {:?}",
         leaf_entry.now
+    );
+}
+
+/// One fixture, run through `check_status_consistency`, `ready_order`, and
+/// `derive_focus`, asserting all three resolve the same block to the same
+/// authored status — the covering test for the `block-status-map-construction`
+/// sibling rule. All three functions now build their `"{repo}:{id}" -> status`
+/// lookup exclusively through `block_status_map` (`src/brain/state.rs`); this
+/// test is the "asserted against BOTH [all three]" proof the check's
+/// `test-not-covering` finding keys off — `check_status_consistency`,
+/// `ready_order`, and `derive_focus` must all appear, literally, in this
+/// test's body.
+#[test]
+fn all_status_consumers_agree_on_one_fixture() {
+    let dir = temp_dir("status-map");
+    let graph = StateGraph::default();
+
+    // gamma: GA.1.A closed (no deps); GA.1.B open, depends_on GA.1.A (block dep,
+    // satisfied -> ready); GA.1.C in_progress.
+    let json = r#"{
+  "repo": "gamma",
+  "kind": "project",
+  "updated": "2026-08-04",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [{
+    "title": "Phase 1",
+    "blocks": [
+      { "id": "GA.1.A", "title": "Done", "status": "closed" },
+      {
+        "id": "GA.1.B",
+        "title": "Ready",
+        "status": "open",
+        "depends_on": [{ "type": "block", "repo": "gamma", "id": "GA.1.A" }]
+      },
+      { "id": "GA.1.C", "title": "Active", "status": "in_progress" }
+    ]
+  }]
+}"#;
+    let pair = make_pair(dir.as_path(), "gamma-state.json", "project", json);
+    let files = vec![pair];
+    let (src, file) = &files[0];
+
+    // --- check_status_consistency: GA.1.A is closed and has no deps, so no
+    // block in this fixture is a closed-depending-on-non-closed pair. All three
+    // functions must agree GA.1.A's authored status is "closed".
+    let diags = check_status_consistency(&files);
+    assert!(
+        diags.is_empty(),
+        "no closed block depends on a non-closed block in this fixture, got: {diags:?}"
+    );
+
+    // --- ready_order: GA.1.B is open with its sole block-dep (GA.1.A) closed,
+    // so it must be ready — proving ready_order also resolved GA.1.A as closed.
+    let ready = ready_order(&graph, &files);
+    assert!(
+        ready.contains(&"gamma:GA.1.B".to_string()),
+        "GA.1.B's dependency GA.1.A is closed, so GA.1.B must be ready, got: {ready:?}"
+    );
+    assert!(
+        !ready.contains(&"gamma:GA.1.A".to_string()),
+        "GA.1.A is closed, not open, so it must not appear in ready_order, got: {ready:?}"
+    );
+
+    // --- derive_focus: GA.1.C (in_progress) lands in `now`, GA.1.B (open, dep
+    // closed) lands in `next` — the same GA.1.A-is-closed resolution once more,
+    // this time through derive_focus's own status_map lookup.
+    let focus = derive_focus(src, file, &graph, &files);
+    assert!(
+        focus.now.contains(&"GA.1.C".to_string()),
+        "GA.1.C is in_progress, expected in derive_focus.now, got: {:?}",
+        focus.now
+    );
+    assert!(
+        focus.next.contains(&"GA.1.B".to_string()),
+        "GA.1.B is ready (dep GA.1.A closed), expected in derive_focus.next, got: {:?}",
+        focus.next
+    );
+    assert!(
+        focus.blocked.is_empty(),
+        "no block in this fixture has an unmet dependency, got: {:?}",
+        focus.blocked
     );
 }
