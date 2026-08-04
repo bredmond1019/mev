@@ -9,6 +9,7 @@ pub mod block_graph;
 pub mod blocks;
 pub mod carryover;
 pub mod config;
+pub mod conformance;
 pub mod crawl;
 pub mod distill;
 pub mod emit;
