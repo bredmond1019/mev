@@ -33,7 +33,6 @@ fn make_src(repo_slug: &str) -> StateSource {
 /// Build a minimal `StateFile` with `kind:"project"` and the given tracks.
 fn make_leaf(repo: &str, tracks: Vec<Track>) -> StateFile {
     StateFile {
-        extra: Default::default(),
         epics: Vec::new(),
         repo: repo.to_string(),
         kind: "project".to_string(),
@@ -46,13 +45,13 @@ fn make_leaf(repo: &str, tracks: Vec<Track>) -> StateFile {
         note: None,
         backlog: vec![],
         carryover: vec![],
+        ..Default::default()
     }
 }
 
 /// Build a `TrackBlock` with a given wave and no deps.
 fn block(id: &str, title: &str, status: Option<&str>, wave: Option<i64>) -> TrackBlock {
     TrackBlock {
-        extra: Default::default(),
         epics: Vec::new(),
         due: None,
         priority: None,
@@ -66,6 +65,7 @@ fn block(id: &str, title: &str, status: Option<&str>, wave: Option<i64>) -> Trac
         origin: None,
         note: None,
         description: None,
+        ..Default::default()
     }
 }
 
@@ -79,7 +79,6 @@ fn block_with_dep(
     dep_id: &str,
 ) -> TrackBlock {
     TrackBlock {
-        extra: Default::default(),
         epics: Vec::new(),
         due: None,
         priority: None,
@@ -97,6 +96,7 @@ fn block_with_dep(
         origin: None,
         note: None,
         description: None,
+        ..Default::default()
     }
 }
 
@@ -115,13 +115,13 @@ fn wave_order_ascending_wave_numbers() {
     let file = make_leaf(
         "myrepo",
         vec![Track {
-            extra: Default::default(),
             title: "Phase 1".to_string(),
             blocks: vec![
                 block("B", "Block B", None, Some(3)),
                 block("A", "Block A", None, Some(1)),
                 block("C", "Block C", None, Some(2)),
             ],
+            ..Default::default()
         }],
     );
     let graph = empty_graph();
@@ -137,13 +137,13 @@ fn wave_order_none_wave_last() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "Phase".to_string(),
             blocks: vec![
                 block("X", "No wave", None, None), // no wave → last
                 block("Y", "Wave 1", None, Some(1)),
                 block("Z", "Wave 2", None, Some(2)),
             ],
+            ..Default::default()
         }],
     );
     let graph = empty_graph();
@@ -160,13 +160,13 @@ fn wave_order_tiebreak_by_iteration_order() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "Phase".to_string(),
             blocks: vec![
                 block("A", "First", None, Some(1)),
                 block("B", "Second", None, Some(1)),
                 block("C", "Third", None, Some(1)),
             ],
+            ..Default::default()
         }],
     );
     let graph = empty_graph();
@@ -183,18 +183,18 @@ fn wave_order_multiple_repos_stable_ordering() {
     let file_a = make_leaf(
         "alpha",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![block("A1", "Alpha 1", None, Some(2))],
+            ..Default::default()
         }],
     );
     let src_b = make_src("beta");
     let file_b = make_leaf(
         "beta",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![block("B1", "Beta 1", None, Some(1))],
+            ..Default::default()
         }],
     );
     let graph = empty_graph();
@@ -215,9 +215,9 @@ fn render_wave_table_includes_header_and_sep() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![block("B1", "My Block", Some("open"), Some(1))],
+            ..Default::default()
         }],
     );
     let graph = empty_graph();
@@ -242,12 +242,12 @@ fn render_wave_table_open_block_with_unmet_dep_shows_blocked() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![
                 block("A", "Block A", Some("open"), Some(1)),
                 block_with_dep("B", "Block B", Some("open"), Some(2), "repo", "A"),
             ],
+            ..Default::default()
         }],
     );
     let graph = empty_graph();
@@ -271,9 +271,9 @@ fn render_wave_table_open_ready_block_shows_open() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![block("A", "Block A", Some("open"), Some(1))],
+            ..Default::default()
         }],
     );
     let graph = empty_graph();
@@ -295,9 +295,9 @@ fn render_wave_table_closed_block_shows_closed() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![block("X", "Done block", Some("closed"), Some(1))],
+            ..Default::default()
         }],
     );
     let graph = empty_graph();
@@ -319,9 +319,9 @@ fn render_wave_table_no_wave_shows_em_dash() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![block("Y", "No wave block", None, None)],
+            ..Default::default()
         }],
     );
     let graph = empty_graph();
@@ -349,9 +349,9 @@ fn render_wave_table_depends_on_column_lists_deps() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![block("A", "A", Some("closed"), Some(1)), b],
+            ..Default::default()
         }],
     );
     let graph = empty_graph();
@@ -378,12 +378,12 @@ fn render_wave_table_wave_order_respected_in_rows() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![
                 block("Late", "Late block", None, Some(2)),
                 block("Early", "Early block", None, Some(1)),
             ],
+            ..Default::default()
         }],
     );
     let graph = empty_graph();
@@ -411,7 +411,6 @@ fn render_wave_table_cross_repo_closed_dep_shows_open() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![block_with_dep(
                 "B",
@@ -421,6 +420,7 @@ fn render_wave_table_cross_repo_closed_dep_shows_open() {
                 "other",
                 "X",
             )],
+            ..Default::default()
         }],
     );
     let graph = empty_graph();
@@ -445,7 +445,6 @@ fn render_wave_table_cross_repo_open_dep_shows_blocked() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![block_with_dep(
                 "B",
@@ -455,6 +454,7 @@ fn render_wave_table_cross_repo_open_dep_shows_blocked() {
                 "other",
                 "X",
             )],
+            ..Default::default()
         }],
     );
     let graph = empty_graph();
@@ -479,7 +479,6 @@ fn render_wave_table_cross_repo_absent_dep_shows_blocked() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![block_with_dep(
                 "B",
@@ -489,6 +488,7 @@ fn render_wave_table_cross_repo_absent_dep_shows_blocked() {
                 "other",
                 "X",
             )],
+            ..Default::default()
         }],
     );
     let graph = empty_graph();
@@ -673,7 +673,6 @@ mod task3_planners {
         deps: Vec<BlockedBy>,
     ) -> TrackBlock {
         TrackBlock {
-            extra: Default::default(),
             epics: Vec::new(),
             due: None,
             priority: None,
@@ -687,12 +686,12 @@ mod task3_planners {
             origin: None,
             note: None,
             description: None,
+            ..Default::default()
         }
     }
 
     fn make_leaf_file(repo: &str, tracks: Vec<Track>, focus: Focus) -> StateFile {
         StateFile {
-            extra: Default::default(),
             epics: Vec::new(),
             repo: repo.to_string(),
             kind: "project".to_string(),
@@ -705,6 +704,7 @@ mod task3_planners {
             note: None,
             backlog: vec![],
             carryover: vec![],
+            ..Default::default()
         }
     }
 
@@ -714,7 +714,6 @@ mod task3_planners {
         focus: Focus,
     ) -> StateFile {
         StateFile {
-            extra: Default::default(),
             epics: Vec::new(),
             repo: "brain".to_string(),
             kind: "brain".to_string(),
@@ -727,6 +726,7 @@ mod task3_planners {
             note: None,
             backlog: vec![],
             carryover: vec![],
+            ..Default::default()
         }
     }
 
@@ -758,12 +758,12 @@ mod task3_planners {
         // Leaf has a stale focus.now (a closed block) while "B" is in_progress.
         let stale_focus = focus_with_now("A", "Block A"); // stale: A is now closed
         let tracks = vec![Track {
-            extra: Default::default(),
             title: "Phase 1".to_string(),
             blocks: vec![
                 track_block("A", "Block A", Some("closed"), Some(1), vec![]),
                 track_block("B", "Block B", Some("in_progress"), Some(2), vec![]),
             ],
+            ..Default::default()
         }];
         let file = make_leaf_file("myrepo", tracks, stale_focus);
         let src = StateSource {
@@ -810,11 +810,9 @@ mod task3_planners {
     fn leaf_focus_carries_priority_and_due_from_tracks() {
         // "A" is in_progress with priority/due set; "B" is next with only priority set.
         let tracks = vec![Track {
-            extra: Default::default(),
             title: "Phase 1".to_string(),
             blocks: vec![
                 TrackBlock {
-                    extra: Default::default(),
                     epics: Vec::new(),
                     due: Some("2026-07-10".to_string()),
                     priority: Some(1),
@@ -828,9 +826,9 @@ mod task3_planners {
                     origin: None,
                     note: None,
                     description: None,
+                    ..Default::default()
                 },
                 TrackBlock {
-                    extra: Default::default(),
                     epics: Vec::new(),
                     due: None,
                     priority: Some(2),
@@ -844,8 +842,10 @@ mod task3_planners {
                     origin: None,
                     note: None,
                     description: None,
+                    ..Default::default()
                 },
             ],
+            ..Default::default()
         }];
         let file = make_leaf_file("myrepo", tracks, Focus::default());
         let src = StateSource {
@@ -893,12 +893,12 @@ mod task3_planners {
     fn fixed_point_no_action() {
         // A leaf whose stored focus already matches the derivation → no action.
         let tracks = vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![
                 track_block("A", "Block A", Some("closed"), Some(1), vec![]),
                 track_block("B", "Block B", Some("in_progress"), Some(2), vec![]),
             ],
+            ..Default::default()
         }];
         // Pre-derive the correct focus.
         let correct_focus = Focus {
@@ -943,7 +943,6 @@ mod task3_planners {
 
         // Leaf repo with one in_progress block.
         let leaf_tracks = vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![track_block(
                 "BA.1",
@@ -952,6 +951,7 @@ mod task3_planners {
                 Some(1),
                 vec![],
             )],
+            ..Default::default()
         }];
         let leaf_file = make_leaf_file("myrepo", leaf_tracks, Focus::default());
         let leaf_src = StateSource {
@@ -1026,7 +1026,6 @@ mod task3_planners {
         // Brain file has a stale authored focus that must be replaced by the
         // repo-tagged union of in-scope children's derived focus (MV.3B.U task 2/3).
         let leaf_tracks = vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![track_block(
                 "BA.1",
@@ -1035,6 +1034,7 @@ mod task3_planners {
                 Some(1),
                 vec![],
             )],
+            ..Default::default()
         }];
         let leaf_file = make_leaf_file("myrepo", leaf_tracks, Focus::default());
         let leaf_src = StateSource {
@@ -1094,7 +1094,6 @@ mod task3_planners {
         std::fs::write(&mp_path, original_mp).unwrap();
 
         let tracks = vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![track_block(
                 "B1",
@@ -1103,6 +1102,7 @@ mod task3_planners {
                 Some(1),
                 vec![],
             )],
+            ..Default::default()
         }];
         let file = make_leaf_file("myrepo", tracks, Focus::default());
         let src = StateSource {
@@ -1270,9 +1270,9 @@ mod task3_planners {
         std::fs::write(&mp_path, original_mp).unwrap();
 
         let tracks = vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![track_block("X", "X block", Some("open"), Some(1), vec![])],
+            ..Default::default()
         }];
         let file = make_leaf_file("repo", tracks, Focus::default());
         let src = StateSource {
@@ -1387,7 +1387,6 @@ mod task3_planners {
         .unwrap();
 
         let tracks = vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![track_block(
                 "B1",
@@ -1396,6 +1395,7 @@ mod task3_planners {
                 Some(1),
                 vec![],
             )],
+            ..Default::default()
         }];
         let mut file = make_leaf_file("myrepo", tracks, Focus::default());
         // The brain's own coarse freshness scalar — deliberately different from the
@@ -1597,7 +1597,6 @@ mod task3_planners {
         .unwrap();
 
         let tracks = vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![track_block(
                 "B1",
@@ -1606,6 +1605,7 @@ mod task3_planners {
                 Some(1),
                 vec![],
             )],
+            ..Default::default()
         }];
         let mut file = make_leaf_file("myrepo", tracks, Focus::default());
         file.updated = "2026-06-01".to_string();
@@ -1952,7 +1952,6 @@ mod task3_planners {
 
         // Leaf repo "repo-a" (core tier) with one in_progress block.
         let leaf_tracks = vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![track_block(
                 "RA.1.A",
@@ -1961,6 +1960,7 @@ mod task3_planners {
                 Some(1),
                 vec![],
             )],
+            ..Default::default()
         }];
         let leaf_file = make_leaf_file("repo-a", leaf_tracks, Focus::default());
         let leaf_src = StateSource {
@@ -2141,7 +2141,6 @@ mod task3_planners {
         std::fs::write(&status_path, status_doc_with_sentinel()).unwrap();
 
         let leaf_tracks = vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![track_block(
                 "RA.1.A",
@@ -2150,6 +2149,7 @@ mod task3_planners {
                 Some(1),
                 vec![],
             )],
+            ..Default::default()
         }];
         let leaf_file = make_leaf_file("repo-a", leaf_tracks, Focus::default());
         let leaf_src = StateSource {
@@ -4040,9 +4040,9 @@ mod task2_global_status_map {
                 make_leaf(
                     "core",
                     vec![Track {
-                        extra: Default::default(),
                         title: "Phase 1".to_string(),
                         blocks: vec![block("A", "Block A", Some("closed"), Some(1))],
+                        ..Default::default()
                     }],
                 ),
             ),
@@ -4051,9 +4051,9 @@ mod task2_global_status_map {
                 make_leaf(
                     "mev",
                     vec![Track {
-                        extra: Default::default(),
                         title: "Phase 1".to_string(),
                         blocks: vec![block("A", "Block A (mev)", Some("open"), Some(1))],
+                        ..Default::default()
                     }],
                 ),
             ),
@@ -4073,9 +4073,9 @@ mod task2_global_status_map {
                 make_leaf(
                     "core",
                     vec![Track {
-                        extra: Default::default(),
                         title: "Phase 1".to_string(),
                         blocks: vec![block("X", "Core X", Some("closed"), None)],
+                        ..Default::default()
                     }],
                 ),
             ),
@@ -4084,9 +4084,9 @@ mod task2_global_status_map {
                 make_leaf(
                     "bastion",
                     vec![Track {
-                        extra: Default::default(),
                         title: "Phase 1".to_string(),
                         blocks: vec![block("X", "Bastion X", Some("in_progress"), None)],
+                        ..Default::default()
                     }],
                 ),
             ),
@@ -4107,9 +4107,9 @@ mod task2_global_status_map {
             make_leaf(
                 "mev",
                 vec![Track {
-                    extra: Default::default(),
                     title: "Phase 1".to_string(),
                     blocks: vec![block("NOSTATUS", "No status block", None, Some(2))],
+                    ..Default::default()
                 }],
             ),
         )];
@@ -4852,7 +4852,6 @@ mod task2_plan_hq_board {
         deps: Vec<BlockedBy>,
     ) -> TrackBlock {
         TrackBlock {
-            extra: Default::default(),
             epics: Vec::new(),
             due: None,
             priority: None,
@@ -4866,12 +4865,12 @@ mod task2_plan_hq_board {
             origin: None,
             note: None,
             description: None,
+            ..Default::default()
         }
     }
 
     fn make_leaf_file(repo: &str, tracks: Vec<Track>, focus: Focus) -> StateFile {
         StateFile {
-            extra: Default::default(),
             epics: Vec::new(),
             repo: repo.to_string(),
             kind: "project".to_string(),
@@ -4884,6 +4883,7 @@ mod task2_plan_hq_board {
             note: None,
             backlog: vec![],
             carryover: vec![],
+            ..Default::default()
         }
     }
 
@@ -4893,7 +4893,6 @@ mod task2_plan_hq_board {
         focus: Focus,
     ) -> StateFile {
         StateFile {
-            extra: Default::default(),
             epics: Vec::new(),
             repo: "hq".to_string(),
             kind: "brain".to_string(),
@@ -4906,6 +4905,7 @@ mod task2_plan_hq_board {
             note: None,
             backlog: vec![],
             carryover: vec![],
+            ..Default::default()
         }
     }
 
@@ -4932,7 +4932,6 @@ mod task2_plan_hq_board {
 
         // Leaf repo "repo-a" (core tier) with one in_progress block.
         let leaf_tracks = vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![track_block(
                 "RA.1.A",
@@ -4941,6 +4940,7 @@ mod task2_plan_hq_board {
                 Some(1),
                 vec![],
             )],
+            ..Default::default()
         }];
         let leaf_file = make_leaf_file("repo-a", leaf_tracks, Focus::default());
         let leaf_src = StateSource {
@@ -5114,7 +5114,6 @@ mod task2_plan_hq_board {
         std::fs::write(&status_path, board_doc_with_sentinel()).unwrap();
 
         let leaf_tracks = vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![track_block(
                 "RA.1.A",
@@ -5123,6 +5122,7 @@ mod task2_plan_hq_board {
                 Some(1),
                 vec![],
             )],
+            ..Default::default()
         }];
         let leaf_file = make_leaf_file("repo-a", leaf_tracks, Focus::default());
         let leaf_src = StateSource {
@@ -5206,7 +5206,6 @@ mod task2_plan_unified_board {
         deps: Vec<BlockedBy>,
     ) -> TrackBlock {
         TrackBlock {
-            extra: Default::default(),
             epics: Vec::new(),
             due: None,
             priority: None,
@@ -5220,12 +5219,12 @@ mod task2_plan_unified_board {
             origin: None,
             note: None,
             description: None,
+            ..Default::default()
         }
     }
 
     fn make_leaf_file(repo: &str, tracks: Vec<Track>, focus: Focus) -> StateFile {
         StateFile {
-            extra: Default::default(),
             epics: Vec::new(),
             repo: repo.to_string(),
             kind: "project".to_string(),
@@ -5238,6 +5237,7 @@ mod task2_plan_unified_board {
             note: None,
             backlog: vec![],
             carryover: vec![],
+            ..Default::default()
         }
     }
 
@@ -5247,7 +5247,6 @@ mod task2_plan_unified_board {
         focus: Focus,
     ) -> StateFile {
         StateFile {
-            extra: Default::default(),
             epics: Vec::new(),
             repo: "hq".to_string(),
             kind: "brain".to_string(),
@@ -5260,6 +5259,7 @@ mod task2_plan_unified_board {
             note: None,
             backlog: vec![],
             carryover: vec![],
+            ..Default::default()
         }
     }
 
@@ -5289,7 +5289,6 @@ mod task2_plan_unified_board {
         std::fs::write(&status_path, board_doc_with_sentinel()).unwrap();
 
         let leaf_tracks = vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![track_block(
                 "RA.1.A",
@@ -5298,6 +5297,7 @@ mod task2_plan_unified_board {
                 Some(1),
                 vec![],
             )],
+            ..Default::default()
         }];
         let leaf_file = make_leaf_file("repo-a", leaf_tracks, Focus::default());
         let leaf_src = StateSource {
@@ -5465,7 +5465,6 @@ mod task2_plan_unified_board {
         std::fs::write(&status_path, board_doc_with_sentinel()).unwrap();
 
         let leaf_tracks = vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![track_block(
                 "RA.1.A",
@@ -5474,6 +5473,7 @@ mod task2_plan_unified_board {
                 Some(1),
                 vec![],
             )],
+            ..Default::default()
         }];
         let leaf_file = make_leaf_file("repo-a", leaf_tracks, Focus::default());
         let leaf_src = StateSource {
@@ -5897,17 +5897,14 @@ mod task_yaml_frontmatter_drift_tests {
             expected_kind: "project",
         };
         let file = StateFile {
-            extra: Default::default(),
             epics: Vec::new(),
             repo: "myrepo".to_string(),
             kind: "project".to_string(),
             updated: "2026-06-30".to_string(),
             focus: Focus::default(),
             tracks: vec![Track {
-                extra: Default::default(),
                 title: "P".to_string(),
                 blocks: vec![TrackBlock {
-                    extra: Default::default(),
                     epics: Vec::new(),
                     due: None,
                     priority: None,
@@ -5921,7 +5918,9 @@ mod task_yaml_frontmatter_drift_tests {
                     origin: None,
                     note: None,
                     description: None,
+                    ..Default::default()
                 }],
+                ..Default::default()
             }],
             repos: vec![],
             cross_repo: vec![],
@@ -5929,6 +5928,7 @@ mod task_yaml_frontmatter_drift_tests {
             note: None,
             backlog: vec![],
             carryover: vec![],
+            ..Default::default()
         };
 
         let files = vec![(src, file)];
@@ -7041,7 +7041,6 @@ mod attention_board {
 
     fn carry(slug: &str, kind: &str, created: &str, repo: &str) -> Carryover {
         Carryover {
-            extra: Default::default(),
             slug: slug.to_string(),
             scope: CarryoverScope {
                 repo: Some(repo.to_string()),
@@ -7055,12 +7054,12 @@ mod attention_board {
             created: created.to_string(),
             reviewed: None,
             snoozed_until: None,
+            ..Default::default()
         }
     }
 
     fn leaf(repo: &str, carryover: Vec<Carryover>) -> StateFile {
         StateFile {
-            extra: Default::default(),
             epics: Vec::new(),
             repo: repo.to_string(),
             kind: "project".to_string(),
@@ -7073,12 +7072,12 @@ mod attention_board {
             note: None,
             backlog: vec![],
             carryover,
+            ..Default::default()
         }
     }
 
     fn brain(repo: &str, backlog: Vec<Backlog>, carryover: Vec<Carryover>) -> StateFile {
         StateFile {
-            extra: Default::default(),
             epics: Vec::new(),
             repo: repo.to_string(),
             kind: "brain".to_string(),
@@ -7091,6 +7090,7 @@ mod attention_board {
             note: None,
             backlog,
             carryover,
+            ..Default::default()
         }
     }
 
@@ -7587,13 +7587,13 @@ fn epic_members_returns_only_members_in_cross_repo_wave_order() {
         make_leaf(
             "bastion",
             vec![Track {
-                extra: Default::default(),
                 title: "P".to_string(),
                 blocks: vec![
                     block_in_epics("BA.1", Some(1), &["bastion-os"]),
                     block_in_epics("BA.2", Some(3), &["bastion-os", "bastion-web"]),
                     block("BA.3", "untagged", Some("open"), Some(2)),
                 ],
+                ..Default::default()
             }],
         ),
     );
@@ -7602,9 +7602,9 @@ fn epic_members_returns_only_members_in_cross_repo_wave_order() {
         make_leaf(
             "bastion-web",
             vec![Track {
-                extra: Default::default(),
                 title: "P".to_string(),
                 blocks: vec![block_in_epics("BW.1", Some(2), &["bastion-web"])],
+                ..Default::default()
             }],
         ),
     );
@@ -7645,9 +7645,9 @@ fn epic_members_follows_depends_on_over_mismatched_cross_repo_wave_scales() {
         make_leaf(
             "bastion",
             vec![Track {
-                extra: Default::default(),
                 title: "P".to_string(),
                 blocks: vec![block_in_epics("BA.1", Some(250), &["ep"])],
+                ..Default::default()
             }],
         ),
     );
@@ -7656,7 +7656,6 @@ fn epic_members_follows_depends_on_over_mismatched_cross_repo_wave_scales() {
         make_leaf(
             "bastion-web",
             vec![Track {
-                extra: Default::default(),
                 title: "P".to_string(),
                 blocks: vec![{
                     let mut b = block_with_dep(
@@ -7670,6 +7669,7 @@ fn epic_members_follows_depends_on_over_mismatched_cross_repo_wave_scales() {
                     b.epics = vec!["ep".to_string()];
                     b
                 }],
+                ..Default::default()
             }],
         ),
     );
@@ -7695,9 +7695,9 @@ fn epic_members_is_empty_for_an_unclaimed_slug() {
         make_leaf(
             "mev",
             vec![Track {
-                extra: Default::default(),
                 title: "P".to_string(),
                 blocks: vec![block("MV.1", "untagged", Some("open"), Some(1))],
+                ..Default::default()
             }],
         ),
     )];
@@ -7712,7 +7712,6 @@ fn epic_members_cycle_terminates_without_hang_or_panic() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![
                 {
@@ -7726,6 +7725,7 @@ fn epic_members_cycle_terminates_without_hang_or_panic() {
                     b
                 },
             ],
+            ..Default::default()
         }],
     );
     let files = vec![(make_src("repo"), file)];
@@ -7754,12 +7754,12 @@ fn topo_order_dependency_edge_forces_order() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![
                 block_with_dep("B", "B", Some("open"), Some(1), "repo", "A"),
                 block("A", "A", Some("open"), Some(5)),
             ],
+            ..Default::default()
         }],
     );
     let files = vec![(make_src("repo"), file)];
@@ -7781,12 +7781,12 @@ fn topo_order_unconstrained_pairs_keep_wave_order() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![
                 block("Y", "Y", Some("open"), Some(2)),
                 block("X", "X", Some("open"), Some(1)),
             ],
+            ..Default::default()
         }],
     );
     let files = vec![(make_src("repo"), file)];
@@ -7807,12 +7807,12 @@ fn topo_order_cycle_terminates_without_hang_or_panic() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![
                 block_with_dep("A", "A", Some("open"), Some(1), "repo", "B"),
                 block_with_dep("B", "B", Some("open"), Some(2), "repo", "A"),
             ],
+            ..Default::default()
         }],
     );
     let files = vec![(make_src("repo"), file)];
@@ -7838,9 +7838,9 @@ fn topo_order_external_deps_do_not_constrain_order() {
     let file = make_leaf(
         "repo",
         vec![Track {
-            extra: Default::default(),
             title: "P".to_string(),
             blocks: vec![block("A", "A", Some("open"), Some(2)), b],
+            ..Default::default()
         }],
     );
     let files = vec![(make_src("repo"), file)];
@@ -7895,7 +7895,6 @@ mod epic_emit {
 
     fn tb(id: &str, status: &str, wave: i64, epics: &[&str], deps: Vec<BlockedBy>) -> TrackBlock {
         TrackBlock {
-            extra: Default::default(),
             epics: epics.iter().map(|s| s.to_string()).collect(),
             due: None,
             priority: None,
@@ -7909,6 +7908,7 @@ mod epic_emit {
             origin: None,
             note: None,
             description: None,
+            ..Default::default()
         }
     }
 
@@ -7924,16 +7924,15 @@ mod epic_emit {
                 expected_kind: "project",
             },
             StateFile {
-                extra: Default::default(),
                 epics: Vec::new(),
                 repo: repo.to_string(),
                 kind: "project".to_string(),
                 updated: "2026-07-24".to_string(),
                 focus: Focus::default(),
                 tracks: vec![Track {
-                    extra: Default::default(),
                     title: "P".to_string(),
                     blocks,
+                    ..Default::default()
                 }],
                 repos: vec![],
                 cross_repo: vec![],
@@ -7941,13 +7940,13 @@ mod epic_emit {
                 note: None,
                 backlog: vec![],
                 carryover: vec![],
+                ..Default::default()
             },
         )
     }
 
     fn epic(slug: &str, title: &str, status: &str, plan: Option<&str>) -> Epic {
         Epic {
-            extra: Default::default(),
             slug: slug.to_string(),
             title: title.to_string(),
             description: None,
@@ -7955,6 +7954,7 @@ mod epic_emit {
             weight: None,
             plan: plan.map(|p| p.to_string()),
             repos: vec![],
+            ..Default::default()
         }
     }
 
@@ -7966,7 +7966,6 @@ mod epic_emit {
                 expected_kind: "brain",
             },
             StateFile {
-                extra: Default::default(),
                 epics,
                 repo: repo.to_string(),
                 kind: "brain".to_string(),
@@ -7979,6 +7978,7 @@ mod epic_emit {
                 note: None,
                 backlog: vec![],
                 carryover: vec![],
+                ..Default::default()
             },
         )
     }
