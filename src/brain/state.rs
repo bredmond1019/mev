@@ -321,7 +321,10 @@ pub fn parse_state_date(s: &str) -> Option<chrono::NaiveDate> {
 /// The effective staleness anchor for an item: the latest of its `created` and
 /// (optional) `reviewed` dates that parses. `None` when no date parses (the
 /// item cannot age — the malformed date is surfaced separately as an error).
-fn staleness_anchor(created: Option<&str>, reviewed: Option<&str>) -> Option<chrono::NaiveDate> {
+pub(crate) fn staleness_anchor(
+    created: Option<&str>,
+    reviewed: Option<&str>,
+) -> Option<chrono::NaiveDate> {
     let c = created.and_then(parse_state_date);
     let r = reviewed.and_then(parse_state_date);
     match (c, r) {
@@ -335,7 +338,7 @@ fn staleness_anchor(created: Option<&str>, reviewed: Option<&str>) -> Option<chr
 /// Whether an item is currently snoozed: `snoozed_until` parses to a date that
 /// is still in the future (`today < snoozed_until`). An absent or unparseable
 /// value is not snoozed.
-fn is_snoozed(snoozed_until: Option<&str>, today: chrono::NaiveDate) -> bool {
+pub(crate) fn is_snoozed(snoozed_until: Option<&str>, today: chrono::NaiveDate) -> bool {
     snoozed_until
         .and_then(parse_state_date)
         .is_some_and(|d| today < d)
