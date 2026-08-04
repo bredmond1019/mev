@@ -1195,6 +1195,94 @@ mev carryover ~/Dev/agentic-portfolio
 
 ---
 
+### `conformance [--check <name>] [--json] [path]`
+
+A **registry of named drift checks** over facts kept in two places. Each registered check
+canonicalizes both sides of a duplicated fact into a sorted item list, digests each side with an
+in-house FNV-1a 64-bit hex digest (no new crate dependency — this is an equality/display aid, not
+a security primitive), and compares. Equal digests pass; unequal digests report drift with the
+concrete set difference in **both** directions (`only in <left>: ...` / `only in <right>: ...`),
+so the operator sees what to fix rather than "these differ". Modelled on qm's
+`conformance.ts` (`canonicalize → digest → compare → report`) — this is a gate, not an
+auto-repair tool; no check ever writes anything.
+
+```bash
+mev conformance
+mev conformance --check backlog-parity
+mev conformance --json
+mev conformance ~/Dev/agentic-portfolio
+```
+
+| Argument / Flag | Default | Description |
+|---|---|---|
+| `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
+| `--check <name>` | unset | Run exactly one named check instead of the full registry. An unknown name is a hard error listing the valid check names |
+| `--json` | off | Emit the `ConformanceReport` as compact JSON instead of the human, per-check summary |
+
+#### The registered checks
+
+| Name | Left side | Right side | What drift means |
+|---|---|---|---|
+| `backlog-parity` | HQ `planning/backlog.md` — ticket titles under `## Active` + `## Promoted` only (`## Superseded` and `## Shipped` are record-only and excluded), trimmed/whitespace-collapsed, sorted | `planning/state.json` `backlog[].title`, same canonicalization, sorted | A ticket title present in the markdown but missing from `backlog[]`, or vice versa — join key is the exact title |
+| `epics-index-parity` | `core/planning/epics/index.md` rows as `(slug, status)`, where `slug` is resolved from the row's link target against the registry's own `epics[].plan` pointers (falling back to the link stem only when no `plan` value matches) | HQ `epics[]` registry as `(slug, status)` pairs, `status` being the registry's status field | A `(slug, status)` pair present on only one side — including an epic in `epics[]` with no index row, or an index row whose status disagrees with the registry. The check also asserts every registry epic's `plan` target exists on disk |
+| `project-cache-watermark` | Each `docs/projects/<project>.md` frontmatter `synced_from` | The sub-repo's real `planning/status.md` frontmatter `timestamp` | Delegates entirely to `crate::brain::sync::check_sync` (the same logic behind `mev validate-brain --sync`) — this check is an **adapter**, not a reimplementation, and surfaces that function's `E_SYNC_DRIFT` / `E_SYNC_WATERMARK_MISSING` / `E_SYNC_WATERMARK_MALFORMED` / `E_SYNC_FILE_MISSING` diagnostics verbatim rather than re-parsing RFC3339 timestamps itself |
+| `toolchain-freshness` | The running `mev` binary's compiled-in build stamp (`MEV_BUILD_GIT_SHA`, `MEV_BUILD_DIRTY`, `MEV_BUILD_SOURCE_DIR` — stamped into the binary by `build.rs` via `cargo:rustc-env` at compile time) | `git rev-parse HEAD` run in `MEV_BUILD_SOURCE_DIR` right now | A different live SHA than the stamped one ("the running binary is behind its source; rebuild"), or the same SHA but the build was dirty (a distinct drift message) |
+
+#### Pass / drift / not-evaluable
+
+Every check reports exactly one of three statuses:
+
+- **`pass`** — both sides canonicalized to the same digest (or, for `toolchain-freshness`, the
+  stamped SHA matches the live HEAD and the build was clean).
+- **`drift`** — the two sides genuinely diverge. Only a real two-sided comparison can produce
+  this status.
+- **`not-evaluable`** — the check's inputs were absent (the backlog file missing from this
+  checkout, the epics index not present, the source dir gone, git unavailable, or a stamped
+  value of `unknown`). **Absent inputs always yield `not-evaluable`, never `drift`** — a check
+  that cannot compare both sides has nothing to report divergence about.
+
+#### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Every check reported `pass` or `not-evaluable` |
+| `1` | At least one check reported `drift`, **or** `brain.toml` was not found/unreadable, `--check` named an unknown check, or JSON serialization failed |
+
+#### Registering a fifth check
+
+The registry is a real registry — adding a check touches exactly two things:
+
+1. Add one file under `src/brain/conformance/` (e.g. `my_check.rs`) exposing a
+   `pub fn run(ctx: &ConformanceCtx) -> CheckOutcome`. Build both sides as sorted
+   `Vec<String>`, wrap each in a `FactSide`, and hand them to the shared `compare_sides`
+   helper (or return `CheckOutcome { status: CheckStatus::NotEvaluable, .. }` directly when an
+   input is absent).
+2. Add one `ConformanceCheck { name, description, run }` entry to `all_checks()` in
+   `src/brain/conformance/mod.rs`.
+
+Nothing else changes — the CLI wiring, `--check` dispatch, `--json` envelope, and exit-code
+logic all iterate `all_checks()` generically. A test in `mod.rs` asserts every registered check
+has a unique, non-empty name, so a name collision fails the suite rather than silently shadowing
+a check.
+
+**Examples:**
+
+```bash
+# Human, per-check summary of the whole registry
+mev conformance
+
+# Run just one check
+mev conformance --check toolchain-freshness
+
+# Machine-readable JSON envelope
+mev conformance --json
+
+# From an explicit brain root
+mev conformance ~/Dev/agentic-portfolio
+```
+
+---
+
 ## Exit codes
 
 | Code | Meaning |
