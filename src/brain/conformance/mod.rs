@@ -14,6 +14,7 @@
 
 mod backlog;
 mod epics_index;
+mod project_cache;
 
 use serde::Serialize;
 use std::path::PathBuf;
@@ -109,6 +110,11 @@ pub fn all_checks() -> Vec<ConformanceCheck> {
             name: "epics-index-parity",
             description: "HQ state.json epics[] vs core/planning/epics/index.md",
             run: epics_index::run,
+        },
+        ConformanceCheck {
+            name: "project-cache-watermark",
+            description: "docs/projects/<project>.md synced_from vs sub-repo planning/status.md timestamp (adapter over brain::sync::check_sync)",
+            run: project_cache::run,
         },
     ]
 }
