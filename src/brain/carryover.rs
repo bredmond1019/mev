@@ -17,16 +17,26 @@
 //!
 //! # The two evaluable predicate classes — deliberately narrow
 //!
-//! **Class A — block references.** Two sources, both resolved against the corpus:
-//! 1. `related[]` entries with `type == "block"` — structured, zero parsing risk.
-//!    Always used ([`block_refs_from_related`]).
-//! 2. Block IDs matched in the `clears_when` prose by a strict grammar
-//!    ([`block_refs_from_prose`]): `[A-Z]{2,3}\.(?:\d+\.[A-Z0-9]+|ticket\.[a-z0-9][a-z0-9-]*|chore\.[a-z0-9][a-z0-9-]*)`.
-//!    A match is kept only when it resolves to exactly one node in the loaded corpus
-//!    (preferring the carryover's own scope repo when the bare ID is ambiguous; if
-//!    still ambiguous across repos, the match is dropped and the ambiguity is
-//!    reported instead). An unresolvable token is not a block reference — discarded
-//!    silently.
+//! **Class A — block references, from `clears_when` only.** Block IDs matched in the
+//! `clears_when` prose by a strict grammar ([`block_refs_from_prose`]):
+//! `[A-Z]{2,3}\.(?:\d+\.[A-Z0-9]+|ticket\.[a-z0-9][a-z0-9-]*|chore\.[a-z0-9][a-z0-9-]*)`.
+//! A match is kept only when (a) the predicate contains a [`CLOSURE_VERBS`] entry, and
+//! (b) the token resolves to exactly one node in the loaded corpus (preferring the
+//! carryover's own scope repo when the bare ID is ambiguous; if still ambiguous across
+//! repos, the match is dropped and the ambiguity is reported instead). An unresolvable
+//! token is not a block reference — discarded silently.
+//!
+//! **`related[]` is NOT a clearing condition** and does not affect the lane.
+//! [`block_refs_from_related`] remains available as an accessor, but the schema
+//! documents `related[]` as "optional related edges" — a *see also*. A carryover
+//! merely related to block X does not clear when X closes, and wiring it into the
+//! verdict produced false `cleared` results against the live corpus.
+//!
+//! Both gates exist because of the same 2026-08-03 finding: `core:ba-0-a-id-collision`
+//! reads *"one of the two BA.0.A blocks is renamed and Phase 0 is backfilled"*, and
+//! `BA.0.A` **is** closed — so without the closure-verb gate the sweep recommended
+//! deleting a live, unresolved known_issue. A false `cleared` is the only verdict here
+//! that destroys durable knowledge; every ambiguity resolves away from it.
 //!
 //! **Class B — path existence.** Only when `clears_when` contains the literal word
 //! `exists` ([`path_refs_from_prose`]).
@@ -74,6 +84,12 @@ pub enum NotEvaluableReason {
     /// not resolve to the carryover's own scope repo either — dropped rather
     /// than guessed at.
     AmbiguousReference,
+    /// `clears_when` names a block ID but never says the block must *close* —
+    /// e.g. *"one of the two BA.0.A blocks is renamed"* or *"BL.2.A's
+    /// `blocked_by` is narrowed"*. The ID is a subject, not a closure
+    /// condition, so the predicate is not machine-checkable. See
+    /// [`CLOSURE_VERBS`].
+    NoClosureVerb,
 }
 
 /// One extracted, resolved reference and whether it is currently satisfied.
@@ -236,8 +252,40 @@ fn match_block_id_at(chars: &[char], start: usize) -> Option<usize> {
     None
 }
 
+/// Verbs that turn a block ID mentioned in `clears_when` into a *closure*
+/// condition rather than a passing reference.
+///
+/// Without this gate the grammar happily reads `"one of the two BA.0.A blocks
+/// is renamed and Phase 0 is backfilled"` as "clears when `BA.0.A` closes" —
+/// and since `BA.0.A` *is* closed, the entry was reported `cleared` while the
+/// collision it documents is still live. That is a **false cleared**: the one
+/// verdict that loses durable knowledge, found against the live corpus on
+/// 2026-08-03 before this gate existed.
+///
+/// Matched word-bounded and case-insensitively against the whole predicate.
+pub const CLOSURE_VERBS: &[&str] = &[
+    "land", "lands", "landed", "landing", "ship", "ships", "shipped", "shipping", "merge",
+    "merges", "merged", "closes", "closed",
+];
+
+/// Whether `clears_when` contains a word-bounded [`CLOSURE_VERBS`] entry.
+///
+/// Word-bounding matters: `"overland"` must not match `"land"`, and
+/// `"relationship"` must not match `"ship"`.
+pub fn has_closure_verb(clears_when: &str) -> bool {
+    let lower = clears_when.to_ascii_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.iter().any(|w| CLOSURE_VERBS.contains(w))
+}
+
 /// Block references matched in `clears_when` prose, resolved against the loaded
 /// corpus's known `"{repo}:{id}"` keys.
+///
+/// Returns `([], false)` when the predicate contains no [`CLOSURE_VERBS`] entry:
+/// a block ID with no closure verb is a subject, not a condition.
 ///
 /// A grammar match is kept only when it resolves to exactly one key in
 /// `known_keys`. When it matches keys in more than one repo, the carryover's own
@@ -254,6 +302,10 @@ pub fn block_refs_from_prose(
 ) -> (Vec<String>, bool) {
     let mut refs = Vec::new();
     let mut ambiguous = false;
+
+    if !has_closure_verb(clears_when) {
+        return (refs, ambiguous);
+    }
 
     for token in extract_block_id_tokens(clears_when) {
         let suffix = format!(":{token}");
@@ -391,28 +443,18 @@ pub fn evaluate_carryover(
             let mut refs: Vec<CarryoverRef> = Vec::new();
             let mut ambiguous = false;
 
-            // Class A, source 1: structured related[] block edges — always used.
-            for key in block_refs_from_related(item) {
-                let satisfied = status_map
-                    .get(&key)
-                    .map(|s| s.as_deref() == Some("closed"))
-                    .unwrap_or(false);
-                refs.push(CarryoverRef::Block { key, satisfied });
-            }
-
+            // `related[]` is deliberately NOT consulted here. It is documented
+            // as "optional related edges" — a *see also*, not a clearing
+            // condition. A carryover related to block X does not clear when X
+            // closes, and treating it as one produced false `cleared` verdicts
+            // against the live corpus. Only `clears_when` decides the lane.
             if let Some(clears_when) = item.clears_when.as_deref() {
-                // Class A, source 2: prose block IDs, resolved against the corpus.
+                // Class A: prose block IDs, resolved against the corpus, and
+                // only when the predicate actually asserts closure.
                 let (prose_keys, prose_ambiguous) =
                     block_refs_from_prose(clears_when, Some(own_repo), &known_keys);
                 ambiguous = prose_ambiguous;
                 for key in prose_keys {
-                    // Dedupe against a related[] edge that named the same block.
-                    if refs
-                        .iter()
-                        .any(|r| matches!(r, CarryoverRef::Block { key: k, .. } if k == &key))
-                    {
-                        continue;
-                    }
                     let satisfied = status_map
                         .get(&key)
                         .map(|s| s.as_deref() == Some("closed"))
@@ -439,9 +481,14 @@ pub fn evaluate_carryover(
                     CarryoverLane::Actionable
                 };
                 (lane, None)
-            } else if item.clears_when.is_some() {
+            } else if let Some(clears_when) = item.clears_when.as_deref() {
                 let reason = if ambiguous {
                     NotEvaluableReason::AmbiguousReference
+                } else if !has_closure_verb(clears_when)
+                    && !extract_block_id_tokens(clears_when).is_empty()
+                {
+                    // Names a block but never says it must close.
+                    NotEvaluableReason::NoClosureVerb
                 } else {
                     NotEvaluableReason::Prose
                 };
@@ -981,7 +1028,10 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_related_edge_with_no_prose_id_is_still_evaluated() {
+    fn evaluate_related_edge_alone_never_clears_an_entry() {
+        // `related[]` is a "see also" edge, not a clearing condition. A closed
+        // related block must NOT clear the carryover — the predicate here names
+        // no block, so the entry is prose and stays not-evaluable.
         let files = vec![
             (
                 src("bastion"),
@@ -1001,6 +1051,115 @@ mod tests {
                             id: "BE.2.A".to_string(),
                             what: None,
                         }],
+                        "2020-01-01",
+                        None,
+                        None,
+                    )],
+                ),
+            ),
+        ];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+        );
+        assert_eq!(report.cleared, 0, "a related[] edge must never clear");
+        assert_eq!(report.not_evaluable, 1);
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
+        assert_eq!(report.entries[0].reason, Some(NotEvaluableReason::Prose));
+        assert!(
+            report.entries[0].refs.is_empty(),
+            "related[] must contribute no verdict-bearing refs"
+        );
+    }
+
+    #[test]
+    fn has_closure_verb_is_word_bounded() {
+        assert!(has_closure_verb("BT.ticket.foo lands in base-template"));
+        assert!(has_closure_verb("EN.5.B1/EN.5.B2 land"));
+        assert!(has_closure_verb("BW.8.N SHIPPED"));
+        // Substring hits must not count.
+        assert!(!has_closure_verb("the overland route is documented"));
+        assert!(!has_closure_verb("the relationship is clarified"));
+        assert!(!has_closure_verb("one of the two BA.0.A blocks is renamed"));
+    }
+
+    #[test]
+    fn evaluate_block_id_without_a_closure_verb_is_not_evaluable() {
+        // The live false-cleared found 2026-08-03: `core:ba-0-a-id-collision`
+        // reads "one of the two BA.0.A blocks is renamed and Phase 0 is
+        // backfilled". BA.0.A IS closed, so without the closure-verb gate this
+        // reported `cleared` while the collision it documents was still live.
+        let files = vec![
+            (
+                src("bastion"),
+                state_file("bastion", vec![("BA.0.A", "closed")], vec![]),
+            ),
+            (
+                src("core"),
+                state_file(
+                    "core",
+                    vec![],
+                    vec![item(
+                        "ba-0-a-id-collision",
+                        "known_issue",
+                        Some("one of the two BA.0.A blocks is renamed and Phase 0 is backfilled"),
+                        vec![],
+                        "2020-01-01",
+                        None,
+                        None,
+                    )],
+                ),
+            ),
+        ];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+        );
+        assert_eq!(
+            report.cleared, 0,
+            "a renamed-not-closed predicate must not clear"
+        );
+        assert_eq!(report.not_evaluable, 1);
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::NoClosureVerb)
+        );
+    }
+
+    #[test]
+    fn evaluate_block_id_with_a_closure_verb_still_clears() {
+        // The gate must not break the legitimate case.
+        let files = vec![
+            (
+                src("base-template"),
+                state_file(
+                    "base-template",
+                    vec![("BT.ticket.worktree-env-file-copy", "closed")],
+                    vec![],
+                ),
+            ),
+            (
+                src("orchestrator"),
+                state_file(
+                    "orchestrator",
+                    vec![],
+                    vec![item(
+                        "init-worktree-missing-app-env-copy",
+                        "known_issue",
+                        Some("BT.ticket.worktree-env-file-copy ships in base-template"),
+                        vec![],
                         "2020-01-01",
                         None,
                         None,

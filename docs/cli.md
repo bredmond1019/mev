@@ -1125,23 +1125,37 @@ command) to act on — it is never an automatic deletion.
 |---|---|
 | `cleared` | At least one reference was extracted from the entry and **every** extracted reference is currently satisfied — a recommendation to delete the entry |
 | `actionable` | At least one reference was extracted, but **at least one** is unsatisfied — the specific unmet reference(s) are named so a reader can act without re-reading the predicate |
-| `not-evaluable` | No reference could be extracted. Reason `prose` (a `clears_when` is present but is pure prose, or a bare block ID matched more than one repo and was dropped as ambiguous) or `no-predicate` (`clears_when` is `None`) |
+| `not-evaluable` | No reference could be extracted. Reason `prose` (`clears_when` is present but is pure prose), `no-closure-verb` (it names a block but never says the block must close), `ambiguous-reference` (a bare block ID matched more than one repo and was dropped), or `no-predicate` (`clears_when` is `None`) |
 
 #### The two evaluable predicate classes
 
 Only two classes of `clears_when` predicate are ever machine-evaluated; anything else falls
 into `not-evaluable` rather than being guessed at:
 
-- **Block references** — two sources, both resolved against the loaded corpus:
-  1. `related[]` entries with `type == "block"` (structured edges — always used).
-  2. Block IDs matched in the `clears_when` prose by a strict grammar
-     (`[A-Z]{2,3}\.(?:\d+\.[A-Z0-9]+|ticket\.[a-z0-9][a-z0-9-]*|chore\.[a-z0-9][a-z0-9-]*)`).
-     A match is kept only when it resolves to exactly one node in the loaded corpus
-     (preferring the carryover's own scope repo when the bare ID is ambiguous); an ID that
-     resolves to nodes in more than one repo is dropped and the entry is reported
-     `not-evaluable` with reason `AmbiguousReference` rather than guessed at. An unresolvable
-     token is simply not a block reference and is discarded silently.
+- **Block references — from `clears_when` only.** Block IDs matched in the prose by a strict
+  grammar (`[A-Z]{2,3}\.(?:\d+\.[A-Z0-9]+|ticket\.[a-z0-9][a-z0-9-]*|chore\.[a-z0-9][a-z0-9-]*)`).
+  A match is kept only when **both** hold:
+  1. The predicate contains a word-bounded **closure verb** — one of `land` · `lands` ·
+     `landed` · `landing` · `ship` · `ships` · `shipped` · `shipping` · `merge` · `merges` ·
+     `merged` · `closes` · `closed`. A predicate that names a block without one is reported
+     `not-evaluable` with reason `no-closure-verb`.
+  2. The token resolves to exactly one node in the loaded corpus (preferring the carryover's
+     own scope repo when the bare ID is ambiguous); an ID resolving to nodes in more than one
+     repo is dropped and the entry reported `not-evaluable` with reason `ambiguous-reference`
+     rather than guessed at. An unresolvable token is simply not a block reference and is
+     discarded silently.
+
   A block reference is satisfied when its node's authored status is `closed`.
+
+  **`related[]` is not consulted.** The schema documents it as *optional related edges* — a
+  "see also", not a clearing condition. A carryover merely related to block X does not clear
+  when X closes.
+
+> **Why both gates exist.** Verified against the live corpus 2026-08-03:
+> `core:ba-0-a-id-collision` reads *"one of the two `BA.0.A` blocks is renamed and Phase 0 is
+> backfilled"*, and `BA.0.A` **is** `closed`. Without the closure-verb gate the sweep
+> recommended deleting a live, unresolved `known_issue`. A false `cleared` is the only verdict
+> here that destroys durable knowledge.
 - **Path-existence references** — extracted only when the `clears_when` text contains the
   literal word `exists`. Whitespace-delimited tokens containing `/` and ending in one of
   `.md .rs .py .sh .ts .tsx .json .toml` are resolved against the brain root and against the

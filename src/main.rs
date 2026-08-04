@@ -784,6 +784,7 @@ fn print_carryover_report(report: &mev::CarryoverReport) {
                         Some(mev::NotEvaluableReason::Prose) => "prose",
                         Some(mev::NotEvaluableReason::NoPredicate) => "no-predicate",
                         Some(mev::NotEvaluableReason::AmbiguousReference) => "ambiguous-reference",
+                        Some(mev::NotEvaluableReason::NoClosureVerb) => "no-closure-verb",
                         None => "unknown",
                     };
                     println!("      reason: {reason}");
