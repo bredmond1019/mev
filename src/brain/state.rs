@@ -2398,8 +2398,9 @@ pub(crate) fn resolve_repo_state_file<'a>(
 ///
 /// Iterates the **in-scope** `config.repos[]` entries (filtered by `scope`, in
 /// config order) and, for each, produces one [`RepoRollup`]:
-/// - If a loadable `kind == "project"` child exists in `files` for that slug,
-///   derive its headline via [`derive_focus`] (as before) and set
+/// - If a loadable child (resolved via [`resolve_repo_state_file`] — either
+///   `kind == "project"` or `kind == "brain"`) exists in `files` for that
+///   slug, derive its headline via [`derive_focus`] (as before) and set
 ///   `tier: Some(<config tier>)`.
 /// - Else if `existing` (the brain file's current `repos[]`) already has an
 ///   entry for that slug, **preserve it verbatim** (backfilling `tier` from
@@ -2424,9 +2425,7 @@ pub fn derive_rollup(
 
     in_scope
         .map(|entry| {
-            let child = files
-                .iter()
-                .find(|(src, f)| src.repo_slug == entry.slug && f.kind == "project");
+            let child = resolve_repo_state_file(files, &entry.slug);
 
             if let Some((src, file)) = child {
                 let derived = derive_focus(src, file, graph, files);
