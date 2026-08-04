@@ -4,6 +4,9 @@ name: ci
 # mirrors this repo's planning/harness.json checks in declared order (fmt,
 # clippy, test, build). See base-template/docs/ci.md for the opt-in model
 # and the local actionlint -> act -> push validation loop.
+#
+# mev has a path dependency on the sibling okf-core repo (`okf-core = { path = "../okf-core" }`
+# in Cargo.toml), so this caller opts into the reusable workflow's sibling-repo checkout.
 
 on:
   push:
@@ -12,3 +15,5 @@ on:
 jobs:
   gate:
     uses: bredmond1019/agentic-base-template/.github/workflows/gate-rust.yml@main
+    with:
+      sibling-repos: "bredmond1019/okf-core"
