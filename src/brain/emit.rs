@@ -775,6 +775,16 @@ pub const EPIC_STATUS_ACTIVE: &str = "active";
 /// `active`, never `focused`: un-parking is not a promotion to priority.
 pub const EPIC_STATUS_FOCUSED: &str = "focused";
 
+/// The authored epic status meaning "finished" — terminal.
+///
+/// A `complete` epic drops off the board entirely ([`RENDERED_EPIC_STATUSES`],
+/// state-schema.md:266) and is never inferred: `W_STATE_EPIC_ALL_CLOSED` is
+/// warn-only by design (state-schema.md:290) precisely because the last block
+/// closing is not the same as the initiative's goal being met. Only an operator
+/// declaring completion by name — `mev complete-epic <slug>` — may set this;
+/// no reconciler path may set it automatically.
+pub const EPIC_STATUS_COMPLETE: &str = "complete";
+
 /// Counted progress for one epic: how many member blocks are in each state.
 pub struct EpicProgress {
     /// Members with authored `status == "closed"`.

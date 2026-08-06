@@ -40,8 +40,8 @@ use okf_core::{Epic, StateFile, TrackBlock};
 use crate::Diagnostic;
 use crate::brain::config::BrainConfig;
 use crate::brain::emit::{
-    EPIC_STATUS_ACTIVE, EPIC_STATUS_FOCUSED, EPIC_STATUS_PAUSED, EmitAction, EmitPlan,
-    epic_progress,
+    EPIC_STATUS_ACTIVE, EPIC_STATUS_COMPLETE, EPIC_STATUS_FOCUSED, EPIC_STATUS_PAUSED, EmitAction,
+    EmitPlan, epic_progress,
 };
 use crate::brain::state::{StateSource, TierScope, tier_scope_for};
 
@@ -144,6 +144,42 @@ fn set_epic_status(epic: &mut Epic, want: &str) -> bool {
     true
 }
 
+/// Resolve `slug` against the HQ `epics[]` registry, emitting the same
+/// diagnostics every epic-status command shares (`E_EPIC_NO_REGISTRY` /
+/// `E_EPIC_UNKNOWN`) on failure.
+///
+/// Returns the HQ file index on success, or `Err(plan)` with the diagnostic
+/// already attached — callers just `return` the `Err` plan as-is. Shared so
+/// `plan_epic_cascade` and [`plan_complete_epic`] cannot drift on error
+/// behavior for the two failure cases every sibling command must match.
+fn resolve_epic(
+    slug: &str,
+    config: &BrainConfig,
+    files: &[(StateSource, StateFile)],
+) -> Result<usize, EmitPlan> {
+    let mut plan = EmitPlan::default();
+
+    let Some(hq) = hq_index(config, files) else {
+        plan.diagnostics.push(Diagnostic::error(
+            std::path::Path::new("."),
+            "E_EPIC_NO_REGISTRY",
+            "no HQ brain file with an epics[] registry is loaded; cannot resolve epics".to_string(),
+        ));
+        return Err(plan);
+    };
+
+    if !files[hq].1.epics.iter().any(|e| e.slug == slug) {
+        plan.diagnostics.push(Diagnostic::error(
+            &files[hq].0.abs_path,
+            "E_EPIC_UNKNOWN",
+            format!("epic '{slug}' is not in the HQ epics[] registry"),
+        ));
+        return Err(plan);
+    }
+
+    Ok(hq)
+}
+
 /// Plan one epic's cascade in `action`'s direction.
 ///
 /// Mutates a working copy of `files`, so the caller's slice is untouched. Returns
@@ -154,25 +190,11 @@ fn plan_epic_cascade(
     config: &BrainConfig,
     files: &[(StateSource, StateFile)],
 ) -> EmitPlan {
-    let mut plan = EmitPlan::default();
-
-    let Some(hq) = hq_index(config, files) else {
-        plan.diagnostics.push(Diagnostic::error(
-            std::path::Path::new("."),
-            "E_EPIC_NO_REGISTRY",
-            "no HQ brain file with an epics[] registry is loaded; cannot resolve epics".to_string(),
-        ));
-        return plan;
+    let hq = match resolve_epic(slug, config, files) {
+        Ok(hq) => hq,
+        Err(plan) => return plan,
     };
-
-    if !files[hq].1.epics.iter().any(|e| e.slug == slug) {
-        plan.diagnostics.push(Diagnostic::error(
-            &files[hq].0.abs_path,
-            "E_EPIC_UNKNOWN",
-            format!("epic '{slug}' is not in the HQ epics[] registry"),
-        ));
-        return plan;
-    }
+    let mut plan = EmitPlan::default();
 
     // Work on a copy so a dry run cannot mutate the caller's corpus.
     // `touched` maps file index → how many of ITS blocks changed, so each
@@ -262,6 +284,53 @@ pub fn plan_resume_epic(
     files: &[(StateSource, StateFile)],
 ) -> EmitPlan {
     plan_epic_cascade(slug, EpicAction::Resume, config, files)
+}
+
+/// Declare an initiative finished: epic → `complete`.
+///
+/// This is an **operator declaration**, not an inference — the caller names the
+/// slug explicitly on the command line. It is compatible with, and does not
+/// weaken, `W_STATE_EPIC_ALL_CLOSED` being warn-only by design
+/// (state-schema.md:290): that rule forbids *inferring* completion from every
+/// member closing, and this function performs no such inference — it never
+/// inspects member status at all, and no other mev code path may call this to
+/// auto-complete an epic on its behalf.
+///
+/// Deliberately **not** implemented via [`plan_epic_cascade`] / [`EpicAction`]:
+/// both existing variants mean "cascade a status change onto member blocks",
+/// and completion must do the opposite — it mutates the registry entry only and
+/// touches zero member blocks, on purpose (see module docs and
+/// `planning/ticket-complete-epic/tasks.md`). Keeping this a standalone
+/// function (rather than a third `EpicAction` variant funneled through the
+/// cascade planner) makes "no cascade" the only possible shape here instead of
+/// a behavior a future refactor could accidentally reintroduce.
+pub fn plan_complete_epic(
+    slug: &str,
+    config: &BrainConfig,
+    files: &[(StateSource, StateFile)],
+) -> EmitPlan {
+    let hq = match resolve_epic(slug, config, files) {
+        Ok(hq) => hq,
+        Err(plan) => return plan,
+    };
+    let mut plan = EmitPlan::default();
+
+    // Work on a copy so a dry run cannot mutate the caller's corpus.
+    let mut work: Vec<(StateSource, StateFile)> = files.to_vec();
+
+    let Some(epic) = work[hq].1.epics.iter_mut().find(|e| e.slug == slug) else {
+        // Unreachable: resolve_epic already confirmed the slug is present.
+        return plan;
+    };
+
+    if set_epic_status(epic, EPIC_STATUS_COMPLETE) {
+        let note = format!("complete epic '{slug}' (registry status → {EPIC_STATUS_COMPLETE})");
+        if let Some(a) = action_for(&work[hq].0, &work[hq].1, note) {
+            plan.actions.push(a);
+        }
+    }
+
+    plan
 }
 
 /// Reconcile every epic in the registry, in both directions.
