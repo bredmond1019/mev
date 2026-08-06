@@ -19,6 +19,46 @@ timestamp: "2026-08-06T17:00:00Z"
 
 ## [run: 2026-08-06]
 
+### `12.A-blog-module-linting` BAILED after tasks 1–3 of 8
+- **What:** `/sdlc-flow` ran tasks 1 through 3 of the 8-task `12.A-blog-module-linting` spec (Phase
+  12's `BlogValidator` block — blog frontmatter, pt-BR filename parity, code-block language-tag
+  linting, and local link/asset existence checks, plus shared lint helpers learn modules can opt
+  into). Task 1 (`src/learn_ai/lint.rs`) added pure `lint_code_blocks` (`W_LINT_UNTAGGED_CODE_BLOCK`)
+  and `lint_local_links` (`E_LINT_DEAD_LOCAL_LINK`/`E_LINT_DEAD_ASSET`) helpers with 14 unit tests,
+  and passed. Task 2 (`src/learn_ai/blog.rs`) added `BlogPost`, `crawl()`, and `BlogValidator` (a
+  `ContentValidator` impl) with frontmatter checks, EN/pt-BR parity, and the task-1 lint helpers
+  wired in, and passed. Both tasks were independently verified by temporarily wiring their new
+  module into `mod.rs`, running the fast test suite, then reverting the wiring before commit —
+  exactly as each task's spec required, since neither task owns the `mod.rs` wiring.
+- **Why it BAILED:** Task 3 (`src/learn_ai/mod.rs` — opt-in `lint: bool` field, `with_lint(true)`,
+  registering `pub mod blog`/`pub mod lint`) failed the test/clippy gate. The task spec explicitly
+  leaves `src/lib.rs`'s `LearnAiValidator.run(root)` call site broken, deferring that fix to task
+  4 — but the crate-wide `cargo test`/`cargo clippy -D warnings` gate needs the whole crate to
+  compile. That is an intermediate state no amount of retrying task 3 alone can pass; the task
+  split creates a gate that fails by design, not by defect. Verified in isolation (scratch-patched
+  a copy of `lib.rs`, reverted before commit) that `mod.rs` itself is clean and the one deferred
+  call site is the *only* remaining compile error in the crate.
+- **Decision needed:** re-sequence the spec — merge tasks 3 and 4 into one gate-passing unit, or
+  give task 3 a module-scoped test target (e.g. `cargo nextest run --lib learn_ai::mod` style
+  invocation, or a `#[cfg(test)]`-only build check) that doesn't require the whole binary to link.
+  A retry of task 3 as currently written cannot pass.
+- **State:** `planning/status.md` "Current focus" updated to the blocked note above;
+  `planning/state.json`'s `MV.12.A` block left untouched (spec not complete — no status flip);
+  `mev emit-state --write` re-run to resync derived surfaces.
+- Next: re-sequence `12.A-blog-module-linting`'s task split (merge 3+4, or scope task 3's test
+  target), then resume `/sdlc-flow 12.A-blog-module-linting`.
+
+```
+08a2d7f feat: implement 12.A-blog-module-linting-task3
+5bee0b4 feat: implement 12.A-blog-module-linting-task2
+e70670b feat: implement 12.A-blog-module-linting-task1
+9c1e32c docs: log ticket-complete-epic close-out
+28cc7e7 docs: document mev complete-epic in cli.md
+3cfd7f3 feat: implement ticket-complete-epic-task3
+e876da4 feat: implement ticket-complete-epic-task2
+ac3cd0c feat: implement ticket-complete-epic-task1
+```
+
 ### `ticket-complete-epic` shipped (full spec, 4 tasks, PASS)
 - **What:** `mev complete-epic <slug>` — a sanctioned writer for the `epics[].status` →
   `complete` transition. `plan_complete_epic` (`src/brain/epics.rs`) is a standalone,
