@@ -21,9 +21,11 @@ src/
 ├── shared.rs       ← internal helpers: extract_frontmatter, is_kebab_case, non_empty
 ├── validator.rs    ← ContentValidator trait (the extension point)
 ├── learn_ai/
-│   ├── mod.rs      ← LearnAiValidator (implements ContentValidator)
+│   ├── mod.rs      ← LearnAiValidator (implements ContentValidator; overrides run() to derive content_root and thread it into the opt-in lint pass), with_lint()
 │   ├── crawl.rs    ← crawl() → (Vec<ContentFile>, Vec<Diagnostic>); ContentFile, Corpus, FileKind, Locale
-│   └── meta.rs     ← validate_file() — per-file frontmatter + JSON struct checks
+│   ├── meta.rs     ← validate_file() — per-file frontmatter + JSON struct checks
+│   ├── blog.rs     ← BlogPost, crawl(), BlogValidator (implements ContentValidator; overrides run() like LearnAiValidator) — the learn-ai blog tree: EN/pt-BR frontmatter + parity checks (E_BLOG_MALFORMED_FRONTMATTER, E_BLOG_MISSING_FIELD, W_BLOG_PTBR_MISSING), Phase 12 Block A
+│   └── lint.rs     ← lint_code_blocks() (W_LINT_UNTAGGED_CODE_BLOCK), lint_local_links() (E_LINT_DEAD_LOCAL_LINK, E_LINT_DEAD_ASSET), derive_content_root(), resolve_route() — shared, pure (path, source) -> Vec<Diagnostic> content-lint passes reused by both LearnAiValidator (opt-in via --lint) and BlogValidator (on by default), Phase 12 Block A
 └── brain/
     ├── mod.rs      ← BrainValidator (implements ContentValidator); wires crawl_corpus
     ├── config.rs   ← BrainConfig, CrawlConfig, VocabConfig, RepoEntry, HistoryConfig (`[history]` table: `enabled`/`keep`, `serde(default)`); find_brain_config(), load_brain_config(); BrainConfig::scope_dependencies(), ScopeDependencySet, ScopeError — `emit-state --scope` dependency resolution (ticket-emit-state-scope-and-lock)
@@ -71,6 +73,7 @@ tests/
 ├── set_block_status.rs ← integration tests for `mev set-block-status`, driving the real binary (happy path, byte-identical dry run, idempotent re-write, every rejection incl. `blocked`, and the chained-emit-state ripple) — MV.11.B
 ├── brain_last_touched.rs ← integration tests for derive_last_touched() — Phase 10 Block MV.10.D (full-ID/bare-ID/prefix-stripped folder resolution, archive inclusion, newest-wins, determinism, read-only guarantee, consumption-path join)
 ├── smoke.rs           ← integration tests for the learn-ai validate() public API
+├── blog_validate.rs   ← integration tests for validate_blog()/validate_with_lint() — all six blog/lint diagnostic codes, a regression pin for byte-identical lint-off mev::validate() output, and a live-tree smoke test — Phase 12 Block A
 └── fixtures/
     └── brain.toml     ← minimal fixture — NOT the live brain.toml
 ```
@@ -99,11 +102,12 @@ pub trait ContentValidator {
 3. Implement `validate_item` — check a single item, return diagnostics
 4. Wire into `main.rs` as a new `Subcommand` variant
 
-The two current consumers:
+The current consumers:
 
 | Struct | Item type | Source module |
 |---|---|---|
 | `LearnAiValidator` | `ContentFile` | `src/learn_ai/` |
+| `BlogValidator` | `BlogPost` | `src/learn_ai/blog.rs` |
 | `BrainValidator` | `MdFile` | `src/brain/` |
 
 ---
