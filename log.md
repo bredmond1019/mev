@@ -19,6 +19,39 @@ timestamp: "2026-08-06T17:00:00Z"
 
 ## [run: 2026-08-06]
 
+### `12.A-blog-module-linting` tasks 8-9 shipped (route-aware link resolution, PASS)
+Follow-on `/sdlc-flow` run against the already-shipped `12.A-blog-module-linting` spec, adding
+tasks 8-9 after the first full pass's live-corpus smoke test found `E_LINT_DEAD_LOCAL_LINK` firing
+29 times with zero true positives (18 blog, 11 learn) — the spec's link resolver treated
+site-absolute Next.js routes (`/en/blog/x`, `/blog/x`, `/learn/paths/x`, `/learn/x`) as dead
+filesystem paths instead of recognizing them as routes. Task 8 made `lint_local_links`
+route-aware: `BlogValidator`/`LearnAiValidator` now override `ContentValidator::run` to derive a
+`content_root` and thread it through to the frontmatter/lint pass, with a new `derive_content_root`
+helper (strips `blog/published` or `learn` off the validator root) and `resolve_route` mapping the
+four route shapes (only `en`/`pt-BR` locales recognized; anything else skipped silently, never
+asserted on). Along the way, a 30th live false positive surfaced from link-shaped code content
+(a JSX prop string containing `results[node](results)`, no fence) — fixed via a new
+`lines_in_code_fence` helper (reusing `lint_code_blocks`' fence-tracking) plus a heuristic that a
+`[` glued to a preceding identifier character is code indexing, not a markdown link. Task 9 reran
+the full gated suite (fmt, clippy `-D warnings`, full `cargo test`, release build) plus live-tree
+smoke tests — all clean, no source changes. Final verdict: PASS. Next: `MV.12.B` (funnel
+conformance) and `MV.12.C` (voice tripwire).
+
+```
+4a4adb0 docs: update docs for 12.A-blog-module-linting
+95eb7aa chore(harness): stamp harness manifest for base-template a5e22fee
+bc99f89 chore(harness): sync from base-template a5e22fee
+eeaa6cc feat: implement 12.A-blog-module-linting-task8
+3043331 chore: wrap up 12.A-blog-module-linting
+0af181f feat: implement 12.A-blog-module-linting-task6
+902dedc feat: implement 12.A-blog-module-linting-task5
+e950eac feat: implement 12.A-blog-module-linting-task4
+```
+
+---
+
+## [run: 2026-08-06]
+
 ### `12.A-blog-module-linting` shipped (full spec, 7 tasks, PASS)
 Re-run of `/sdlc-flow` after the earlier BAIL, per the re-sequencing the Amendment Log recorded
 (tasks 3+4 merged into one gate-passing unit, tasks 5–8 renumbered to 4–7). Task 1 added
