@@ -1,0 +1,37 @@
+# The voice tripwire's banned-phrase list (MV.12.C, Task 1).
+#
+# Authority: `learn-ai/CLAUDE.md` -> "Voice and tone" (lines 64-65):
+#   "No slang, no hype, no filler. Avoid colloquialisms ("actually bites you"), marketing
+#   language ("production-ready," "game-changing"), or anything that reads as a persona rather
+#   than a person."
+#
+# This seed list is deliberately tight -- exactly the three phrases that bullet names. Broader
+# marketing vocabulary was measured against the live corpus (content/blog/published/, EN,
+# 2026-08-06) and excluded because it is ordinary technical English as often as it is hype:
+# `robust` hits 7 files, `leverage` 4, `unlock` 2, `seamless` 1. Seeding those would turn the
+# report into a triage queue, which the block's acceptance criterion ("a report the operator can
+# act on without triage") rules out.
+#
+# Format: a flat list of tables under `[[tells]]`, each with:
+#   - `phrase` — the literal string to match (case-insensitive, word-boundary-respecting; never
+#     a regex, so a bad edit here can never panic or hang the validator).
+#   - `note`   — one line naming where the rule comes from. If a fourth term is ever added,
+#     its `note` must record its measured hit count against the live corpus at authoring time
+#     (see the excluded-terms rationale above) -- otherwise a future reader will "improve" this
+#     list straight into a triage queue.
+#
+# This file is embedded into the `mev` binary at compile time via `include_str!` (same pattern
+# as `data/cta-vocabulary.toml`), so it works from any working directory. Adding a tell is a
+# one-line edit here, not a Rust change or a release.
+
+[[tells]]
+phrase = "production-ready"
+note = "learn-ai/CLAUDE.md Voice and tone — marketing language (measured: 3 files in content/blog/published/, 2026-08-06)"
+
+[[tells]]
+phrase = "game-changing"
+note = "learn-ai/CLAUDE.md Voice and tone — marketing language (measured: 1 file in content/blog/published/, 2026-08-06)"
+
+[[tells]]
+phrase = "actually bites you"
+note = "learn-ai/CLAUDE.md Voice and tone — colloquialism (measured: 0 files in content/blog/published/, 2026-08-06)"

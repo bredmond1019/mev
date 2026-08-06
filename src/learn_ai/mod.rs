@@ -10,6 +10,13 @@ pub mod crawl;
 pub mod funnel;
 pub mod lint;
 pub mod meta;
+// The phrase list + loader for `MV.12.C`'s voice tripwire; the scanner that consumes it
+// (`voice::check_voice`) lands in Task 2. Declared here (rather than left out of the module
+// tree) so the crate stays compilable and the module's own tests run under
+// `cargo nextest run --lib --bins` per Task 1; `#[allow(dead_code)]` is temporary and must
+// come off once Task 2/3 call `default_tells`/`parse` from `voice.rs`/`blog.rs`.
+#[allow(dead_code)]
+pub mod voice_tells;
 
 use std::path::Path;
 
