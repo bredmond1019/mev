@@ -104,7 +104,9 @@ site route resolved as a filesystem path. All 29 are fixed by the mapping above 
 learn-tree false positive, unrelated to routing — link-shaped text inside code embedded via a
 JSX component prop, which carries no ` ``` ` fence — is fixed by making the link scanner
 fence-aware and by skipping any `[` immediately glued to a preceding identifier character, e.g.
-`results[node](results)` in a Python snippet). `mev validate --blog` and `mev validate --lint`
+a Python indexing expression like `results` immediately followed by an open bracket, an index, a
+close bracket, and a call — the array-indexing-then-call shape that reads as markdown link syntax
+if you don't special-case it). `mev validate --blog` and `mev validate --lint`
 each report zero `E_LINT_DEAD_LOCAL_LINK` over the live corpus as a result, pinned by tests.
 
 ---
