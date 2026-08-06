@@ -76,10 +76,35 @@ mev --json validate --blog
 | `W_LINT_UNTAGGED_CODE_BLOCK` | Warning | A fenced code block (` ``` ` or `~~~`) opens with no language tag. Presentation, not correctness; exit code unchanged |
 | `E_LINT_DEAD_LOCAL_LINK` | Error | A markdown link `[text](target)` resolves to a path that does not exist. Absolute URLs (`http://`, `https://`, `mailto:`, protocol-relative `//`) and in-page anchors (`#...`) are skipped, never reported. A genuinely relative target (`./x.md`, `../assets/y.png`) resolves against the file's parent directory. A **site-absolute** target (a single leading `/`, e.g. `/en/blog/x`) is a Next.js route, not a filesystem path — see "Site-absolute route resolution" below; causes exit 1 |
 | `E_LINT_DEAD_ASSET` | Error | An image reference `![alt](target)` resolves to a path that does not exist on disk; causes exit 1 |
+| `E_FUNNEL_CTA_UNRESOLVED` | Error | A blog post's `cta` frontmatter value is present but outside the accepted vocabulary (`data/cta-vocabulary.toml`: `newsletter` / `booking` / `bastiel` / `module`), or `cta: module` names a `ctaTarget` that is missing, not shaped `"<path-slug>/<module-id>"` with both segments non-empty, or names a module that does not exist under the sibling learn tree. A post with **no `cta` key at all** is the legitimate newsletter default and is never flagged; causes exit 1 |
+| `E_FUNNEL_MISSING_UTM` | Error | An `http(s)` URL in content whose host is `bastiel.com.br` or `bastielai.com` (including subdomains) is missing any of `utm_source`, `utm_medium`, `utm_campaign` from its query string. **Presence and shape only** — a UTM value is never checked against a campaign registry, and no network call is ever made. `mailto:` references (e.g. `mailto:brandon@bastiel.com.br`) are skipped unconditionally, never reported — they are not outbound links and matching the bare domain would false-positive on every one of them; causes exit 1 |
+| `E_FUNNEL_BARE_CAL_LINK` | Error | Any `cal.com` URL appears directly in blog or module content. The booking CTA renders through its own component; a hand-written Cal.com link bypasses it; causes exit 1 |
+| `E_FUNNEL_RAW_ANALYTICS_ATTR` | Error | A `data-umami-*` attribute is written directly into content instead of going through learn-ai's analytics module; causes exit 1 |
 
 `--blog` and `--lint` are content checks over the learn-ai repo, surfaced only through `mev
 validate` — they have no `validate-brain` equivalent and never will, per the Phase 12 boundary
 between content linting and brain-corpus validation.
+
+#### Funnel conformance (`E_FUNNEL_*`, Phase 12 Block B)
+
+The four `E_FUNNEL_*` codes gate that published content actually participates in the funnel: every
+post resolves a real CTA, every outbound `bastiel` link carries UTM params, no bare Cal.com link
+survives in content, and no CTA emits through a raw `data-umami-*` attribute instead of learn-ai's
+analytics module. They run under the existing `--blog` flag — there is no separate flag for this
+block, matching `MV.12.A`'s "one flag runs every content check" convention.
+
+- **UTM boundary:** the check is presence-and-shape only — it confirms `utm_source`, `utm_medium`,
+  and `utm_campaign` are present in the query string, never that their *values* are correct against
+  a campaign registry. And, like every check in this module, it makes no network call.
+- **The `mailto:` exclusion:** `E_FUNNEL_MISSING_UTM` matches only `http://`/`https://` URLs. A
+  `mailto:brandon@bastiel.com.br` reference is not an outbound link and is skipped unconditionally,
+  regardless of query string. Without this exclusion the check false-positives on every `mailto:`
+  occurrence in the corpus — this is the non-obvious rule a future reader would otherwise
+  "simplify" away by matching on the bare `bastiel.com.br` / `bastielai.com` host.
+- **Cross-repo contract:** learn-ai adopts these four codes as a gated check in its own
+  `planning/harness.json`, and `bastion-web:BW.11.A` renders the per-post verdict from the
+  `--json` envelope. The codes are therefore a contract across repos — renaming one is a breaking
+  change for both consumers.
 
 #### Site-absolute route resolution (`E_LINT_DEAD_LOCAL_LINK`)
 
