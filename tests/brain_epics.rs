@@ -7,7 +7,9 @@
 
 use std::path::Path;
 
-use mev::brain::epics::EpicAction;
+use mev::brain::config::find_brain_config;
+use mev::brain::epics::{EpicAction, plan_complete_epic, plan_sync_epics};
+use mev::brain::state::{discover_state_files, load_state};
 
 const BRAIN_TOML: &str = r#"
 [vocab]
@@ -133,6 +135,32 @@ fn status_of(pairs: &[(String, String)], key: &str) -> String {
         .find(|(k, _)| k == key)
         .map(|(_, v)| v.clone())
         .unwrap_or_else(|| panic!("no entry for {key}"))
+}
+
+/// Load `brain.toml` + every discovered `state.json`, exactly as
+/// `mev::complete_epic` / `mev::epic_status` do, for tests that need to plan
+/// directly against [`plan_complete_epic`] / [`plan_sync_epics`] rather than
+/// through the on-disk-writing public entry points.
+fn load_all(
+    root: &Path,
+) -> (
+    mev::brain::config::BrainConfig,
+    Vec<(mev::brain::state::StateSource, mev::brain::state::StateFile)>,
+) {
+    let config = find_brain_config(root).expect("brain.toml must load");
+    let (sources, diags) = discover_state_files(root, &config);
+    assert!(
+        diags.is_empty(),
+        "fixture corpus must discover cleanly: {diags:?}"
+    );
+    let files = sources
+        .iter()
+        .map(|src| {
+            let file = load_state(&src.abs_path).expect("state.json must load");
+            (src.clone(), file)
+        })
+        .collect();
+    (config, files)
 }
 
 // ── defer ────────────────────────────────────────────────────────────────────
@@ -458,5 +486,153 @@ fn resume_epic_sets_active_never_focused() {
 
     mev::epic_status(root, Some("tui"), EpicAction::Resume, true).unwrap();
 
+    assert_eq!(status_of(&epic_statuses(root), "tui"), "active");
+}
+
+// ── complete ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn complete_epic_sets_registry_status() {
+    let dir = brain(&[("AL.1.A", "open", "tui")], &[("tui", "active")]);
+    let root = dir.path();
+
+    let report = mev::complete_epic(root, "tui", true).unwrap();
+    assert!(!report.is_failure(), "complete must succeed: {report:?}");
+
+    assert_eq!(status_of(&epic_statuses(root), "tui"), "complete");
+}
+
+#[test]
+fn complete_epic_plans_no_block_mutation_whatsoever() {
+    // The central guarantee: an epic with a mix of open/deferred/in_progress/
+    // closed members is completed, and the PLAN must contain no block mutation
+    // at all — not "members end up unchanged in effect", but literally no
+    // action touching the member repo's state.json.
+    let dir = brain(
+        &[
+            ("AL.1.A", "open", "tui"),
+            ("AL.1.B", "deferred", "tui"),
+            ("AL.1.C", "in_progress", "tui"),
+            ("AL.1.D", "closed", "tui"),
+        ],
+        &[("tui", "active")],
+    );
+    let root = dir.path();
+    let (config, files) = load_all(root);
+
+    let plan = plan_complete_epic("tui", &config, &files);
+
+    let hq_path = root.join("planning/state.json");
+    let alpha_path = root.join("alpha/planning/state.json");
+    assert!(
+        plan.actions.iter().all(|a| a.path != alpha_path),
+        "complete-epic must never plan an action against the member repo's \
+         state.json: {plan:?}"
+    );
+    assert_eq!(
+        plan.actions.len(),
+        1,
+        "exactly one action, the registry file itself: {plan:?}"
+    );
+    assert_eq!(plan.actions[0].path, hq_path);
+
+    // Confirm via the real write path too, member statuses unchanged on disk.
+    mev::complete_epic(root, "tui", true).unwrap();
+    let blocks = block_statuses(root);
+    assert_eq!(status_of(&blocks, "AL.1.A"), "open");
+    assert_eq!(status_of(&blocks, "AL.1.B"), "deferred");
+    assert_eq!(status_of(&blocks, "AL.1.C"), "in_progress");
+    assert_eq!(status_of(&blocks, "AL.1.D"), "closed");
+}
+
+#[test]
+fn complete_epic_is_idempotent_on_an_already_complete_epic() {
+    let dir = brain(&[("AL.1.A", "open", "tui")], &[("tui", "complete")]);
+    let root = dir.path();
+    let (config, files) = load_all(root);
+
+    let plan = plan_complete_epic("tui", &config, &files);
+
+    assert!(
+        plan.actions.is_empty(),
+        "re-completing an already-complete epic must plan no action: {plan:?}"
+    );
+
+    let before = std::fs::read_to_string(root.join("planning/state.json")).unwrap();
+    let report = mev::complete_epic(root, "tui", true).unwrap();
+    assert!(!report.is_failure());
+    assert_eq!(
+        std::fs::read_to_string(root.join("planning/state.json")).unwrap(),
+        before,
+        "a no-op complete must not touch the file on disk"
+    );
+}
+
+#[test]
+fn complete_epic_unknown_slug_is_an_error() {
+    let dir = brain(&[("AL.1.A", "open", "tui")], &[("tui", "active")]);
+
+    let report = mev::complete_epic(dir.path(), "nope", true).unwrap();
+
+    assert!(report.is_failure());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.locator == "E_EPIC_UNKNOWN")
+    );
+}
+
+#[test]
+fn defer_then_complete_leaves_member_statuses_exactly_as_defer_left_them() {
+    // `complete-epic` must neither un-defer nor re-defer — the round trip that
+    // caught `resume-epic` NOT being a precise inverse of `defer-epic` (it
+    // reactivates every deferred member, including ones deferred before the
+    // epic was ever parked) does not apply here, because `complete-epic`
+    // touches zero members.
+    let dir = brain(
+        &[("AL.1.A", "open", "tui"), ("AL.1.B", "open", "tui")],
+        &[("tui", "active")],
+    );
+    let root = dir.path();
+
+    mev::epic_status(root, Some("tui"), EpicAction::Defer, true).unwrap();
+    let after_defer = block_statuses(root);
+    assert_eq!(status_of(&after_defer, "AL.1.A"), "deferred");
+    assert_eq!(status_of(&after_defer, "AL.1.B"), "deferred");
+
+    mev::complete_epic(root, "tui", true).unwrap();
+
+    assert_eq!(
+        block_statuses(root),
+        after_defer,
+        "complete-epic must leave member statuses exactly as defer-epic left them"
+    );
+    assert_eq!(status_of(&epic_statuses(root), "tui"), "complete");
+}
+
+#[test]
+fn sync_epics_never_auto_completes_all_closed_epic() {
+    // `W_STATE_EPIC_ALL_CLOSED` is warn-only BY DECISION (state-schema.md:290):
+    // the last block closing is not the same as the initiative's goal being
+    // met, so declaring an epic `complete` stays an operator judgement.
+    // `sync-epics` must never infer `complete` from every member closing — that
+    // is exactly the auto-flip the schema forbids. This test is named for that
+    // intent so a later refactor that "completes the symmetry" between
+    // defer/resume/complete breaks loudly instead of silently reintroducing it.
+    let dir = brain(
+        &[("AL.1.A", "closed", "tui"), ("AL.1.B", "closed", "tui")],
+        &[("tui", "active")],
+    );
+    let root = dir.path();
+    let (config, files) = load_all(root);
+
+    let plan = plan_sync_epics(&config, &files);
+
+    assert!(
+        plan.actions.is_empty(),
+        "sync-epics must plan no status change for an all-closed epic, \
+         complete or otherwise: {plan:?}"
+    );
     assert_eq!(status_of(&epic_statuses(root), "tui"), "active");
 }
