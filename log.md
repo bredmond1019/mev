@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-04T17:20:00Z"
+timestamp: "2026-08-06T17:00:00Z"
 ---
 
 # Log — mev
@@ -16,6 +16,38 @@ timestamp: "2026-08-04T17:20:00Z"
 *Append-only working log. One dated entry per session. Newest entries at the top.*
 
 ---
+
+## [run: 2026-08-06]
+
+### `ticket-complete-epic` shipped (full spec, 4 tasks, PASS)
+- **What:** `mev complete-epic <slug>` — a sanctioned writer for the `epics[].status` →
+  `complete` transition. `plan_complete_epic` (`src/brain/epics.rs`) is a standalone,
+  non-cascading planner (not a third `EpicAction` variant) that sets only the registry epic's
+  status, sharing `E_EPIC_NO_REGISTRY`/`E_EPIC_UNKNOWN` diagnostics with `plan_epic_cascade` via
+  a new `resolve_epic` helper. `mev complete-epic` CLI wired through the same shared
+  `run_epic_status` dispatcher as `defer-epic`/`resume-epic`/`sync-epics` (worktree guard,
+  advisory lock, `emit-state --write` chain, `--json` envelope). Six integration tests in
+  `tests/brain_epics.rs`, including the no-cascade guarantee asserted on the plan itself (not
+  just end-state) and a named test citing `state-schema.md:290` pinning that `sync-epics` must
+  never auto-complete an all-closed epic. `docs/cli.md` patched to document the new command
+  alongside its siblings. All four harness gates green.
+- **Why:** Three of the four `epics[].status` transitions already had a sanctioned mev writer;
+  `complete` had none, so declaring an initiative finished required a hand edit of `state.json`
+  that skipped `emit-state --write` and left derived boards drifted. Hit live 2026-08-06 when
+  `HQ.chore.epic-status-reclassification` set `bullet-proof-software` to `complete` by hand.
+- **Refs:** `planning/ticket-complete-epic/tasks.md`; `state-schema.md:266,290`
+
+### Harness note — task-splitting validation-command mismatch
+- **What:** The first `/sdlc-task` run bailed on task 1: `tasks.json`'s `validation_commands`
+  for task 1 was `cargo nextest run --lib brain::epics`, but task 1 deliberately ships no tests
+  (testing is task 3's job by design), so nextest's "no tests to run" exit 4 read as failure
+  even though the implementation was correct and already committed. Fixed by changing task 1's
+  validation command to `cargo build --lib` and resuming from corrected state; all four tasks
+  then passed clean.
+- **Why:** Worth remembering for any future multi-task ticket that splits implementation and
+  tests across tasks — the implementation task's own validation command must not require tests
+  that don't exist until a later task.
+- **Refs:** `planning/ticket-complete-epic/tasks.json` (task 1 `validation_commands`)
 
 ## [run: 2026-08-04]
 
