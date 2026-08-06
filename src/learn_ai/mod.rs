@@ -6,6 +6,12 @@
 
 pub mod blog;
 pub mod crawl;
+// Wired into `BlogValidator::validate_item` by `MV.12.B` Task 2. Declared here (rather than
+// left out of the module tree) so the crate stays compilable and the module's own tests run
+// under `cargo nextest run --lib --bins` per Task 1; `#[allow(dead_code)]` is temporary and
+// must come off once Task 2 calls these checks from `blog.rs`.
+#[allow(dead_code)]
+pub mod funnel;
 pub mod lint;
 pub mod meta;
 

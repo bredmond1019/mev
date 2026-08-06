@@ -1,0 +1,16 @@
+# The accepted blog frontmatter `cta` override vocabulary (MV.12.B, Task 1).
+#
+# Authority: `learn-ai/lib/content/cta/resolve.ts` — `BlogCtaOverride`. Any value not in this
+# list (and any missing `cta` key, which is the legitimate default) is treated by the resolver
+# as an unrecognized override; a missing key silently degrades to `newsletter` and is NOT an
+# error, but a present-and-unrecognized value IS (`E_FUNNEL_CTA_UNRESOLVED`).
+#
+# This list is data, not Rust, on purpose: it changed mid-run once already (2026-08-06, when
+# `learn-ai:LA.21.C` retargeted 23 posts from `booking` to a new `bastiel` variant) and a
+# hardcoded list would have shipped a gate that was red on arrival. Adding the next variant
+# should be a one-line edit to this file, not a Rust release.
+#
+# Keep this in sync with `BLOG_CTA_OVERRIDES` in resolve.ts by hand — there is no automated
+# cross-repo check for drift (both repos are gitignored siblings, not a shared crate).
+
+values = ["newsletter", "booking", "bastiel", "module"]
