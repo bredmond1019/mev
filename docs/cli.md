@@ -893,7 +893,7 @@ mev state-history planning/state.json --restore 1
 
 ---
 
-### `defer-epic <slug> [--write] [path]` · `resume-epic <slug> [--write] [path]` · `sync-epics [--write] [path]`
+### `defer-epic <slug> [--write] [path]` · `resume-epic <slug> [--write] [path]` · `complete-epic <slug> [--write] [path]` · `sync-epics [--write] [path]`
 
 Park and un-park a whole initiative, keeping the HQ `epics[]` registry status and
 its member blocks' authored statuses in agreement.
@@ -907,7 +907,17 @@ initiative shelved. These commands move both together.
 |---|---|---|
 | `defer-epic <slug>` | → `paused` | `open` → `deferred` |
 | `resume-epic <slug>` | → `active` | `deferred` → `open` |
+| `complete-epic <slug>` | → `complete` | untouched |
 | `sync-epics` | fully-deferred epics → `paused` | stragglers in a `paused` epic → `deferred` |
+
+**`complete-epic` is the odd one out: it never cascades.** `defer-epic` and
+`resume-epic` move member blocks along with the registry; `complete-epic` sets
+*only* the registry epic's status to `complete` and touches zero member blocks.
+It is an **operator declaration** that an initiative is finished, not something
+mev infers — `W_STATE_EPIC_ALL_CLOSED` (all members closed) stays warn-only by
+design, precisely because the last block closing is not the same as the goal
+being met. A `complete` epic drops off the board entirely. There is no
+`reopen-epic`; if that turns out to be wrong, undo it by hand in the registry.
 
 **`in_progress` blocks are never touched**, in either direction. Parking work you
 are mid-block on is far more likely to be a mistake than an intent, so it is left
@@ -925,8 +935,8 @@ regenerated in the same invocation instead of being left drifted.
 
 **`--write` takes the same advisory lock `emit-state --write` and
 `set-block-status --write` take**, at `<root>/.mev-emit.lock`, before any file is
-touched — `defer-epic`, `resume-epic`, and `sync-epics` all share one dispatch
-function, so one lock acquisition covers all three. If another live process
+touched — `defer-epic`, `resume-epic`, `complete-epic`, and `sync-epics` all
+share one dispatch function, so one lock acquisition covers all four. If another live process
 already holds it, the command fails with `E_EMIT_LOCK_HELD` (naming the holder's
 pid) and writes nothing; a lockfile whose owning process is no longer alive is
 reclaimed automatically instead of blocking forever. Dry-run (no `--write`) never
@@ -949,6 +959,9 @@ mev resume-epic bastion-tui --write
 
 # You deferred blocks by hand; make the registry agree
 mev sync-epics --write
+
+# Declare the initiative finished (registry only — no member block is touched)
+mev complete-epic bastion-tui --write
 ```
 
 Exit codes: `0` planned/applied successfully · `1` unknown epic slug
