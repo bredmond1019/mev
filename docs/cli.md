@@ -74,12 +74,38 @@ mev --json validate --blog
 | `E_BLOG_MISSING_FIELD` | Error | A required blog frontmatter field (`title`, `date`, or `excerpt`) is missing or empty; the field name is in the message; causes exit 1 |
 | `W_BLOG_PTBR_MISSING` | Warning | An EN post under `blog/published/*.mdx` has no `pt-BR/<slug>.mdx` counterpart. Warning, not error: three real parity gaps exist in the live tree today, and erroring here would make `--blog` red on arrival and unusable as a gate for `MV.12.B`; exit code unchanged |
 | `W_LINT_UNTAGGED_CODE_BLOCK` | Warning | A fenced code block (` ``` ` or `~~~`) opens with no language tag. Presentation, not correctness; exit code unchanged |
-| `E_LINT_DEAD_LOCAL_LINK` | Error | A relative markdown link `[text](target)` resolves to a path that does not exist on disk. Absolute URLs (`http://`, `https://`, `mailto:`, protocol-relative `//`) and in-page anchors (`#...`) are skipped, never reported; causes exit 1 |
+| `E_LINT_DEAD_LOCAL_LINK` | Error | A markdown link `[text](target)` resolves to a path that does not exist. Absolute URLs (`http://`, `https://`, `mailto:`, protocol-relative `//`) and in-page anchors (`#...`) are skipped, never reported. A genuinely relative target (`./x.md`, `../assets/y.png`) resolves against the file's parent directory. A **site-absolute** target (a single leading `/`, e.g. `/en/blog/x`) is a Next.js route, not a filesystem path — see "Site-absolute route resolution" below; causes exit 1 |
 | `E_LINT_DEAD_ASSET` | Error | An image reference `![alt](target)` resolves to a path that does not exist on disk; causes exit 1 |
 
 `--blog` and `--lint` are content checks over the learn-ai repo, surfaced only through `mev
 validate` — they have no `validate-brain` equivalent and never will, per the Phase 12 boundary
 between content linting and brain-corpus validation.
+
+#### Site-absolute route resolution (`E_LINT_DEAD_LOCAL_LINK`)
+
+A link target with a single leading `/` (not `//`, which is protocol-relative and skipped) is a
+Next.js route, not a filesystem path, and resolves through four mapping rules against a
+`content_root` — the directory containing both `blog/` and `learn/` — derived from the
+validator's root (`<content>/blog/published` and `<content>/learn` both strip back to
+`<content>`; when the root doesn't match either shape, `content_root` is `None` and **every**
+absolute link is skipped, never reported, rather than guessed at):
+
+| Route shape | Resolves to |
+|---|---|
+| `/<locale>/blog/<slug>` | `blog/published/<slug>.mdx` for `en`; `blog/published/pt-BR/<slug>.mdx` for `pt-BR` |
+| `/blog/<slug>` (no locale segment) | `blog/published/<slug>.mdx` |
+| `/learn/paths/<slug>` | `learn/paths/<slug>` |
+| `/learn/<slug>` | `learn/paths/<slug>` (both shapes are in live use) |
+| anything else | skipped silently, never reported — mev does not assert on routes it does not model |
+
+This was added after the block's first full pass found `E_LINT_DEAD_LOCAL_LINK` firing 29 times
+over the live corpus (18 blog, 11 learn) with zero true positives — every target was a real
+site route resolved as a filesystem path. All 29 are fixed by the mapping above (one additional
+learn-tree false positive, unrelated to routing — link-shaped text inside code embedded via a
+JSX component prop, which carries no ` ``` ` fence — is fixed by making the link scanner
+fence-aware and by skipping any `[` immediately glued to a preceding identifier character, e.g.
+`results[node](results)` in a Python snippet). `mev validate --blog` and `mev validate --lint`
+each report zero `E_LINT_DEAD_LOCAL_LINK` over the live corpus as a result, pinned by tests.
 
 ---
 

@@ -17,6 +17,7 @@ use serde::Deserialize;
 use super::crawl::Locale;
 use super::lint;
 use crate::Diagnostic;
+use crate::Report;
 use crate::shared::{extract_frontmatter, non_empty};
 use crate::validator::ContentValidator;
 
@@ -115,7 +116,13 @@ fn list_mdx_files(dir: &Path) -> Vec<(String, PathBuf)> {
 ///
 /// A read failure short-circuits to a single `E_BLOG_MALFORMED_FRONTMATTER` diagnostic; the
 /// lint passes never run over content that could not be read.
-fn validate_post(post: &BlogPost) -> Vec<Diagnostic> {
+///
+/// `content_root` is threaded through to [`lint::lint_local_links`] for route-aware
+/// resolution of site-absolute links (Task 8). `None` skips all absolute links rather than
+/// guessing — callers that only have a bare `&BlogPost` (e.g. `ContentValidator::validate_item`,
+/// used directly by tests) get that conservative behaviour; [`BlogValidator::run`] derives the
+/// real content root from the validator's `root` and passes it through.
+fn validate_post(post: &BlogPost, content_root: Option<&Path>) -> Vec<Diagnostic> {
     let contents = match std::fs::read_to_string(&post.path) {
         Ok(c) => c,
         Err(e) => {
@@ -129,7 +136,12 @@ fn validate_post(post: &BlogPost) -> Vec<Diagnostic> {
 
     let mut diags = frontmatter_diagnostics(post, &contents);
     diags.extend(lint::lint_code_blocks(&post.rel, &contents));
-    diags.extend(lint::lint_local_links(&post.path, &post.rel, &contents));
+    diags.extend(lint::lint_local_links(
+        &post.path,
+        &post.rel,
+        &contents,
+        content_root,
+    ));
     diags
 }
 
@@ -194,8 +206,25 @@ impl ContentValidator for BlogValidator {
         crawl(root)
     }
 
+    /// Used directly (e.g. by tests calling `validate_item` on a bare `BlogPost`) without a
+    /// known content root — conservatively skips route resolution for any absolute link
+    /// rather than guessing. [`run`](ContentValidator::run) is overridden below to derive and
+    /// thread through the real content root for the actual `mev validate --blog` path.
     fn validate_item(&self, item: &BlogPost) -> Vec<Diagnostic> {
-        validate_post(item)
+        validate_post(item, None)
+    }
+
+    /// Overridden (not the default driver) so every item's lint pass gets route-aware
+    /// resolution: the content root is derived once from `root` here and threaded through to
+    /// [`validate_post`], since `ContentValidator::validate_item`'s signature has no root
+    /// parameter to carry it (Task 8).
+    fn run(&self, root: &Path) -> Report {
+        let content_root = lint::derive_content_root(root);
+        let (items, mut diagnostics) = self.crawl(root);
+        for item in &items {
+            diagnostics.extend(validate_post(item, content_root.as_deref()));
+        }
+        Report { diagnostics }
     }
 }
 
@@ -240,7 +269,7 @@ mod tests {
             slug: "post".to_string(),
             locale: Locale::En,
         };
-        let diags = validate_post(&post);
+        let diags = validate_post(&post, None);
         assert!(diags.is_empty(), "expected clean post, got {diags:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -256,7 +285,7 @@ mod tests {
             slug: "post".to_string(),
             locale: Locale::En,
         };
-        let diags = validate_post(&post);
+        let diags = validate_post(&post, None);
         let missing = diags_with_locator(&diags, "E_BLOG_MISSING_FIELD");
         assert_eq!(missing.len(), 1, "{diags:?}");
         assert!(missing[0].message.contains("title"));
@@ -274,7 +303,7 @@ mod tests {
             slug: "post".to_string(),
             locale: Locale::En,
         };
-        let diags = validate_post(&post);
+        let diags = validate_post(&post, None);
         let missing = diags_with_locator(&diags, "E_BLOG_MISSING_FIELD");
         assert_eq!(missing.len(), 1, "{diags:?}");
         assert!(missing[0].message.contains("date"));
@@ -292,7 +321,7 @@ mod tests {
             slug: "post".to_string(),
             locale: Locale::En,
         };
-        let diags = validate_post(&post);
+        let diags = validate_post(&post, None);
         let missing = diags_with_locator(&diags, "E_BLOG_MISSING_FIELD");
         assert_eq!(missing.len(), 1, "{diags:?}");
         assert!(missing[0].message.contains("excerpt"));
@@ -310,7 +339,7 @@ mod tests {
             slug: "post".to_string(),
             locale: Locale::En,
         };
-        let diags = validate_post(&post);
+        let diags = validate_post(&post, None);
         let missing = diags_with_locator(&diags, "E_BLOG_MISSING_FIELD");
         assert_eq!(missing.len(), 1, "{diags:?}");
         std::fs::remove_dir_all(&dir).ok();
@@ -326,7 +355,7 @@ mod tests {
             slug: "post".to_string(),
             locale: Locale::En,
         };
-        let diags = validate_post(&post);
+        let diags = validate_post(&post, None);
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].locator, "E_BLOG_MALFORMED_FRONTMATTER");
         assert_eq!(diags[0].severity, Severity::Error);
@@ -345,7 +374,7 @@ mod tests {
             slug: "post".to_string(),
             locale: Locale::En,
         };
-        let diags = validate_post(&post);
+        let diags = validate_post(&post, None);
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].locator, "E_BLOG_MALFORMED_FRONTMATTER");
         std::fs::remove_dir_all(&dir).ok();
@@ -367,7 +396,7 @@ mod tests {
             slug: "post".to_string(),
             locale: Locale::En,
         };
-        let diags = validate_post(&post);
+        let diags = validate_post(&post, None);
         assert!(
             diags
                 .iter()

@@ -306,3 +306,57 @@ fn validate_blog_does_not_panic_over_the_live_blog_tree() {
     // panicking and returns a `Report`.
     let _ = report.diagnostics.len();
 }
+
+// ---------------------------------------------------------------------------
+// Task 8 — route-aware resolution: the live corpus must report zero
+// E_LINT_DEAD_LOCAL_LINK. Before this fix, `--blog` reported 18 and `--lint` over the learn
+// tree reported 11 false positives, all from site-absolute routes resolved as filesystem
+// paths (plus one link-shaped-code-content false positive on the learn tree, fixed
+// alongside route resolution). Both skip cleanly on a fresh clone without the sibling repo.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn validate_blog_over_the_live_tree_reports_zero_dead_local_links() {
+    let live_root = Path::new("../../learn-ai/content/blog/published");
+    if !live_root.exists() {
+        eprintln!(
+            "skipping: {} not present (fresh clone)",
+            live_root.display()
+        );
+        return;
+    }
+
+    let report = mev::validate_blog(live_root).expect("validate_blog");
+    let dead_links: Vec<&mev::Diagnostic> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator == "E_LINT_DEAD_LOCAL_LINK")
+        .collect();
+    assert!(
+        dead_links.is_empty(),
+        "expected zero E_LINT_DEAD_LOCAL_LINK over the live blog tree, got {dead_links:?}"
+    );
+}
+
+#[test]
+fn validate_with_lint_over_the_live_learn_tree_reports_zero_dead_local_links() {
+    let live_root = Path::new("../../learn-ai/content/learn");
+    if !live_root.exists() {
+        eprintln!(
+            "skipping: {} not present (fresh clone)",
+            live_root.display()
+        );
+        return;
+    }
+
+    let report = mev::validate_with_lint(live_root).expect("validate_with_lint");
+    let dead_links: Vec<&mev::Diagnostic> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator == "E_LINT_DEAD_LOCAL_LINK")
+        .collect();
+    assert!(
+        dead_links.is_empty(),
+        "expected zero E_LINT_DEAD_LOCAL_LINK over the live learn tree, got {dead_links:?}"
+    );
+}

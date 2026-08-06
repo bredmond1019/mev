@@ -12,6 +12,7 @@ pub mod meta;
 use std::path::Path;
 
 use crate::Diagnostic;
+use crate::Report;
 use crate::validator::ContentValidator;
 use crawl::{ContentFile, FileKind};
 
@@ -48,12 +49,44 @@ impl ContentValidator for LearnAiValidator {
 
     /// Validate a single classified content file and return any structural diagnostics.
     ///
-    /// The existing struct/frontmatter checks always run. When `self.lint` is set, the shared
+    /// Used directly (e.g. by tests) without a known content root — conservatively skips
+    /// route resolution for any absolute link rather than guessing. See
+    /// [`run`](ContentValidator::run), overridden below, for the real `mev validate --lint`
+    /// path, which derives and threads through the actual content root.
+    fn validate_item(&self, item: &ContentFile) -> Vec<Diagnostic> {
+        self.validate_item_with_root(item, None)
+    }
+
+    /// Overridden (not the default driver) so the opt-in lint pass gets route-aware
+    /// resolution: the content root is derived once from `root` here and threaded through to
+    /// every item, since `ContentValidator::validate_item`'s signature has no root parameter
+    /// to carry it (Task 8). When `self.lint` is off, no root derivation is needed at all.
+    fn run(&self, root: &Path) -> Report {
+        let content_root = if self.lint {
+            lint::derive_content_root(root)
+        } else {
+            None
+        };
+        let (items, mut diagnostics) = self.crawl(root);
+        for item in &items {
+            diagnostics.extend(self.validate_item_with_root(item, content_root.as_deref()));
+        }
+        Report { diagnostics }
+    }
+}
+
+impl LearnAiValidator {
+    /// Shared implementation behind both `validate_item` and the overridden `run`: the
+    /// existing struct/frontmatter checks always run. When `self.lint` is set, the shared
     /// lint passes additionally run over `FileKind::ModuleMdx` items only — a fence/link scan
     /// over `.json` metadata is meaningless. The file is read once for linting; if that read
     /// fails, linting is silently skipped rather than adding a second diagnostic on top of the
     /// read-failure diagnostic `meta::validate_file` already produced.
-    fn validate_item(&self, item: &ContentFile) -> Vec<Diagnostic> {
+    fn validate_item_with_root(
+        &self,
+        item: &ContentFile,
+        content_root: Option<&Path>,
+    ) -> Vec<Diagnostic> {
         let mut diags = meta::validate_file(item);
 
         if self.lint
@@ -61,7 +94,12 @@ impl ContentValidator for LearnAiValidator {
             && let Ok(source) = std::fs::read_to_string(&item.path)
         {
             diags.extend(lint::lint_code_blocks(&item.rel, &source));
-            diags.extend(lint::lint_local_links(&item.path, &item.rel, &source));
+            diags.extend(lint::lint_local_links(
+                &item.path,
+                &item.rel,
+                &source,
+                content_root,
+            ));
         }
 
         diags
