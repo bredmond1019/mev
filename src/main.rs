@@ -326,6 +326,42 @@ enum Command {
         #[arg(long)]
         write: bool,
     },
+    /// Declare an initiative finished: set its registry status to `complete`.
+    ///
+    /// This is an **operator declaration**, not an inference. `mev` never auto-flips
+    /// an epic to `complete` on your behalf — `W_STATE_EPIC_ALL_CLOSED` is warn-only
+    /// by design (state-schema.md:290) precisely because the last member block
+    /// closing is not the same as the initiative's goal being met. This command is
+    /// the sanctioned way to state that judgement explicitly, by name, on the
+    /// command line; it never inspects member status and is compatible with, not a
+    /// workaround for, that rule.
+    ///
+    /// Sets **only** the named epic's registry status — no member block's status is
+    /// ever touched. `complete` is terminal and drops the epic off the board; its
+    /// members' own statuses remain whatever they already were.
+    ///
+    /// Dry-run by default; pass --write to apply (which also re-runs emit-state).
+    ///
+    /// `--write` takes the same advisory lock at <root>/.mev-emit.lock as
+    /// `defer-epic`/`resume-epic`/`sync-epics`/`emit-state`; a held lock fails this
+    /// with E_EMIT_LOCK_HELD and writes nothing, a stale lock is reclaimed
+    /// automatically, and dry-run never takes the lock. Refused the same way as its
+    /// siblings when run from inside a linked git worktree.
+    ///
+    /// Exit codes:
+    ///   0 — planned (dry-run) or applied successfully, including a no-op on an
+    ///       epic already `complete`
+    ///   1 — unknown epic slug, no HQ registry, a write failure, or E_EMIT_LOCK_HELD
+    CompleteEpic {
+        /// Epic slug as it appears in the HQ `epics[]` registry.
+        slug: String,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Apply the edits. Without this the command prints what it would change.
+        #[arg(long)]
+        write: bool,
+    },
     /// Reconcile every epic's registry status against its blocks, in both directions.
     ///
     /// - An epic whose remaining work is entirely `deferred` but which is still
@@ -762,15 +798,34 @@ fn run_state_history(path: &std::path::Path, restore: Option<u32>, json: bool) -
     }
 }
 
-/// Shared dispatch for `defer-epic` / `resume-epic` / `sync-epics`.
+/// Which epic-status command [`run_epic_status`] is dispatching for.
 ///
-/// All three resolve the brain root, run [`mev::epic_status`], and report in the
-/// same shape as `emit-state` (per-diagnostic lines + a mode/count summary, or a
-/// JSON envelope under `--json`).
+/// A CLI-layer selector, distinct from [`mev::brain::epics::EpicAction`]: that
+/// type only ever means "cascade a status change onto member blocks" (its two
+/// variants are `Defer`/`Resume`), and `complete-epic` deliberately does not
+/// cascade — see `plan_complete_epic`'s doc comment. Keeping the non-cascading
+/// case out of `EpicAction` means the planner side of the cascade/no-cascade
+/// distinction cannot be blurred by this CLI-level enum growing a matching
+/// variant later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EpicOp {
+    Defer,
+    Resume,
+    Complete,
+}
+
+/// Shared dispatch for `defer-epic` / `resume-epic` / `complete-epic` / `sync-epics`.
+///
+/// All four resolve the brain root, take the same advisory lock, and report in
+/// the same shape as `emit-state` (per-diagnostic lines + a mode/count summary,
+/// or a JSON envelope under `--json`) — this is the one place that plumbing
+/// lives, so it cannot drift between the sibling commands. `complete-epic`
+/// dispatches to [`mev::complete_epic`] instead of [`mev::epic_status`]; the
+/// other three still go through `epic_status`.
 fn run_epic_status(
     path: &std::path::Path,
     slug: Option<&str>,
-    action: mev::brain::epics::EpicAction,
+    op: EpicOp,
     write: bool,
     json: bool,
 ) -> ExitCode {
@@ -794,9 +849,10 @@ fn run_epic_status(
         }
     };
 
-    let label = match (slug, action) {
-        (Some(_), mev::brain::epics::EpicAction::Defer) => "defer-epic",
-        (Some(_), mev::brain::epics::EpicAction::Resume) => "resume-epic",
+    let label = match (slug, op) {
+        (Some(_), EpicOp::Defer) => "defer-epic",
+        (Some(_), EpicOp::Resume) => "resume-epic",
+        (Some(_), EpicOp::Complete) => "complete-epic",
         (None, _) => "sync-epics",
     };
 
@@ -828,7 +884,21 @@ fn run_epic_status(
         None
     };
 
-    match mev::epic_status(&root, slug, action, write) {
+    let outcome = match op {
+        EpicOp::Complete => {
+            // slug is always Some for complete-epic — there is no "complete every
+            // epic" analog of sync-epics (see tasks.md's Notes: completion stays
+            // an explicit, named operator judgement, never a reconcile-all pass).
+            let s = slug.expect("complete-epic always names a slug");
+            mev::complete_epic(&root, s, write)
+        }
+        EpicOp::Defer => mev::epic_status(&root, slug, mev::brain::epics::EpicAction::Defer, write),
+        EpicOp::Resume => {
+            mev::epic_status(&root, slug, mev::brain::epics::EpicAction::Resume, write)
+        }
+    };
+
+    match outcome {
         Ok(report) => {
             if json {
                 let envelope = mev::JsonReport::new(label, &root, &report);
@@ -1285,27 +1355,18 @@ fn main() -> ExitCode {
             }
         }
         Command::StateHistory { path, restore } => run_state_history(&path, restore, cli.json),
-        Command::DeferEpic { slug, path, write } => run_epic_status(
-            &path,
-            Some(&slug),
-            mev::brain::epics::EpicAction::Defer,
-            write,
-            cli.json,
-        ),
-        Command::ResumeEpic { slug, path, write } => run_epic_status(
-            &path,
-            Some(&slug),
-            mev::brain::epics::EpicAction::Resume,
-            write,
-            cli.json,
-        ),
-        Command::SyncEpics { path, write } => run_epic_status(
-            &path,
-            None,
-            mev::brain::epics::EpicAction::Defer,
-            write,
-            cli.json,
-        ),
+        Command::DeferEpic { slug, path, write } => {
+            run_epic_status(&path, Some(&slug), EpicOp::Defer, write, cli.json)
+        }
+        Command::ResumeEpic { slug, path, write } => {
+            run_epic_status(&path, Some(&slug), EpicOp::Resume, write, cli.json)
+        }
+        Command::CompleteEpic { slug, path, write } => {
+            run_epic_status(&path, Some(&slug), EpicOp::Complete, write, cli.json)
+        }
+        Command::SyncEpics { path, write } => {
+            run_epic_status(&path, None, EpicOp::Defer, write, cli.json)
+        }
         Command::SetBlockStatus {
             key,
             status,

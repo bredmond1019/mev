@@ -673,6 +673,93 @@ pub fn epic_status(
     Ok(report)
 }
 
+/// Declare an epic finished (`mev complete-epic`).
+///
+/// The non-cascading sibling of [`epic_status`]: sets only the named epic's
+/// registry `status` to `complete` and touches zero member blocks — see
+/// [`brain::epics::plan_complete_epic`] for why that is deliberate (it is an
+/// operator *declaration*, not an inference from member status, and is
+/// compatible with `W_STATE_EPIC_ALL_CLOSED` staying warn-only per
+/// `state-schema.md:290`).
+///
+/// Same shape as `epic_status` otherwise: resolve `brain.toml`, discover +
+/// load every `state.json`, refuse to write against an incomplete corpus,
+/// plan, apply, and — on a successful `--write` — chain into [`emit_state`] so
+/// the derived views agree with the new authored value. Dry-run by default.
+pub fn complete_epic(root: &std::path::Path, slug: &str, write: bool) -> anyhow::Result<Report> {
+    use brain::config::find_brain_config;
+    use brain::emit::apply_plan;
+    use brain::epics::plan_complete_epic;
+    use brain::state::{StateLoadError, discover_state_files, load_state};
+
+    let mut report = Report::default();
+
+    let config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    let (sources, discovery_diags) = discover_state_files(root, &config);
+    report.diagnostics.extend(discovery_diags);
+
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    let mut load_failed = false;
+    for src in &sources {
+        match load_state(&src.abs_path) {
+            Ok(file) => loaded.push((src.clone(), file)),
+            Err(StateLoadError::Parse { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("state.json is not valid JSON or does not match the schema: {source}"),
+                ));
+            }
+            Err(StateLoadError::Io { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("could not read state.json: {source}"),
+                ));
+            }
+        }
+    }
+
+    // Same completeness guard as epic_status: refuse to write from a partial
+    // corpus so a missing repo's registry entry is never silently skipped.
+    if write && load_failed {
+        report.diagnostics.push(Diagnostic::error(
+            root,
+            "E_EPIC_INCOMPLETE_CORPUS",
+            "refusing to write: at least one state.json failed to load; cannot confirm the \
+             HQ registry that carries this epic loaded cleanly"
+                .to_string(),
+        ));
+        return Ok(report);
+    }
+
+    let plan = plan_complete_epic(slug, &config, &loaded);
+
+    let had_actions = !plan.actions.is_empty();
+    report.diagnostics.extend(apply_plan(&plan, write));
+
+    // Regenerate derived views so focus/boards agree with the authored edit.
+    if write && had_actions && !report.is_failure() {
+        let emit = emit_state(root, true, None)?;
+        report.diagnostics.extend(emit.diagnostics);
+    }
+
+    Ok(report)
+}
+
 /// Set one block's authored `status` (`mev set-block-status <repo:id> <status>`).
 ///
 /// The block-level sibling of [`epic_status`], and deliberately the same shape:
