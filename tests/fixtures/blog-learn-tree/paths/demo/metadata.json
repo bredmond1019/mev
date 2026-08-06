@@ -1,0 +1,11 @@
+{
+  "id": "demo",
+  "title": "Demo Path",
+  "description": "A minimal path fixture for the regression pin.",
+  "level": "Beginner",
+  "duration": "1 hour",
+  "version": "1.0.0",
+  "lastUpdated": "2026-01-01",
+  "topics": ["demo"],
+  "modules": ["01-intro"]
+}
