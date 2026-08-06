@@ -80,6 +80,7 @@ mev --json validate --blog
 | `E_FUNNEL_MISSING_UTM` | Error | An `http(s)` URL in content whose host is `bastiel.com.br` or `bastielai.com` (including subdomains) is missing any of `utm_source`, `utm_medium`, `utm_campaign` from its query string. **Presence and shape only** — a UTM value is never checked against a campaign registry, and no network call is ever made. `mailto:` references (e.g. `mailto:brandon@bastiel.com.br`) are skipped unconditionally, never reported — they are not outbound links and matching the bare domain would false-positive on every one of them; causes exit 1 |
 | `E_FUNNEL_BARE_CAL_LINK` | Error | Any `cal.com` URL appears directly in blog or module content. The booking CTA renders through its own component; a hand-written Cal.com link bypasses it; causes exit 1 |
 | `E_FUNNEL_RAW_ANALYTICS_ATTR` | Error | A `data-umami-*` attribute is written directly into content instead of going through learn-ai's analytics module; causes exit 1 |
+| `W_VOICE_TELL` | Warning | A phrase from the data-driven banned-phrase list (`data/voice-tells.toml`) appears in prose, outside fenced code blocks, inline code spans, blockquotes, and frontmatter. **Warning-level by design, always** — there is no configuration under which this diagnostic becomes an error, and it never affects the exit code. One code covers every phrase; the matched phrase and the 1-indexed line are in the message, so the operator reads a single ranked list instead of reconciling a code per phrase |
 
 `--blog` and `--lint` are content checks over the learn-ai repo, surfaced only through `mev
 validate` — they have no `validate-brain` equivalent and never will, per the Phase 12 boundary
@@ -105,6 +106,49 @@ block, matching `MV.12.A`'s "one flag runs every content check" convention.
   `planning/harness.json`, and `bastion-web:BW.11.A` renders the per-post verdict from the
   `--json` envelope. The codes are therefore a contract across repos — renaming one is a breaking
   change for both consumers.
+
+#### Voice tripwire (`W_VOICE_TELL`, Phase 12 Block C)
+
+A warning-level lint for the banned-phrase list `learn-ai/CLAUDE.md`'s "Voice and tone" bullet
+already states — the concrete, testable half of "doesn't sound like AI slop." It runs under the
+existing `--blog` flag, alongside the funnel-conformance checks above; there is no separate flag
+for this block.
+
+- **The data file:** `data/voice-tells.toml`, embedded into the `mev` binary at compile time via
+  `include_str!` (same pattern as `data/cta-vocabulary.toml`), so the tripwire works from any
+  working directory. It is a flat list of `[[tells]]` tables, each with:
+  - `phrase` — the literal string to match (case-insensitive, word-boundary-respecting; never a
+    regex, so a bad edit can never panic or hang the validator, and can never match across a
+    line break).
+  - `note` — one line naming where the rule comes from. If a phrase is ever added beyond the
+    seed, its `note` must record the phrase's measured hit count against the live corpus at
+    authoring time (see below).
+- **Adding a tell is a one-step, Rust-free edit:** append a `[[tells]]` entry to
+  `data/voice-tells.toml` with a `phrase` and a sourcing `note`. No code change and no release
+  are required — the loader is data-driven, which is itself pinned by a test that loads a phrase
+  absent from the shipped list, via an override, and confirms it fires.
+- **Exemptions:** fenced code blocks (` ``` `/`~~~`), inline code spans, blockquote lines, and
+  the YAML frontmatter block are all exempt from matching, each pinned by its own test. The
+  fenced-code exemption reuses the same fence-tracking logic `E_LINT_DEAD_LOCAL_LINK` uses,
+  rather than a second, independently-drifting scanner.
+- **Warning-level, never error, by design.** A false positive from this scanner must never be
+  able to block a push — there is no configuration that promotes `W_VOICE_TELL` to an error, and
+  a corpus whose only findings are voice tells exits 0. This is pinned by a test.
+- **Two deliberate boundaries.** This tripwire does not judge voice, and it makes no model call.
+  It catches the phrases `learn-ai/CLAUDE.md` writes down, and only those — it does not attempt
+  to score tone, reading level, or "AI-ness" statistically. The judgement of whether a post
+  actually reads as AI slop stays with the human operator, on the surface
+  `bastion-web:BW.11.A` provides.
+- **Why the seed list is only three phrases.** `learn-ai/CLAUDE.md` names exactly
+  `production-ready`, `game-changing`, and `actually bites you` as marketing-language and
+  colloquialism examples, and the seed list is deliberately scoped to just those. Broader
+  marketing vocabulary was measured against the live corpus
+  (`content/blog/published/`, EN, 2026-08-06) and excluded because it reads as ordinary
+  technical English as often as it reads as hype: `robust` hits 7 files, `leverage` 4, `unlock`
+  2, `seamless` 1. Seeding those would turn the report into a triage queue — the exact outcome
+  the block's acceptance criterion ("a report the operator can act on without triage") rules
+  out. Any term added beyond the three explicit ones must carry its own measured hit count in
+  its `note`, and should be excluded when the hits are mostly legitimate usage.
 
 #### Site-absolute route resolution (`E_LINT_DEAD_LOCAL_LINK`)
 
