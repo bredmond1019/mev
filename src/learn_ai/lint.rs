@@ -183,7 +183,7 @@ pub fn lint_local_links(
 /// same-character fence nested inside an already-open block of the other character).
 /// [`lint_local_links`] uses this to avoid mistaking link-shaped code content (e.g.
 /// `results[node](results)` in a Python snippet) for a real markdown link.
-fn lines_in_code_fence(source: &str) -> Vec<bool> {
+pub(crate) fn lines_in_code_fence(source: &str) -> Vec<bool> {
     let mut in_fence = Vec::new();
     let mut open_fence: Option<(char, usize)> = None;
 
