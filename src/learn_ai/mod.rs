@@ -56,11 +56,12 @@ impl ContentValidator for LearnAiValidator {
     fn validate_item(&self, item: &ContentFile) -> Vec<Diagnostic> {
         let mut diags = meta::validate_file(item);
 
-        if self.lint && item.kind == FileKind::ModuleMdx {
-            if let Ok(source) = std::fs::read_to_string(&item.path) {
-                diags.extend(lint::lint_code_blocks(&item.rel, &source));
-                diags.extend(lint::lint_local_links(&item.path, &item.rel, &source));
-            }
+        if self.lint
+            && item.kind == FileKind::ModuleMdx
+            && let Ok(source) = std::fs::read_to_string(&item.path)
+        {
+            diags.extend(lint::lint_code_blocks(&item.rel, &source));
+            diags.extend(lint::lint_local_links(&item.path, &item.rel, &source));
         }
 
         diags
