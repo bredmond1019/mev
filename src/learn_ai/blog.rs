@@ -16,6 +16,8 @@ use serde::Deserialize;
 
 use super::crawl::Locale;
 use super::lint;
+use super::voice;
+use super::voice_tells::{self, VoiceTell};
 use crate::Diagnostic;
 use crate::Report;
 use crate::shared::{extract_frontmatter, non_empty};
@@ -132,10 +134,17 @@ fn list_mdx_files(dir: &Path) -> Vec<(String, PathBuf)> {
 /// and passed through to the funnel check rather than re-parsed — the funnel checks that scan
 /// raw `source` (`check_utm`/`check_cal_link`/`check_analytics_attr`) still run even when the
 /// frontmatter itself is malformed, since they do not depend on it.
+///
+/// `tells` (`MV.12.C` Task 3) is the voice-tripwire phrase list, resolved once at
+/// [`BlogValidator`] construction time and threaded through rather than reloaded per post —
+/// see [`voice::check_voice`]. `W_VOICE_TELL` findings are appended after the existing checks;
+/// every one of them is `Severity::Warning`, so a voice tell alone can never flip a report to
+/// failing.
 fn validate_post(
     post: &BlogPost,
     content_root: Option<&Path>,
     learn_root: Option<&Path>,
+    tells: &[VoiceTell],
 ) -> Vec<Diagnostic> {
     let contents = match std::fs::read_to_string(&post.path) {
         Ok(c) => c,
@@ -165,6 +174,7 @@ fn validate_post(
     diags.extend(super::funnel::check_utm(&post.rel, &contents));
     diags.extend(super::funnel::check_cal_link(&post.rel, &contents));
     diags.extend(super::funnel::check_analytics_attr(&post.rel, &contents));
+    diags.extend(voice::check_voice(&post.rel, &contents, tells));
 
     diags
 }
@@ -235,27 +245,42 @@ fn require_field(
 /// `learn_root`, when `Some`, roots the on-disk existence half of `funnel::check_cta`'s
 /// `cta: module` handling (`MV.12.B` Task 2). It is resolved once at construction time — see
 /// [`BlogValidator::from_blog_root`] — rather than re-derived per item.
+///
+/// `tells` (`MV.12.C` Task 3) is the voice-tripwire phrase list, loaded once here at
+/// construction — not once per post; 53 posts must not re-parse the data file 53 times. Both
+/// constructors below default it to [`voice_tells::default_tells`]; [`BlogValidator::default`]
+/// (the `#[derive]`) leaves it empty, matching that constructor's existing "everything off"
+/// semantics.
 #[derive(Debug, Default, Clone)]
 pub struct BlogValidator {
     pub learn_root: Option<PathBuf>,
+    pub tells: Vec<VoiceTell>,
 }
 
 impl BlogValidator {
     /// Construct a validator with an explicit `learn_root` (or `None` to skip module-existence
-    /// resolution entirely) — the constructor tests use to point it anywhere.
+    /// resolution entirely) — the constructor tests use to point it anywhere. The voice-tell
+    /// list is loaded from the shipped default.
     pub fn new(learn_root: Option<PathBuf>) -> Self {
-        Self { learn_root }
+        Self {
+            learn_root,
+            tells: voice_tells::default_tells().to_vec(),
+        }
     }
 
     /// Derive `learn_root` from a blog root, per the block's `<content>/blog/published` ->
     /// `<content>/learn` mapping (reusing [`lint::derive_content_root`]), and keep it only when
     /// that directory actually exists on disk — a partial checkout (no sibling learn tree)
-    /// degrades to `None` rather than pointing at a directory that isn't there.
+    /// degrades to `None` rather than pointing at a directory that isn't there. The voice-tell
+    /// list is loaded from the shipped default, once, here.
     pub fn from_blog_root(blog_root: &Path) -> Self {
         let learn_root = lint::derive_content_root(blog_root)
             .map(|content_root| content_root.join("learn"))
             .filter(|p| p.is_dir());
-        Self { learn_root }
+        Self {
+            learn_root,
+            tells: voice_tells::default_tells().to_vec(),
+        }
     }
 }
 
@@ -271,7 +296,7 @@ impl ContentValidator for BlogValidator {
     /// rather than guessing. [`run`](ContentValidator::run) is overridden below to derive and
     /// thread through the real content root for the actual `mev validate --blog` path.
     fn validate_item(&self, item: &BlogPost) -> Vec<Diagnostic> {
-        validate_post(item, None, self.learn_root.as_deref())
+        validate_post(item, None, self.learn_root.as_deref(), &self.tells)
     }
 
     /// Overridden (not the default driver) so every item's lint pass gets route-aware
@@ -287,6 +312,7 @@ impl ContentValidator for BlogValidator {
                 item,
                 content_root.as_deref(),
                 self.learn_root.as_deref(),
+                &self.tells,
             ));
         }
         Report { diagnostics }
@@ -334,7 +360,7 @@ mod tests {
             slug: "post".to_string(),
             locale: Locale::En,
         };
-        let diags = validate_post(&post, None, None);
+        let diags = validate_post(&post, None, None, &[]);
         assert!(diags.is_empty(), "expected clean post, got {diags:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -350,7 +376,7 @@ mod tests {
             slug: "post".to_string(),
             locale: Locale::En,
         };
-        let diags = validate_post(&post, None, None);
+        let diags = validate_post(&post, None, None, &[]);
         let missing = diags_with_locator(&diags, "E_BLOG_MISSING_FIELD");
         assert_eq!(missing.len(), 1, "{diags:?}");
         assert!(missing[0].message.contains("title"));
@@ -368,7 +394,7 @@ mod tests {
             slug: "post".to_string(),
             locale: Locale::En,
         };
-        let diags = validate_post(&post, None, None);
+        let diags = validate_post(&post, None, None, &[]);
         let missing = diags_with_locator(&diags, "E_BLOG_MISSING_FIELD");
         assert_eq!(missing.len(), 1, "{diags:?}");
         assert!(missing[0].message.contains("date"));
@@ -386,7 +412,7 @@ mod tests {
             slug: "post".to_string(),
             locale: Locale::En,
         };
-        let diags = validate_post(&post, None, None);
+        let diags = validate_post(&post, None, None, &[]);
         let missing = diags_with_locator(&diags, "E_BLOG_MISSING_FIELD");
         assert_eq!(missing.len(), 1, "{diags:?}");
         assert!(missing[0].message.contains("excerpt"));
@@ -404,7 +430,7 @@ mod tests {
             slug: "post".to_string(),
             locale: Locale::En,
         };
-        let diags = validate_post(&post, None, None);
+        let diags = validate_post(&post, None, None, &[]);
         let missing = diags_with_locator(&diags, "E_BLOG_MISSING_FIELD");
         assert_eq!(missing.len(), 1, "{diags:?}");
         std::fs::remove_dir_all(&dir).ok();
@@ -420,7 +446,7 @@ mod tests {
             slug: "post".to_string(),
             locale: Locale::En,
         };
-        let diags = validate_post(&post, None, None);
+        let diags = validate_post(&post, None, None, &[]);
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].locator, "E_BLOG_MALFORMED_FRONTMATTER");
         assert_eq!(diags[0].severity, Severity::Error);
@@ -439,7 +465,7 @@ mod tests {
             slug: "post".to_string(),
             locale: Locale::En,
         };
-        let diags = validate_post(&post, None, None);
+        let diags = validate_post(&post, None, None, &[]);
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].locator, "E_BLOG_MALFORMED_FRONTMATTER");
         std::fs::remove_dir_all(&dir).ok();
@@ -461,7 +487,7 @@ mod tests {
             slug: "post".to_string(),
             locale: Locale::En,
         };
-        let diags = validate_post(&post, None, None);
+        let diags = validate_post(&post, None, None, &[]);
         assert!(
             diags
                 .iter()
@@ -639,6 +665,77 @@ mod tests {
                 .iter()
                 .all(|d| d.locator != "E_FUNNEL_CTA_UNRESOLVED"),
             "{:?}",
+            report.diagnostics
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------
+    // MV.12.C Task 3: voice tripwire wired into BlogValidator
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn seeded_voice_tell_surfaces_through_blog_validator_run() {
+        // A post whose body contains one of the three seeded phrases must surface
+        // W_VOICE_TELL through BlogValidator::run (not just the bare check_voice function),
+        // proving Task 3's wiring — construction, loading, and the validate_post call site —
+        // is actually in the loop.
+        let dir = fixture_root("mev-blog-voice-tell");
+        let body = format!(
+            "{}\nThis release is production-ready and ships today.\n",
+            clean_frontmatter()
+        );
+        write_post(&dir, "post.mdx", &body);
+
+        let report = BlogValidator::new(None).run(&dir);
+        let tells = diags_with_locator(&report.diagnostics, "W_VOICE_TELL");
+        assert_eq!(tells.len(), 1, "{:?}", report.diagnostics);
+        assert_eq!(tells[0].severity, Severity::Warning);
+        assert!(tells[0].message.contains("production-ready"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn voice_tells_loaded_once_at_construction_not_per_post() {
+        // BlogValidator::new / from_blog_root resolve the tells list once, at construction —
+        // not by re-parsing the data file inside validate_post for every post. Pin this by
+        // asserting the loaded list matches the shipped default exactly, for both
+        // constructors.
+        let expected = voice_tells::default_tells().to_vec();
+        assert_eq!(BlogValidator::new(None).tells, expected);
+
+        let dir = crate::testsupport::unique_temp_dir("mev-blog-voice-tells-loaded-once");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(BlogValidator::from_blog_root(&dir).tells, expected);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn report_with_only_voice_tells_is_not_a_failure() {
+        // The block's central design constraint: a corpus whose ONLY findings are voice tells
+        // must not be a failing report — W_VOICE_TELL can never block a push. A clean post
+        // (no missing fields, no funnel errors) with a seeded phrase in its body should trip
+        // only warnings.
+        let dir = fixture_root("mev-blog-voice-only-not-failure");
+        let body = format!(
+            "{}\nThis release is production-ready and also game-changing.\n",
+            clean_frontmatter()
+        );
+        write_post(&dir, "post.mdx", &body);
+
+        let report = BlogValidator::new(None).run(&dir);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .all(|d| d.severity == Severity::Warning),
+            "expected only warnings, got {:?}",
+            report.diagnostics
+        );
+        assert!(
+            !report.is_failure(),
+            "a corpus with only voice tells must not be a failure, got {:?}",
             report.diagnostics
         );
         std::fs::remove_dir_all(&dir).ok();

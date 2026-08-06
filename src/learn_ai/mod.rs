@@ -11,18 +11,11 @@ pub mod funnel;
 pub mod lint;
 pub mod meta;
 // The phrase list + loader for `MV.12.C`'s voice tripwire; the scanner that consumes it
-// (`voice::check_voice`) is declared below. `#[allow(dead_code)]` is temporary and must come
-// off once Task 3 calls `default_tells`/`parse` from `blog.rs` to wire this into
-// `BlogValidator`.
-#[allow(dead_code)]
+// (`voice::check_voice`) is declared below. Wired into `BlogValidator` by Task 3 (`blog.rs`).
 pub mod voice_tells;
 // The scanner for `MV.12.C`'s voice tripwire (Task 2): `check_voice` matches the phrase list
-// above against prose, exempting code and quotation. Declared here (rather than left out of
-// the module tree) so the crate stays compilable and its own tests run under
-// `cargo nextest run --lib --bins` per this repo's task-boundary rule (see this spec's
-// Amendment Log). `#[allow(dead_code)]` is temporary and must come off once Task 3 calls
-// `check_voice` from `blog.rs`.
-#[allow(dead_code)]
+// above against prose, exempting code and quotation. Wired into `BlogValidator::validate_post`
+// by Task 3 (`blog.rs`).
 pub mod voice;
 
 use std::path::Path;
