@@ -175,8 +175,12 @@ pub fn validate_with_lint(root: &std::path::Path) -> anyhow::Result<Report> {
 /// `E_LINT_DEAD_LOCAL_LINK`, `E_LINT_DEAD_ASSET`), which run on by default for blog posts.
 ///
 /// This is a **content** check — it surfaces through `mev validate`, never `validate-brain`.
+///
+/// `MV.12.B`: also constructs [`BlogValidator`] with its `learn_root` resolved from `root`
+/// (`<content>/blog/published` -> `<content>/learn`) so the funnel checks' `cta: module`
+/// existence resolution actually runs.
 pub fn validate_blog(root: &std::path::Path) -> anyhow::Result<Report> {
-    Ok(BlogValidator.run(root))
+    Ok(BlogValidator::from_blog_root(root).run(root))
 }
 
 /// Validate the company-brain repo rooted at `root` for OKF frontmatter compliance.

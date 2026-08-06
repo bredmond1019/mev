@@ -211,7 +211,7 @@ fn absolute_url_and_anchor_only_links_report_no_dead_link_diagnostics() {
 
 #[test]
 fn every_fixture_post_is_crawled_and_classified() {
-    let (posts, _diags) = BlogValidator.crawl(blog_fixture_root());
+    let (posts, _diags) = BlogValidator::default().crawl(blog_fixture_root());
     let en_slugs: Vec<&str> = posts
         .iter()
         .filter(|p| p.locale == Locale::En)
