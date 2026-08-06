@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-06T17:00:00Z"
+timestamp: "2026-08-06T21:50:00Z"
 ---
 
 # Log — mev
@@ -18,6 +18,29 @@ timestamp: "2026-08-06T17:00:00Z"
 ---
 
 ## [run: 2026-08-06]
+
+### Lane C2 closed — `MV.12.B` + `MV.12.C` shipped, chain complete, close-out run
+- **What:** Closed the Phase 12 chain. **`MV.12.B`** (`12.B-funnel-conformance`, `/sdlc-task`, 5/5
+  tasks) added four gating funnel checks in `src/learn_ai/funnel.rs` — `E_FUNNEL_CTA_UNRESOLVED`,
+  `E_FUNNEL_MISSING_UTM`, `E_FUNNEL_BARE_CAL_LINK`, `E_FUNNEL_RAW_ANALYTICS_ATTR` — with the accepted
+  `cta` vocabulary as data (`data/cta-vocabulary.toml`), not Rust. **`MV.12.C`**
+  (`12.C-voice-tripwire`, `/sdlc-task`, 6/6 tasks) added the warning-only `W_VOICE_TELL` tripwire
+  (`src/learn_ai/voice.rs`, `voice_tells.rs`, `data/voice-tells.toml`), exempting code, inline spans,
+  blockquotes and frontmatter. Both run under the existing `--blog` flag. `MV.12.A` was merged
+  `--no-ff` to `main` (`46459a1`) by hand after `--auto-merge` reported PASS but did not merge.
+  Close-out then added `tests/validate_cli_flags.rs` (7 tests covering the `--blog`/`--lint` CLI
+  dispatch, which had no coverage) and patched `docs/architecture.md`'s module map with the three
+  new modules. Final gates: fmt, clippy, **1200 tests / 0 failures**, release build — all green;
+  `mev validate --blog` exits 0 over the live corpus; bare `mev validate` unchanged at 142/0.
+- **Why:** `MV.12.B` and `MV.12.C` ran on `/sdlc-task`, whose bookkeep is deliberately lean and
+  writes no `log.md` entry — so without this they would have left no narrative history at all. Same
+  reason the docs patch was needed: `sdlc-task` has no docs stage, unlike `sdlc-flow`. Three
+  spec-authoring defects cost this run and are now carryover constraints: task boundaries must fall
+  on compilable states; a check with no true-positive surface still passes every gate; and
+  calibration measured at authoring time is a snapshot a sibling lane can invalidate (learn-ai's
+  `LA.21.C` added a `bastiel` CTA variant mid-run, which would have made `MV.12.B` red on arrival).
+- **Refs:** `planning/orchestration-run/notes.md` (ranked open items + all three defects),
+  `planning/demand-ready/lane-substrate.txt` § C2, `planning/handoff.md`
 
 ### `12.A-blog-module-linting` tasks 8-9 shipped (route-aware link resolution, PASS)
 Follow-on `/sdlc-flow` run against the already-shipped `12.A-blog-module-linting` spec, adding
