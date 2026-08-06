@@ -26,32 +26,60 @@ mev [--json] <subcommand> [args]
 
 ## Subcommands
 
-### `validate [path]`
+### `validate [--blog] [--lint] [path]`
 
-Validate the learn-ai content tree.
+Validate the learn-ai content tree — the learn modules by default, or, with `--blog`, the
+learn-ai **blog** tree instead (Phase 12, Block A). These are **content** checks, not corpus
+checks: they surface here, through `mev validate`, and never through `validate-brain`.
 
 ```bash
-mev validate [path]
+mev validate [--blog] [--lint] [path]
 ```
 
-| Argument | Default | Description |
+| Argument / Flag | Default | Description |
 |---|---|---|
-| `path` | `../learn-ai/content/learn` | Path to the content root |
+| `path` | `../learn-ai/content/learn`, or `../learn-ai/content/blog/published` when `--blog` is given | Path to the content root. The positional's default is resolved after parsing, not conditionally inside the derive, so the existing learn-tree default is untouched when `--blog` is absent. |
+| `--blog` | off | Validate the learn-ai blog tree instead of the learn module tree: EN posts under `blog/published/*.mdx` and pt-BR posts under `blog/published/pt-BR/*.mdx` (`BlogValidator`). Changes the positional path's default and the `--json` consumer label to `"blog"`. Runs the shared content-lint passes (untagged code blocks, dead local links/assets) on by default, alongside the blog-specific frontmatter and pt-BR parity checks. |
+| `--lint` | off | Run the shared content-lint passes (`W_LINT_UNTAGGED_CODE_BLOCK`, `E_LINT_DEAD_LOCAL_LINK`, `E_LINT_DEAD_ASSET`) over learn modules, in addition to the existing frontmatter/JSON checks. Only `ModuleMdx` items get the lint pass — a markdown fence scan over `.json` metadata is meaningless. A no-op when combined with `--blog`, since lint already runs there by default. Without this flag, bare `mev validate` is byte-identical to its pre-Block-A output. |
 
-Checks each file in the tree against the learn-ai frontmatter schema and JSON struct constraints (`LearnAiValidator`).
+Checks each file in the tree against the learn-ai frontmatter schema and JSON struct constraints
+(`LearnAiValidator`). With `--blog`, checks each post's frontmatter (`title`/`date`/`excerpt`
+required), pt-BR filename parity, and the shared lint passes (`BlogValidator`).
 
 **Examples:**
 
 ```bash
-# Default path
+# Default path — learn modules, existing behaviour unchanged
 mev validate
 
 # Explicit path
 mev validate ~/Dev/learn-ai/content/learn
 
+# Learn modules, with the shared lint passes turned on
+mev validate --lint
+
+# Blog tree — frontmatter, pt-BR parity, and lint, all on by default
+mev validate --blog
+
 # Machine-readable output
 mev --json validate
+mev --json validate --blog
 ```
+
+#### Diagnostic codes — `--blog` / `--lint`
+
+| Locator | Severity | Condition |
+|---|---|---|
+| `E_BLOG_MALFORMED_FRONTMATTER` | Error | A blog post's leading `---` YAML frontmatter block is absent or unparseable; causes exit 1 |
+| `E_BLOG_MISSING_FIELD` | Error | A required blog frontmatter field (`title`, `date`, or `excerpt`) is missing or empty; the field name is in the message; causes exit 1 |
+| `W_BLOG_PTBR_MISSING` | Warning | An EN post under `blog/published/*.mdx` has no `pt-BR/<slug>.mdx` counterpart. Warning, not error: three real parity gaps exist in the live tree today, and erroring here would make `--blog` red on arrival and unusable as a gate for `MV.12.B`; exit code unchanged |
+| `W_LINT_UNTAGGED_CODE_BLOCK` | Warning | A fenced code block (` ``` ` or `~~~`) opens with no language tag. Presentation, not correctness; exit code unchanged |
+| `E_LINT_DEAD_LOCAL_LINK` | Error | A relative markdown link `[text](target)` resolves to a path that does not exist on disk. Absolute URLs (`http://`, `https://`, `mailto:`, protocol-relative `//`) and in-page anchors (`#...`) are skipped, never reported; causes exit 1 |
+| `E_LINT_DEAD_ASSET` | Error | An image reference `![alt](target)` resolves to a path that does not exist on disk; causes exit 1 |
+
+`--blog` and `--lint` are content checks over the learn-ai repo, surfaced only through `mev
+validate` — they have no `validate-brain` equivalent and never will, per the Phase 12 boundary
+between content linting and brain-corpus validation.
 
 ---
 
