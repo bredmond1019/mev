@@ -26,32 +26,88 @@ mev [--json] <subcommand> [args]
 
 ## Subcommands
 
-### `validate [path]`
+### `validate [--blog] [--lint] [path]`
 
-Validate the learn-ai content tree.
+Validate the learn-ai content tree — the learn modules by default, or, with `--blog`, the
+learn-ai **blog** tree instead (Phase 12, Block A). These are **content** checks, not corpus
+checks: they surface here, through `mev validate`, and never through `validate-brain`.
 
 ```bash
-mev validate [path]
+mev validate [--blog] [--lint] [path]
 ```
 
-| Argument | Default | Description |
+| Argument / Flag | Default | Description |
 |---|---|---|
-| `path` | `../learn-ai/content/learn` | Path to the content root |
+| `path` | `../learn-ai/content/learn`, or `../learn-ai/content/blog/published` when `--blog` is given | Path to the content root. The positional's default is resolved after parsing, not conditionally inside the derive, so the existing learn-tree default is untouched when `--blog` is absent. |
+| `--blog` | off | Validate the learn-ai blog tree instead of the learn module tree: EN posts under `blog/published/*.mdx` and pt-BR posts under `blog/published/pt-BR/*.mdx` (`BlogValidator`). Changes the positional path's default and the `--json` consumer label to `"blog"`. Runs the shared content-lint passes (untagged code blocks, dead local links/assets) on by default, alongside the blog-specific frontmatter and pt-BR parity checks. |
+| `--lint` | off | Run the shared content-lint passes (`W_LINT_UNTAGGED_CODE_BLOCK`, `E_LINT_DEAD_LOCAL_LINK`, `E_LINT_DEAD_ASSET`) over learn modules, in addition to the existing frontmatter/JSON checks. Only `ModuleMdx` items get the lint pass — a markdown fence scan over `.json` metadata is meaningless. A no-op when combined with `--blog`, since lint already runs there by default. Without this flag, bare `mev validate` is byte-identical to its pre-Block-A output. |
 
-Checks each file in the tree against the learn-ai frontmatter schema and JSON struct constraints (`LearnAiValidator`).
+Checks each file in the tree against the learn-ai frontmatter schema and JSON struct constraints
+(`LearnAiValidator`). With `--blog`, checks each post's frontmatter (`title`/`date`/`excerpt`
+required), pt-BR filename parity, and the shared lint passes (`BlogValidator`).
 
 **Examples:**
 
 ```bash
-# Default path
+# Default path — learn modules, existing behaviour unchanged
 mev validate
 
 # Explicit path
 mev validate ~/Dev/learn-ai/content/learn
 
+# Learn modules, with the shared lint passes turned on
+mev validate --lint
+
+# Blog tree — frontmatter, pt-BR parity, and lint, all on by default
+mev validate --blog
+
 # Machine-readable output
 mev --json validate
+mev --json validate --blog
 ```
+
+#### Diagnostic codes — `--blog` / `--lint`
+
+| Locator | Severity | Condition |
+|---|---|---|
+| `E_BLOG_MALFORMED_FRONTMATTER` | Error | A blog post's leading `---` YAML frontmatter block is absent or unparseable; causes exit 1 |
+| `E_BLOG_MISSING_FIELD` | Error | A required blog frontmatter field (`title`, `date`, or `excerpt`) is missing or empty; the field name is in the message; causes exit 1 |
+| `W_BLOG_PTBR_MISSING` | Warning | An EN post under `blog/published/*.mdx` has no `pt-BR/<slug>.mdx` counterpart. Warning, not error: three real parity gaps exist in the live tree today, and erroring here would make `--blog` red on arrival and unusable as a gate for `MV.12.B`; exit code unchanged |
+| `W_LINT_UNTAGGED_CODE_BLOCK` | Warning | A fenced code block (` ``` ` or `~~~`) opens with no language tag. Presentation, not correctness; exit code unchanged |
+| `E_LINT_DEAD_LOCAL_LINK` | Error | A markdown link `[text](target)` resolves to a path that does not exist. Absolute URLs (`http://`, `https://`, `mailto:`, protocol-relative `//`) and in-page anchors (`#...`) are skipped, never reported. A genuinely relative target (`./x.md`, `../assets/y.png`) resolves against the file's parent directory. A **site-absolute** target (a single leading `/`, e.g. `/en/blog/x`) is a Next.js route, not a filesystem path — see "Site-absolute route resolution" below; causes exit 1 |
+| `E_LINT_DEAD_ASSET` | Error | An image reference `![alt](target)` resolves to a path that does not exist on disk; causes exit 1 |
+
+`--blog` and `--lint` are content checks over the learn-ai repo, surfaced only through `mev
+validate` — they have no `validate-brain` equivalent and never will, per the Phase 12 boundary
+between content linting and brain-corpus validation.
+
+#### Site-absolute route resolution (`E_LINT_DEAD_LOCAL_LINK`)
+
+A link target with a single leading `/` (not `//`, which is protocol-relative and skipped) is a
+Next.js route, not a filesystem path, and resolves through four mapping rules against a
+`content_root` — the directory containing both `blog/` and `learn/` — derived from the
+validator's root (`<content>/blog/published` and `<content>/learn` both strip back to
+`<content>`; when the root doesn't match either shape, `content_root` is `None` and **every**
+absolute link is skipped, never reported, rather than guessed at):
+
+| Route shape | Resolves to |
+|---|---|
+| `/<locale>/blog/<slug>` | `blog/published/<slug>.mdx` for `en`; `blog/published/pt-BR/<slug>.mdx` for `pt-BR` |
+| `/blog/<slug>` (no locale segment) | `blog/published/<slug>.mdx` |
+| `/learn/paths/<slug>` | `learn/paths/<slug>` |
+| `/learn/<slug>` | `learn/paths/<slug>` (both shapes are in live use) |
+| anything else | skipped silently, never reported — mev does not assert on routes it does not model |
+
+This was added after the block's first full pass found `E_LINT_DEAD_LOCAL_LINK` firing 29 times
+over the live corpus (18 blog, 11 learn) with zero true positives — every target was a real
+site route resolved as a filesystem path. All 29 are fixed by the mapping above (one additional
+learn-tree false positive, unrelated to routing — link-shaped text inside code embedded via a
+JSX component prop, which carries no ` ``` ` fence — is fixed by making the link scanner
+fence-aware and by skipping any `[` immediately glued to a preceding identifier character, e.g.
+a Python indexing expression like `results` immediately followed by an open bracket, an index, a
+close bracket, and a call — the array-indexing-then-call shape that reads as markdown link syntax
+if you don't special-case it). `mev validate --blog` and `mev validate --lint`
+each report zero `E_LINT_DEAD_LOCAL_LINK` over the live corpus as a result, pinned by tests.
 
 ---
 

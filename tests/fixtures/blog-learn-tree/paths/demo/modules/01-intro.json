@@ -1,0 +1,19 @@
+{
+  "metadata": {
+    "id": "intro",
+    "pathId": "demo",
+    "title": "Intro",
+    "description": "A minimal module fixture for the regression pin.",
+    "duration": "5 minutes",
+    "type": "concept",
+    "difficulty": "beginner",
+    "order": 1,
+    "objectives": ["Understand the fixture"],
+    "tags": ["demo"],
+    "version": "1.0.0",
+    "lastUpdated": "2026-01-01"
+  },
+  "sections": [
+    { "id": "overview", "type": "content", "order": 1 }
+  ]
+}

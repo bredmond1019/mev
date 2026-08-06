@@ -48,6 +48,7 @@ pub use doc::{
     plan_merge_contacts, plan_set_stage,
 };
 pub use learn_ai::LearnAiValidator;
+pub use learn_ai::blog::{BlogPost, BlogValidator};
 pub use learn_ai::crawl::{ContentFile, Corpus, FileKind, Locale, crawl};
 pub use learn_ai::meta::validate_file;
 pub use validator::ContentValidator;
@@ -147,8 +148,35 @@ impl Report {
 /// All diagnostics (filename + struct/frontmatter) are collected into the returned [`Report`].
 ///
 /// Delegates to [`LearnAiValidator`] via the [`ContentValidator`] trait's default `run` driver.
+///
+/// Always constructs the **default** validator (`lint: false`) — this function's behaviour is
+/// pinned by a byte-identical regression test, so the shared lint passes never run here. Use
+/// [`validate_with_lint`] to opt into them.
 pub fn validate(root: &std::path::Path) -> anyhow::Result<Report> {
-    Ok(LearnAiValidator.run(root))
+    Ok(LearnAiValidator::default().run(root))
+}
+
+/// Validate the learn-agentic-ai.com module tree with the shared content-lint passes
+/// ([`learn_ai::lint::lint_code_blocks`] / [`learn_ai::lint::lint_local_links`]) turned on.
+///
+/// Phase 12, Block A: identical crawl and frontmatter/struct checks to [`validate`], plus
+/// `W_LINT_UNTAGGED_CODE_BLOCK` / `E_LINT_DEAD_LOCAL_LINK` / `E_LINT_DEAD_ASSET` over
+/// `FileKind::ModuleMdx` items. `validate` itself is unaffected — it always builds the
+/// default (lint-off) validator.
+pub fn validate_with_lint(root: &std::path::Path) -> anyhow::Result<Report> {
+    Ok(LearnAiValidator::with_lint(true).run(root))
+}
+
+/// Validate the learn-agentic-ai.com blog tree (EN + pt-BR) rooted at `root`.
+///
+/// Phase 12, Block A: delegates to [`BlogValidator`] via the [`ContentValidator`] trait's
+/// default `run` driver. Surfaces `E_BLOG_MALFORMED_FRONTMATTER`, `E_BLOG_MISSING_FIELD`,
+/// `W_BLOG_PTBR_MISSING`, plus the shared lint codes (`W_LINT_UNTAGGED_CODE_BLOCK`,
+/// `E_LINT_DEAD_LOCAL_LINK`, `E_LINT_DEAD_ASSET`), which run on by default for blog posts.
+///
+/// This is a **content** check — it surfaces through `mev validate`, never `validate-brain`.
+pub fn validate_blog(root: &std::path::Path) -> anyhow::Result<Report> {
+    Ok(BlogValidator.run(root))
 }
 
 /// Validate the company-brain repo rooted at `root` for OKF frontmatter compliance.
@@ -1446,5 +1474,62 @@ impl JsonReport {
     /// Serialize to a pretty-printed JSON string.
     pub fn to_json(&self) -> anyhow::Result<String> {
         Ok(serde_json::to_string_pretty(self)?)
+    }
+}
+
+#[cfg(test)]
+mod entry_point_tests {
+    use super::*;
+
+    #[test]
+    fn validate_blog_on_empty_dir_returns_empty_report() {
+        let dir = testsupport::unique_temp_dir("mev-validate-blog-empty-test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let report = validate_blog(&dir).expect("validate_blog should not error on an empty dir");
+        assert!(
+            report.diagnostics.is_empty(),
+            "expected empty report for empty blog dir, got {:?}",
+            report.diagnostics
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_with_lint_reports_lint_diagnostics_where_validate_reports_none() {
+        let dir = testsupport::unique_temp_dir("mev-validate-with-lint-test");
+        let modules_dir = dir.join("paths").join("demo").join("modules");
+        std::fs::create_dir_all(&modules_dir).unwrap();
+        let body = "---\ntitle: Intro\ndescription: An intro module.\nduration: 5 minutes\ndifficulty: beginner\nlastUpdated: 2026-01-01\n---\n\n```\nno language tag here\n```\n\n[dead link](./nowhere.mdx)\n";
+        std::fs::write(modules_dir.join("01-intro.mdx"), body).unwrap();
+
+        let plain = validate(&dir).expect("validate should not error");
+        assert!(
+            plain
+                .diagnostics
+                .iter()
+                .all(|d| d.locator != "W_LINT_UNTAGGED_CODE_BLOCK"
+                    && d.locator != "E_LINT_DEAD_LOCAL_LINK"),
+            "bare validate() must not emit lint diagnostics, got {:?}",
+            plain.diagnostics
+        );
+
+        let linted = validate_with_lint(&dir).expect("validate_with_lint should not error");
+        let locators: Vec<&str> = linted
+            .diagnostics
+            .iter()
+            .map(|d| d.locator.as_str())
+            .collect();
+        assert!(
+            locators.contains(&"W_LINT_UNTAGGED_CODE_BLOCK"),
+            "expected W_LINT_UNTAGGED_CODE_BLOCK, got {locators:?}"
+        );
+        assert!(
+            locators.contains(&"E_LINT_DEAD_LOCAL_LINK"),
+            "expected E_LINT_DEAD_LOCAL_LINK, got {locators:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

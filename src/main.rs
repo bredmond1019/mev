@@ -39,10 +39,34 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Validate the learn-ai content tree (Phase 1: learn modules).
+    ///
+    /// With --blog, validates the learn-ai blog tree instead (Phase 12, Block A): EN posts under
+    /// `blog/published/*.mdx` and pt-BR posts under `blog/published/pt-BR/*.mdx`. Surfaces
+    /// `E_BLOG_MALFORMED_FRONTMATTER`, `E_BLOG_MISSING_FIELD`, `W_BLOG_PTBR_MISSING`, and the
+    /// shared lint codes (`W_LINT_UNTAGGED_CODE_BLOCK`, `E_LINT_DEAD_LOCAL_LINK`,
+    /// `E_LINT_DEAD_ASSET`), which run on by default for blog posts. This is a **content**
+    /// check — it surfaces here, never through `validate-brain`.
+    ///
+    /// With --lint (and without --blog), additionally runs the shared content-lint passes over
+    /// learn modules, reporting `W_LINT_UNTAGGED_CODE_BLOCK` / `E_LINT_DEAD_LOCAL_LINK` /
+    /// `E_LINT_DEAD_ASSET`. A no-op when combined with --blog, since lint is already on there.
+    /// Without either flag, behaviour is byte-identical to the pre-Phase-12 binary.
     Validate {
-        /// Path to the content root (e.g. ../learn-ai/content/learn).
-        #[arg(default_value = "../learn-ai/content/learn")]
-        path: PathBuf,
+        /// Path to the content root. Defaults to ../learn-ai/content/learn, or, when --blog is
+        /// given, to ../learn-ai/content/blog/published.
+        path: Option<PathBuf>,
+        /// Validate the learn-ai blog tree instead of the learn module tree. Changes the
+        /// positional path's default and the --json consumer label to "blog". Runs the shared
+        /// lint passes (untagged code blocks, dead local links/assets) on by default alongside
+        /// the blog-specific frontmatter and pt-BR parity checks.
+        #[arg(long)]
+        blog: bool,
+        /// Run the shared content-lint passes (W_LINT_UNTAGGED_CODE_BLOCK,
+        /// E_LINT_DEAD_LOCAL_LINK, E_LINT_DEAD_ASSET) over learn modules. Ignored (no-op) when
+        /// --blog is also given, since lint already runs there by default. Without this flag,
+        /// `mev validate` stays byte-identical to the pre-Phase-12 binary.
+        #[arg(long)]
+        lint: bool,
     },
     /// Validate the Bastion Brain repo for OKF frontmatter compliance (Phase 2).
     /// With --sync, also checks cross-repo synced_from watermark integrity (Phase 3, Block M).
@@ -1154,39 +1178,58 @@ fn print_conformance_report(report: &mev::ConformanceReport) {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::Validate { path } => match mev::validate(&path) {
-            Ok(report) => {
-                if cli.json {
-                    let envelope = mev::JsonReport::new("learn-ai", &path, &report);
-                    match envelope.to_json() {
-                        Ok(s) => println!("{s}"),
-                        Err(err) => {
-                            eprintln!("error serializing JSON: {err:#}");
-                            return ExitCode::FAILURE;
+        Command::Validate { path, blog, lint } => {
+            // The positional's default is resolved here rather than in the derive so it can
+            // depend on --blog: leaving the clap default off the blog case keeps the existing
+            // learn-tree default (`../learn-ai/content/learn`) untouched when --blog is absent.
+            let path = path.unwrap_or_else(|| {
+                if blog {
+                    PathBuf::from("../learn-ai/content/blog/published")
+                } else {
+                    PathBuf::from("../learn-ai/content/learn")
+                }
+            });
+            let (result, consumer_label) = if blog {
+                (mev::validate_blog(&path), "blog")
+            } else if lint {
+                (mev::validate_with_lint(&path), "learn-ai")
+            } else {
+                (mev::validate(&path), "learn-ai")
+            };
+            match result {
+                Ok(report) => {
+                    if cli.json {
+                        let envelope = mev::JsonReport::new(consumer_label, &path, &report);
+                        match envelope.to_json() {
+                            Ok(s) => println!("{s}"),
+                            Err(err) => {
+                                eprintln!("error serializing JSON: {err:#}");
+                                return ExitCode::FAILURE;
+                            }
                         }
+                    } else {
+                        for d in &report.diagnostics {
+                            print_diagnostic(d);
+                        }
+                        println!(
+                            "validated {}: {} error(s), {} warning(s)",
+                            path.display(),
+                            report.error_count(),
+                            report.warning_count()
+                        );
                     }
-                } else {
-                    for d in &report.diagnostics {
-                        print_diagnostic(d);
+                    if report.is_failure() {
+                        ExitCode::FAILURE
+                    } else {
+                        ExitCode::SUCCESS
                     }
-                    println!(
-                        "validated {}: {} error(s), {} warning(s)",
-                        path.display(),
-                        report.error_count(),
-                        report.warning_count()
-                    );
                 }
-                if report.is_failure() {
+                Err(err) => {
+                    eprintln!("error: {err:#}");
                     ExitCode::FAILURE
-                } else {
-                    ExitCode::SUCCESS
                 }
             }
-            Err(err) => {
-                eprintln!("error: {err:#}");
-                ExitCode::FAILURE
-            }
-        },
+        }
         Command::ValidateBrain {
             path,
             sync,
