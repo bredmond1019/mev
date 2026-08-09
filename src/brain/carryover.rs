@@ -38,8 +38,18 @@
 //! deleting a live, unresolved known_issue. A false `cleared` is the only verdict here
 //! that destroys durable knowledge; every ambiguity resolves away from it.
 //!
-//! **Class B — path existence.** Only when `clears_when` contains the literal word
-//! `exists` ([`path_refs_from_prose`]).
+//! **Class B — path assertions.** A path token (contains `/`, ends in a known
+//! extension) is extracted only when `clears_when` also contains a word-bounded
+//! entry from [`PATH_PRESENCE_VERBS`] (`exists`, `created`, `added`, `written`,
+//! `present`, `corrected`, `fixed`) or [`PATH_ABSENCE_VERBS`] (`removed`,
+//! `deleted`, `gone`) — the path analogue of [`CLOSURE_VERBS`]: a path named
+//! with no assertion verb is a *subject*, not a *condition*
+//! ([`path_refs_from_prose`]). Presence verbs are satisfied when the path
+//! exists ([`CarryoverRef::Path`]); absence verbs are satisfied when it does
+//! **not** ([`CarryoverRef::PathAbsent`]) — a distinct ref variant because the
+//! satisfaction polarity is flipped and conflating the two would let "X is
+//! deleted" read as cleared merely because X is *named*, not because it is
+//! actually gone.
 //!
 //! No `regex` dependency is used or added — the grammar is small and fixed, so it is
 //! matched by hand (char scanning) in [`extract_block_id_tokens`].
@@ -95,6 +105,16 @@ pub enum NotEvaluableReason {
     /// `Cleared` regardless of what the command would have exited — an
     /// unrun command is unknown, and unknown must never read as cleared.
     ExecutionNotAllowed,
+    /// `clears_when` mentions a validator/gate/CI concept (see
+    /// [`GATE_MENTION_WORDS`]) but no path or block reference could be
+    /// extracted from it — e.g. *"the validator is green"* alone. Not
+    /// checkable from a data file; surfaced distinctly from plain
+    /// [`Self::Prose`] so an operator sees it as a candidate for a typed
+    /// `command_exits_zero` predicate rather than as generic unstructured
+    /// text. Deriving and running a command from this prose automatically
+    /// is explicitly out of scope — this reason only names the possibility
+    /// for a human.
+    GateMentionNotCheckable,
 }
 
 /// One extracted, resolved reference and whether it is currently satisfied.
@@ -107,6 +127,15 @@ pub enum CarryoverRef {
     /// A path-existence reference. Satisfied when the path resolves to an
     /// existing file (relative to the brain root or the owning repo's path).
     Path { path: String, satisfied: bool },
+    /// A path-*absence* reference, produced when prose asserts a path was
+    /// removed/deleted/gone rather than that it exists (see
+    /// [`PATH_ABSENCE_VERBS`]). Satisfied when the path does **not** resolve
+    /// to an existing file — the inverse polarity of [`Self::Path`]. Kept as
+    /// a distinct variant rather than a flag on `Path` so a reader of the
+    /// enum (and `print_carryover_report`) cannot mistake "the path exists"
+    /// for "the path is gone", which is exactly the false-`cleared` shape
+    /// this reference exists to avoid.
+    PathAbsent { path: String, satisfied: bool },
     /// A typed `block_closed` predicate whose `"{repo}:{id}"` key has no
     /// entry at all in the loaded status map — an unresolvable target
     /// (wrong repo slug, wrong ID, or a corpus that simply never loaded that
@@ -396,18 +425,75 @@ pub fn block_refs_from_prose(
 /// File extensions a path-existence token may end in.
 const PATH_EXTENSIONS: &[&str] = &["md", "rs", "py", "sh", "ts", "tsx", "json", "toml"];
 
-/// Path tokens matched in `clears_when` prose — only when the text contains the
-/// literal word `exists` (case-insensitive, word-bounded). Every
-/// whitespace-delimited token containing `/` and ending in one of
-/// [`PATH_EXTENSIONS`] is returned, trimmed of surrounding punctuation/quotes.
-/// Returns `[]` when the word `exists` is absent.
-pub fn path_refs_from_prose(clears_when: &str) -> Vec<String> {
-    let has_exists = clears_when
-        .split(|c: char| !c.is_alphanumeric())
-        .any(|w| w.eq_ignore_ascii_case("exists"));
-    if !has_exists {
-        return Vec::new();
+/// Whether a path assertion in `clears_when` claims the path is *present* or
+/// *absent* — see [`PATH_PRESENCE_VERBS`] / [`PATH_ABSENCE_VERBS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathAssertion {
+    /// The predicate claims the path exists / was created / written /
+    /// corrected — satisfied when it resolves to an existing file.
+    Present,
+    /// The predicate claims the path was removed / deleted / is gone —
+    /// satisfied when it does **not** resolve to an existing file.
+    Absent,
+}
+
+/// Verbs asserting that a named path's *presence* is the clearing condition —
+/// the path analogue of [`CLOSURE_VERBS`] for the path axis. Includes the
+/// `corrected`/`fixed` family: a predicate like *"the count in X.md is
+/// corrected"* is only checkable via the named file's existence, so those
+/// verbs widen the presence vocabulary rather than adding new grammar (see
+/// module header).
+pub const PATH_PRESENCE_VERBS: &[&str] = &[
+    "exists",
+    "created",
+    "added",
+    "written",
+    "present",
+    "corrected",
+    "fixed",
+];
+
+/// Verbs asserting that a named path's *absence* is the clearing condition —
+/// satisfied when the path does **not** exist. See [`CarryoverRef::PathAbsent`].
+pub const PATH_ABSENCE_VERBS: &[&str] = &["removed", "deleted", "gone"];
+
+/// Word-bounded scan of `clears_when` for a [`PATH_ABSENCE_VERBS`] or
+/// [`PATH_PRESENCE_VERBS`] entry. Absence verbs are checked first: they are
+/// the smaller, more specific vocabulary, and a predicate is expected to
+/// assert one polarity, not both. Returns `None` when neither vocabulary is
+/// present — a path named with no assertion verb at all is a *subject*, not
+/// a *condition* (the identical trap [`CLOSURE_VERBS`] closes for block IDs).
+fn path_assertion(clears_when: &str) -> Option<PathAssertion> {
+    let lower = clears_when.to_ascii_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.iter().any(|w| PATH_ABSENCE_VERBS.contains(w)) {
+        Some(PathAssertion::Absent)
+    } else if words.iter().any(|w| PATH_PRESENCE_VERBS.contains(w)) {
+        Some(PathAssertion::Present)
+    } else {
+        None
     }
+}
+
+/// Path tokens matched in `clears_when` prose, each paired with the
+/// [`PathAssertion`] polarity the predicate asserts for it.
+///
+/// Returns `[]` when [`path_assertion`] finds neither a presence nor an
+/// absence verb — a bounded, documented gate (not the previous single literal
+/// `exists` check) that still keeps a bare path mention from being read as a
+/// clearing condition. Every whitespace-delimited token containing `/` and
+/// ending in one of [`PATH_EXTENSIONS`] is returned, trimmed of surrounding
+/// punctuation/quotes. All paths in one predicate share the same polarity —
+/// a predicate asserting both presence of one path and absence of another in
+/// the same sentence is outside this module's grammar (same "keep it small
+/// and fixed" bias as [`extract_block_id_tokens`]).
+pub fn path_refs_from_prose(clears_when: &str) -> Vec<(String, PathAssertion)> {
+    let Some(assertion) = path_assertion(clears_when) else {
+        return Vec::new();
+    };
 
     clears_when
         .split_whitespace()
@@ -418,12 +504,40 @@ pub fn path_refs_from_prose(clears_when: &str) -> Vec<String> {
             }
             let ext = trimmed.rsplit('.').next()?;
             if PATH_EXTENSIONS.contains(&ext) {
-                Some(trimmed.to_string())
+                Some((trimmed.to_string(), assertion))
             } else {
                 None
             }
         })
         .collect()
+}
+
+/// Words naming a validator/gate/CI concept in `clears_when` — see
+/// [`NotEvaluableReason::GateMentionNotCheckable`]. Matched word-bounded and
+/// case-insensitively, the same way [`has_closure_verb`] matches
+/// [`CLOSURE_VERBS`]. Deliberately does NOT include the bare word `check` —
+/// too common in ordinary English to be a reliable gate signal on its own.
+pub const GATE_MENTION_WORDS: &[&str] = &[
+    "validator",
+    "validators",
+    "gate",
+    "gates",
+    "lint",
+    "linter",
+    "harness",
+    "pipeline",
+    "suite",
+    "ci",
+];
+
+/// Whether `clears_when` contains a word-bounded [`GATE_MENTION_WORDS`] entry.
+pub fn mentions_gate(clears_when: &str) -> bool {
+    let lower = clears_when.to_ascii_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.iter().any(|w| GATE_MENTION_WORDS.contains(w))
 }
 
 // ---------------------------------------------------------------------------
@@ -628,15 +742,29 @@ pub fn evaluate_carryover(
                         refs.push(CarryoverRef::Block { key, satisfied });
                     }
 
-                    // Class B: path existence, only when "exists" appears.
-                    for path in path_refs_from_prose(clears_when) {
-                        let satisfied = path_ref_satisfied(
+                    // Class B: path assertions, gated by a bounded presence/
+                    // absence verb vocabulary (see `path_assertion`).
+                    for (path, assertion) in path_refs_from_prose(clears_when) {
+                        let exists = path_ref_satisfied(
                             &path,
                             brain_root,
                             repo_paths,
                             src.repo_slug.as_str(),
                         );
-                        refs.push(CarryoverRef::Path { path, satisfied });
+                        match assertion {
+                            PathAssertion::Present => {
+                                refs.push(CarryoverRef::Path {
+                                    path,
+                                    satisfied: exists,
+                                });
+                            }
+                            PathAssertion::Absent => {
+                                refs.push(CarryoverRef::PathAbsent {
+                                    path,
+                                    satisfied: !exists,
+                                });
+                            }
+                        }
                     }
                 }
                 Some(ClearsWhen::Predicate(ClearsWhenPredicate::BlockClosed {
@@ -718,6 +846,7 @@ pub fn evaluate_carryover(
                 let all_satisfied = refs.iter().all(|r| match r {
                     CarryoverRef::Block { satisfied, .. } => *satisfied,
                     CarryoverRef::Path { satisfied, .. } => *satisfied,
+                    CarryoverRef::PathAbsent { satisfied, .. } => *satisfied,
                     CarryoverRef::UnresolvedBlock { .. } => false,
                     CarryoverRef::FileContains { satisfied, .. } => *satisfied,
                     CarryoverRef::CommandExitsZero { satisfied, .. } => *satisfied,
@@ -738,6 +867,12 @@ pub fn evaluate_carryover(
                 {
                     // Names a block but never says it must close.
                     NotEvaluableReason::NoClosureVerb
+                } else if mentions_gate(clears_when) {
+                    // Names a validator/gate/CI concept but nothing checkable
+                    // (no path, no block) could be extracted from it — a
+                    // candidate for a typed `command_exits_zero` predicate,
+                    // never something this sweep derives and runs itself.
+                    NotEvaluableReason::GateMentionNotCheckable
                 } else {
                     NotEvaluableReason::Prose
                 };
@@ -1002,8 +1137,14 @@ mod tests {
         assert_eq!(
             refs,
             vec![
-                "docs/decisions/D58-us-market-entry-and-two-domain-split.md",
-                "docs/decisions/index.md",
+                (
+                    "docs/decisions/D58-us-market-entry-and-two-domain-split.md".to_string(),
+                    PathAssertion::Present
+                ),
+                (
+                    "docs/decisions/index.md".to_string(),
+                    PathAssertion::Present
+                ),
             ]
         );
     }
@@ -1019,7 +1160,94 @@ mod tests {
     fn path_refs_from_prose_trims_surrounding_punctuation_and_quotes() {
         let text = "exists: \"docs/index.md\", (planning/status.md).";
         let refs = path_refs_from_prose(text);
-        assert_eq!(refs, vec!["docs/index.md", "planning/status.md"]);
+        assert_eq!(
+            refs,
+            vec![
+                ("docs/index.md".to_string(), PathAssertion::Present),
+                ("planning/status.md".to_string(), PathAssertion::Present),
+            ]
+        );
+    }
+
+    // -- Task 3: broadened path assertion vocabulary -------------------------
+
+    /// RED-FIRST GUARD (a): a path named in prose with no assertion verb at
+    /// all — presence or absence — must stay unextracted. Before this task's
+    /// widening, this test was equivalent to
+    /// `path_refs_from_prose_empty_when_no_exists_word` and passed trivially;
+    /// it is kept as its own guard because the widening below adds many new
+    /// verbs and this is the case a careless widening (e.g. dropping the gate
+    /// instead of bounding it) would break first.
+    #[test]
+    fn path_refs_from_prose_stays_empty_for_a_bare_path_mention_with_no_assertion_verb() {
+        let text = "see docs/decisions/D58-foo.md for the rationale";
+        assert!(path_refs_from_prose(text).is_empty());
+    }
+
+    #[test]
+    fn path_refs_from_prose_extracts_via_created_added_written_present_verbs() {
+        assert_eq!(
+            path_refs_from_prose("docs/new.md is created"),
+            vec![("docs/new.md".to_string(), PathAssertion::Present)]
+        );
+        assert_eq!(
+            path_refs_from_prose("docs/new.md is added to the index"),
+            vec![("docs/new.md".to_string(), PathAssertion::Present)]
+        );
+        assert_eq!(
+            path_refs_from_prose("docs/new.md is written"),
+            vec![("docs/new.md".to_string(), PathAssertion::Present)]
+        );
+        assert_eq!(
+            path_refs_from_prose("docs/new.md is present"),
+            vec![("docs/new.md".to_string(), PathAssertion::Present)]
+        );
+    }
+
+    /// (b) corrected/fixed pair with a named file — extraction goes through
+    /// the widened presence vocabulary, not new grammar.
+    #[test]
+    fn path_refs_from_prose_extracts_via_corrected_and_fixed_verbs() {
+        assert_eq!(
+            path_refs_from_prose("the count in docs/report.md is corrected"),
+            vec![("docs/report.md".to_string(), PathAssertion::Present)]
+        );
+        assert_eq!(
+            path_refs_from_prose("docs/report.md is fixed"),
+            vec![("docs/report.md".to_string(), PathAssertion::Present)]
+        );
+    }
+
+    /// "X is corrected" alone, with nothing checkable named, stays
+    /// NotEvaluable — verified at the `evaluate_carryover` level below
+    /// (`corrected_predicate_naming_nothing_checkable_stays_not_evaluable`).
+    #[test]
+    fn path_refs_from_prose_extracts_via_removed_deleted_gone_verbs_as_absent() {
+        assert_eq!(
+            path_refs_from_prose("docs/old.md is removed"),
+            vec![("docs/old.md".to_string(), PathAssertion::Absent)]
+        );
+        assert_eq!(
+            path_refs_from_prose("docs/old.md is deleted"),
+            vec![("docs/old.md".to_string(), PathAssertion::Absent)]
+        );
+        assert_eq!(
+            path_refs_from_prose("docs/old.md is gone"),
+            vec![("docs/old.md".to_string(), PathAssertion::Absent)]
+        );
+    }
+
+    // -- mentions_gate ---------------------------------------------------------
+
+    #[test]
+    fn mentions_gate_matches_word_bounded_validator_and_gate_vocabulary() {
+        assert!(mentions_gate("the validator is green"));
+        assert!(mentions_gate("CI passes"));
+        assert!(mentions_gate("the harness gate is satisfied"));
+        assert!(!mentions_gate("the count is corrected"));
+        // Word-bounding: "gated" must not match "gate" as a substring of an
+        // unrelated word (mirrors `has_closure_verb_is_word_bounded`).
+        assert!(!mentions_gate("the feature is gated behind a flag"));
     }
 
     // -- evaluate_carryover ----------------------------------------------------
@@ -2457,5 +2685,290 @@ mod tests {
         // see the module-level doc on `evaluate_carryover`'s Predicate arm.
         assert!(has_closure_verb("BA.0.A closes"));
         assert!(!has_closure_verb("one of the two BA.0.A blocks is renamed"));
+    }
+
+    // -- Task 3: prose widening, wired through evaluate_carryover ------------
+
+    /// RED-FIRST GUARD (a): a bare path mention with no assertion verb, run
+    /// through the full evaluator (not just the extractor), stays
+    /// NotEvaluable — never Actionable, and certainly never Cleared, merely
+    /// because a path-shaped token happens to appear in the prose.
+    #[test]
+    fn bare_path_mention_with_no_assertion_verb_stays_not_evaluable() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![item(
+                    "bare-path-mention",
+                    "deferred",
+                    Some("see docs/decisions/D58-foo.md for the rationale"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
+        assert_eq!(report.entries[0].reason, Some(NotEvaluableReason::Prose));
+    }
+
+    /// RED-FIRST GUARD (a continued) — the polarity guard: an
+    /// absence-assertion ("X is removed") over a path that in fact still
+    /// EXISTS must land Actionable, never Cleared. Before `PathAbsent`
+    /// existed, the only representable ref was `Path { satisfied: exists }`,
+    /// which would have reported this entry `cleared` purely because the
+    /// path is named and resolves — exactly the false-`cleared` shape this
+    /// guard exists to catch.
+    #[test]
+    fn absence_assertion_over_a_still_existing_path_is_actionable_never_cleared() {
+        let dir = std::env::temp_dir().join(format!(
+            "mev-carryover-path-absent-still-exists-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/stale.md"), "still here").unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![item(
+                    "absence-over-existing",
+                    "deferred",
+                    Some("docs/stale.md is removed"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.entries[0].lane, CarryoverLane::Actionable);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::PathAbsent {
+                path: "docs/stale.md".to_string(),
+                satisfied: false,
+            }]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The positive case, for completeness: an absence-assertion over a path
+    /// that has genuinely been removed clears.
+    #[test]
+    fn absence_assertion_over_a_missing_path_clears() {
+        let dir = std::env::temp_dir().join(format!(
+            "mev-carryover-path-absent-gone-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![item(
+                    "absence-over-missing",
+                    "deferred",
+                    Some("docs/stale.md is deleted"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// (b) "X is corrected" alone, with nothing checkable named, stays
+    /// NotEvaluable — the widening only reaches predicates that resolve to
+    /// an already-checkable file/block reference.
+    #[test]
+    fn corrected_predicate_naming_nothing_checkable_stays_not_evaluable() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![item(
+                    "corrected-nothing-checkable",
+                    "deferred",
+                    Some("the count is corrected"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
+        assert_eq!(report.entries[0].reason, Some(NotEvaluableReason::Prose));
+    }
+
+    /// RED-FIRST GUARD (c): a gate/validator mention with nothing checkable
+    /// stays NotEvaluable with the dedicated reason, never Actionable or
+    /// Cleared — no ref is fabricated from "the validator is green" and no
+    /// command is derived from it and run.
+    #[test]
+    fn gate_mention_with_nothing_checkable_stays_not_evaluable_never_cleared() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![item(
+                    "gate-mention-only",
+                    "deferred",
+                    Some("the validator is green"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
+        assert!(report.entries[0].refs.is_empty());
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::GateMentionNotCheckable)
+        );
+    }
+
+    /// A gate mention that ALSO names a closing block still evaluates via
+    /// the existing block path — `mentions_gate` only supplies a more
+    /// specific reason label when nothing else was extracted; it never
+    /// suppresses real extraction.
+    #[test]
+    fn gate_mention_paired_with_a_closing_block_still_evaluates_via_block_ref() {
+        let files = vec![(
+            src("engine-rs"),
+            state_file(
+                "engine-rs",
+                vec![("EN.5.B1", "closed")],
+                vec![item(
+                    "gate-mention-with-block",
+                    "deferred",
+                    Some("the CI gate clears when EN.5.B1 lands"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
+    }
+
+    /// Live-data twin of the CLOSURE_VERBS pinning test, re-run through the
+    /// widened Task 3 code path: the 2026-08-03 false-cleared shape must
+    /// still stay NotEvaluable even with the broadened path/gate vocabulary
+    /// in play.
+    #[test]
+    fn ba_0_a_id_collision_shape_stays_not_evaluable_after_task3_widening() {
+        let files = vec![(
+            src("core"),
+            state_file(
+                "core",
+                vec![("BA.0.A", "closed")],
+                vec![item(
+                    "core:ba-0-a-id-collision",
+                    "known_issue",
+                    Some("one of the two BA.0.A blocks is renamed and Phase 0 is backfilled"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_ne!(report.entries[0].lane, CarryoverLane::Cleared);
     }
 }

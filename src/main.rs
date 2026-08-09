@@ -1113,6 +1113,11 @@ fn print_carryover_report(report: &mev::CarryoverReport) {
                                     println!("      unmet: {path}");
                                 }
                             }
+                            mev::CarryoverRef::PathAbsent { path, satisfied } => {
+                                if !satisfied {
+                                    println!("      unmet: {path} still exists (expected removed)");
+                                }
+                            }
                             mev::CarryoverRef::UnresolvedBlock { key } => {
                                 println!("      unresolvable: {key} (not found in loaded corpus)");
                             }
@@ -1141,6 +1146,9 @@ fn print_carryover_report(report: &mev::CarryoverReport) {
                         Some(mev::NotEvaluableReason::NoClosureVerb) => "no-closure-verb",
                         Some(mev::NotEvaluableReason::ExecutionNotAllowed) => {
                             "execution-not-allowed (rerun with --allow-exec)"
+                        }
+                        Some(mev::NotEvaluableReason::GateMentionNotCheckable) => {
+                            "gate-mention-not-checkable (candidate for a typed command_exits_zero predicate)"
                         }
                         None => "unknown",
                     };

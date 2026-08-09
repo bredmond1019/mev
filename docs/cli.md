@@ -1377,7 +1377,7 @@ command) to act on — it is never an automatic deletion.
 |---|---|
 | `cleared` | At least one reference was extracted from the entry and **every** extracted reference is currently satisfied — a recommendation to delete the entry |
 | `actionable` | At least one reference was extracted, but **at least one** is unsatisfied — the specific unmet reference(s) are named so a reader can act without re-reading the predicate |
-| `not-evaluable` | No reference could be extracted. Reason `prose` (`clears_when` is present but is pure prose), `no-closure-verb` (it names a block but never says the block must close), `ambiguous-reference` (a bare block ID matched more than one repo and was dropped), `execution-not-allowed` (a `command_exits_zero` predicate was present but `--allow-exec` was not passed), or `no-predicate` (`clears_when` is `None`) |
+| `not-evaluable` | No reference could be extracted. Reason `prose` (`clears_when` is present but is pure prose), `no-closure-verb` (it names a block but never says the block must close), `ambiguous-reference` (a bare block ID matched more than one repo and was dropped), `execution-not-allowed` (a `command_exits_zero` predicate was present but `--allow-exec` was not passed), `gate-mention-not-checkable` (it names a validator/gate/CI concept but nothing checkable — no path, no block — could be extracted, flagged as a candidate for a typed `command_exits_zero` predicate), or `no-predicate` (`clears_when` is `None`) |
 
 #### Typed `clears_when` predicates
 
@@ -1441,10 +1441,26 @@ Only two classes of prose `clears_when` are ever machine-evaluated; anything els
 > backfilled"*, and `BA.0.A` **is** `closed`. Without the closure-verb gate the sweep
 > recommended deleting a live, unresolved `known_issue`. A false `cleared` is the only verdict
 > here that destroys durable knowledge.
-- **Path-existence references** — extracted only when the `clears_when` text contains the
-  literal word `exists`. Whitespace-delimited tokens containing `/` and ending in one of
-  `.md .rs .py .sh .ts .tsx .json .toml` are resolved against the brain root and against the
-  owning repo's `repo_path`; satisfied when either resolves to an existing file.
+- **Path assertion references** — extracted only when the `clears_when` text contains a
+  word-bounded entry from a bounded, documented verb vocabulary — the path analogue of the
+  closure-verb gate above. A path named with no assertion verb at all is a *subject*, not a
+  *condition*, and nothing is extracted for it (`not-evaluable`, reason `prose`).
+  - **Presence verbs** — `exists` · `created` · `added` · `written` · `present` · `corrected` ·
+    `fixed`. Whitespace-delimited tokens containing `/` and ending in one of
+    `.md .rs .py .sh .ts .tsx .json .toml` are resolved against the brain root and against the
+    owning repo's `repo_path`; satisfied when either resolves to an existing file. The
+    `corrected`/`fixed` verbs pair with an already-checkable file this way rather than attempting
+    to parse what "corrected" means — a predicate like *"X is corrected"* with no named file/block
+    stays `not-evaluable`.
+  - **Absence verbs** — `removed` · `deleted` · `gone`. Same path resolution, but satisfied when
+    the path does **not** resolve to an existing file — the inverse polarity, reported as a
+    distinct `path_absent` reference (`{"type": "path_absent", "path": "...", "satisfied": ...}`
+    in `--json`) so "the path exists" is never conflated with "the path is gone".
+  - When a predicate names a validator/gate/CI concept (`validator` · `gate` · `lint` · `linter` ·
+    `harness` · `pipeline` · `suite` · `ci`) but nothing checkable was extracted from it, it is
+    reported `not-evaluable` with reason `gate-mention-not-checkable` rather than plain `prose` —
+    a hint that it is a candidate for a typed `command_exits_zero` predicate. Nothing derives a
+    command from this prose and runs it automatically; that stays explicitly out of scope.
 
 **All extracted references are combined conjunctively (AND), even when the prose says "or".**
 This is a deliberate, safe-failure-direction bias: it can mis-report a genuinely-cleared
