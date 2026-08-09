@@ -72,7 +72,7 @@ mev --json validate --blog
 |---|---|---|
 | `E_BLOG_MALFORMED_FRONTMATTER` | Error | A blog post's leading `---` YAML frontmatter block is absent or unparseable; causes exit 1 |
 | `E_BLOG_MISSING_FIELD` | Error | A required blog frontmatter field (`title`, `date`, or `excerpt`) is missing or empty; the field name is in the message; causes exit 1 |
-| `W_BLOG_PTBR_MISSING` | Warning | An EN post under `blog/published/*.mdx` has no `pt-BR/<slug>.mdx` counterpart. Warning, not error: three real parity gaps exist in the live tree today, and erroring here would make `--blog` red on arrival and unusable as a gate for `MV.12.B`; exit code unchanged |
+| `W_BLOG_PTBR_MISSING` | Warning | An EN post under `blog/published/*.mdx` has no `pt-BR/<slug>.mdx` counterpart. Warning, not error: real parity gaps exist in the live tree (1 as of 2026-08-09), and erroring here would make `--blog` red on arrival and unusable as a gate for `MV.12.B`; exit code unchanged |
 | `W_LINT_UNTAGGED_CODE_BLOCK` | Warning | A fenced code block (` ``` ` or `~~~`) opens with no language tag. Presentation, not correctness; exit code unchanged |
 | `E_LINT_DEAD_LOCAL_LINK` | Error | A markdown link `[text](target)` resolves to a path that does not exist. Absolute URLs (`http://`, `https://`, `mailto:`, protocol-relative `//`) and in-page anchors (`#...`) are skipped, never reported. A genuinely relative target (`./x.md`, `../assets/y.png`) resolves against the file's parent directory. A **site-absolute** target (a single leading `/`, e.g. `/en/blog/x`) is a Next.js route, not a filesystem path — see "Site-absolute route resolution" below; causes exit 1 |
 | `E_LINT_DEAD_ASSET` | Error | An image reference `![alt](target)` resolves to a path that does not exist on disk; causes exit 1 |
