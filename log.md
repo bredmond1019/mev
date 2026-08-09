@@ -8,12 +8,48 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-06T21:50:00Z"
+timestamp: "2026-08-09T13:30:00Z"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## [run: 2026-08-09]
+
+### Lane C2 (close-the-loop) — three tickets closed, 16/16 tasks first-attempt
+
+- **What:** Closed all three `mev` blocks in Lane C2 of HQ's close-the-loop roadmap.
+  (1) `MV.ticket.learn-link-mapping-masks-dead-links` — `resolve_route` aliased `/learn/<slug>`
+  onto `learn/paths/<slug>`, a route learn-ai's App Router does not have, so the target existed on
+  disk and `E_LINT_DEAD_LOCAL_LINK` could never fire. Fixed with a `known_invalid_learn_route`
+  check hoisted ahead of `resolve_route` (option (b)) rather than deleting the arm, which would
+  have turned the false negative into a silent skip; added locale-prefixed learn arms and
+  `/learn/concepts/<slug>` (4 → 7 rules); inverted the test that pinned the bug. Surfaced the two
+  live dead links (`/learn/12-factor-agent-development`, EN + pt-BR) that Lane B's
+  `LA.ticket.content-lint-cleanup` was HELD on. Suite 1200 → 1210.
+  (2) `MV.ticket.close-stale-conformance-branch` — PR #31 was already merged, so this reduced to
+  branch cleanup; operator approved the full sweep and all 17 stale branches were deleted, leaving
+  `origin` with `main` only and the badge green.
+  (3) `MV.ticket.funnel-conformance-extraction-spike` — recommendation **(b) extract later**
+  behind a named trigger (a client engagement needing content instrumentation for a non-learn-ai
+  site), costed 21–29h, no `src/` touched. Plus doc repairs: A14/AR-63 parity-gap count, AR-67
+  piped verification recipes, and `docs/cli.md`'s route-resolution section, which had been
+  documenting the defect as intended behaviour.
+- **Why:** All three were silent-failure problems rather than hard bugs — a checker that could
+  never fire, a red badge unrelated to the code, and docs asserting counts that had drifted. Each
+  teaches a reader or an agent to distrust a signal that should be trustworthy. The spike existed
+  to make the "extract it later" decision cheap and evidence-based instead of deferring it forever.
+- **Refs:** `planning/close-the-loop/lane-substrate.txt` § C2; `planning/close-the-loop/roadmap.md`;
+  findings at `planning/ticket-funnel-conformance-extraction-spike/findings.md`.
+
+**Three lessons worth more than the blocks** (all now in `state.json` `carryover[]`): Wave 0
+tickets ship prose-only and bail every engine on `No tasks.json` (D16) until `/generate-tasks`
+runs; an OKF `related:` entry pointing at a carryover slug instead of a real `doc_id` red-gated
+the whole corpus and bailed another lane's block; and `merge-base --is-ancestor` mislabels
+squash-merged branches (5 of 17 here) as carrying unmerged work.
 
 ---
 
