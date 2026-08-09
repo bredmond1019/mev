@@ -48,6 +48,7 @@
 //!   `complete` (warn-only; never auto-flipped).
 //! - `W_STATE_EPIC_UNREACHABLE_DEP` — an unclosed epic block depends on an unclosed
 //!   block that belongs to no epic (a gate invisible on the epic's board).
+//! - `E_STATE_SCHEMA_BAD_FINDING_ID` — a carryover `finding_id` is not kebab-case.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -764,6 +765,58 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                     ),
                 ));
             }
+        }
+
+        for dep in &item.blocks {
+            match dep {
+                BlockedBy::Block { repo, id, .. } => {
+                    let repo_empty = repo.trim().is_empty();
+                    let id_empty = id.trim().is_empty();
+                    if repo_empty || id_empty {
+                        diags.push(Diagnostic::error(
+                            path,
+                            "E_STATE_SCHEMA_BAD_BLOCKED_BY",
+                            format!(
+                                "blocks entry in carryover item '{}' is missing required \
+                                 field(s): {}",
+                                item.slug,
+                                [repo_empty.then_some("'repo'"), id_empty.then_some("'id'")]
+                                    .into_iter()
+                                    .flatten()
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        ));
+                    }
+                }
+                BlockedBy::External { what } => {
+                    if what.trim().is_empty() {
+                        diags.push(Diagnostic::error(
+                            path,
+                            "E_STATE_SCHEMA_BAD_BLOCKED_BY",
+                            format!(
+                                "blocks entry in carryover item '{}' is an External \
+                                 dependency with an empty 'what'",
+                                item.slug
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some(finding_id) = &item.finding_id
+            && !crate::shared::is_kebab_case(finding_id)
+        {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_SCHEMA_BAD_FINDING_ID",
+                format!(
+                    "carryover item '{}' has malformed finding_id '{}'; must be kebab-case \
+                     ([a-z0-9] separated by single hyphens)",
+                    item.slug, finding_id
+                ),
+            ));
         }
     }
 
@@ -7829,6 +7882,246 @@ fn carryover_schema_checks() {
 
     assert!(bad_kind, "Should flag bad kind");
     assert!(bad_scope, "Should flag malformed scope");
+}
+
+#[test]
+fn carryover_blocks_block_empty_repo_and_id_emit_bad_blocked_by() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "ghost-block",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Blocks a ghost.",
+      "created": "2026-06-30",
+      "blocks": [ { "type": "block", "repo": "", "id": "" } ]
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_BLOCKED_BY")
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one E_STATE_SCHEMA_BAD_BLOCKED_BY, got: {diags:?}"
+    );
+    assert!(matches[0].message.contains("ghost-block"));
+    assert!(matches[0].message.contains("blocks"));
+    assert!(matches[0].message.contains("'repo'"));
+    assert!(matches[0].message.contains("'id'"));
+}
+
+#[test]
+fn carryover_blocks_well_formed_block_emits_no_diagnostic() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "real-block",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Blocks a real block.",
+      "created": "2026-06-30",
+      "blocks": [ { "type": "block", "repo": "bastion", "id": "B.1" } ]
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.locator != "E_STATE_SCHEMA_BAD_BLOCKED_BY"),
+        "well-formed blocks[] entry should not error: {diags:?}"
+    );
+}
+
+#[test]
+fn carryover_blocks_external_empty_what_emits_bad_blocked_by() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "external-blocker",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Blocks fleet-wide.",
+      "created": "2026-06-30",
+      "blocks": [ { "type": "external", "what": "" } ]
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_BLOCKED_BY")
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one E_STATE_SCHEMA_BAD_BLOCKED_BY for empty External what, got: {diags:?}"
+    );
+    assert!(matches[0].message.contains("external-blocker"));
+}
+
+#[test]
+fn carryover_blocks_external_nonempty_what_emits_no_diagnostic() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "external-blocker",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Blocks fleet-wide.",
+      "created": "2026-06-30",
+      "blocks": [ { "type": "external", "what": "blocks every ticket run fleet-wide" } ]
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.locator != "E_STATE_SCHEMA_BAD_BLOCKED_BY"),
+        "well-formed External blocks[] entry should not error: {diags:?}"
+    );
+}
+
+#[test]
+fn carryover_finding_id_bad_shape_emits_dedicated_locator() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "bad-finding",
+      "scope": { "repo": "bastion" },
+      "kind": "known_issue",
+      "text": "Bad finding id.",
+      "created": "2026-06-30",
+      "finding_id": "Not_Kebab--Case"
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_FINDING_ID")
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one E_STATE_SCHEMA_BAD_FINDING_ID, got: {diags:?}"
+    );
+    assert!(matches[0].message.contains("bad-finding"));
+    assert!(matches[0].message.contains("kebab-case"));
+}
+
+#[test]
+fn carryover_finding_id_valid_shape_emits_no_diagnostic() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "good-finding",
+      "scope": { "repo": "bastion" },
+      "kind": "known_issue",
+      "text": "Valid finding id.",
+      "created": "2026-06-30",
+      "finding_id": "auth-timeout-2026"
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.locator != "E_STATE_SCHEMA_BAD_FINDING_ID"),
+        "valid kebab-case finding_id should not error: {diags:?}"
+    );
+}
+
+#[test]
+fn carryover_finding_id_absent_emits_no_diagnostic_never_checked_against_registry() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "no-finding",
+      "scope": { "repo": "bastion" },
+      "kind": "known_issue",
+      "text": "No finding id at all.",
+      "created": "2026-06-30",
+      "finding_id": "some-completely-unseen-value-never-registered-anywhere"
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.locator != "E_STATE_SCHEMA_BAD_FINDING_ID"),
+        "an unseen finding_id value (no registry) should not error on shape: {diags:?}"
+    );
 }
 
 // --- check_field_policy tests ---
