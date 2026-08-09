@@ -90,6 +90,11 @@ pub enum NotEvaluableReason {
     /// condition, so the predicate is not machine-checkable. See
     /// [`CLOSURE_VERBS`].
     NoClosureVerb,
+    /// A `CommandExitsZero` predicate was present but execution is not
+    /// opted in (see `allow_exec` on [`evaluate_carryover`]). Never
+    /// `Cleared` regardless of what the command would have exited — an
+    /// unrun command is unknown, and unknown must never read as cleared.
+    ExecutionNotAllowed,
 }
 
 /// One extracted, resolved reference and whether it is currently satisfied.
@@ -111,6 +116,24 @@ pub enum CarryoverRef {
     /// problem worth flagging differently) rather than rendering both as an
     /// identical "unmet: key" line.
     UnresolvedBlock { key: String },
+    /// A typed `file_contains` predicate. Satisfied when the path resolves
+    /// (same two-root strategy as [`Self::Path`]) and its contents contain
+    /// `pattern` as a literal substring. Every failure mode — missing file,
+    /// unreadable file, non-UTF8 contents, oversized file — is `satisfied:
+    /// false`, never a panic.
+    FileContains {
+        path: String,
+        pattern: String,
+        satisfied: bool,
+    },
+    /// A typed `command_exits_zero` predicate, evaluated only when the sweep
+    /// opted in (see `allow_exec` on [`evaluate_carryover`]). Satisfied iff
+    /// the command's exit status is exactly 0; spawn failure, non-zero exit,
+    /// signal death, and an in-process watchdog timeout are all `satisfied:
+    /// false`. When execution is not opted in, no `CommandExitsZero` ref is
+    /// produced at all — the entry surfaces as `NotEvaluable` with
+    /// [`NotEvaluableReason::ExecutionNotAllowed`] instead.
+    CommandExitsZero { command: String, satisfied: bool },
 }
 
 /// The evaluated verdict for a single `carryover[]` entry.
@@ -415,12 +438,111 @@ fn path_ref_satisfied(
     repo_paths: &HashMap<String, PathBuf>,
     owning_repo: &str,
 ) -> bool {
-    if brain_root.join(path).exists() {
-        return true;
+    resolve_existing_path(path, brain_root, repo_paths, owning_repo).is_some()
+}
+
+/// Resolve a path reference against the same two-root strategy
+/// [`path_ref_satisfied`] uses (brain root first, then the owning repo's
+/// `repo_path`), returning the first candidate that actually exists.
+fn resolve_existing_path(
+    path: &str,
+    brain_root: &Path,
+    repo_paths: &HashMap<String, PathBuf>,
+    owning_repo: &str,
+) -> Option<PathBuf> {
+    let brain_candidate = brain_root.join(path);
+    if brain_candidate.exists() {
+        return Some(brain_candidate);
     }
-    repo_paths
-        .get(owning_repo)
-        .is_some_and(|repo_path| repo_path.join(path).exists())
+    repo_paths.get(owning_repo).and_then(|repo_path| {
+        let candidate = repo_path.join(path);
+        candidate.exists().then_some(candidate)
+    })
+}
+
+/// Bound on how much of a `file_contains` target we will read into memory —
+/// a stray binary or huge path named in a data file must not blow up memory
+/// during a fleet sweep. 5 MiB comfortably covers any real doc/source file
+/// this predicate is meant to check.
+const FILE_CONTAINS_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Whether a `file_contains` predicate is satisfied: the path resolves (same
+/// two-root strategy as [`path_ref_satisfied`]), its size is within
+/// [`FILE_CONTAINS_MAX_BYTES`], its contents decode as UTF-8, and `pattern`
+/// appears as a literal substring (never a regex — see the module header).
+/// Every failure mode — missing file, oversized file, unreadable file,
+/// non-UTF8 contents, IO error — returns `false`, never panics.
+fn file_contains_satisfied(
+    path: &str,
+    pattern: &str,
+    brain_root: &Path,
+    repo_paths: &HashMap<String, PathBuf>,
+    owning_repo: &str,
+) -> bool {
+    let Some(resolved) = resolve_existing_path(path, brain_root, repo_paths, owning_repo) else {
+        return false;
+    };
+    let Ok(metadata) = std::fs::metadata(&resolved) else {
+        return false;
+    };
+    if metadata.len() > FILE_CONTAINS_MAX_BYTES {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(&resolved) else {
+        return false;
+    };
+    let Ok(contents) = String::from_utf8(bytes) else {
+        return false;
+    };
+    contents.contains(pattern)
+}
+
+/// Wall-clock bound for a `command_exits_zero` child process. `timeout(1)`
+/// does not exist on this macOS shell, so the bound is enforced in-process
+/// by polling `try_wait` and killing the child on expiry — never by
+/// shelling out to `timeout`.
+const COMMAND_EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Poll interval for the in-process watchdog.
+const COMMAND_EXEC_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Whether a `command_exits_zero` predicate is satisfied: spawns `sh -c
+/// <command>` in `cwd`, and returns `true` only on a clean exit status of 0
+/// observed within [`COMMAND_EXEC_TIMEOUT`]. Spawn failure, non-zero exit,
+/// signal death, and timeout (the child is killed and reaped) all return
+/// `false` — never `true`, and never a panic that aborts the sweep. Only
+/// called when the caller has already confirmed `allow_exec` is set.
+fn command_exit_zero_satisfied(command: &str, cwd: &Path) -> bool {
+    use std::process::Stdio;
+
+    let mut child = match std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if start.elapsed() >= COMMAND_EXEC_TIMEOUT {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(COMMAND_EXEC_POLL_INTERVAL);
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
 /// Rank used to sort lanes `Cleared` < `Actionable` < `NotEvaluable`.
@@ -444,7 +566,10 @@ fn lane_rank(lane: CarryoverLane) -> u8 {
 /// unparseable value degrades every entry's `age_days` to `None` and `stale`
 /// to `false` rather than panicking. `repo_filter`, when set, restricts the
 /// sweep to one repo's entries (matched against the owning file's
-/// `StateSource::repo_slug`).
+/// `StateSource::repo_slug`). `allow_exec` is the opt-in gate for the
+/// `CommandExitsZero` typed predicate — see that arm's doc comment for the
+/// safe-direction reasoning; it has no effect on any other predicate or on
+/// prose extraction.
 ///
 /// **References are combined conjunctively (AND), even when the source prose
 /// reads as a disjunction ("or").** This is a deliberate safe-direction bias:
@@ -453,6 +578,7 @@ fn lane_rank(lane: CarryoverLane) -> u8 {
 /// `cleared` verdict destroys durable knowledge; a false `actionable` verdict
 /// merely wastes a glance. Disjunction parsing is explicitly out of scope
 /// (see `planning/ticket-carryover-sweep-command/tasks.md`).
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_carryover(
     files: &[(StateSource, StateFile)],
     status_map: &HashMap<String, Option<String>>,
@@ -461,6 +587,7 @@ pub fn evaluate_carryover(
     today: &str,
     thresholds: &AttentionThresholds,
     repo_filter: Option<&str>,
+    allow_exec: bool,
 ) -> CarryoverReport {
     let known_keys: HashSet<String> = status_map.keys().cloned().collect();
     let today_date = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d").ok();
@@ -479,6 +606,7 @@ pub fn evaluate_carryover(
 
             let mut refs: Vec<CarryoverRef> = Vec::new();
             let mut ambiguous = false;
+            let mut forced_reason: Option<NotEvaluableReason> = None;
 
             // `related[]` is deliberately NOT consulted here. It is documented
             // as "optional related edges" — a *see also*, not a clearing
@@ -541,16 +669,48 @@ pub fn evaluate_carryover(
                         satisfied,
                     });
                 }
-                // `FileContains` and `CommandExitsZero` are
-                // `MV.ticket.clears-when-evaluation` task 2's job (execution
-                // safety design). Until then a predicate of either kind
-                // extracts no refs — the same "behaves like no predicate"
-                // stance the field-validation ticket left every typed
-                // predicate in.
-                Some(ClearsWhen::Predicate(
-                    ClearsWhenPredicate::FileContains { .. }
-                    | ClearsWhenPredicate::CommandExitsZero { .. },
-                )) => {}
+                Some(ClearsWhen::Predicate(ClearsWhenPredicate::FileContains {
+                    path,
+                    pattern,
+                    ..
+                })) => {
+                    // Same two-root resolution strategy as `FileExists`;
+                    // every failure mode (missing/oversized/unreadable/
+                    // non-UTF8) folds into `satisfied: false`.
+                    let satisfied =
+                        file_contains_satisfied(path, pattern, brain_root, repo_paths, own_repo);
+                    refs.push(CarryoverRef::FileContains {
+                        path: path.clone(),
+                        pattern: pattern.clone(),
+                        satisfied,
+                    });
+                }
+                Some(ClearsWhen::Predicate(ClearsWhenPredicate::CommandExitsZero {
+                    command,
+                    ..
+                })) => {
+                    if allow_exec {
+                        let cwd = repo_paths.get(own_repo).map(PathBuf::as_path).unwrap_or(
+                            // Falls back to the brain root when the owning
+                            // repo has no known path — still a real cwd,
+                            // never a no-op.
+                            brain_root,
+                        );
+                        let satisfied = command_exit_zero_satisfied(command, cwd);
+                        refs.push(CarryoverRef::CommandExitsZero {
+                            command: command.clone(),
+                            satisfied,
+                        });
+                    } else {
+                        // Opt-in is off: this predicate is NOT evaluated at
+                        // all — no ref is produced, and the entry is
+                        // reported via a dedicated reason rather than
+                        // falling through to the generic `NoPredicate`
+                        // case. An unrun command is unknown, and unknown
+                        // must never read as `Cleared`.
+                        forced_reason = Some(NotEvaluableReason::ExecutionNotAllowed);
+                    }
+                }
                 None => {}
             }
 
@@ -559,6 +719,8 @@ pub fn evaluate_carryover(
                     CarryoverRef::Block { satisfied, .. } => *satisfied,
                     CarryoverRef::Path { satisfied, .. } => *satisfied,
                     CarryoverRef::UnresolvedBlock { .. } => false,
+                    CarryoverRef::FileContains { satisfied, .. } => *satisfied,
+                    CarryoverRef::CommandExitsZero { satisfied, .. } => *satisfied,
                 });
                 let lane = if all_satisfied {
                     CarryoverLane::Cleared
@@ -566,6 +728,8 @@ pub fn evaluate_carryover(
                     CarryoverLane::Actionable
                 };
                 (lane, None)
+            } else if let Some(reason) = forced_reason {
+                (CarryoverLane::NotEvaluable, Some(reason))
             } else if let Some(ClearsWhen::Prose(clears_when)) = item.clears_when.as_ref() {
                 let reason = if ambiguous {
                     NotEvaluableReason::AmbiguousReference
@@ -987,6 +1151,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.total, 1);
         assert_eq!(report.cleared, 1);
@@ -1026,6 +1191,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.total, 1);
         assert_eq!(report.actionable, 1);
@@ -1067,6 +1233,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.not_evaluable, 1);
         let entry = &report.entries[0];
@@ -1114,6 +1281,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.not_evaluable, 1);
         let entry = &report.entries[0];
@@ -1161,6 +1329,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.cleared, 0, "a related[] edge must never clear");
         assert_eq!(report.not_evaluable, 1);
@@ -1220,6 +1389,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(
             report.cleared, 0,
@@ -1270,6 +1440,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.cleared, 1);
         assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
@@ -1302,6 +1473,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.not_evaluable, 1);
         assert_eq!(
@@ -1342,6 +1514,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.actionable, 1, "one path missing -> actionable");
         let entry = &report.entries[0];
@@ -1395,6 +1568,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         let by_slug = |slug: &str| report.entries.iter().find(|e| e.slug == slug).unwrap();
         assert!(
@@ -1453,6 +1627,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             Some("mev"),
+            false,
         );
         assert_eq!(report.total, 1);
         assert_eq!(report.entries[0].repo, "mev");
@@ -1505,6 +1680,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         let report2 = evaluate_carryover(
             &files,
@@ -1514,6 +1690,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         let lanes1: Vec<CarryoverLane> = report1.entries.iter().map(|e| e.lane).collect();
         let lanes2: Vec<CarryoverLane> = report2.entries.iter().map(|e| e.lane).collect();
@@ -1566,6 +1743,7 @@ mod tests {
             "2026-08-09",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.cleared, 1);
         assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
@@ -1605,6 +1783,7 @@ mod tests {
             "2026-08-09",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.actionable, 1);
         assert_eq!(report.entries[0].lane, CarryoverLane::Actionable);
@@ -1646,6 +1825,7 @@ mod tests {
             "2026-08-09",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.cleared, 0);
         assert_eq!(report.actionable, 1);
@@ -1693,6 +1873,7 @@ mod tests {
             "2026-08-09",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.cleared, 1);
         assert_eq!(
@@ -1743,6 +1924,7 @@ mod tests {
             "2026-08-09",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.cleared, 1);
 
@@ -1775,6 +1957,7 @@ mod tests {
             "2026-08-09",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.actionable, 1);
         assert_eq!(
@@ -1786,35 +1969,123 @@ mod tests {
         );
     }
 
+    /// Scratch dir helper for `file_contains` fixtures — mirrors the
+    /// `file_exists_predicate_*` tests' `std::env::temp_dir()` pattern.
+    fn scratch_dir(suffix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "mev-carryover-file-contains-{suffix}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
-    fn file_contains_and_command_exits_zero_predicates_are_not_evaluable_in_this_task() {
-        // Task 2 (`MV.ticket.clears-when-evaluation` task 2) owns evaluating
-        // these — until then they must behave exactly like `None` did before
-        // any typed predicate evaluation existed, never like `Cleared`.
+    fn file_contains_predicate_matching_pattern_clears() {
+        let dir = scratch_dir("match");
+        std::fs::write(dir.join("target.md"), "the quick brown fox").unwrap();
+
         let files = vec![(
             src("mev"),
             state_file(
                 "mev",
                 vec![],
-                vec![
-                    predicate_item(
-                        "typed-file-contains-deferred",
-                        "deferred",
-                        ClearsWhenPredicate::FileContains {
-                            path: "CLAUDE.md".to_string(),
-                            pattern: "mev".to_string(),
-                            note: None,
-                        },
-                    ),
-                    predicate_item(
-                        "typed-command-exits-zero-deferred",
-                        "deferred",
-                        ClearsWhenPredicate::CommandExitsZero {
-                            command: "true".to_string(),
-                            note: None,
-                        },
-                    ),
-                ],
+                vec![predicate_item(
+                    "typed-file-contains-match",
+                    "deferred",
+                    ClearsWhenPredicate::FileContains {
+                        path: "target.md".to_string(),
+                        pattern: "brown fox".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.cleared, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::FileContains {
+                path: "target.md".to_string(),
+                pattern: "brown fox".to_string(),
+                satisfied: true,
+            }]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_contains_predicate_non_matching_pattern_is_actionable() {
+        let dir = scratch_dir("no-match");
+        std::fs::write(dir.join("target.md"), "the quick brown fox").unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-contains-no-match",
+                    "deferred",
+                    ClearsWhenPredicate::FileContains {
+                        path: "target.md".to_string(),
+                        pattern: "lazy dog".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.actionable, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::FileContains {
+                path: "target.md".to_string(),
+                pattern: "lazy dog".to_string(),
+                satisfied: false,
+            }]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_contains_predicate_absent_file_is_actionable_never_panics() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-contains-absent",
+                    "deferred",
+                    ClearsWhenPredicate::FileContains {
+                        path: "definitely/does/not/exist.md".to_string(),
+                        pattern: "anything".to_string(),
+                        note: None,
+                    },
+                )],
             ),
         )];
         let status = status_map(&files);
@@ -1826,13 +2097,302 @@ mod tests {
             "2026-08-09",
             &thresholds(),
             None,
+            false,
+        );
+        assert_eq!(report.actionable, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::FileContains {
+                path: "definitely/does/not/exist.md".to_string(),
+                pattern: "anything".to_string(),
+                satisfied: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn file_contains_predicate_oversized_file_is_actionable_never_panics() {
+        let dir = scratch_dir("oversized");
+        // One byte past FILE_CONTAINS_MAX_BYTES — must be rejected, not read.
+        let oversized = vec![b'x'; (FILE_CONTAINS_MAX_BYTES + 1) as usize];
+        std::fs::write(dir.join("huge.md"), &oversized).unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-contains-oversized",
+                    "deferred",
+                    ClearsWhenPredicate::FileContains {
+                        path: "huge.md".to_string(),
+                        pattern: "x".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.actionable, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::FileContains {
+                path: "huge.md".to_string(),
+                pattern: "x".to_string(),
+                satisfied: false,
+            }],
+            "an oversized file must never be read into memory to satisfy the predicate"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_contains_predicate_non_utf8_file_is_actionable_never_panics() {
+        let dir = scratch_dir("non-utf8");
+        // 0xFF is never valid as a UTF-8 lead byte.
+        std::fs::write(dir.join("binary.md"), [0xFFu8, 0xFE, 0x00, 0x01]).unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-contains-non-utf8",
+                    "deferred",
+                    ClearsWhenPredicate::FileContains {
+                        path: "binary.md".to_string(),
+                        pattern: "anything".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.actionable, 1);
+        assert!(!matches!(report.entries[0].lane, CarryoverLane::Cleared));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn command_exits_zero_with_opt_in_and_exit_zero_clears() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-command-exit-zero",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        command: "true".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            std::env::temp_dir().as_path(),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            true, // allow_exec
+        );
+        assert_eq!(report.cleared, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::CommandExitsZero {
+                command: "true".to_string(),
+                satisfied: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn command_exits_zero_with_opt_in_and_nonzero_exit_is_actionable() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-command-exit-one",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        command: "false".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            std::env::temp_dir().as_path(),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            true,
+        );
+        assert_eq!(report.actionable, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::CommandExitsZero {
+                command: "false".to_string(),
+                satisfied: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn command_exits_zero_with_opt_in_and_nonexistent_binary_is_actionable_never_panics() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-command-nonexistent",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        command: "definitely-not-a-real-binary-xyz".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            std::env::temp_dir().as_path(),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            true,
+        );
+        assert_eq!(report.actionable, 1);
+        assert!(!matches!(report.entries[0].lane, CarryoverLane::Cleared));
+    }
+
+    #[test]
+    fn command_exits_zero_with_opt_in_and_slow_command_times_out_and_is_actionable() {
+        // Exceeds COMMAND_EXEC_TIMEOUT; the in-process watchdog must kill it
+        // and report not-satisfied within roughly the bound rather than
+        // hanging the sweep. `timeout(1)` is never invoked to enforce this.
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-command-timeout",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        command: "sleep 30".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+
+        let start = std::time::Instant::now();
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            std::env::temp_dir().as_path(),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            true,
+        );
+        let elapsed = start.elapsed();
+
+        assert_eq!(report.actionable, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::CommandExitsZero {
+                command: "sleep 30".to_string(),
+                satisfied: false,
+            }]
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "watchdog should kill the child at roughly COMMAND_EXEC_TIMEOUT, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn command_exits_zero_opt_in_off_is_not_evaluable_never_cleared_even_if_would_exit_zero() {
+        // The safe-direction bias on a new axis: an unrun command is
+        // unknown, and unknown must never read as Cleared — even though
+        // `true` would have exited 0 had it run.
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-command-opt-in-off",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        command: "true".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false, // allow_exec off
         );
         assert_eq!(report.cleared, 0);
-        assert_eq!(report.not_evaluable, 2);
-        for entry in &report.entries {
-            assert!(entry.refs.is_empty());
-            assert_eq!(entry.lane, CarryoverLane::NotEvaluable);
-        }
+        assert_eq!(report.not_evaluable, 1);
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
+        assert!(report.entries[0].refs.is_empty());
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::ExecutionNotAllowed)
+        );
     }
 
     #[test]
@@ -1877,6 +2437,7 @@ mod tests {
             "2026-08-09",
             &thresholds(),
             None,
+            false,
         );
         let by_slug = |slug: &str| {
             report

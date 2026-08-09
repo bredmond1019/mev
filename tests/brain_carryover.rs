@@ -163,7 +163,7 @@ fn cross_repo_closed_block_lands_in_cleared() {
     let dir = temp_dir("cleared");
     write_fixture(&dir);
 
-    let report = mev::carryover_sweep(&dir, None).expect("carryover_sweep should not error");
+    let report = mev::carryover_sweep(&dir, None, false).expect("carryover_sweep should not error");
 
     let entry = report
         .entries
@@ -189,7 +189,7 @@ fn cross_repo_open_block_lands_in_actionable_naming_the_unmet_block() {
     let dir = temp_dir("actionable");
     write_fixture(&dir);
 
-    let report = mev::carryover_sweep(&dir, None).expect("carryover_sweep should not error");
+    let report = mev::carryover_sweep(&dir, None, false).expect("carryover_sweep should not error");
 
     let entry = report
         .entries
@@ -215,7 +215,7 @@ fn prose_only_predicate_lands_in_not_evaluable_prose() {
     let dir = temp_dir("prose");
     write_fixture(&dir);
 
-    let report = mev::carryover_sweep(&dir, None).expect("carryover_sweep should not error");
+    let report = mev::carryover_sweep(&dir, None, false).expect("carryover_sweep should not error");
 
     let entry = report
         .entries
@@ -240,7 +240,7 @@ fn repo_filter_returns_only_that_repos_entries() {
     write_fixture(&dir);
 
     let report =
-        mev::carryover_sweep(&dir, Some("alpha")).expect("carryover_sweep should not error");
+        mev::carryover_sweep(&dir, Some("alpha"), false).expect("carryover_sweep should not error");
 
     assert!(
         !report.entries.is_empty(),
@@ -257,7 +257,7 @@ fn repo_filter_returns_only_that_repos_entries() {
     );
 
     let beta_only =
-        mev::carryover_sweep(&dir, Some("beta")).expect("carryover_sweep should not error");
+        mev::carryover_sweep(&dir, Some("beta"), false).expect("carryover_sweep should not error");
     assert_eq!(
         beta_only.total, 0,
         "beta has no carryover[] entries of its own, expected total == 0, got: {:#?}",
@@ -272,7 +272,7 @@ fn total_equals_sum_of_lanes_and_entries() {
     let dir = temp_dir("total");
     write_fixture(&dir);
 
-    let report = mev::carryover_sweep(&dir, None).expect("carryover_sweep should not error");
+    let report = mev::carryover_sweep(&dir, None, false).expect("carryover_sweep should not error");
 
     assert_eq!(
         report.total, 3,

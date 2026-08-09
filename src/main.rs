@@ -508,11 +508,12 @@ enum Command {
     ///   not-evaluable  — no reference could be extracted (prose predicate, or no
     ///                     `clears_when` at all)
     ///
-    /// Two evaluable predicate classes only: block references (`related[]` edges plus
-    /// prose block IDs that resolve to exactly one corpus node) and path-existence
-    /// references (only when `clears_when` contains the word "exists"). References are
-    /// combined conjunctively (AND) even when the prose says "or" — the safe failure
-    /// direction. Never writes anything.
+    /// Evaluates prose block/path references, plus the four typed `clears_when`
+    /// predicates: `block_closed`, `file_exists`, `file_contains`, and
+    /// `command_exits_zero`. References combine conjunctively (AND) even when the
+    /// prose says "or" — the safe failure direction. `command_exits_zero` is never
+    /// executed unless `--allow-exec` is passed; without it, such entries report
+    /// NotEvaluable rather than running anything. Never writes anything.
     ///
     /// Exit codes:
     ///   0 — sweep completed, regardless of how many entries land in any lane
@@ -529,6 +530,12 @@ enum Command {
         /// Emit the CarryoverReport as compact JSON instead of a human summary.
         #[arg(long)]
         json: bool,
+        /// Opt in to executing `command_exits_zero` predicates. Off by
+        /// default — without this flag, every `command_exits_zero` entry
+        /// reports NotEvaluable (reason: execution-not-allowed) rather than
+        /// running the command, regardless of what it would have exited.
+        #[arg(long)]
+        allow_exec: bool,
     },
     /// Run the registry of named drift checks over facts kept in two places
     /// (`MV.ticket.conformance-check-registry`).
@@ -1109,6 +1116,20 @@ fn print_carryover_report(report: &mev::CarryoverReport) {
                             mev::CarryoverRef::UnresolvedBlock { key } => {
                                 println!("      unresolvable: {key} (not found in loaded corpus)");
                             }
+                            mev::CarryoverRef::FileContains {
+                                path,
+                                pattern,
+                                satisfied,
+                            } => {
+                                if !satisfied {
+                                    println!("      unmet: {path} does not contain '{pattern}'");
+                                }
+                            }
+                            mev::CarryoverRef::CommandExitsZero { command, satisfied } => {
+                                if !satisfied {
+                                    println!("      unmet: `{command}` did not exit 0");
+                                }
+                            }
                         }
                     }
                 }
@@ -1118,6 +1139,9 @@ fn print_carryover_report(report: &mev::CarryoverReport) {
                         Some(mev::NotEvaluableReason::NoPredicate) => "no-predicate",
                         Some(mev::NotEvaluableReason::AmbiguousReference) => "ambiguous-reference",
                         Some(mev::NotEvaluableReason::NoClosureVerb) => "no-closure-verb",
+                        Some(mev::NotEvaluableReason::ExecutionNotAllowed) => {
+                            "execution-not-allowed (rerun with --allow-exec)"
+                        }
                         None => "unknown",
                     };
                     println!("      reason: {reason}");
@@ -1733,7 +1757,12 @@ fn main() -> ExitCode {
                 }
             },
         },
-        Command::Carryover { path, repo, json } => {
+        Command::Carryover {
+            path,
+            repo,
+            json,
+            allow_exec,
+        } => {
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,
                 Err(e) => {
@@ -1741,7 +1770,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match mev::carryover_sweep(&root, repo.as_deref()) {
+            match mev::carryover_sweep(&root, repo.as_deref(), allow_exec) {
                 Ok(report) => {
                     if json || cli.json {
                         match serde_json::to_string(&report) {

@@ -1346,14 +1346,14 @@ mev --json doc opportunity ingest --input company-brief.json
 
 ---
 
-### `carryover [--repo <slug>] [--json] [path]`
+### `carryover [--repo <slug>] [--json] [--allow-exec] [path]`
 
 Fleet-wide, **read-only** sweep of every discovered `planning/state.json`'s `carryover[]`
 array. Evaluates each entry's `clears_when` predicate where it is machine-checkable and sorts
 the fleet into three lanes.
 
 ```bash
-mev carryover [--repo <SLUG>] [--json] [path]
+mev carryover [--repo <SLUG>] [--json] [--allow-exec] [path]
 ```
 
 | Argument / Flag | Default | Description |
@@ -1361,6 +1361,7 @@ mev carryover [--repo <SLUG>] [--json] [path]
 | `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
 | `--repo <SLUG>` | unset | Restrict the sweep to one repo's `carryover[]` entries. An unknown slug is a hard error naming the valid slugs |
 | `--json` | off | Emit the `CarryoverReport` as compact JSON instead of the human, lane-grouped summary |
+| `--allow-exec` | off | Opt in to running `command_exits_zero` predicates. Without it, every such entry reports `not-evaluable` (reason `execution-not-allowed`) and **no command is ever run** |
 
 Resolves `brain.toml` by walking up from `path`, discovers and loads every repo's
 `planning/state.json` (individual load failures are skipped, not fatal), and evaluates every
@@ -1376,12 +1377,12 @@ command) to act on — it is never an automatic deletion.
 |---|---|
 | `cleared` | At least one reference was extracted from the entry and **every** extracted reference is currently satisfied — a recommendation to delete the entry |
 | `actionable` | At least one reference was extracted, but **at least one** is unsatisfied — the specific unmet reference(s) are named so a reader can act without re-reading the predicate |
-| `not-evaluable` | No reference could be extracted. Reason `prose` (`clears_when` is present but is pure prose), `no-closure-verb` (it names a block but never says the block must close), `ambiguous-reference` (a bare block ID matched more than one repo and was dropped), or `no-predicate` (`clears_when` is `None`, or is a typed predicate this version does not yet evaluate — see below) |
+| `not-evaluable` | No reference could be extracted. Reason `prose` (`clears_when` is present but is pure prose), `no-closure-verb` (it names a block but never says the block must close), `ambiguous-reference` (a bare block ID matched more than one repo and was dropped), `execution-not-allowed` (a `command_exits_zero` predicate was present but `--allow-exec` was not passed), or `no-predicate` (`clears_when` is `None`) |
 
 #### Typed `clears_when` predicates
 
 Alongside prose, `clears_when` may be a typed predicate object (`{"type": "block_closed", ...}`
-etc.). Two of the four typed predicate kinds are evaluated today:
+etc.). All four typed predicate kinds are evaluated:
 
 - **`block_closed { repo, id }`** — satisfied when `"{repo}:{id}"`'s authored status in the
   loaded corpus is exactly `closed`. A `{repo, id}` pair with **no matching node at all** in the
@@ -1393,10 +1394,23 @@ etc.). Two of the four typed predicate kinds are evaluated today:
   unambiguous by construction.
 - **`file_exists { path }`** — satisfied under the same two-root resolution as the prose Class B
   reference below (brain root, then the owning repo's path).
-
-`file_contains` and `command_exits_zero` are not yet evaluated — an entry using either of them
-falls into `not-evaluable` with reason `no-predicate`, exactly like an entry with no `clears_when`
-at all (a later change adds these, including `command_exits_zero`'s opt-in execution gate).
+- **`file_contains { path, pattern }`** — satisfied when `path` resolves under that same
+  two-root strategy **and** its contents contain `pattern` as a literal substring (never a
+  regex). Every failure mode — missing file, unreadable file, non-UTF8 contents, or a file
+  larger than 5 MiB (never read into memory) — is `satisfied: false`, never a panic and never
+  `satisfied: true`.
+- **`command_exits_zero { command }`** — satisfied only when running `sh -c <command>` (cwd: the
+  owning repo's path if known, else the brain root) exits with status `0` **and** `--allow-exec`
+  was passed. This is the one predicate that executes arbitrary shell from a data file, so it
+  carries three deliberate safety properties:
+  1. **Opt-in, off by default.** Without `--allow-exec`, `command_exits_zero` entries are never
+     run — they report `not-evaluable` with reason `execution-not-allowed` instead. An unrun
+     command is unknown, and unknown must never read as `cleared`.
+  2. **In-process wall-clock timeout.** `timeout(1)` does not exist on macOS, so the ~2s bound is
+     enforced by polling `try_wait` and killing the child on expiry — a bad predicate cannot hang
+     a fleet-wide sweep.
+  3. **Failure is never success.** Spawn failure, non-zero exit, signal death, and timeout are
+     all `satisfied: false`; only a clean exit status of `0` satisfies.
 
 #### The two evaluable prose predicate classes
 
@@ -1462,6 +1476,9 @@ mev carryover --repo mev
 
 # From an explicit brain root
 mev carryover ~/Dev/agentic-portfolio
+
+# Opt in to running command_exits_zero predicates
+mev carryover --allow-exec
 ```
 
 ---
