@@ -141,30 +141,44 @@ pub fn lint_local_links(
                 let in_fence = fence_lines.get(line_no - 1).copied().unwrap_or(false);
                 if !in_fence && !should_skip_target(&target) {
                     let resolved_rel = strip_anchor_and_query(&target);
-                    let resolved = if resolved_rel.starts_with('/') {
-                        // Site-absolute: route-aware resolution, or silent skip when the
-                        // route shape is unrecognized or content_root could not be derived.
-                        content_root.and_then(|root| resolve_route(resolved_rel, root))
+                    let resolution = if resolved_rel.starts_with('/') {
+                        // Site-absolute: route-aware resolution. A route shape that is
+                        // *known invalid* (e.g. `/learn/<slug>`, which has no matching
+                        // Next.js route) is reported directly, naming the correct route. A
+                        // route shape `resolve_route` does not model at all, or a
+                        // `content_root` of `None`, is skipped silently — mev must not
+                        // assert on routes it does not model.
+                        content_root.and_then(|root| {
+                            if let Some(correct_route) = known_invalid_learn_route(resolved_rel) {
+                                Some(RouteResolution::KnownInvalid(correct_route))
+                            } else {
+                                resolve_route(resolved_rel, root).map(RouteResolution::Path)
+                            }
+                        })
                     } else {
-                        Some(base.join(resolved_rel))
+                        Some(RouteResolution::Path(base.join(resolved_rel)))
                     };
 
-                    if let Some(resolved) = resolved
-                        && !resolved.exists()
-                    {
+                    let dead_message = match &resolution {
+                        Some(RouteResolution::Path(p)) if !p.exists() => Some(format!(
+                            "dead {} target `{target}` at line {line_no}",
+                            if is_image { "asset" } else { "local link" }
+                        )),
+                        Some(RouteResolution::KnownInvalid(correct_route)) => Some(format!(
+                            "dead {} target `{target}` at line {line_no}: `{resolved_rel}` is \
+                             not a valid route, use `{correct_route}` instead",
+                            if is_image { "asset" } else { "local link" }
+                        )),
+                        _ => None,
+                    };
+
+                    if let Some(message) = dead_message {
                         let code = if is_image {
                             "E_LINT_DEAD_ASSET"
                         } else {
                             "E_LINT_DEAD_LOCAL_LINK"
                         };
-                        diags.push(Diagnostic::error(
-                            rel.to_path_buf(),
-                            code,
-                            format!(
-                                "dead {} target `{target}` at line {line_no}",
-                                if is_image { "asset" } else { "local link" }
-                            ),
-                        ));
+                        diags.push(Diagnostic::error(rel.to_path_buf(), code, message));
                     }
                 }
                 i = alt_end;
@@ -303,8 +317,37 @@ fn resolve_route(route: &str, content_root: &Path) -> Option<PathBuf> {
         ),
         // /learn/paths/<slug>
         ["learn", "paths", slug] => Some(content_root.join("learn/paths").join(slug)),
-        // /learn/<slug>
-        ["learn", slug] => Some(content_root.join("learn/paths").join(slug)),
+        _ => None,
+    }
+}
+
+/// Outcome of resolving a site-absolute route: either it maps to a filesystem path to check
+/// for existence, or the route shape itself is known to be invalid (distinct from a route
+/// shape [`resolve_route`] simply does not model, which is skipped silently).
+enum RouteResolution {
+    /// A modeled route, resolved to the content path it should point at.
+    Path(PathBuf),
+    /// A route shape known not to exist in learn-ai's App Router tree (e.g. `/learn/<slug>`),
+    /// carrying the correct route a reader should use instead.
+    KnownInvalid(String),
+}
+
+/// Returns `Some(correct_route)` when `route` is `/learn/<slug>` — a shape that looks like a
+/// valid content path (the file exists on disk at `content/learn/paths/<slug>`) but is **not**
+/// a real Next.js route: there is no `[slug]` segment directly under `app/[locale]/learn/`,
+/// only the two named children `learn/paths/<slug>` and `learn/concepts/<slug>`. This is what
+/// lets [`lint_local_links`] report a diagnostic naming the correct route, rather than either
+/// (a) silently skipping the link because it looks like an unmodeled shape, or (b) resolving
+/// it to a path that happens to exist and reading it as clean.
+///
+/// `route` must start with `/` (the caller strips the leading `/` here).
+fn known_invalid_learn_route(route: &str) -> Option<String> {
+    let trimmed = route.trim_start_matches('/');
+    let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+    match segments.as_slice() {
+        ["learn", slug] if *slug != "paths" && *slug != "concepts" => {
+            Some(format!("/learn/paths/{slug}"))
+        }
         _ => None,
     }
 }
@@ -582,12 +625,21 @@ mod tests {
     }
 
     #[test]
-    fn learn_shorthand_route_resolves() {
+    fn learn_shorthand_route_is_reported_as_dead() {
         let content_root = route_fixture_root("mev-lint-route-learn-short");
         let file = content_root.join("learn/some-module.mdx");
         let source = "[link](/learn/existing-path)\n";
         let diags = lint_local_links(&file, &rel(), source, Some(&content_root));
-        assert!(diags.is_empty(), "{diags:?}");
+        // `/learn/existing-path` is not a real route even though
+        // `content/learn/paths/existing-path` exists on disk — the naive alias would read
+        // this as clean, which is exactly the regression this ticket closes.
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].locator, "E_LINT_DEAD_LOCAL_LINK");
+        assert!(
+            diags[0].message.contains("/learn/paths/existing-path"),
+            "diagnostic must name the correct route: {:?}",
+            diags[0].message
+        );
         std::fs::remove_dir_all(&content_root).ok();
     }
 
