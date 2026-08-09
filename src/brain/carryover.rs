@@ -49,7 +49,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use okf_core::{BlockedBy, Carryover, StateFile, StateSource};
+use okf_core::{BlockedBy, Carryover, ClearsWhen, StateFile, StateSource};
 
 use crate::brain::config::AttentionThresholds;
 use crate::brain::state::{carryover_stale_age, is_snoozed, staleness_anchor};
@@ -252,6 +252,34 @@ fn match_block_id_at(chars: &[char], start: usize) -> Option<usize> {
     None
 }
 
+/// The prose string of a `clears_when`, if it is the legacy free-form form.
+///
+/// Returns `Some(s)` for [`ClearsWhen::Prose`], `None` for
+/// [`ClearsWhen::Predicate`]. Every site that previously did
+/// `item.clears_when.as_deref()` against the old `Option<String>` shape
+/// should now do `item.clears_when.as_ref().and_then(clears_when_prose)` —
+/// behaviour-identical for prose entries, and a `Predicate` value produces
+/// exactly what a `None` did before (no refs extracted, no display string).
+/// This is deliberately temporary: predicate evaluation and a richer display
+/// form are `MV.ticket.clears-when-evaluation`'s job, not this one's.
+pub fn clears_when_prose(cw: &ClearsWhen) -> Option<&str> {
+    match cw {
+        ClearsWhen::Prose(s) => Some(s.as_str()),
+        ClearsWhen::Predicate(_) => None,
+    }
+}
+
+/// Human-facing display string for a `clears_when`, for the report/summary
+/// sites (`CarryoverVerdict.clears_when`, the staleness-warning and
+/// Attention-section formatters). Currently identical to
+/// [`clears_when_prose`] — `Predicate` entries have no display string yet —
+/// kept as a separate name so those call sites read as "what do I show a
+/// human" rather than "what do I evaluate", and so a future predicate
+/// summary (`MV.ticket.clears-when-evaluation`) has one place to land.
+pub fn clears_when_display(cw: &ClearsWhen) -> Option<&str> {
+    clears_when_prose(cw)
+}
+
 /// Verbs that turn a block ID mentioned in `clears_when` into a *closure*
 /// condition rather than a passing reference.
 ///
@@ -448,7 +476,7 @@ pub fn evaluate_carryover(
             // condition. A carryover related to block X does not clear when X
             // closes, and treating it as one produced false `cleared` verdicts
             // against the live corpus. Only `clears_when` decides the lane.
-            if let Some(clears_when) = item.clears_when.as_deref() {
+            if let Some(clears_when) = item.clears_when.as_ref().and_then(clears_when_prose) {
                 // Class A: prose block IDs, resolved against the corpus, and
                 // only when the predicate actually asserts closure.
                 let (prose_keys, prose_ambiguous) =
@@ -481,7 +509,8 @@ pub fn evaluate_carryover(
                     CarryoverLane::Actionable
                 };
                 (lane, None)
-            } else if let Some(clears_when) = item.clears_when.as_deref() {
+            } else if let Some(clears_when) = item.clears_when.as_ref().and_then(clears_when_prose)
+            {
                 let reason = if ambiguous {
                     NotEvaluableReason::AmbiguousReference
                 } else if !has_closure_verb(clears_when)
@@ -520,7 +549,11 @@ pub fn evaluate_carryover(
                 slug: item.slug.clone(),
                 kind: item.kind.clone(),
                 text: item.text.clone(),
-                clears_when: item.clears_when.clone(),
+                clears_when: item
+                    .clears_when
+                    .as_ref()
+                    .and_then(clears_when_display)
+                    .map(String::from),
                 created: item.created.clone(),
                 age_days,
                 stale,
@@ -838,7 +871,7 @@ mod tests {
             kind: kind.to_string(),
             text: "some carryover text".to_string(),
             related,
-            clears_when: clears_when.map(str::to_string),
+            clears_when: clears_when.map(|s| ClearsWhen::Prose(s.to_string())),
             created: created.to_string(),
             reviewed: reviewed.map(str::to_string),
             snoozed_until: snoozed_until.map(str::to_string),

@@ -55,6 +55,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::Diagnostic;
+use crate::brain::carryover::clears_when_display;
 use crate::brain::config::BrainConfig;
 
 // ---------------------------------------------------------------------------
@@ -401,7 +402,8 @@ pub fn check_carryover_staleness(
             let threshold = thresholds.carryover_threshold(&item.kind);
             let clears = item
                 .clears_when
-                .as_deref()
+                .as_ref()
+                .and_then(clears_when_display)
                 .map(|c| format!(" (clears when: {c})"))
                 .unwrap_or_default();
             diags.push(Diagnostic::warning(
