@@ -49,7 +49,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use okf_core::{BlockedBy, Carryover, ClearsWhen, StateFile, StateSource};
+use okf_core::{BlockedBy, Carryover, ClearsWhen, ClearsWhenPredicate, StateFile, StateSource};
 
 use crate::brain::config::AttentionThresholds;
 use crate::brain::state::{carryover_stale_age, is_snoozed, staleness_anchor};
@@ -102,6 +102,15 @@ pub enum CarryoverRef {
     /// A path-existence reference. Satisfied when the path resolves to an
     /// existing file (relative to the brain root or the owning repo's path).
     Path { path: String, satisfied: bool },
+    /// A typed `block_closed` predicate whose `"{repo}:{id}"` key has no
+    /// entry at all in the loaded status map — an unresolvable target
+    /// (wrong repo slug, wrong ID, or a corpus that simply never loaded that
+    /// repo). Always unsatisfied, and kept distinct from [`Self::Block`] so
+    /// the report can tell "the block exists and is open" (an ordinary,
+    /// actionable unmet ref) apart from "the block was never found" (a data
+    /// problem worth flagging differently) rather than rendering both as an
+    /// identical "unmet: key" line.
+    UnresolvedBlock { key: String },
 }
 
 /// The evaluated verdict for a single `carryover[]` entry.
@@ -476,32 +485,80 @@ pub fn evaluate_carryover(
             // condition. A carryover related to block X does not clear when X
             // closes, and treating it as one produced false `cleared` verdicts
             // against the live corpus. Only `clears_when` decides the lane.
-            if let Some(clears_when) = item.clears_when.as_ref().and_then(clears_when_prose) {
-                // Class A: prose block IDs, resolved against the corpus, and
-                // only when the predicate actually asserts closure.
-                let (prose_keys, prose_ambiguous) =
-                    block_refs_from_prose(clears_when, Some(own_repo), &known_keys);
-                ambiguous = prose_ambiguous;
-                for key in prose_keys {
-                    let satisfied = status_map
-                        .get(&key)
-                        .map(|s| s.as_deref() == Some("closed"))
-                        .unwrap_or(false);
-                    refs.push(CarryoverRef::Block { key, satisfied });
-                }
+            match item.clears_when.as_ref() {
+                Some(ClearsWhen::Prose(clears_when)) => {
+                    // Class A: prose block IDs, resolved against the corpus, and
+                    // only when the predicate actually asserts closure.
+                    let (prose_keys, prose_ambiguous) =
+                        block_refs_from_prose(clears_when, Some(own_repo), &known_keys);
+                    ambiguous = prose_ambiguous;
+                    for key in prose_keys {
+                        let satisfied = status_map
+                            .get(&key)
+                            .map(|s| s.as_deref() == Some("closed"))
+                            .unwrap_or(false);
+                        refs.push(CarryoverRef::Block { key, satisfied });
+                    }
 
-                // Class B: path existence, only when "exists" appears.
-                for path in path_refs_from_prose(clears_when) {
-                    let satisfied =
-                        path_ref_satisfied(&path, brain_root, repo_paths, src.repo_slug.as_str());
-                    refs.push(CarryoverRef::Path { path, satisfied });
+                    // Class B: path existence, only when "exists" appears.
+                    for path in path_refs_from_prose(clears_when) {
+                        let satisfied = path_ref_satisfied(
+                            &path,
+                            brain_root,
+                            repo_paths,
+                            src.repo_slug.as_str(),
+                        );
+                        refs.push(CarryoverRef::Path { path, satisfied });
+                    }
                 }
+                Some(ClearsWhen::Predicate(ClearsWhenPredicate::BlockClosed {
+                    repo, id, ..
+                })) => {
+                    let key = format!("{repo}:{id}");
+                    match status_map.get(&key) {
+                        // Present in the corpus: satisfied iff its authored
+                        // status is exactly "closed" — same predicate the
+                        // prose path uses above.
+                        Some(status) => {
+                            let satisfied = status.as_deref() == Some("closed");
+                            refs.push(CarryoverRef::Block { key, satisfied });
+                        }
+                        // Absent from the corpus entirely: an unresolvable
+                        // target, never satisfied, and reported distinctly
+                        // from a plain unmet `Block` ref (see
+                        // `CarryoverRef::UnresolvedBlock`).
+                        None => {
+                            refs.push(CarryoverRef::UnresolvedBlock { key });
+                        }
+                    }
+                }
+                Some(ClearsWhen::Predicate(ClearsWhenPredicate::FileExists { path, .. })) => {
+                    // Reuse `path_ref_satisfied` verbatim — no second
+                    // resolution strategy for the typed form.
+                    let satisfied = path_ref_satisfied(path, brain_root, repo_paths, own_repo);
+                    refs.push(CarryoverRef::Path {
+                        path: path.clone(),
+                        satisfied,
+                    });
+                }
+                // `FileContains` and `CommandExitsZero` are
+                // `MV.ticket.clears-when-evaluation` task 2's job (execution
+                // safety design). Until then a predicate of either kind
+                // extracts no refs — the same "behaves like no predicate"
+                // stance the field-validation ticket left every typed
+                // predicate in.
+                Some(ClearsWhen::Predicate(
+                    ClearsWhenPredicate::FileContains { .. }
+                    | ClearsWhenPredicate::CommandExitsZero { .. },
+                )) => {}
+                None => {}
             }
 
             let (lane, reason) = if !refs.is_empty() {
                 let all_satisfied = refs.iter().all(|r| match r {
                     CarryoverRef::Block { satisfied, .. } => *satisfied,
                     CarryoverRef::Path { satisfied, .. } => *satisfied,
+                    CarryoverRef::UnresolvedBlock { .. } => false,
                 });
                 let lane = if all_satisfied {
                     CarryoverLane::Cleared
@@ -509,8 +566,7 @@ pub fn evaluate_carryover(
                     CarryoverLane::Actionable
                 };
                 (lane, None)
-            } else if let Some(clears_when) = item.clears_when.as_ref().and_then(clears_when_prose)
-            {
+            } else if let Some(ClearsWhen::Prose(clears_when)) = item.clears_when.as_ref() {
                 let reason = if ambiguous {
                     NotEvaluableReason::AmbiguousReference
                 } else if !has_closure_verb(clears_when)
@@ -1470,5 +1526,375 @@ mod tests {
                 CarryoverLane::NotEvaluable,
             ]
         );
+    }
+
+    // -- typed predicates: BlockClosed / FileExists -------------------------
+
+    /// Builds a `Carryover` with a typed `clears_when` predicate instead of
+    /// prose, sharing every other field with [`item`]'s defaults.
+    fn predicate_item(slug: &str, kind: &str, predicate: ClearsWhenPredicate) -> Carryover {
+        Carryover {
+            clears_when: Some(ClearsWhen::Predicate(predicate)),
+            ..item(slug, kind, None, vec![], "2020-01-01", None, None)
+        }
+    }
+
+    #[test]
+    fn block_closed_predicate_naming_a_closed_block_clears() {
+        let files = vec![(
+            src("engine-rs"),
+            state_file(
+                "engine-rs",
+                vec![("EN.5.B1", "closed")],
+                vec![predicate_item(
+                    "typed-closed",
+                    "deferred",
+                    ClearsWhenPredicate::BlockClosed {
+                        repo: "engine-rs".to_string(),
+                        id: "EN.5.B1".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+        );
+        assert_eq!(report.cleared, 1);
+        assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::Block {
+                key: "engine-rs:EN.5.B1".to_string(),
+                satisfied: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn block_closed_predicate_naming_an_open_block_is_actionable_with_unmet_ref() {
+        let files = vec![(
+            src("engine-rs"),
+            state_file(
+                "engine-rs",
+                vec![("EN.5.B1", "in-progress")],
+                vec![predicate_item(
+                    "typed-open",
+                    "deferred",
+                    ClearsWhenPredicate::BlockClosed {
+                        repo: "engine-rs".to_string(),
+                        id: "EN.5.B1".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+        );
+        assert_eq!(report.actionable, 1);
+        assert_eq!(report.entries[0].lane, CarryoverLane::Actionable);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::Block {
+                key: "engine-rs:EN.5.B1".to_string(),
+                satisfied: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn block_closed_predicate_whose_target_is_absent_from_status_map_is_never_cleared() {
+        // A false `cleared` here would mean a typo'd repo/id silently
+        // vanishing the entry instead of flagging the data problem.
+        let files = vec![(
+            src("engine-rs"),
+            state_file(
+                "engine-rs",
+                vec![],
+                vec![predicate_item(
+                    "typed-unresolvable",
+                    "deferred",
+                    ClearsWhenPredicate::BlockClosed {
+                        repo: "engine-rs".to_string(),
+                        id: "EN.99.Z".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+        );
+        assert_eq!(report.cleared, 0);
+        assert_eq!(report.actionable, 1);
+        assert_eq!(report.entries[0].lane, CarryoverLane::Actionable);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::UnresolvedBlock {
+                key: "engine-rs:EN.99.Z".to_string(),
+            }],
+            "an absent target must be surfaced distinctly from a plain unmet Block ref"
+        );
+    }
+
+    #[test]
+    fn file_exists_predicate_resolves_against_brain_root() {
+        let dir = std::env::temp_dir().join(format!(
+            "mev-carryover-file-exists-brain-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("marker.md");
+        std::fs::write(&target, "present").unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-exists-brain-root",
+                    "deferred",
+                    ClearsWhenPredicate::FileExists {
+                        path: "marker.md".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+        );
+        assert_eq!(report.cleared, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::Path {
+                path: "marker.md".to_string(),
+                satisfied: true,
+            }]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_exists_predicate_resolves_against_owning_repo_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "mev-carryover-file-exists-repo-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("marker.md");
+        std::fs::write(&target, "present").unwrap();
+
+        let mut repo_paths = HashMap::new();
+        repo_paths.insert("mev".to_string(), dir.clone());
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-exists-repo-path",
+                    "deferred",
+                    ClearsWhenPredicate::FileExists {
+                        path: "marker.md".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/definitely/not/the/brain/root"),
+            &repo_paths,
+            "2026-08-09",
+            &thresholds(),
+            None,
+        );
+        assert_eq!(report.cleared, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_exists_predicate_naming_a_missing_path_is_actionable() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-missing",
+                    "deferred",
+                    ClearsWhenPredicate::FileExists {
+                        path: "definitely/does/not/exist.md".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+        );
+        assert_eq!(report.actionable, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::Path {
+                path: "definitely/does/not/exist.md".to_string(),
+                satisfied: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn file_contains_and_command_exits_zero_predicates_are_not_evaluable_in_this_task() {
+        // Task 2 (`MV.ticket.clears-when-evaluation` task 2) owns evaluating
+        // these — until then they must behave exactly like `None` did before
+        // any typed predicate evaluation existed, never like `Cleared`.
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![
+                    predicate_item(
+                        "typed-file-contains-deferred",
+                        "deferred",
+                        ClearsWhenPredicate::FileContains {
+                            path: "CLAUDE.md".to_string(),
+                            pattern: "mev".to_string(),
+                            note: None,
+                        },
+                    ),
+                    predicate_item(
+                        "typed-command-exits-zero-deferred",
+                        "deferred",
+                        ClearsWhenPredicate::CommandExitsZero {
+                            command: "true".to_string(),
+                            note: None,
+                        },
+                    ),
+                ],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+        );
+        assert_eq!(report.cleared, 0);
+        assert_eq!(report.not_evaluable, 2);
+        for entry in &report.entries {
+            assert!(entry.refs.is_empty());
+            assert_eq!(entry.lane, CarryoverLane::NotEvaluable);
+        }
+    }
+
+    #[test]
+    fn mixed_typed_satisfied_and_prose_unsatisfied_entries_each_preserve_conjunctive_and() {
+        // The schema allows exactly one `clears_when` per carryover entry, so
+        // "mixed typed-and-prose reference sets" is exercised across a fleet
+        // sweep containing one entry of each kind, each independently
+        // proving the same `refs`-vec AND logic governs both source types.
+        let files = vec![(
+            src("engine-rs"),
+            state_file(
+                "engine-rs",
+                vec![("EN.5.B1", "closed"), ("EN.5.B2", "in-progress")],
+                vec![
+                    predicate_item(
+                        "typed-satisfied",
+                        "deferred",
+                        ClearsWhenPredicate::BlockClosed {
+                            repo: "engine-rs".to_string(),
+                            id: "EN.5.B1".to_string(),
+                            note: None,
+                        },
+                    ),
+                    item(
+                        "prose-unsatisfied",
+                        "deferred",
+                        Some("EN.5.B2 lands"),
+                        vec![],
+                        "2020-01-01",
+                        None,
+                        None,
+                    ),
+                ],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+        );
+        let by_slug = |slug: &str| {
+            report
+                .entries
+                .iter()
+                .find(|e| e.slug == slug)
+                .unwrap_or_else(|| panic!("missing entry {slug}"))
+        };
+        assert_eq!(by_slug("typed-satisfied").lane, CarryoverLane::Cleared);
+        assert_eq!(by_slug("prose-unsatisfied").lane, CarryoverLane::Actionable);
+    }
+
+    #[test]
+    fn closure_verbs_and_pinning_test_guard_are_untouched_by_typed_predicate_support() {
+        // Re-affirms the CLOSURE_VERBS gate still applies on the prose path
+        // even though the typed BlockClosed path (correctly) bypasses it —
+        // see the module-level doc on `evaluate_carryover`'s Predicate arm.
+        assert!(has_closure_verb("BA.0.A closes"));
+        assert!(!has_closure_verb("one of the two BA.0.A blocks is renamed"));
     }
 }

@@ -1376,12 +1376,32 @@ command) to act on — it is never an automatic deletion.
 |---|---|
 | `cleared` | At least one reference was extracted from the entry and **every** extracted reference is currently satisfied — a recommendation to delete the entry |
 | `actionable` | At least one reference was extracted, but **at least one** is unsatisfied — the specific unmet reference(s) are named so a reader can act without re-reading the predicate |
-| `not-evaluable` | No reference could be extracted. Reason `prose` (`clears_when` is present but is pure prose), `no-closure-verb` (it names a block but never says the block must close), `ambiguous-reference` (a bare block ID matched more than one repo and was dropped), or `no-predicate` (`clears_when` is `None`) |
+| `not-evaluable` | No reference could be extracted. Reason `prose` (`clears_when` is present but is pure prose), `no-closure-verb` (it names a block but never says the block must close), `ambiguous-reference` (a bare block ID matched more than one repo and was dropped), or `no-predicate` (`clears_when` is `None`, or is a typed predicate this version does not yet evaluate — see below) |
 
-#### The two evaluable predicate classes
+#### Typed `clears_when` predicates
 
-Only two classes of `clears_when` predicate are ever machine-evaluated; anything else falls
-into `not-evaluable` rather than being guessed at:
+Alongside prose, `clears_when` may be a typed predicate object (`{"type": "block_closed", ...}`
+etc.). Two of the four typed predicate kinds are evaluated today:
+
+- **`block_closed { repo, id }`** — satisfied when `"{repo}:{id}"`'s authored status in the
+  loaded corpus is exactly `closed`. A `{repo, id}` pair with **no matching node at all** in the
+  loaded corpus (a typo'd repo slug or ID) is never satisfied and is reported distinctly from an
+  ordinary unmet reference — `unresolvable: {repo}:{id} (not found in loaded corpus)` in the
+  human summary, `{"type": "unresolved_block", "key": "..."}` in `--json` — so a data problem
+  doesn't read the same as "the block just hasn't closed yet". Unlike the prose grammar, the
+  typed form needs no [`CLOSURE_VERBS`](#the-two-evaluable-predicate-classes) gate: it is
+  unambiguous by construction.
+- **`file_exists { path }`** — satisfied under the same two-root resolution as the prose Class B
+  reference below (brain root, then the owning repo's path).
+
+`file_contains` and `command_exits_zero` are not yet evaluated — an entry using either of them
+falls into `not-evaluable` with reason `no-predicate`, exactly like an entry with no `clears_when`
+at all (a later change adds these, including `command_exits_zero`'s opt-in execution gate).
+
+#### The two evaluable prose predicate classes
+
+Only two classes of prose `clears_when` are ever machine-evaluated; anything else falls into
+`not-evaluable` rather than being guessed at:
 
 - **Block references — from `clears_when` only.** Block IDs matched in the prose by a strict
   grammar (`[A-Z]{2,3}\.(?:\d+\.[A-Z0-9]+|ticket\.[a-z0-9][a-z0-9-]*|chore\.[a-z0-9][a-z0-9-]*)`).

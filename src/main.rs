@@ -1095,14 +1095,20 @@ fn print_carryover_report(report: &mev::CarryoverReport) {
             match lane {
                 mev::CarryoverLane::Actionable => {
                     for r in &entry.refs {
-                        let (label, satisfied) = match r {
-                            mev::CarryoverRef::Block { key, satisfied } => (key.clone(), satisfied),
-                            mev::CarryoverRef::Path { path, satisfied } => {
-                                (path.clone(), satisfied)
+                        match r {
+                            mev::CarryoverRef::Block { key, satisfied } => {
+                                if !satisfied {
+                                    println!("      unmet: {key}");
+                                }
                             }
-                        };
-                        if !satisfied {
-                            println!("      unmet: {label}");
+                            mev::CarryoverRef::Path { path, satisfied } => {
+                                if !satisfied {
+                                    println!("      unmet: {path}");
+                                }
+                            }
+                            mev::CarryoverRef::UnresolvedBlock { key } => {
+                                println!("      unresolvable: {key} (not found in loaded corpus)");
+                            }
                         }
                     }
                 }
