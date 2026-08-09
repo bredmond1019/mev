@@ -79,9 +79,9 @@ pub fn lint_code_blocks(rel: &Path, source: &str) -> Vec<Diagnostic> {
 ///
 /// A **site-absolute** target (a single leading `/`, e.g. `/en/blog/x` or `/learn/y`) is a
 /// Next.js route, not a filesystem path — it is resolved route-aware via [`resolve_route`]
-/// against `content_root` (see the four mapping rules there). A route shape `resolve_route`
-/// does not recognize, or a `content_root` of `None`, is skipped silently rather than
-/// reported: mev must not assert on routes it does not model.
+/// against `content_root` (see the mapping rules there). A route shape `resolve_route` does
+/// not recognize, or a `content_root` of `None`, is skipped silently rather than reported:
+/// mev must not assert on routes it does not model.
 ///
 /// Everything else (a genuinely relative target) is resolved relative to `file`'s parent
 /// directory, after stripping any trailing `#anchor` or `?query` suffix, and checked for
@@ -287,11 +287,14 @@ fn strip_anchor_and_query(target: &str) -> &str {
     &target[..end]
 }
 
-/// Map a site-absolute route (e.g. `/en/blog/x`, `/blog/x`, `/learn/paths/x`, `/learn/x`) to
-/// a content path under `content_root`, per the four mapping rules established for Task 8
-/// (`planning/12.A-blog-module-linting/tasks.md` — route-aware resolution). Returns `None`
-/// for any route shape not covered by those rules — such a path is skipped silently by the
-/// caller, never reported, because mev must not assert on routes it does not model.
+/// Map a site-absolute route (e.g. `/en/blog/x`, `/blog/x`, `/learn/paths/x`,
+/// `/en/learn/paths/x`, `/learn/concepts/x`, `/pt-BR/learn/concepts/x`) to a content path under
+/// `content_root`, per the mapping rules established for Task 8
+/// (`planning/12.A-blog-module-linting/tasks.md` — route-aware resolution) and extended by
+/// `planning/ticket-learn-link-mapping-masks-dead-links` for locale-prefixed learn routes and
+/// `/learn/concepts/<slug>`. Returns `None` for any route shape not covered by those rules —
+/// such a path is skipped silently by the caller, never reported, because mev must not assert
+/// on routes it does not model.
 ///
 /// `route` must start with `/` (the caller strips the leading `/` here).
 fn resolve_route(route: &str, content_root: &Path) -> Option<PathBuf> {
@@ -315,8 +318,18 @@ fn resolve_route(route: &str, content_root: &Path) -> Option<PathBuf> {
                 .join("blog/published")
                 .join(format!("{slug}.mdx")),
         ),
+        // /<locale>/learn/paths/<slug>
+        [locale, "learn", "paths", slug] if *locale == "en" || *locale == "pt-BR" => {
+            Some(content_root.join("learn/paths").join(slug))
+        }
+        // /<locale>/learn/concepts/<slug>
+        [locale, "learn", "concepts", slug] if *locale == "en" || *locale == "pt-BR" => {
+            Some(content_root.join("learn/concepts").join(slug))
+        }
         // /learn/paths/<slug>
         ["learn", "paths", slug] => Some(content_root.join("learn/paths").join(slug)),
+        // /learn/concepts/<slug>
+        ["learn", "concepts", slug] => Some(content_root.join("learn/concepts").join(slug)),
         _ => None,
     }
 }
@@ -534,12 +547,14 @@ mod tests {
     // Route-aware resolution for site-absolute links (Task 8)
     // -----------------------------------------------------------------
 
-    /// Build a `<root>/blog/published/<slug>.mdx` (+ optional pt-BR) and
-    /// `<root>/learn/paths/<slug>` fixture tree, returning the content root.
+    /// Build a `<root>/blog/published/<slug>.mdx` (+ optional pt-BR),
+    /// `<root>/learn/paths/<slug>`, and `<root>/learn/concepts/<slug>` fixture tree, returning
+    /// the content root.
     fn route_fixture_root(prefix: &str) -> PathBuf {
         let dir = crate::testsupport::unique_temp_dir(prefix);
         std::fs::create_dir_all(dir.join("blog/published/pt-BR")).unwrap();
         std::fs::create_dir_all(dir.join("learn/paths/existing-path")).unwrap();
+        std::fs::create_dir_all(dir.join("learn/concepts/existing-concept")).unwrap();
         std::fs::write(dir.join("blog/published/hello.mdx"), "hi").unwrap();
         std::fs::write(dir.join("blog/published/pt-BR/hello.mdx"), "oi").unwrap();
         dir
@@ -618,6 +633,111 @@ mod tests {
         let content_root = route_fixture_root("mev-lint-route-learn-paths-missing");
         let file = content_root.join("learn/some-module.mdx");
         let source = "[link](/learn/paths/nope)\n";
+        let diags = lint_local_links(&file, &rel(), source, Some(&content_root));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].locator, "E_LINT_DEAD_LOCAL_LINK");
+        std::fs::remove_dir_all(&content_root).ok();
+    }
+
+    #[test]
+    fn locale_learn_paths_route_resolves_en() {
+        let content_root = route_fixture_root("mev-lint-route-learn-paths-en");
+        let file = content_root.join("learn/some-module.mdx");
+        let source = "[link](/en/learn/paths/existing-path)\n";
+        let diags = lint_local_links(&file, &rel(), source, Some(&content_root));
+        assert!(diags.is_empty(), "{diags:?}");
+        std::fs::remove_dir_all(&content_root).ok();
+    }
+
+    #[test]
+    fn locale_learn_paths_route_resolves_ptbr() {
+        let content_root = route_fixture_root("mev-lint-route-learn-paths-ptbr");
+        let file = content_root.join("learn/some-module.mdx");
+        let source = "[link](/pt-BR/learn/paths/existing-path)\n";
+        let diags = lint_local_links(&file, &rel(), source, Some(&content_root));
+        assert!(diags.is_empty(), "{diags:?}");
+        std::fs::remove_dir_all(&content_root).ok();
+    }
+
+    #[test]
+    fn locale_learn_paths_route_missing_target_is_reported_en() {
+        let content_root = route_fixture_root("mev-lint-route-learn-paths-en-missing");
+        let file = content_root.join("learn/some-module.mdx");
+        let source = "[link](/en/learn/paths/nope)\n";
+        let diags = lint_local_links(&file, &rel(), source, Some(&content_root));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].locator, "E_LINT_DEAD_LOCAL_LINK");
+        std::fs::remove_dir_all(&content_root).ok();
+    }
+
+    #[test]
+    fn locale_learn_paths_route_missing_target_is_reported_ptbr() {
+        let content_root = route_fixture_root("mev-lint-route-learn-paths-ptbr-missing");
+        let file = content_root.join("learn/some-module.mdx");
+        let source = "[link](/pt-BR/learn/paths/nope)\n";
+        let diags = lint_local_links(&file, &rel(), source, Some(&content_root));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].locator, "E_LINT_DEAD_LOCAL_LINK");
+        std::fs::remove_dir_all(&content_root).ok();
+    }
+
+    #[test]
+    fn learn_concepts_route_resolves() {
+        let content_root = route_fixture_root("mev-lint-route-learn-concepts");
+        let file = content_root.join("learn/some-module.mdx");
+        let source = "[link](/learn/concepts/existing-concept)\n";
+        let diags = lint_local_links(&file, &rel(), source, Some(&content_root));
+        assert!(diags.is_empty(), "{diags:?}");
+        std::fs::remove_dir_all(&content_root).ok();
+    }
+
+    #[test]
+    fn learn_concepts_route_missing_target_is_reported() {
+        let content_root = route_fixture_root("mev-lint-route-learn-concepts-missing");
+        let file = content_root.join("learn/some-module.mdx");
+        let source = "[link](/learn/concepts/nope)\n";
+        let diags = lint_local_links(&file, &rel(), source, Some(&content_root));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].locator, "E_LINT_DEAD_LOCAL_LINK");
+        std::fs::remove_dir_all(&content_root).ok();
+    }
+
+    #[test]
+    fn locale_learn_concepts_route_resolves_en() {
+        let content_root = route_fixture_root("mev-lint-route-learn-concepts-en");
+        let file = content_root.join("learn/some-module.mdx");
+        let source = "[link](/en/learn/concepts/existing-concept)\n";
+        let diags = lint_local_links(&file, &rel(), source, Some(&content_root));
+        assert!(diags.is_empty(), "{diags:?}");
+        std::fs::remove_dir_all(&content_root).ok();
+    }
+
+    #[test]
+    fn locale_learn_concepts_route_resolves_ptbr() {
+        let content_root = route_fixture_root("mev-lint-route-learn-concepts-ptbr");
+        let file = content_root.join("learn/some-module.mdx");
+        let source = "[link](/pt-BR/learn/concepts/existing-concept)\n";
+        let diags = lint_local_links(&file, &rel(), source, Some(&content_root));
+        assert!(diags.is_empty(), "{diags:?}");
+        std::fs::remove_dir_all(&content_root).ok();
+    }
+
+    #[test]
+    fn locale_learn_concepts_route_missing_target_is_reported_en() {
+        let content_root = route_fixture_root("mev-lint-route-learn-concepts-en-missing");
+        let file = content_root.join("learn/some-module.mdx");
+        let source = "[link](/en/learn/concepts/nope)\n";
+        let diags = lint_local_links(&file, &rel(), source, Some(&content_root));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].locator, "E_LINT_DEAD_LOCAL_LINK");
+        std::fs::remove_dir_all(&content_root).ok();
+    }
+
+    #[test]
+    fn locale_learn_concepts_route_missing_target_is_reported_ptbr() {
+        let content_root = route_fixture_root("mev-lint-route-learn-concepts-ptbr-missing");
+        let file = content_root.join("learn/some-module.mdx");
+        let source = "[link](/pt-BR/learn/concepts/nope)\n";
         let diags = lint_local_links(&file, &rel(), source, Some(&content_root));
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].locator, "E_LINT_DEAD_LOCAL_LINK");
