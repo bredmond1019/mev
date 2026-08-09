@@ -1306,6 +1306,11 @@ pub fn check_epics(config: &BrainConfig, files: &[(StateSource, StateFile)]) -> 
 /// 5. **`E_STATE_DANGLING_CROSS_REPO`** — a brain `cross_repo[]` edge's
 ///    `from` or `to` endpoint's block does not exist in the named repo's
 ///    `tracks[]` (repo is known, block is not).
+/// 6. **`E_STATE_DANGLING_BLOCKED_BY`** — a carryover `blocks[]` entry of
+///    `{type:"block",repo,id}` targets a `repo:id` that does not exist in
+///    the corpus-wide node set. `External` entries and entries with an
+///    empty `repo` (already reported by [`check_schema`]'s structural
+///    check) are skipped.
 pub fn check_state_graph(
     graph: &StateGraph,
     files: &[(StateSource, StateFile)],
@@ -1440,6 +1445,40 @@ pub fn check_state_graph(
                         format!(
                             "cross_repo 'to' block '{to_id}' does not exist in repo \
                              '{to_repo}' tracks[]"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    // --- 6. Carryover blocks[] dangling targets ---
+    //
+    // `blocks[]` is not part of `okf_core::build_state_graph`'s edges (that graph
+    // only covers `tracks[].blocks[].depends_on` and brain `cross_repo[]`), so it
+    // gets its own pass here rather than a `graph.edges` entry. Reuses the same
+    // `node_set` the edge-integrity checks above already built — no second index.
+    for (src, file) in files {
+        let path = &src.abs_path;
+        for item in &file.carryover {
+            for dep in &item.blocks {
+                let BlockedBy::Block { repo, id, .. } = dep else {
+                    continue; // External has no target node.
+                };
+                if repo.trim().is_empty() {
+                    // Reported by check_schema's structural check; skip here
+                    // rather than double-reporting.
+                    continue;
+                }
+                let key = format!("{repo}:{id}");
+                if !node_set.contains(key.as_str()) {
+                    diags.push(Diagnostic::error(
+                        path,
+                        "E_STATE_DANGLING_BLOCKED_BY",
+                        format!(
+                            "carryover '{}' blocks[] entry targets '{key}', which does not \
+                             exist in repo '{repo}' tracks[]",
+                            item.slug
                         ),
                     ));
                 }
@@ -4405,6 +4444,175 @@ mod tests {
             dangling_cross.len(),
             1,
             "expected exactly one E_STATE_DANGLING_CROSS_REPO for ghost 'to' endpoint, got: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 5 — carryover blocks[] dangling-target check
+    // -----------------------------------------------------------------------
+
+    /// Fixture: alpha has block AL.1.A in tracks[]; beta carries a carryover
+    /// item whose `blocks[]` targets `blocks_repo:blocks_id`.
+    fn beta_with_carryover_blocks(
+        dir: &std::path::Path,
+        blocks_repo: &str,
+        blocks_id: &str,
+    ) -> (StateSource, StateFile) {
+        let json = format!(
+            r#"{{
+  "repo": "beta",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": {{ "now": [], "next": [], "blocked": [] }},
+  "tracks": [],
+  "carryover": [
+    {{
+      "slug": "waiting-on-alpha",
+      "scope": {{ "repo": "beta" }},
+      "kind": "deferred",
+      "text": "Waiting on a block elsewhere.",
+      "created": "2026-06-29",
+      "blocks": [ {{ "type": "block", "repo": "{blocks_repo}", "id": "{blocks_id}" }} ]
+    }}
+  ]
+}}"#
+        );
+        make_pair(dir, "beta-state.json", "project", &json)
+    }
+
+    #[test]
+    fn carryover_blocks_dangling_target_emits_dangling_blocked_by() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let pair_a = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let pair_b = beta_with_carryover_blocks(dir.path(), "alpha", "AL.1.GHOST");
+
+        let files = vec![pair_a, pair_b];
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files);
+
+        let dangling: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+            .collect();
+        assert_eq!(
+            dangling.len(),
+            1,
+            "expected exactly one E_STATE_DANGLING_BLOCKED_BY for carryover blocks[] ghost \
+             target, got: {diags:?}"
+        );
+        assert!(dangling[0].message.contains("waiting-on-alpha"));
+        assert!(dangling[0].message.contains("alpha:AL.1.GHOST"));
+        assert!(dangling[0].message.contains("blocks[]"));
+    }
+
+    #[test]
+    fn carryover_blocks_resolvable_target_emits_no_diagnostic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let pair_a = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let pair_b = beta_with_carryover_blocks(dir.path(), "alpha", "AL.1.A");
+
+        let files = vec![pair_a, pair_b];
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files);
+
+        let dangling: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+            .collect();
+        assert!(
+            dangling.is_empty(),
+            "resolvable carryover blocks[] target should emit no diagnostic, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn carryover_blocks_external_entry_is_skipped_by_graph_check() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let json = r#"{
+  "repo": "beta",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [],
+  "carryover": [
+    {
+      "slug": "fleet-wide-block",
+      "scope": { "repo": "beta" },
+      "kind": "deferred",
+      "text": "Blocks everything, no node target.",
+      "created": "2026-06-29",
+      "blocks": [ { "type": "external", "what": "vendor outage" } ]
+    }
+  ]
+}"#;
+        let pair_b = make_pair(dir.path(), "beta-state.json", "project", json);
+
+        let files = vec![pair_b];
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files);
+
+        let dangling: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+            .collect();
+        assert!(
+            dangling.is_empty(),
+            "External blocks[] entries have no target node and must be skipped, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn carryover_blocks_empty_repo_is_not_double_reported_by_graph_check() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let json = r#"{
+  "repo": "beta",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [],
+  "carryover": [
+    {
+      "slug": "malformed-block-ref",
+      "scope": { "repo": "beta" },
+      "kind": "deferred",
+      "text": "Malformed blocks[] entry.",
+      "created": "2026-06-29",
+      "blocks": [ { "type": "block", "repo": "", "id": "" } ]
+    }
+  ]
+}"#;
+        let pair_b = make_pair(dir.path(), "beta-state.json", "project", json);
+
+        let files = vec![pair_b];
+        let graph = build_state_graph(&files);
+
+        // check_schema (task 3) reports the empty-repo/id shape once.
+        let schema_diags = check_schema(&files[0].0, &files[0].1);
+        let schema_bad_blocked_by: Vec<_> = schema_diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_BLOCKED_BY")
+            .collect();
+        assert_eq!(
+            schema_bad_blocked_by.len(),
+            1,
+            "expected check_schema to report the malformed blocks[] entry once, got: \
+             {schema_diags:?}"
+        );
+
+        // check_state_graph (task 5) must defer to it, not double-report.
+        let graph_diags = check_state_graph(&graph, &files);
+        let graph_dangling: Vec<_> = graph_diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+            .collect();
+        assert!(
+            graph_dangling.is_empty(),
+            "empty-repo blocks[] entry must not be double-reported by check_state_graph, got: \
+             {graph_diags:?}"
         );
     }
 
