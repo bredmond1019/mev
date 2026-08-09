@@ -153,7 +153,7 @@ for this block.
 #### Site-absolute route resolution (`E_LINT_DEAD_LOCAL_LINK`)
 
 A link target with a single leading `/` (not `//`, which is protocol-relative and skipped) is a
-Next.js route, not a filesystem path, and resolves through four mapping rules against a
+Next.js route, not a filesystem path, and resolves through seven mapping rules against a
 `content_root` — the directory containing both `blog/` and `learn/` — derived from the
 validator's root (`<content>/blog/published` and `<content>/learn` both strip back to
 `<content>`; when the root doesn't match either shape, `content_root` is `None` and **every**
@@ -163,9 +163,26 @@ absolute link is skipped, never reported, rather than guessed at):
 |---|---|
 | `/<locale>/blog/<slug>` | `blog/published/<slug>.mdx` for `en`; `blog/published/pt-BR/<slug>.mdx` for `pt-BR` |
 | `/blog/<slug>` (no locale segment) | `blog/published/<slug>.mdx` |
+| `/<locale>/learn/paths/<slug>` | `learn/paths/<slug>` (`en` and `pt-BR`) |
+| `/<locale>/learn/concepts/<slug>` | `learn/concepts/<slug>` (`en` and `pt-BR`) |
 | `/learn/paths/<slug>` | `learn/paths/<slug>` |
-| `/learn/<slug>` | `learn/paths/<slug>` (both shapes are in live use) |
+| `/learn/concepts/<slug>` | `learn/concepts/<slug>` |
+| `/learn/<slug>` | **nothing — reported as `E_LINT_DEAD_LOCAL_LINK`.** See below |
 | anything else | skipped silently, never reported — mev does not assert on routes it does not model |
+
+**Two ways a route can fail to resolve, and they are not the same.** An *unmodelled* shape
+(`/services`, `/about`) is skipped silently: mev does not assert on routes it does not model.
+A *known-invalid* shape is reported. Today there is exactly one known-invalid shape,
+`/learn/<slug>`: learn-ai's App Router has no `[slug]` segment directly under `learn/` — only
+`learn/paths/[slug]` and `learn/concepts/[slug]` — so `/learn/<slug>` 404s in production. It is
+matched before route resolution runs, and the diagnostic names `/learn/paths/<slug>` as the
+correct route so the reader can fix the link without re-deriving the route table.
+
+Until 2026-08-09 this table aliased `/learn/<slug>` onto `learn/paths/<slug>`, which made the
+link resolve to a file that exists and therefore *never* fire — a false negative that hid two
+live dead links. Collapsing known-invalid back into the silent-skip branch would re-hide them,
+which is why the distinction above is load-bearing rather than stylistic
+(`MV.ticket.learn-link-mapping-masks-dead-links`).
 
 This was added after the block's first full pass found `E_LINT_DEAD_LOCAL_LINK` firing 29 times
 over the live corpus (18 blog, 11 learn) with zero true positives — every target was a real
@@ -175,8 +192,14 @@ JSX component prop, which carries no ` ``` ` fence — is fixed by making the li
 fence-aware and by skipping any `[` immediately glued to a preceding identifier character, e.g.
 a Python indexing expression like `results` immediately followed by an open bracket, an index, a
 close bracket, and a call — the array-indexing-then-call shape that reads as markdown link syntax
-if you don't special-case it). `mev validate --blog` and `mev validate --lint`
-each report zero `E_LINT_DEAD_LOCAL_LINK` over the live corpus as a result, pinned by tests.
+if you don't special-case it).
+
+As of 2026-08-09, `mev validate --lint` reports zero `E_LINT_DEAD_LOCAL_LINK` over the live learn
+tree, and `mev validate --blog` reports **two** — the same `/learn/12-factor-agent-development`
+target in the EN and pt-BR copies of the 12-factor post, surfaced by the known-invalid rule above.
+Those are content bugs owned by learn-ai's `LA.ticket.content-lint-cleanup`, not mev bugs. Both
+figures are pinned by live-tree tests; the blog-side test allowlists that one tracked target and
+still fails on any other dead link, so the guard against new regressions is intact.
 
 ---
 
