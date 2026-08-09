@@ -313,10 +313,19 @@ fn validate_blog_does_not_panic_over_the_live_blog_tree() {
 // tree reported 11 false positives, all from site-absolute routes resolved as filesystem
 // paths (plus one link-shaped-code-content false positive on the learn tree, fixed
 // alongside route resolution). Both skip cleanly on a fresh clone without the sibling repo.
+//
+// ticket-learn-link-mapping-masks-dead-links (2026-08-09): fixing the `/learn/<slug>` ->
+// `/learn/paths/<slug>` aliasing bug (the whole point of that ticket) correctly turned two
+// previously-masked live dead links into real findings — `/learn/12-factor-agent-development`
+// inside `12-factor-agents-building-reliable-llm-applications.mdx` (EN and pt-BR). Fixing that
+// content belongs to learn-ai's `LA.ticket.content-lint-cleanup`, not to mev, so this test can
+// no longer assert zero without re-masking the exact defect the ticket closed. It instead
+// allowlists that one known, tracked target and keeps failing on anything else, so it still
+// catches genuinely new dead-link regressions in the live corpus.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn validate_blog_over_the_live_tree_reports_zero_dead_local_links() {
+fn validate_blog_over_the_live_tree_reports_only_known_dead_local_links() {
     let live_root = Path::new("../../learn-ai/content/blog/published");
     if !live_root.exists() {
         eprintln!(
@@ -326,15 +335,24 @@ fn validate_blog_over_the_live_tree_reports_zero_dead_local_links() {
         return;
     }
 
+    // Tracked by LA.ticket.content-lint-cleanup (learn-ai B4); not mev's job to fix the
+    // content. Remove this allowlist entry once that ticket lands.
+    const KNOWN_DEAD_LINK_TARGET: &str = "/learn/12-factor-agent-development";
+
     let report = mev::validate_blog(live_root).expect("validate_blog");
     let dead_links: Vec<&mev::Diagnostic> = report
         .diagnostics
         .iter()
         .filter(|d| d.locator == "E_LINT_DEAD_LOCAL_LINK")
         .collect();
+    let unexpected: Vec<&&mev::Diagnostic> = dead_links
+        .iter()
+        .filter(|d| !d.message.contains(KNOWN_DEAD_LINK_TARGET))
+        .collect();
     assert!(
-        dead_links.is_empty(),
-        "expected zero E_LINT_DEAD_LOCAL_LINK over the live blog tree, got {dead_links:?}"
+        unexpected.is_empty(),
+        "expected only the known, tracked {KNOWN_DEAD_LINK_TARGET} dead link over the live \
+         blog tree, got unexpected findings: {unexpected:?}"
     );
 }
 
