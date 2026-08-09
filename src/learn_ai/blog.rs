@@ -123,7 +123,11 @@ fn list_mdx_files(dir: &Path) -> Vec<(String, PathBuf)> {
 /// lint and funnel passes never run over content that could not be read.
 ///
 /// `content_root` is threaded through to [`lint::lint_local_links`] for route-aware
-/// resolution of site-absolute links (Task 8). `learn_root` is threaded through to
+/// resolution of site-absolute links (Task 8). Route-aware resolution has two outcomes: a
+/// route shape one of the seven mapping rules models resolves to a content path and is checked
+/// for existence, and a route shape known to be invalid (e.g. `/learn/<slug>`) is reported
+/// directly naming the correct route; a route shape neither covers is skipped silently.
+/// `learn_root` is threaded through to
 /// [`funnel::check_cta`] for filesystem resolution of `cta: module` targets (Task 2). Both
 /// `None` skip the corresponding resolution rather than guessing — callers that only have a
 /// bare `&BlogPost` (e.g. `ContentValidator::validate_item`, used directly by tests) get that
@@ -293,8 +297,11 @@ impl ContentValidator for BlogValidator {
 
     /// Used directly (e.g. by tests calling `validate_item` on a bare `BlogPost`) without a
     /// known content root — conservatively skips route resolution for any absolute link
-    /// rather than guessing. [`run`](ContentValidator::run) is overridden below to derive and
-    /// thread through the real content root for the actual `mev validate --blog` path.
+    /// rather than guessing, including a link whose route shape would otherwise be reported
+    /// as known-invalid: without `content_root` there is no content path to check, so even
+    /// the known-invalid distinction does not surface. [`run`](ContentValidator::run) is
+    /// overridden below to derive and thread through the real content root for the actual
+    /// `mev validate --blog` path.
     fn validate_item(&self, item: &BlogPost) -> Vec<Diagnostic> {
         validate_post(item, None, self.learn_root.as_deref(), &self.tells)
     }
@@ -302,8 +309,11 @@ impl ContentValidator for BlogValidator {
     /// Overridden (not the default driver) so every item's lint pass gets route-aware
     /// resolution: the content root is derived once from `root` here and threaded through to
     /// [`validate_post`], since `ContentValidator::validate_item`'s signature has no root
-    /// parameter to carry it (Task 8). `learn_root` was already resolved at construction time
-    /// and is carried through unchanged.
+    /// parameter to carry it (Task 8). With a real content root in hand, a route shape one of
+    /// the seven mapping rules models is checked for existence and a known-invalid shape (e.g.
+    /// `/learn/<slug>`) is reported naming the correct route, while a route shape neither
+    /// covers is still skipped silently. `learn_root` was already resolved at construction
+    /// time and is carried through unchanged.
     fn run(&self, root: &Path) -> Report {
         let content_root = lint::derive_content_root(root);
         let (items, mut diagnostics) = self.crawl(root);

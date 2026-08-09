@@ -78,10 +78,14 @@ pub fn lint_code_blocks(rel: &Path, source: &str) -> Vec<Diagnostic> {
 /// skipped — no network calls, ever. Pure in-page anchors (`#...`) are skipped.
 ///
 /// A **site-absolute** target (a single leading `/`, e.g. `/en/blog/x` or `/learn/y`) is a
-/// Next.js route, not a filesystem path — it is resolved route-aware via [`resolve_route`]
-/// against `content_root` (see the mapping rules there). A route shape `resolve_route` does
-/// not recognize, or a `content_root` of `None`, is skipped silently rather than reported:
-/// mev must not assert on routes it does not model.
+/// Next.js route, not a filesystem path. Two distinct outcomes follow, and they must not be
+/// collapsed into one: a route shape [`resolve_route`]'s seven mapping rules recognize is
+/// resolved to a content path and checked for existence; a route shape [`known_invalid_learn_route`]
+/// recognizes as **known invalid** (e.g. `/learn/<slug>`, which has no matching Next.js route
+/// even though the aliased content file exists on disk) is reported directly, naming the
+/// correct route in the diagnostic. Anything else — a route shape neither function models, or
+/// a `content_root` of `None` — is skipped silently rather than reported: mev must not assert
+/// on routes it does not model.
 ///
 /// Everything else (a genuinely relative target) is resolved relative to `file`'s parent
 /// directory, after stripping any trailing `#anchor` or `?query` suffix, and checked for
@@ -289,12 +293,14 @@ fn strip_anchor_and_query(target: &str) -> &str {
 
 /// Map a site-absolute route (e.g. `/en/blog/x`, `/blog/x`, `/learn/paths/x`,
 /// `/en/learn/paths/x`, `/learn/concepts/x`, `/pt-BR/learn/concepts/x`) to a content path under
-/// `content_root`, per the mapping rules established for Task 8
+/// `content_root`, per the **seven** mapping rules established for Task 8
 /// (`planning/12.A-blog-module-linting/tasks.md` — route-aware resolution) and extended by
 /// `planning/ticket-learn-link-mapping-masks-dead-links` for locale-prefixed learn routes and
-/// `/learn/concepts/<slug>`. Returns `None` for any route shape not covered by those rules —
-/// such a path is skipped silently by the caller, never reported, because mev must not assert
-/// on routes it does not model.
+/// `/learn/concepts/<slug>`. Returns `None` for any route shape none of these seven rules
+/// cover — such a path is skipped silently by the caller, never reported, because mev must not
+/// assert on routes it does not model. This is distinct from a **known-invalid** shape (e.g.
+/// `/learn/<slug>`): that case is intercepted by [`known_invalid_learn_route`] before this
+/// function is ever called, so it is reported rather than silently skipped or misresolved.
 ///
 /// `route` must start with `/` (the caller strips the leading `/` here).
 fn resolve_route(route: &str, content_root: &Path) -> Option<PathBuf> {
