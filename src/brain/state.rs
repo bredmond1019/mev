@@ -833,6 +833,21 @@ pub fn check_field_policy(src: &StateSource, file: &StateFile) -> Vec<Diagnostic
         }
     }
 
+    for item in &file.carryover {
+        if let Some(priority) = item.priority
+            && priority > 3
+        {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_PRIORITY_RANGE",
+                format!(
+                    "carryover '{}' has out-of-range priority {}; must be 0..=3",
+                    item.slug, priority
+                ),
+            ));
+        }
+    }
+
     diags
 }
 
@@ -7911,6 +7926,48 @@ mod check_field_policy_tests {
         let diags = run_field_policy(b);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].locator, "E_STATE_MODEL_ENUM");
+    }
+
+    fn run_carryover_field_policy(item: okf_core::Carryover) -> Vec<Diagnostic> {
+        let mut file: StateFile =
+            serde_json::from_str(tests::leaf_json("test_repo").as_str()).unwrap();
+        file.carryover = vec![item];
+        let src = StateSource {
+            repo_slug: "test_repo".to_string(),
+            abs_path: PathBuf::from("test.json"),
+            expected_kind: "project",
+        };
+        check_field_policy(&src, &file)
+    }
+
+    fn base_carryover() -> okf_core::Carryover {
+        okf_core::Carryover {
+            slug: "some-caveat".to_string(),
+            kind: "constraint".to_string(),
+            text: "A durable caveat.".to_string(),
+            priority: None,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_carryover_valid_all_none() {
+        assert!(run_carryover_field_policy(base_carryover()).is_empty());
+    }
+
+    #[test]
+    fn test_carryover_priority_range() {
+        let mut item = base_carryover();
+        item.priority = Some(0);
+        assert!(run_carryover_field_policy(item.clone()).is_empty());
+        item.priority = Some(3);
+        assert!(run_carryover_field_policy(item.clone()).is_empty());
+        item.priority = Some(4);
+        let diags = run_carryover_field_policy(item);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].locator, "E_STATE_PRIORITY_RANGE");
+        assert!(diags[0].message.contains("some-caveat"));
+        assert!(diags[0].message.contains('4'));
     }
 }
 
