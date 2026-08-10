@@ -54,7 +54,7 @@
 //! No `regex` dependency is used or added — the grammar is small and fixed, so it is
 //! matched by hand (char scanning) in [`extract_block_id_tokens`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -949,6 +949,113 @@ pub fn evaluate_carryover(
         entries,
     }
 }
+
+// --- Dedup: tokenization + similarity ---
+//
+// `MV.ticket.carryover-dedup-clusters` task 1. Pure, dependency-free primitives that
+// support two later passes: exact clustering on the authored `finding_id` field
+// (trusted — a human wrote it) and a heuristic token-overlap suggestion pass over
+// entries that have no `finding_id` yet (untrusted — suggestions only, never
+// auto-merged). See `planning/ticket-carryover-dedup-clusters/tasks.md` for the full
+// governing design decisions.
+//
+// No regex crate here by convention — this module is hand-scanned, matching the style
+// of `extract_block_id_tokens` above.
+
+/// English function words plus corpus-noise terms that carry no identity signal for
+/// the dedup token-overlap pass. Removed from both `slug` and `text` tokens before
+/// similarity is computed.
+pub const DEDUP_STOPWORDS: &[&str] = &[
+    "a", "an", "and", "the", "is", "are", "was", "were", "be", "been", "it", "its", "this", "that",
+    "to", "of", "in", "on", "for", "from", "with", "without", "but", "not", "no", "as", "at", "by",
+    "or", "so", "than", "then", "when", "which", "what", "all", "any", "only", "own", "has",
+    "have", "had", "does", "do", "did", "can", "must", "should", "will", "would", "there", "their",
+    "them", "they", "we", "you", "i",
+];
+
+/// Tokenizes a carryover entry's `slug` and `text` into one deduplicated,
+/// deterministically-ordered set for similarity scoring.
+///
+/// Lowercases both inputs, splits on any non-ASCII-alphanumeric character (so
+/// `finding_id`-style hyphens, slashes, dots, and backticks all act as separators),
+/// drops tokens shorter than 3 characters, and drops [`DEDUP_STOPWORDS`] members.
+///
+/// CRITICAL: both `slug` and `text` are tokenized into the SAME set. The proof case
+/// (`bastion:grep-inventory-is-a-hypothesis` = `mev:sdlc-spec-acceptance-vs-purpose-gap`,
+/// overlap ~0.38) shares ZERO slug vocabulary and is recoverable only from `text` — a
+/// slug-only tokenizer would silently fail that case, and the block's whole point with
+/// it. A [`BTreeSet`] is used (not a hash set) so iteration order — and therefore any
+/// test or report that walks the tokens — is deterministic across runs and does not
+/// depend on hash-seed randomization.
+pub fn dedup_tokens(slug: &str, text: &str) -> BTreeSet<String> {
+    let mut tokens = BTreeSet::new();
+    for source in [slug, text] {
+        let mut current = String::new();
+        for ch in source.chars() {
+            if ch.is_ascii_alphanumeric() {
+                current.push(ch.to_ascii_lowercase());
+            } else if !current.is_empty() {
+                push_dedup_token(&mut tokens, std::mem::take(&mut current));
+            }
+        }
+        if !current.is_empty() {
+            push_dedup_token(&mut tokens, std::mem::take(&mut current));
+        }
+    }
+    tokens
+}
+
+fn push_dedup_token(tokens: &mut BTreeSet<String>, token: String) {
+    if token.len() < 3 {
+        return;
+    }
+    if DEDUP_STOPWORDS.contains(&token.as_str()) {
+        return;
+    }
+    tokens.insert(token);
+}
+
+/// Jaccard similarity: `|a ∩ b| / |a ∪ b|`. Returns `0.0` (never `NaN`) when both sets
+/// are empty.
+pub fn jaccard(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f64 {
+    let union_len = a.union(b).count();
+    if union_len == 0 {
+        return 0.0;
+    }
+    let intersection_len = a.intersection(b).count();
+    intersection_len as f64 / union_len as f64
+}
+
+/// Overlap coefficient: `|a ∩ b| / min(|a|, |b|)`. Returns `0.0` (never divides by
+/// zero) when either set is empty.
+pub fn overlap_coefficient(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f64 {
+    let min_len = a.len().min(b.len());
+    if min_len == 0 {
+        return 0.0;
+    }
+    let intersection_len = a.intersection(b).count();
+    intersection_len as f64 / min_len as f64
+}
+
+/// Acceptance threshold on Jaccard similarity for the dedup suggestion pass.
+///
+/// OPERATOR-MEASURED against the live 142-entry `carryover[]` corpus (see
+/// `planning/ticket-carryover-dedup-clusters/tasks.md`). Lowering this to catch the
+/// documented miss (`mev:okf-related-must-be-a-real-doc-id` vs
+/// `okf-core:okf-core-doc-ids-are-inconsistent-with-filenames`, which scores ~0.29)
+/// trades a known, documented miss for an unknown number of false positives across
+/// the fleet. Do not lower it.
+pub const DEDUP_JACCARD_MIN: f64 = 0.18;
+
+/// Acceptance threshold on overlap coefficient for the dedup suggestion pass.
+///
+/// OPERATOR-MEASURED against the live 142-entry `carryover[]` corpus (see
+/// `planning/ticket-carryover-dedup-clusters/tasks.md`). Lowering this to catch the
+/// documented miss (`mev:okf-related-must-be-a-real-doc-id` vs
+/// `okf-core:okf-core-doc-ids-are-inconsistent-with-filenames`, which scores ~0.29)
+/// trades a known, documented miss for an unknown number of false positives across
+/// the fleet. Do not lower it.
+pub const DEDUP_OVERLAP_MIN: f64 = 0.34;
 
 #[cfg(test)]
 mod tests {
@@ -2970,5 +3077,124 @@ mod tests {
             false,
         );
         assert_ne!(report.entries[0].lane, CarryoverLane::Cleared);
+    }
+
+    // -- dedup_tokens / jaccard / overlap_coefficient -----------------------
+
+    #[test]
+    fn dedup_tokens_removes_stopwords() {
+        let tokens = dedup_tokens("the-and-of", "this is not a real finding");
+        // "real" and "finding" survive; every stopword and short token is dropped.
+        assert!(tokens.contains("real"));
+        assert!(tokens.contains("finding"));
+        assert!(!tokens.contains("the"));
+        assert!(!tokens.contains("and"));
+        assert!(!tokens.contains("of"));
+        assert!(!tokens.contains("is"));
+        assert!(!tokens.contains("not"));
+        assert!(!tokens.contains("a"));
+    }
+
+    #[test]
+    fn dedup_tokens_splits_on_hyphens_slashes_dots_and_backticks() {
+        let tokens = dedup_tokens(
+            "wave0-tickets-ship-without-tasks-json",
+            "see `src/brain/carryover.rs` version 1.2 for details",
+        );
+        assert!(tokens.contains("wave0"));
+        assert!(tokens.contains("tickets"));
+        assert!(tokens.contains("ship"));
+        assert!(tokens.contains("tasks"));
+        assert!(tokens.contains("json"));
+        assert!(tokens.contains("src"));
+        assert!(tokens.contains("brain"));
+        assert!(tokens.contains("carryover"));
+        // "rs" is 2 chars and is dropped by the short-token rule; splitting is
+        // still proven by "src"/"brain"/"carryover" landing as separate tokens.
+        assert!(!tokens.contains("rs"));
+        assert!(tokens.contains("version"));
+        assert!(tokens.contains("details"));
+    }
+
+    #[test]
+    fn dedup_tokens_drops_short_tokens() {
+        let tokens = dedup_tokens("ab-cd-ok", "xy go up");
+        // All of ab, cd, ok, xy, go, up are < 3 chars.
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn dedup_tokens_merges_slug_and_text_into_one_set() {
+        // Proof case shape: slug-only tokens are disjoint from text-only tokens, but
+        // both must land in the same returned set.
+        let tokens = dedup_tokens("grep-inventory-hypothesis", "acceptance purpose gap");
+        assert!(tokens.contains("grep"));
+        assert!(tokens.contains("inventory"));
+        assert!(tokens.contains("hypothesis"));
+        assert!(tokens.contains("acceptance"));
+        assert!(tokens.contains("purpose"));
+        assert!(tokens.contains("gap"));
+    }
+
+    #[test]
+    fn jaccard_empty_sets_is_zero_not_nan() {
+        let empty: BTreeSet<String> = BTreeSet::new();
+        let score = jaccard(&empty, &empty);
+        assert_eq!(score, 0.0);
+        assert!(!score.is_nan());
+    }
+
+    #[test]
+    fn overlap_coefficient_empty_sets_is_zero_not_nan_or_panic() {
+        let empty: BTreeSet<String> = BTreeSet::new();
+        let mut one = BTreeSet::new();
+        one.insert("token".to_string());
+
+        let score_both_empty = overlap_coefficient(&empty, &empty);
+        assert_eq!(score_both_empty, 0.0);
+        assert!(!score_both_empty.is_nan());
+
+        let score_one_empty = overlap_coefficient(&empty, &one);
+        assert_eq!(score_one_empty, 0.0);
+        assert!(!score_one_empty.is_nan());
+    }
+
+    #[test]
+    fn jaccard_and_overlap_of_identical_sets_is_one() {
+        let mut set = BTreeSet::new();
+        set.insert("finding".to_string());
+        set.insert("token".to_string());
+        assert_eq!(jaccard(&set, &set), 1.0);
+        assert_eq!(overlap_coefficient(&set, &set), 1.0);
+    }
+
+    #[test]
+    fn jaccard_and_overlap_of_disjoint_sets_is_zero() {
+        let mut a = BTreeSet::new();
+        a.insert("alpha".to_string());
+        let mut b = BTreeSet::new();
+        b.insert("beta".to_string());
+        assert_eq!(jaccard(&a, &b), 0.0);
+        assert_eq!(overlap_coefficient(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn overlap_coefficient_exceeds_jaccard_for_asymmetric_pair() {
+        // a is a small set fully contained in the much larger set b: overlap
+        // coefficient (relative to the smaller set) is 1.0, while jaccard (relative
+        // to the union) is much smaller.
+        let mut a = BTreeSet::new();
+        a.insert("shared".to_string());
+
+        let mut b = BTreeSet::new();
+        b.insert("shared".to_string());
+        b.insert("other1".to_string());
+        b.insert("other2".to_string());
+        b.insert("other3".to_string());
+        b.insert("other4".to_string());
+
+        let ov = overlap_coefficient(&a, &b);
+        let jac = jaccard(&a, &b);
+        assert!(ov > jac, "overlap {ov} should exceed jaccard {jac}");
     }
 }
