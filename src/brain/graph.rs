@@ -183,12 +183,27 @@ pub fn check_graph(artifact: &GraphArtifact, ephemeral_ids: &HashSet<String>) ->
         }
     }
 
+    // --- Dangling-related suggestion lookup (built once, not per-edge) ---
+    // Maps each node's bare `doc_id` to the indices of every node that owns it, so a
+    // dangling UNQUALIFIED `related:` target can be checked against every scope in one
+    // hash lookup instead of scanning `artifact.graph.nodes` inside the edge loop below.
+    // See ticket-unqualified-related-suggests-scope: the corpus is thousands of nodes and
+    // this runs on every gate.
+    let mut doc_id_index: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (idx, node) in artifact.graph.nodes.iter().enumerate() {
+        doc_id_index
+            .entry(node.doc_id.as_str())
+            .or_default()
+            .push(idx);
+    }
+
     // --- Edge resolution ---
     for edge in &artifact.graph.edges {
-        let referrer_rel: &std::path::Path = artifact
+        let referrer_node = artifact
             .node_map
             .get(edge.from.as_str())
-            .and_then(|&idx| artifact.graph.nodes.get(idx))
+            .and_then(|&idx| artifact.graph.nodes.get(idx));
+        let referrer_rel: &std::path::Path = referrer_node
             .map(|n| n.rel.as_path())
             .unwrap_or_else(|| std::path::Path::new(""));
 
@@ -217,13 +232,48 @@ pub fn check_graph(artifact: &GraphArtifact, ephemeral_ids: &HashSet<String>) ->
                 ));
             }
             EdgeResolution::Dangling { qualified } => {
+                let mut message = format!(
+                    "related target `{}` (resolved: `{qualified}`) does not exist in the corpus",
+                    edge.to_ref
+                );
+
+                // Only unqualified refs get a suggestion — an explicit `scope:doc_id`
+                // prefix is an authored decision and must never be second-guessed, even
+                // when another scope happens to own that bare doc_id. This is exactly
+                // the same "is this qualified" test okf-core's resolve_edge uses to
+                // decide whether to prefix the referrer's own scope.
+                if !edge.to_ref.contains(':') {
+                    let referrer_scope = referrer_node.map(|n| n.scope.as_str()).unwrap_or("");
+                    if let Some(idxs) = doc_id_index.get(edge.to_ref.as_str()) {
+                        let candidates: Vec<&Node> = idxs
+                            .iter()
+                            .map(|&i| &artifact.graph.nodes[i])
+                            .filter(|n| n.scope != referrer_scope)
+                            .collect();
+                        match candidates.len() {
+                            0 => {}
+                            1 => {
+                                message.push_str(&format!(
+                                    " — did you mean `{}`?",
+                                    candidates[0].id
+                                ));
+                            }
+                            _ => {
+                                let names: Vec<&str> =
+                                    candidates.iter().map(|n| n.id.as_str()).collect();
+                                message.push_str(&format!(
+                                    " — matches multiple scopes ({}); qualify explicitly",
+                                    names.join(", ")
+                                ));
+                            }
+                        }
+                    }
+                }
+
                 diags.push(Diagnostic::error(
                     referrer_rel,
                     "E_GRAPH_DANGLING_RELATED",
-                    format!(
-                        "related target `{}` (resolved: `{qualified}`) does not exist in the corpus",
-                        edge.to_ref
-                    ),
+                    message,
                 ));
             }
         }
@@ -598,6 +648,228 @@ mod tests {
             "message names the target: {:?}",
             dangling[0].message
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // check_graph — dangling `related:` suggests the qualified scope
+    // (ticket-unqualified-related-suggests-scope)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dangling_unqualified_ref_suggests_the_one_owning_scope() {
+        // Reproduces the 2026-08-09 incident: a mev-scope doc writes an unqualified
+        // `related:` target that only exists as a doc_id in `brain`.
+        let dir = TempDir::new().unwrap();
+        let referrer = make_entry(
+            &dir,
+            "mev",
+            "a.md",
+            "---\ndoc_id: alpha\nrelated:\n  - carryover-improvements-plan\n---",
+        );
+        let owner = make_entry(
+            &dir,
+            "brain",
+            "carryover.md",
+            "---\ndoc_id: carryover-improvements-plan\n---",
+        );
+        let corpus = corpus_from(vec![referrer, owner]);
+        let artifact = build_graph(&corpus, &BrainConfig::default());
+        let diags = check_graph(&artifact, &HashSet::new());
+
+        let dangling: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                d.locator == "E_GRAPH_DANGLING_RELATED" && d.severity == crate::Severity::Error
+            })
+            .collect();
+        assert_eq!(dangling.len(), 1, "expected one dangling error: {diags:?}");
+        assert!(
+            dangling[0]
+                .message
+                .contains("brain:carryover-improvements-plan"),
+            "message names the qualified form: {:?}",
+            dangling[0].message
+        );
+    }
+
+    #[test]
+    fn dangling_unqualified_ref_owned_by_two_scopes_lists_both_without_singling_one_out() {
+        let dir = TempDir::new().unwrap();
+        let referrer = make_entry(
+            &dir,
+            "mev",
+            "a.md",
+            "---\ndoc_id: alpha\nrelated:\n  - shared-target\n---",
+        );
+        let owner1 = make_entry(&dir, "brain", "b.md", "---\ndoc_id: shared-target\n---");
+        let owner2 = make_entry(&dir, "engine", "c.md", "---\ndoc_id: shared-target\n---");
+        let corpus = corpus_from(vec![referrer, owner1, owner2]);
+        let artifact = build_graph(&corpus, &BrainConfig::default());
+        let diags = check_graph(&artifact, &HashSet::new());
+
+        let dangling: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                d.locator == "E_GRAPH_DANGLING_RELATED" && d.severity == crate::Severity::Error
+            })
+            .collect();
+        assert_eq!(dangling.len(), 1, "expected one dangling error: {diags:?}");
+        let message = &dangling[0].message;
+        assert!(
+            message.contains("brain:shared-target") && message.contains("engine:shared-target"),
+            "message lists both candidates: {message:?}"
+        );
+        assert!(
+            !message.contains("did you mean"),
+            "ambiguous match must not phrase a single 'did you mean': {message:?}"
+        );
+    }
+
+    #[test]
+    fn dangling_unqualified_ref_with_no_candidate_is_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let referrer = make_entry(
+            &dir,
+            "brain",
+            "a.md",
+            "---\ndoc_id: alpha\nrelated:\n  - typo-nonexistent\n---",
+        );
+        let corpus = corpus_from(vec![referrer]);
+        let artifact = build_graph(&corpus, &BrainConfig::default());
+        let diags = check_graph(&artifact, &HashSet::new());
+
+        let dangling: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                d.locator == "E_GRAPH_DANGLING_RELATED" && d.severity == crate::Severity::Error
+            })
+            .collect();
+        assert_eq!(dangling.len(), 1, "expected one dangling error: {diags:?}");
+        assert_eq!(
+            dangling[0].message,
+            "related target `typo-nonexistent` (resolved: `brain:typo-nonexistent`) does not exist in the corpus",
+            "message must be byte-identical to today's when there is no candidate"
+        );
+    }
+
+    #[test]
+    fn dangling_already_qualified_ref_never_gets_a_suggestion() {
+        // `brain:nope` is explicitly qualified — even though another scope (`mev`) owns
+        // the bare doc_id `nope`, the message must not suggest it. An explicit prefix is
+        // an authored decision.
+        let dir = TempDir::new().unwrap();
+        let referrer = make_entry(
+            &dir,
+            "brain",
+            "a.md",
+            "---\ndoc_id: alpha\nrelated:\n  - \"brain:nope\"\n---",
+        );
+        let owner = make_entry(&dir, "mev", "b.md", "---\ndoc_id: nope\n---");
+        let corpus = corpus_from(vec![referrer, owner]);
+        let artifact = build_graph(&corpus, &BrainConfig::default());
+        let diags = check_graph(&artifact, &HashSet::new());
+
+        let dangling: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                d.locator == "E_GRAPH_DANGLING_RELATED" && d.severity == crate::Severity::Error
+            })
+            .collect();
+        assert_eq!(dangling.len(), 1, "expected one dangling error: {diags:?}");
+        assert_eq!(
+            dangling[0].message,
+            "related target `brain:nope` (resolved: `brain:nope`) does not exist in the corpus",
+            "already-qualified refs must never gain a suggestion"
+        );
+    }
+
+    #[test]
+    fn same_scope_match_never_offered_as_suggestion() {
+        // Unreachable by construction via build_graph (a same-scope match would have
+        // resolved, not dangled), so we prove the candidate filter directly by hand-
+        // building a GraphArtifact: a `mev:shared-target` node exists in `graph.nodes`
+        // (so it is a same-scope doc_id owner) but is deliberately left OUT of
+        // `node_map`, forcing `resolve_edge` to report Dangling anyway. The filter must
+        // still exclude it — the referrer's own scope must never be offered.
+        let referrer = Node {
+            id: "mev:alpha".to_string(),
+            scope: "mev".to_string(),
+            doc_id: "alpha".to_string(),
+            rel: PathBuf::from("a.md"),
+        };
+        let same_scope_owner = Node {
+            id: "mev:shared-target".to_string(),
+            scope: "mev".to_string(),
+            doc_id: "shared-target".to_string(),
+            rel: PathBuf::from("b.md"),
+        };
+        let other_scope_owner = Node {
+            id: "brain:shared-target".to_string(),
+            scope: "brain".to_string(),
+            doc_id: "shared-target".to_string(),
+            rel: PathBuf::from("c.md"),
+        };
+        let edge = Edge {
+            from: "mev:alpha".to_string(),
+            to_ref: "shared-target".to_string(),
+            kind: EdgeKind::Related,
+        };
+        let mut node_map: HashMap<String, usize> = HashMap::new();
+        node_map.insert("mev:alpha".to_string(), 0);
+        // Deliberately omit "mev:shared-target" from node_map so resolve_edge
+        // cannot find it and reports Dangling despite the node existing.
+        let artifact = GraphArtifact {
+            graph: Graph {
+                nodes: vec![referrer, same_scope_owner, other_scope_owner],
+                edges: vec![edge],
+            },
+            node_map,
+            leaf_keys: HashSet::new(),
+        };
+        let diags = check_graph(&artifact, &HashSet::new());
+
+        let dangling = diags
+            .iter()
+            .find(|d| d.locator == "E_GRAPH_DANGLING_RELATED")
+            .expect("expected a dangling error");
+        assert!(
+            dangling.message.contains("brain:shared-target"),
+            "the other-scope owner should still be suggested: {:?}",
+            dangling.message
+        );
+        assert!(
+            !dangling.message.contains("did you mean `mev:shared-target`")
+                && !dangling.message.contains("(mev:shared-target"),
+            "the referrer's own-scope owner must never appear as a candidate: {:?}",
+            dangling.message
+        );
+    }
+
+    #[test]
+    fn dangling_locator_and_severity_unchanged_across_all_suggestion_cases() {
+        let dir = TempDir::new().unwrap();
+        let referrer = make_entry(
+            &dir,
+            "mev",
+            "a.md",
+            "---\ndoc_id: alpha\nrelated:\n  - one-owner\n  - two-owners\n  - no-owner\n  - \"brain:qualified-nope\"\n---",
+        );
+        let owner_one = make_entry(&dir, "brain", "b.md", "---\ndoc_id: one-owner\n---");
+        let owner_two_a = make_entry(&dir, "brain", "c.md", "---\ndoc_id: two-owners\n---");
+        let owner_two_b = make_entry(&dir, "engine", "d.md", "---\ndoc_id: two-owners\n---");
+        let corpus = corpus_from(vec![referrer, owner_one, owner_two_a, owner_two_b]);
+        let artifact = build_graph(&corpus, &BrainConfig::default());
+        let diags = check_graph(&artifact, &HashSet::new());
+
+        let dangling: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_GRAPH_DANGLING_RELATED")
+            .collect();
+        assert_eq!(dangling.len(), 4, "expected four dangling errors: {diags:?}");
+        for d in &dangling {
+            assert_eq!(d.locator, "E_GRAPH_DANGLING_RELATED");
+            assert_eq!(d.severity, crate::Severity::Error);
+        }
     }
 
     #[test]
