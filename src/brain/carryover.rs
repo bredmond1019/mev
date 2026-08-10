@@ -1564,6 +1564,159 @@ pub fn carryover_effective_priorities(
     memo.into_iter().filter(|(_, v)| *v <= 3).collect()
 }
 
+// ---------------------------------------------------------------------------
+// rank_carryover — the public ordering API (MV.ticket.carryover-triage-
+// ranking, task 3) — THE contract surface bastion calls
+// ---------------------------------------------------------------------------
+
+/// Unmet `blocks[]` keys for one carryover entry.
+///
+/// Mirrors `has_unmet_dep`'s predicate shape verbatim
+/// ([`crate::brain::emit`], private, near line 603) so ranking and the
+/// unified board's `depends_on` predicate can never drift apart: a
+/// [`BlockedBy::External`] edge is always unmet (there is no node target to
+/// resolve), and a [`BlockedBy::Block`] edge is unmet unless its target's
+/// authored status in `block_status` is exactly `"closed"` — an
+/// unresolvable target (absent from `block_status` entirely) counts as
+/// unmet too. An empty `repo` on a `Block` edge falls back to the entry's
+/// own `repo`, mirroring [`block_refs_from_related`]'s fallback.
+///
+/// `External` edges are keyed `"external:{what}"` (matching the display
+/// convention already used for `depends_on` at
+/// `crate::brain::emit::render_wave_table`) so every returned string is a
+/// stable, human-readable identifier — never an empty string.
+fn unmet_carryover_block_keys(
+    entry: &CarryoverVerdict,
+    block_status: &HashMap<String, Option<String>>,
+) -> Vec<String> {
+    entry
+        .blocks
+        .iter()
+        .filter_map(|edge| match edge {
+            BlockedBy::External { what } => Some(format!("external:{what}")),
+            BlockedBy::Block { repo, id, .. } => {
+                let target_repo = if repo.is_empty() {
+                    entry.repo.as_str()
+                } else {
+                    repo.as_str()
+                };
+                let key = format!("{target_repo}:{id}");
+                let closed = block_status.get(&key).and_then(|s| s.as_deref()) == Some("closed");
+                if closed { None } else { Some(key) }
+            }
+        })
+        .collect()
+}
+
+/// `TriageLane` sort rank: BLOCKING first, then HOT, AGING, STANDING.
+fn triage_lane_rank(lane: TriageLane) -> u8 {
+    match lane {
+        TriageLane::Blocking => 0,
+        TriageLane::Hot => 1,
+        TriageLane::Aging => 2,
+        TriageLane::Standing => 3,
+    }
+}
+
+/// Sort key for "age descending, absent last" — the opposite convention
+/// from [`effective_priority_for`]'s "absent sorts last" for priorities:
+/// here a missing age must not out-rank a real (however small) age, so it
+/// maps to `i64::MIN`, the smallest possible key under a *descending* sort.
+fn age_desc_key(age: Option<i64>) -> i64 {
+    age.unwrap_or(i64::MIN)
+}
+
+/// Total order for [`rank_carryover`]'s output — lane first (BLOCKING, HOT,
+/// AGING, STANDING), then the per-lane key from the spec table, then age
+/// descending as the shared secondary key (BLOCKING/HOT's explicit
+/// secondary; AGING/STANDING's only key), then `(repo, slug)` as the final
+/// deterministic tiebreak so output order never depends on input order or
+/// hash-map iteration.
+///
+/// Absent priority/effective-priority sorts **last** within a lane,
+/// matching [`crate::brain::emit::effective_priority_for`]'s
+/// absent-sorts-`u8::MAX` convention — this function deliberately does not
+/// invent a different absent convention.
+fn rank_carryover_cmp(a: &CarryoverRanking, b: &CarryoverRanking) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    triage_lane_rank(a.lane)
+        .cmp(&triage_lane_rank(b.lane))
+        .then_with(|| match a.lane {
+            TriageLane::Blocking => {
+                let pa = a.effective_priority.unwrap_or(u8::MAX);
+                let pb = b.effective_priority.unwrap_or(u8::MAX);
+                pa.cmp(&pb)
+            }
+            TriageLane::Hot => {
+                let pa = a.priority.unwrap_or(u8::MAX);
+                let pb = b.priority.unwrap_or(u8::MAX);
+                pa.cmp(&pb)
+            }
+            TriageLane::Aging | TriageLane::Standing => Ordering::Equal,
+        })
+        .then_with(|| age_desc_key(b.age_days).cmp(&age_desc_key(a.age_days)))
+        .then_with(|| a.repo.cmp(&b.repo))
+        .then_with(|| a.slug.cmp(&b.slug))
+}
+
+/// The public ranking entry point — **the contract surface**
+/// (`MV.ticket.carryover-triage-ranking`). bastion calls this and projects
+/// the result; it must never re-derive ranking (the same discipline already
+/// in place at `core/bastion/src/serve/handlers/attention.rs:140-141` for
+/// `carryover_stale_age`).
+///
+/// Composes [`assign_triage_lane`] (task 1) and
+/// [`carryover_effective_priorities`] (task 2) over `entries`:
+/// - Computes each entry's unmet `blocks[]` keys via
+///   [`unmet_carryover_block_keys`], reusing `has_unmet_dep`'s predicate
+///   shape (`external` always unmet; unresolved/non-`closed` target unmet).
+/// - Assigns a [`TriageLane`] from those unmet keys.
+/// - Looks up each entry's effective priority from
+///   `carryover_effective_priorities(entries, block_priorities)`.
+/// - Reads `clears_when_satisfied` from the entry's own already-evaluated
+///   [`CarryoverLane::Cleared`] verdict — `MV.ticket.clears-when-evaluation`
+///   already did that evaluation; this function never re-runs a predicate.
+///
+/// Returns the entries sorted per [`rank_carryover_cmp`] — see that
+/// function's doc comment for the full ordering, including the
+/// absent-sorts-last convention and the deterministic `(repo, slug)`
+/// tiebreak that makes output order identical across calls regardless of
+/// input order.
+pub fn rank_carryover(
+    entries: &[CarryoverVerdict],
+    block_priorities: &HashMap<String, u8>,
+    block_status: &HashMap<String, Option<String>>,
+) -> Vec<CarryoverRanking> {
+    let effective = carryover_effective_priorities(entries, block_priorities);
+
+    let mut ranked: Vec<CarryoverRanking> = entries
+        .iter()
+        .map(|entry| {
+            let unmet_blocks = unmet_carryover_block_keys(entry, block_status);
+            let lane = assign_triage_lane(entry, &unmet_blocks);
+            let key = format!("{}:{}", entry.repo, entry.slug);
+
+            CarryoverRanking {
+                repo: entry.repo.clone(),
+                slug: entry.slug.clone(),
+                kind: entry.kind.clone(),
+                lane,
+                priority: entry.priority,
+                effective_priority: effective.get(&key).copied(),
+                age_days: entry.age_days,
+                stale: entry.stale,
+                unmet_blocks,
+                clears_when_satisfied: entry.lane == CarryoverLane::Cleared,
+                finding_id: entry.finding_id.clone(),
+            }
+        })
+        .collect();
+
+    ranked.sort_by(rank_carryover_cmp);
+    ranked
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
