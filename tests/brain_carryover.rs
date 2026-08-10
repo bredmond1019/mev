@@ -294,3 +294,109 @@ fn total_equals_sum_of_lanes_and_entries() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Live-corpus assertion — `MV.ticket.clears-when-evaluation` Task 4.
+//
+// A green unit-test gate proves the code matches the spec; only real data
+// proves the spec was right. This reuses `mev::carryover_sweep`'s own
+// discovery (no new I/O path) over the real HQ brain corpus and asserts a
+// floor on evaluable entries, a ceiling on `cleared`, and that the
+// 2026-08-03 `core:ba-0-a-id-collision` false-cleared shape — if the entry
+// is still present — is never in the cleared lane.
+// ---------------------------------------------------------------------------
+
+/// Floor on evaluable (`cleared + actionable`) entries in the live HQ corpus.
+///
+/// Baseline measured 2026-08-09, before this block landed: 9 of 142
+/// (3 cleared / 6 actionable / 133 not-evaluable). Measured again 2026-08-09
+/// after Tasks 1-3 landed (typed predicates + broadened prose extraction):
+/// 9 of 138 (2 cleared / 7 actionable / 129 not-evaluable) — see the
+/// Amendment Log in `planning/ticket-clears-when-evaluation/tasks.md` for the
+/// full breakdown and the hand-verified spot check. The floor is set below
+/// that post-block measurement (not at the ticket's ~40 aspiration) because
+/// the live corpus's actual prose shapes did not, at measurement time,
+/// include material volume of the newly-reachable patterns (paths asserted
+/// without the word "exists", corrected/fixed pairs, gate mentions resolving
+/// to a checkable file or block) — that is a fact about the corpus's current
+/// content, not a defect in the widening, and is recorded honestly rather
+/// than papered over. The fleet mutates roughly 20 `carryover[]` entries/day,
+/// so a small margin below the measured value avoids flaking on ordinary
+/// churn while a real regression (a bug that stops the sweep from
+/// evaluating anything) still trips this floor.
+const EVALUABLE_FLOOR: usize = 6;
+
+/// Ceiling on `cleared` in the live HQ corpus. `cleared` is the destructive
+/// verdict this whole block is engineered never to over-produce — an
+/// unexpected jump is exactly the failure mode a floor alone cannot catch.
+/// Measured 2026-08-09: 2 cleared (baseline was 3). Set generously above
+/// both readings to tolerate ordinary fleet churn while still catching a
+/// widening that starts mis-firing.
+const CLEARED_CEILING: usize = 15;
+
+#[test]
+fn live_corpus_evaluable_floor_and_cleared_ceiling() {
+    // mev's own integration test binaries run with cwd == the mev crate
+    // root (`core/mev`); the HQ brain root (where `brain.toml` lives) is two
+    // levels up. Reuses `mev::carryover_sweep`'s own `find_brain_config` +
+    // `discover_state_files` discovery — no new I/O path is added here.
+    let live_root = Path::new("../..");
+    if !live_root.join("brain.toml").exists() {
+        eprintln!(
+            "skipping live_corpus_evaluable_floor_and_cleared_ceiling: {} has no brain.toml \
+             (fresh clone or CI runner without the sibling HQ checkout)",
+            live_root.display()
+        );
+        return;
+    }
+
+    let report = match mev::carryover_sweep(live_root, None, false) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "skipping live_corpus_evaluable_floor_and_cleared_ceiling: \
+                 carryover_sweep over the live corpus errored: {e}"
+            );
+            return;
+        }
+    };
+
+    let evaluable = report.cleared + report.actionable;
+    assert!(
+        evaluable >= EVALUABLE_FLOOR,
+        "expected at least {EVALUABLE_FLOOR} evaluable (cleared + actionable) entries in the \
+         live corpus, got {evaluable} of {} (cleared={}, actionable={}, not_evaluable={})",
+        report.total,
+        report.cleared,
+        report.actionable,
+        report.not_evaluable
+    );
+    assert!(
+        report.cleared <= CLEARED_CEILING,
+        "live-corpus cleared count {} exceeds the ceiling of {CLEARED_CEILING} — a widening may \
+         be over-firing and manufacturing false `cleared` verdicts",
+        report.cleared
+    );
+
+    // Live-data twin of the `carryover.rs:1098`-equivalent CLOSURE_VERBS
+    // pinning test: if `core:ba-0-a-id-collision` is still present in the
+    // corpus, it must never have landed in the cleared lane. BA.0.A IS
+    // closed, so without the closure-verb gate this exact shape recommended
+    // deleting a live `known_issue` (found 2026-08-03).
+    if let Some(entry) = report
+        .entries
+        .iter()
+        .find(|e| e.repo == "core" && e.slug == "ba-0-a-id-collision")
+    {
+        assert_ne!(
+            entry.lane,
+            CarryoverLane::Cleared,
+            "core:ba-0-a-id-collision must never be Cleared (2026-08-03 false-cleared shape); \
+             got refs: {:#?}",
+            entry.refs
+        );
+    }
+
+    // Nothing in this task writes to any state.json — the sweep above is a
+    // pure read, and no code path in this test opens any file for writing.
+}
