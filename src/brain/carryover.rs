@@ -1327,6 +1327,99 @@ pub fn suggest_duplicates(entries: &[CarryoverVerdict]) -> Vec<DedupSuggestion> 
     suggestions
 }
 
+// ---------------------------------------------------------------------------
+// Triage ranking (MV.ticket.carryover-triage-ranking)
+// ---------------------------------------------------------------------------
+
+/// The four-lane re-cut of the carryover board (`MV.ticket.carryover-triage-ranking`).
+///
+/// Replaces raw-age ordering: every `carryover[]` entry lands in exactly one of
+/// these, assigned in this priority order by [`assign_triage_lane`] — BLOCKING
+/// first, then HOT, then AGING, then STANDING. See that function's doc comment
+/// for the full membership rules, and in particular why board membership must
+/// **not** gate on staleness alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TriageLane {
+    /// At least one unmet `blocks[]` edge — this entry is gating other work.
+    /// Ordered by the effective priority of what it blocks (0 hottest first),
+    /// then age descending.
+    Blocking,
+    /// Authored `priority` 0 or 1, and not already in [`Self::Blocking`].
+    /// Ordered by priority ascending, then age descending.
+    Hot,
+    /// Stale (per [`carryover_stale_age`]) with `priority` 2, 3, or absent.
+    /// Ordered by age descending.
+    Aging,
+    /// No authored priority and no `blocks[]` edges — a constraint that is
+    /// simply true forever (e.g. "planning/ is a symlink, pass `-L`").
+    /// Ordered by age descending.
+    ///
+    /// This lane exists so permanent rules stop competing with actionable
+    /// work: re-affirmed at low frequency rather than shown next to a fresh
+    /// P0. It is a re-affirm lane, not a backlog.
+    Standing,
+}
+
+/// One `carryover[]` entry, ranked and carrying every field a renderer or a
+/// consumer (bastion, via the public `rank_carryover` API — `MV.ticket
+/// .carryover-triage-ranking`) needs in order to re-rank or explain the
+/// ranking, without re-deriving anything from a pre-flattened string.
+#[derive(Debug, Clone, Serialize)]
+pub struct CarryoverRanking {
+    pub repo: String,
+    pub slug: String,
+    pub kind: String,
+    pub lane: TriageLane,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_priority: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_days: Option<i64>,
+    pub stale: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unmet_blocks: Vec<String>,
+    pub clears_when_satisfied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding_id: Option<String>,
+}
+
+/// Assign the [`TriageLane`] for one carryover entry.
+///
+/// Membership is evaluated in this exact order, so every entry lands in
+/// exactly one lane (the assignment is total):
+///
+/// 1. **BLOCKING** — `unmet_blocks` is non-empty.
+/// 2. **HOT** — authored `priority` is `Some(0)` or `Some(1)`.
+/// 3. **AGING** — `verdict.stale` is `true` (i.e. `priority` 2, 3, or absent,
+///    and old enough per [`carryover_stale_age`]).
+/// 4. **STANDING** — everything else: no priority and no blocks.
+///
+/// **Board membership must not gate on staleness alone.** `stale` is
+/// consulted only for AGING membership — BLOCKING, HOT and STANDING never
+/// look at it. Before this ranking existed, membership on the Attention
+/// board gated on staleness alone, and only 6 of 142 entries were stale —
+/// hiding 136, including every P0 filed the same day (by construction not
+/// yet stale). A fresh, non-stale P0 must still land somewhere actionable
+/// (HOT), which is exactly what this ordering guarantees.
+///
+/// Blocking-ness is never authored (there is deliberately no `blocking: bool`
+/// field anywhere in this crate) — it is always derived from `unmet_blocks`,
+/// which the caller computes from the entry's `blocks[]` edges.
+pub fn assign_triage_lane(v: &CarryoverVerdict, unmet_blocks: &[String]) -> TriageLane {
+    if !unmet_blocks.is_empty() {
+        return TriageLane::Blocking;
+    }
+    if matches!(v.priority, Some(0) | Some(1)) {
+        return TriageLane::Hot;
+    }
+    if v.stale {
+        return TriageLane::Aging;
+    }
+    TriageLane::Standing
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3806,5 +3899,91 @@ mod tests {
             })
             .collect();
         assert_eq!(keys_a, keys_b, "identical output regardless of input order");
+    }
+
+    // -- assign_triage_lane (MV.ticket.carryover-triage-ranking) -------------
+
+    fn triage_verdict(priority: Option<u8>, stale: bool) -> CarryoverVerdict {
+        CarryoverVerdict {
+            repo: "mev".to_string(),
+            slug: "triage-slug".to_string(),
+            kind: "known_issue".to_string(),
+            text: "some triage text".to_string(),
+            clears_when: None,
+            created: "2026-01-01".to_string(),
+            age_days: Some(1),
+            stale,
+            lane: CarryoverLane::NotEvaluable,
+            refs: Vec::new(),
+            reason: None,
+            priority,
+            finding_id: None,
+        }
+    }
+
+    #[test]
+    fn assign_triage_lane_fresh_p0_lands_hot_not_gated_on_staleness() {
+        // The whole point: membership must not gate on staleness alone. A
+        // fresh (non-stale) P0 must still be HOT, not invisible.
+        let v = triage_verdict(Some(0), false);
+        assert_eq!(assign_triage_lane(&v, &[]), TriageLane::Hot);
+    }
+
+    #[test]
+    fn assign_triage_lane_p1_is_hot() {
+        let v = triage_verdict(Some(1), false);
+        assert_eq!(assign_triage_lane(&v, &[]), TriageLane::Hot);
+    }
+
+    #[test]
+    fn assign_triage_lane_unmet_block_wins_even_when_also_p0() {
+        // BLOCKING is evaluated before HOT, so a P0 with an unmet block edge
+        // lands in BLOCKING, not HOT.
+        let v = triage_verdict(Some(0), false);
+        let unmet = vec!["mev:MV.3.A".to_string()];
+        assert_eq!(assign_triage_lane(&v, &unmet), TriageLane::Blocking);
+    }
+
+    #[test]
+    fn assign_triage_lane_stale_p2_is_aging() {
+        let v = triage_verdict(Some(2), true);
+        assert_eq!(assign_triage_lane(&v, &[]), TriageLane::Aging);
+    }
+
+    #[test]
+    fn assign_triage_lane_stale_no_priority_is_aging() {
+        let v = triage_verdict(None, true);
+        assert_eq!(assign_triage_lane(&v, &[]), TriageLane::Aging);
+    }
+
+    #[test]
+    fn assign_triage_lane_no_priority_no_blocks_non_stale_is_standing() {
+        let v = triage_verdict(None, false);
+        assert_eq!(assign_triage_lane(&v, &[]), TriageLane::Standing);
+    }
+
+    #[test]
+    fn assign_triage_lane_non_stale_p2_is_standing_not_aging() {
+        // p2/p3 without staleness has no lane of its own — it falls through
+        // to STANDING since AGING requires `stale`.
+        let v = triage_verdict(Some(2), false);
+        assert_eq!(assign_triage_lane(&v, &[]), TriageLane::Standing);
+    }
+
+    #[test]
+    fn assign_triage_lane_is_total_over_every_combination() {
+        // Every (priority, stale, has_unmet_blocks) combination must land in
+        // exactly one lane — no panic, no ambiguity.
+        let priorities: [Option<u8>; 5] = [None, Some(0), Some(1), Some(2), Some(3)];
+        for priority in priorities {
+            for stale in [true, false] {
+                for unmet in [Vec::new(), vec!["mev:MV.1.A".to_string()]] {
+                    let v = triage_verdict(priority, stale);
+                    // Must not panic; result is one of the four variants by
+                    // construction (the return type is TriageLane itself).
+                    let _lane = assign_triage_lane(&v, &unmet);
+                }
+            }
+        }
     }
 }
