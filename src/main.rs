@@ -515,6 +515,20 @@ enum Command {
     /// executed unless `--allow-exec` is passed; without it, such entries report
     /// NotEvaluable rather than running anything. Never writes anything.
     ///
+    /// The human summary also prints three cross-repo dedup sections
+    /// (`MV.ticket.carryover-dedup-clusters`), each omitted when empty:
+    ///   CLUSTERS                     — entries sharing an authored `finding_id`, grouped
+    ///                                  one cluster per id. Members render with their own
+    ///                                  per-repo priority side by side; divergent priorities
+    ///                                  across repos are shown as-is, never reconciled into
+    ///                                  one number.
+    ///   SUGGESTED DUPLICATES         — heuristic, UNCONFIRMED candidate duplicate pairs
+    ///                                  over entries with no `finding_id`, from a token-
+    ///                                  overlap pass. Never auto-merged; a human confirms a
+    ///                                  match by hand-authoring a shared `finding_id`.
+    ///   SINGLE-REPO finding_id WARNINGS — a `finding_id` used in only one repo, usually a
+    ///                                  typo that silently failed to group.
+    ///
     /// Exit codes:
     ///   0 — sweep completed, regardless of how many entries land in any lane
     ///   1 — brain.toml not found/unreadable, an unknown --repo slug, or a serialization
@@ -1157,6 +1171,54 @@ fn print_carryover_report(report: &mev::CarryoverReport) {
                 mev::CarryoverLane::Cleared => {}
             }
         }
+    }
+
+    if !report.clusters.is_empty() {
+        println!("\nCLUSTERS ({}):", report.clusters.len());
+        for cluster in &report.clusters {
+            println!("  {}", cluster.finding_id);
+            for member in &cluster.members {
+                let priority = match member.priority {
+                    Some(p) => format!("P{p}"),
+                    None => "P?".to_string(),
+                };
+                println!(
+                    "    {}:{} [{priority}] — {}",
+                    member.repo, member.slug, member.text
+                );
+            }
+        }
+    }
+
+    if !report.suggestions.is_empty() {
+        println!(
+            "\nSUGGESTED DUPLICATES ({}) — UNCONFIRMED:",
+            report.suggestions.len()
+        );
+        for s in &report.suggestions {
+            println!(
+                "  {}:{} ~ {}:{} (jaccard {:.2}, overlap {:.2})",
+                s.a_repo, s.a_slug, s.b_repo, s.b_slug, s.jaccard, s.overlap
+            );
+        }
+        println!(
+            "  note: heuristic candidates only — never auto-merged. A human confirms a match by \
+             hand-authoring a shared finding_id in both entries' state.json."
+        );
+    }
+
+    if !report.single_repo_finding_ids.is_empty() {
+        println!(
+            "\nSINGLE-REPO finding_id WARNINGS ({}):",
+            report.single_repo_finding_ids.len()
+        );
+        for id in &report.single_repo_finding_ids {
+            println!("  {id}");
+        }
+        println!(
+            "  note: a finding_id used in only one repo is usually a typo that silently failed \
+             to group with its intended cross-repo match."
+        );
     }
 }
 

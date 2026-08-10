@@ -18,8 +18,8 @@ pub use brain::block_graph::{
     BlockLane, build_block_graph_export,
 };
 pub use brain::carryover::{
-    CarryoverLane, CarryoverRef, CarryoverReport, CarryoverVerdict, NotEvaluableReason,
-    evaluate_carryover,
+    CarryoverLane, CarryoverRef, CarryoverReport, CarryoverVerdict, ClusterMember, DedupSuggestion,
+    FindingCluster, NotEvaluableReason, evaluate_carryover,
 };
 pub use brain::conformance::{
     CheckOutcome, CheckResult, CheckStatus, ConformanceCheck, ConformanceCtx, ConformanceReport,

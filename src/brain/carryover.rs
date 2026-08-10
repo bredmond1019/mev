@@ -54,7 +54,7 @@
 //! No `regex` dependency is used or added — the grammar is small and fixed, so it is
 //! matched by hand (char scanning) in [`extract_block_id_tokens`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -184,6 +184,17 @@ pub struct CarryoverVerdict {
     pub refs: Vec<CarryoverRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<NotEvaluableReason>,
+    /// Authored value-if-resolved priority, passed through verbatim from the
+    /// source [`Carryover`] item. Per-repo, never reconciled — see
+    /// [`cluster_by_finding_id`]'s doc comment for why divergence across
+    /// repos on the same `finding_id` is correct, not a conflict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
+    /// Free-form shared identity string, passed through verbatim from the
+    /// source [`Carryover`] item. `None`/empty means the entry has not been
+    /// linked to a cross-repo finding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding_id: Option<String>,
 }
 
 /// The full fleet-wide sweep result.
@@ -194,6 +205,23 @@ pub struct CarryoverReport {
     pub actionable: usize,
     pub not_evaluable: usize,
     pub entries: Vec<CarryoverVerdict>,
+    /// Every `carryover[]` entry sharing an authored `finding_id`, grouped one
+    /// cluster per distinct id. See [`cluster_by_finding_id`].
+    pub clusters: Vec<FindingCluster>,
+    /// Heuristic candidate-duplicate pairs over entries that carry no
+    /// `finding_id` yet. Always unconfirmed — see [`suggest_duplicates`].
+    pub suggestions: Vec<DedupSuggestion>,
+    /// Sorted list of `finding_id` values whose cluster spans exactly one
+    /// repo — the typo guard.
+    ///
+    /// A `finding_id` is meant to link the *same* finding across repos. One
+    /// used in only a single repo did not link anything: the entry *looks*
+    /// deduplicated (it carries a `finding_id`) while actually being alone,
+    /// which is usually a mistyped id that silently failed to group rather
+    /// than a genuinely solitary cross-repo finding. This is the same "field
+    /// nothing validates" defect class `MV.ticket.carryover-dedup-clusters`
+    /// exists to remove from `finding_id` itself.
+    pub single_repo_finding_ids: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -915,6 +943,8 @@ pub fn evaluate_carryover(
                 lane,
                 refs,
                 reason,
+                priority: item.priority,
+                finding_id: item.finding_id.clone(),
             });
         }
     }
@@ -941,13 +971,360 @@ pub fn evaluate_carryover(
         .count();
     let total = entries.len();
 
+    // Dedup: cluster on the authored `finding_id`, suggest candidates for the
+    // rest, and flag single-repo clusters as likely typos. All three operate
+    // purely on the already-built `entries` vector — no re-walk of `files`, no
+    // filesystem access, no new discovery pass (`MV.ticket.carryover-dedup-
+    // clusters` task 4's no-new-I/O constraint).
+    let clusters = cluster_by_finding_id(&entries);
+    let suggestions = suggest_duplicates(&entries);
+    let mut single_repo_finding_ids: Vec<String> = clusters
+        .iter()
+        .filter(|c| c.single_repo)
+        .map(|c| c.finding_id.clone())
+        .collect();
+    single_repo_finding_ids.sort();
+
     CarryoverReport {
         total,
         cleared,
         actionable,
         not_evaluable,
         entries,
+        clusters,
+        suggestions,
+        single_repo_finding_ids,
     }
+}
+
+// --- Dedup: tokenization + similarity ---
+//
+// `MV.ticket.carryover-dedup-clusters` task 1. Pure, dependency-free primitives that
+// support two later passes: exact clustering on the authored `finding_id` field
+// (trusted — a human wrote it) and a heuristic token-overlap suggestion pass over
+// entries that have no `finding_id` yet (untrusted — suggestions only, never
+// auto-merged). See `planning/ticket-carryover-dedup-clusters/tasks.md` for the full
+// governing design decisions.
+//
+// No regex crate here by convention — this module is hand-scanned, matching the style
+// of `extract_block_id_tokens` above.
+
+/// English function words plus corpus-noise terms that carry no identity signal for
+/// the dedup token-overlap pass. Removed from both `slug` and `text` tokens before
+/// similarity is computed.
+pub const DEDUP_STOPWORDS: &[&str] = &[
+    "a", "an", "and", "the", "is", "are", "was", "were", "be", "been", "it", "its", "this", "that",
+    "to", "of", "in", "on", "for", "from", "with", "without", "but", "not", "no", "as", "at", "by",
+    "or", "so", "than", "then", "when", "which", "what", "all", "any", "only", "own", "has",
+    "have", "had", "does", "do", "did", "can", "must", "should", "will", "would", "there", "their",
+    "them", "they", "we", "you", "i",
+];
+
+/// Tokenizes a carryover entry's `slug` and `text` into one deduplicated,
+/// deterministically-ordered set for similarity scoring.
+///
+/// Lowercases both inputs, splits on any non-ASCII-alphanumeric character (so
+/// `finding_id`-style hyphens, slashes, dots, and backticks all act as separators),
+/// drops tokens shorter than 3 characters, and drops [`DEDUP_STOPWORDS`] members.
+///
+/// CRITICAL: both `slug` and `text` are tokenized into the SAME set. The proof case
+/// (`bastion:grep-inventory-is-a-hypothesis` = `mev:sdlc-spec-acceptance-vs-purpose-gap`,
+/// overlap ~0.38) shares ZERO slug vocabulary and is recoverable only from `text` — a
+/// slug-only tokenizer would silently fail that case, and the block's whole point with
+/// it. A [`BTreeSet`] is used (not a hash set) so iteration order — and therefore any
+/// test or report that walks the tokens — is deterministic across runs and does not
+/// depend on hash-seed randomization.
+pub fn dedup_tokens(slug: &str, text: &str) -> BTreeSet<String> {
+    let mut tokens = BTreeSet::new();
+    for source in [slug, text] {
+        let mut current = String::new();
+        for ch in source.chars() {
+            if ch.is_ascii_alphanumeric() {
+                current.push(ch.to_ascii_lowercase());
+            } else if !current.is_empty() {
+                push_dedup_token(&mut tokens, std::mem::take(&mut current));
+            }
+        }
+        if !current.is_empty() {
+            push_dedup_token(&mut tokens, std::mem::take(&mut current));
+        }
+    }
+    tokens
+}
+
+fn push_dedup_token(tokens: &mut BTreeSet<String>, token: String) {
+    if token.len() < 3 {
+        return;
+    }
+    if DEDUP_STOPWORDS.contains(&token.as_str()) {
+        return;
+    }
+    tokens.insert(token);
+}
+
+/// Jaccard similarity: `|a ∩ b| / |a ∪ b|`. Returns `0.0` (never `NaN`) when both sets
+/// are empty.
+pub fn jaccard(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f64 {
+    let union_len = a.union(b).count();
+    if union_len == 0 {
+        return 0.0;
+    }
+    let intersection_len = a.intersection(b).count();
+    intersection_len as f64 / union_len as f64
+}
+
+/// Overlap coefficient: `|a ∩ b| / min(|a|, |b|)`. Returns `0.0` (never divides by
+/// zero) when either set is empty.
+pub fn overlap_coefficient(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f64 {
+    let min_len = a.len().min(b.len());
+    if min_len == 0 {
+        return 0.0;
+    }
+    let intersection_len = a.intersection(b).count();
+    intersection_len as f64 / min_len as f64
+}
+
+/// Acceptance threshold on Jaccard similarity for the dedup suggestion pass.
+///
+/// OPERATOR-MEASURED against the live 142-entry `carryover[]` corpus (see
+/// `planning/ticket-carryover-dedup-clusters/tasks.md`). Lowering this to catch the
+/// documented miss (`mev:okf-related-must-be-a-real-doc-id` vs
+/// `okf-core:okf-core-doc-ids-are-inconsistent-with-filenames`, which scores ~0.29)
+/// trades a known, documented miss for an unknown number of false positives across
+/// the fleet. Do not lower it.
+pub const DEDUP_JACCARD_MIN: f64 = 0.18;
+
+/// Acceptance threshold on overlap coefficient for the dedup suggestion pass.
+///
+/// OPERATOR-MEASURED against the live 142-entry `carryover[]` corpus (see
+/// `planning/ticket-carryover-dedup-clusters/tasks.md`). Lowering this to catch the
+/// documented miss (`mev:okf-related-must-be-a-real-doc-id` vs
+/// `okf-core:okf-core-doc-ids-are-inconsistent-with-filenames`, which scores ~0.29)
+/// trades a known, documented miss for an unknown number of false positives across
+/// the fleet. Do not lower it.
+pub const DEDUP_OVERLAP_MIN: f64 = 0.34;
+
+// --- Dedup: authored clustering by finding_id ---
+//
+// `MV.ticket.carryover-dedup-clusters` task 2. This is the TRUSTED half of dedup:
+// `finding_id` is hand-written by a human onto a `carryover[]` entry, so grouping on
+// it is exact — no normalization, no fuzzy join. Contrast with `suggest_duplicates`
+// (task 3), which is the untrusted heuristic half over entries that carry no
+// `finding_id` at all.
+
+/// One entry inside a [`FindingCluster`] — a flattened, report-friendly view of the
+/// source [`CarryoverVerdict`] fields a cluster reader needs.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClusterMember {
+    pub repo: String,
+    pub slug: String,
+    pub priority: Option<u8>,
+    pub kind: String,
+    pub text: String,
+}
+
+/// Every `carryover[]` entry sharing one authored `finding_id`.
+///
+/// # Per-repo priority divergence is correct, not a conflict
+///
+/// Each [`ClusterMember`] keeps its own `priority` verbatim. There is
+/// deliberately no reconciled/effective/max/min priority field on this type and
+/// no diagnostic emitted when members disagree — the measured case is the
+/// `nextest` claim, which is genuinely P0 in `okf-core` (the hook does not fire
+/// there — a real bail) and genuinely P2 in `mev` (it works exactly as
+/// documented). Dedup merges the *claim*; it never merges the *priority*. See
+/// `planning/ticket-carryover-dedup-clusters/tasks.md`, governing decision 1.
+#[derive(Debug, Clone, Serialize)]
+pub struct FindingCluster {
+    pub finding_id: String,
+    pub members: Vec<ClusterMember>,
+    /// Sorted, deduplicated set of repos represented among `members`.
+    pub repos: Vec<String>,
+    /// `true` iff every member shares one repo. A cluster with `single_repo:
+    /// true` is the typo-guard signal upstream (`MV.ticket.carryover-dedup-
+    /// clusters` task 4): a `finding_id` used in only one repo did not link
+    /// anything across repos, which is usually a mistyped id silently failing
+    /// to group rather than a genuinely solitary finding.
+    pub single_repo: bool,
+}
+
+/// Group every entry carrying a non-empty, authored `finding_id` into one
+/// [`FindingCluster`] per distinct id.
+///
+/// Grouping is on the **exact** string — no case-folding, no trimming-based
+/// joining, no fuzzy matching. An authored id is authored; the human who wrote
+/// it is the identity authority, not this function.
+///
+/// Many-to-one is normal and expected: two or more entries in the *same* repo
+/// may legitimately share one `finding_id` (e.g. a lesson filed once per
+/// affected module within a repo). Such entries are never collapsed to one
+/// member — both/all appear as distinct [`ClusterMember`]s.
+///
+/// Entries with `finding_id: None` or an empty string are excluded from every
+/// cluster; they are candidates for [`suggest_duplicates`] instead.
+///
+/// Ordering is fully deterministic: members sort by `(repo, slug)`, clusters
+/// sort by `finding_id`. The report is diffed by humans across runs, so a
+/// stable order (not insertion order, not a hash-map iteration order) is load-
+/// bearing here, not cosmetic.
+pub fn cluster_by_finding_id(entries: &[CarryoverVerdict]) -> Vec<FindingCluster> {
+    let mut by_id: std::collections::BTreeMap<String, Vec<ClusterMember>> =
+        std::collections::BTreeMap::new();
+
+    for entry in entries {
+        let Some(finding_id) = entry.finding_id.as_ref() else {
+            continue;
+        };
+        if finding_id.is_empty() {
+            continue;
+        }
+        by_id
+            .entry(finding_id.clone())
+            .or_default()
+            .push(ClusterMember {
+                repo: entry.repo.clone(),
+                slug: entry.slug.clone(),
+                priority: entry.priority,
+                kind: entry.kind.clone(),
+                text: entry.text.clone(),
+            });
+    }
+
+    by_id
+        .into_iter()
+        .map(|(finding_id, mut members)| {
+            members.sort_by(|a, b| a.repo.cmp(&b.repo).then_with(|| a.slug.cmp(&b.slug)));
+            let mut repos: Vec<String> = members.iter().map(|m| m.repo.clone()).collect();
+            repos.sort();
+            repos.dedup();
+            let single_repo = repos.len() == 1;
+            FindingCluster {
+                finding_id,
+                members,
+                repos,
+                single_repo,
+            }
+        })
+        .collect()
+}
+
+// --- Dedup: heuristic suggestion pass over ungrouped entries ---
+//
+// `MV.ticket.carryover-dedup-clusters` task 3. This is the UNTRUSTED half of dedup:
+// a crude token-overlap pass over entries that carry no `finding_id` at all, offered
+// as candidate duplicates for a human to confirm. Contrast with `cluster_by_finding_id`
+// (task 2), which is exact and trusted because a human authored the `finding_id`.
+
+/// One candidate duplicate pair surfaced by [`suggest_duplicates`].
+///
+/// `a_repo`/`a_slug` and `b_repo`/`b_slug` are ordered by `(repo, slug)` so the same
+/// unordered pair always renders identically across runs — there is no "first" or
+/// "second" entry with any semantic meaning beyond that canonical ordering.
+#[derive(Debug, Clone, Serialize)]
+pub struct DedupSuggestion {
+    pub a_repo: String,
+    pub a_slug: String,
+    pub b_repo: String,
+    pub b_slug: String,
+    pub jaccard: f64,
+    pub overlap: f64,
+}
+
+/// Heuristic candidate-duplicate pass over every `carryover[]` entry that carries no
+/// `finding_id` yet.
+///
+/// # This is a suggestion, never a merge
+///
+/// Every pair returned here is **unconfirmed**. This function must never be trusted as
+/// ground truth: it does not, and must never, mutate `finding_id` on anything, take
+/// `&mut` to any entry, or write to any file — it is a pure read over borrowed
+/// [`CarryoverVerdict`] slices. A human confirms a suggestion by hand-authoring a
+/// shared `finding_id` into both entries' `state.json`; nothing in this module does
+/// that automatically. A false merge destroys durable knowledge the same way a false
+/// `cleared` verdict does — this module already biases in exactly that direction
+/// elsewhere (the conjunctive reference combination and the [`CLOSURE_VERBS`] gate,
+/// both added after a live false-`cleared` incident) and this pass follows the same
+/// discipline.
+///
+/// # Scope and rules
+///
+/// - Only entries whose `finding_id` is `None` or empty are considered. An authored
+///   `finding_id` is the human's answer for that entry; this pass never second-guesses
+///   it, so entries that already have one are excluded entirely (they were handled by
+///   [`cluster_by_finding_id`] instead).
+/// - Every unordered pair is considered at most once (same-repo pairs included — a
+///   duplicate filed twice in one repo is still a duplicate).
+/// - A pair is accepted when `jaccard >= DEDUP_JACCARD_MIN || overlap >= DEDUP_OVERLAP_MIN`.
+///   The `OR` is deliberate: the operator-measured recovery set needs both metrics —
+///   some real pairs clear only on Jaccard, others only on overlap coefficient.
+/// - Output is sorted by `overlap` descending, then `jaccard` descending, then by the
+///   canonical `(a_repo, a_slug, b_repo, b_slug)` tuple, so two runs over the same
+///   input always produce the same order. Float comparisons use `partial_cmp(..)
+///   .unwrap_or(Ordering::Equal)` — never a bare `unwrap()` — because a comparison
+///   would panic on `NaN`, which `jaccard`/`overlap_coefficient` never produce but a
+///   defensive comparator should not assume.
+pub fn suggest_duplicates(entries: &[CarryoverVerdict]) -> Vec<DedupSuggestion> {
+    let candidates: Vec<&CarryoverVerdict> = entries
+        .iter()
+        .filter(|entry| entry.finding_id.as_deref().unwrap_or("").is_empty())
+        .collect();
+
+    let mut suggestions = Vec::new();
+    for i in 0..candidates.len() {
+        for j in (i + 1)..candidates.len() {
+            let left = candidates[i];
+            let right = candidates[j];
+            let left_tokens = dedup_tokens(&left.slug, &left.text);
+            let right_tokens = dedup_tokens(&right.slug, &right.text);
+            let score_jaccard = jaccard(&left_tokens, &right_tokens);
+            let score_overlap = overlap_coefficient(&left_tokens, &right_tokens);
+            if score_jaccard < DEDUP_JACCARD_MIN && score_overlap < DEDUP_OVERLAP_MIN {
+                continue;
+            }
+            let (first, second) = if (left.repo.as_str(), left.slug.as_str())
+                <= (right.repo.as_str(), right.slug.as_str())
+            {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            suggestions.push(DedupSuggestion {
+                a_repo: first.repo.clone(),
+                a_slug: first.slug.clone(),
+                b_repo: second.repo.clone(),
+                b_slug: second.slug.clone(),
+                jaccard: score_jaccard,
+                overlap: score_overlap,
+            });
+        }
+    }
+
+    suggestions.sort_by(|a, b| {
+        b.overlap
+            .partial_cmp(&a.overlap)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.jaccard
+                    .partial_cmp(&a.jaccard)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                (
+                    a.a_repo.as_str(),
+                    a.a_slug.as_str(),
+                    a.b_repo.as_str(),
+                    a.b_slug.as_str(),
+                )
+                    .cmp(&(
+                        b.a_repo.as_str(),
+                        b.a_slug.as_str(),
+                        b.b_repo.as_str(),
+                        b.b_slug.as_str(),
+                    ))
+            })
+    });
+
+    suggestions
 }
 
 #[cfg(test)]
@@ -2970,5 +3347,464 @@ mod tests {
             false,
         );
         assert_ne!(report.entries[0].lane, CarryoverLane::Cleared);
+    }
+
+    // -- dedup_tokens / jaccard / overlap_coefficient -----------------------
+
+    #[test]
+    fn dedup_tokens_removes_stopwords() {
+        let tokens = dedup_tokens("the-and-of", "this is not a real finding");
+        // "real" and "finding" survive; every stopword and short token is dropped.
+        assert!(tokens.contains("real"));
+        assert!(tokens.contains("finding"));
+        assert!(!tokens.contains("the"));
+        assert!(!tokens.contains("and"));
+        assert!(!tokens.contains("of"));
+        assert!(!tokens.contains("is"));
+        assert!(!tokens.contains("not"));
+        assert!(!tokens.contains("a"));
+    }
+
+    #[test]
+    fn dedup_tokens_splits_on_hyphens_slashes_dots_and_backticks() {
+        let tokens = dedup_tokens(
+            "wave0-tickets-ship-without-tasks-json",
+            "see `src/brain/carryover.rs` version 1.2 for details",
+        );
+        assert!(tokens.contains("wave0"));
+        assert!(tokens.contains("tickets"));
+        assert!(tokens.contains("ship"));
+        assert!(tokens.contains("tasks"));
+        assert!(tokens.contains("json"));
+        assert!(tokens.contains("src"));
+        assert!(tokens.contains("brain"));
+        assert!(tokens.contains("carryover"));
+        // "rs" is 2 chars and is dropped by the short-token rule; splitting is
+        // still proven by "src"/"brain"/"carryover" landing as separate tokens.
+        assert!(!tokens.contains("rs"));
+        assert!(tokens.contains("version"));
+        assert!(tokens.contains("details"));
+    }
+
+    #[test]
+    fn dedup_tokens_drops_short_tokens() {
+        let tokens = dedup_tokens("ab-cd-ok", "xy go up");
+        // All of ab, cd, ok, xy, go, up are < 3 chars.
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn dedup_tokens_merges_slug_and_text_into_one_set() {
+        // Proof case shape: slug-only tokens are disjoint from text-only tokens, but
+        // both must land in the same returned set.
+        let tokens = dedup_tokens("grep-inventory-hypothesis", "acceptance purpose gap");
+        assert!(tokens.contains("grep"));
+        assert!(tokens.contains("inventory"));
+        assert!(tokens.contains("hypothesis"));
+        assert!(tokens.contains("acceptance"));
+        assert!(tokens.contains("purpose"));
+        assert!(tokens.contains("gap"));
+    }
+
+    #[test]
+    fn jaccard_empty_sets_is_zero_not_nan() {
+        let empty: BTreeSet<String> = BTreeSet::new();
+        let score = jaccard(&empty, &empty);
+        assert_eq!(score, 0.0);
+        assert!(!score.is_nan());
+    }
+
+    #[test]
+    fn overlap_coefficient_empty_sets_is_zero_not_nan_or_panic() {
+        let empty: BTreeSet<String> = BTreeSet::new();
+        let mut one = BTreeSet::new();
+        one.insert("token".to_string());
+
+        let score_both_empty = overlap_coefficient(&empty, &empty);
+        assert_eq!(score_both_empty, 0.0);
+        assert!(!score_both_empty.is_nan());
+
+        let score_one_empty = overlap_coefficient(&empty, &one);
+        assert_eq!(score_one_empty, 0.0);
+        assert!(!score_one_empty.is_nan());
+    }
+
+    #[test]
+    fn jaccard_and_overlap_of_identical_sets_is_one() {
+        let mut set = BTreeSet::new();
+        set.insert("finding".to_string());
+        set.insert("token".to_string());
+        assert_eq!(jaccard(&set, &set), 1.0);
+        assert_eq!(overlap_coefficient(&set, &set), 1.0);
+    }
+
+    #[test]
+    fn jaccard_and_overlap_of_disjoint_sets_is_zero() {
+        let mut a = BTreeSet::new();
+        a.insert("alpha".to_string());
+        let mut b = BTreeSet::new();
+        b.insert("beta".to_string());
+        assert_eq!(jaccard(&a, &b), 0.0);
+        assert_eq!(overlap_coefficient(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn overlap_coefficient_exceeds_jaccard_for_asymmetric_pair() {
+        // a is a small set fully contained in the much larger set b: overlap
+        // coefficient (relative to the smaller set) is 1.0, while jaccard (relative
+        // to the union) is much smaller.
+        let mut a = BTreeSet::new();
+        a.insert("shared".to_string());
+
+        let mut b = BTreeSet::new();
+        b.insert("shared".to_string());
+        b.insert("other1".to_string());
+        b.insert("other2".to_string());
+        b.insert("other3".to_string());
+        b.insert("other4".to_string());
+
+        let ov = overlap_coefficient(&a, &b);
+        let jac = jaccard(&a, &b);
+        assert!(ov > jac, "overlap {ov} should exceed jaccard {jac}");
+    }
+
+    // -- cluster_by_finding_id -----------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    fn verdict(
+        repo: &str,
+        slug: &str,
+        priority: Option<u8>,
+        finding_id: Option<&str>,
+    ) -> CarryoverVerdict {
+        CarryoverVerdict {
+            repo: repo.to_string(),
+            slug: slug.to_string(),
+            kind: "known_issue".to_string(),
+            text: format!("some text for {slug}"),
+            clears_when: None,
+            created: "2026-01-01".to_string(),
+            age_days: None,
+            stale: false,
+            lane: CarryoverLane::NotEvaluable,
+            refs: Vec::new(),
+            reason: None,
+            priority,
+            finding_id: finding_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn cluster_by_finding_id_groups_across_repos_into_one_cluster() {
+        let entries = vec![
+            verdict(
+                "okf-core",
+                "nextest-bail",
+                Some(0),
+                Some("nextest-hook-gap"),
+            ),
+            verdict("mev", "nextest-scoped", Some(2), Some("nextest-hook-gap")),
+        ];
+        let clusters = cluster_by_finding_id(&entries);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].finding_id, "nextest-hook-gap");
+        assert_eq!(clusters[0].members.len(), 2);
+        assert!(!clusters[0].single_repo);
+        assert_eq!(clusters[0].repos, vec!["mev", "okf-core"]);
+    }
+
+    #[test]
+    fn cluster_by_finding_id_many_to_one_same_repo_yields_two_distinct_members() {
+        let entries = vec![
+            verdict("mev", "issue-a", None, Some("shared-lesson")),
+            verdict("mev", "issue-b", None, Some("shared-lesson")),
+        ];
+        let clusters = cluster_by_finding_id(&entries);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].members.len(), 2);
+        assert!(clusters[0].single_repo, "both members are in 'mev'");
+        assert_eq!(clusters[0].repos, vec!["mev"]);
+        let slugs: Vec<&str> = clusters[0]
+            .members
+            .iter()
+            .map(|m| m.slug.as_str())
+            .collect();
+        assert_eq!(slugs, vec!["issue-a", "issue-b"]);
+    }
+
+    #[test]
+    fn cluster_by_finding_id_preserves_divergent_priorities_verbatim() {
+        let entries = vec![
+            verdict(
+                "okf-core",
+                "nextest-bail",
+                Some(0),
+                Some("nextest-hook-gap"),
+            ),
+            verdict("mev", "nextest-scoped", Some(2), Some("nextest-hook-gap")),
+        ];
+        let clusters = cluster_by_finding_id(&entries);
+        let member_priority = |repo: &str| {
+            clusters[0]
+                .members
+                .iter()
+                .find(|m| m.repo == repo)
+                .and_then(|m| m.priority)
+        };
+        assert_eq!(
+            member_priority("okf-core"),
+            Some(0),
+            "okf-core keeps its own P0"
+        );
+        assert_eq!(member_priority("mev"), Some(2), "mev keeps its own P2");
+    }
+
+    #[test]
+    fn cluster_by_finding_id_excludes_none_and_empty_finding_id() {
+        let entries = vec![
+            verdict("mev", "no-id", None, None),
+            verdict("mev", "empty-id", None, Some("")),
+            verdict("mev", "has-id", None, Some("real-id")),
+        ];
+        let clusters = cluster_by_finding_id(&entries);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].finding_id, "real-id");
+        assert_eq!(clusters[0].members.len(), 1);
+        assert_eq!(clusters[0].members[0].slug, "has-id");
+    }
+
+    #[test]
+    fn cluster_by_finding_id_ordering_is_stable_regardless_of_input_order() {
+        let forward = vec![
+            verdict("bastion", "z-slug", None, Some("beta-id")),
+            verdict("mev", "a-slug", None, Some("alpha-id")),
+            verdict("mev", "b-slug", None, Some("alpha-id")),
+        ];
+        let mut shuffled = forward.clone();
+        shuffled.reverse();
+
+        let clusters_a = cluster_by_finding_id(&forward);
+        let clusters_b = cluster_by_finding_id(&shuffled);
+
+        let ids_a: Vec<&str> = clusters_a.iter().map(|c| c.finding_id.as_str()).collect();
+        let ids_b: Vec<&str> = clusters_b.iter().map(|c| c.finding_id.as_str()).collect();
+        assert_eq!(ids_a, ids_b);
+        assert_eq!(ids_a, vec!["alpha-id", "beta-id"]);
+
+        let alpha_slugs_a: Vec<&str> = clusters_a[0]
+            .members
+            .iter()
+            .map(|m| m.slug.as_str())
+            .collect();
+        let alpha_slugs_b: Vec<&str> = clusters_b[0]
+            .members
+            .iter()
+            .map(|m| m.slug.as_str())
+            .collect();
+        assert_eq!(alpha_slugs_a, alpha_slugs_b);
+        assert_eq!(alpha_slugs_a, vec!["a-slug", "b-slug"]);
+    }
+
+    #[test]
+    fn cluster_by_finding_id_no_diagnostic_field_exists_for_divergence() {
+        // Compile-time-adjacent guard: FindingCluster carries no reconciled
+        // priority and no diagnostic/warning field. This test documents that
+        // invariant by construction — if a future edit adds such a field, this
+        // struct literal (and every other FindingCluster construction site)
+        // will fail to compile unless updated, forcing a conscious decision.
+        let cluster = FindingCluster {
+            finding_id: "id".to_string(),
+            members: vec![],
+            repos: vec![],
+            single_repo: true,
+        };
+        assert_eq!(cluster.finding_id, "id");
+    }
+
+    // -- suggest_duplicates ---------------------------------------------------
+
+    fn verdict_text(
+        repo: &str,
+        slug: &str,
+        text: &str,
+        finding_id: Option<&str>,
+    ) -> CarryoverVerdict {
+        CarryoverVerdict {
+            repo: repo.to_string(),
+            slug: slug.to_string(),
+            kind: "known_issue".to_string(),
+            text: text.to_string(),
+            clears_when: None,
+            created: "2026-01-01".to_string(),
+            age_days: None,
+            stale: false,
+            lane: CarryoverLane::NotEvaluable,
+            refs: Vec::new(),
+            reason: None,
+            priority: None,
+            finding_id: finding_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn suggest_duplicates_skips_entries_that_already_carry_a_finding_id() {
+        let entries = vec![
+            verdict_text(
+                "mev",
+                "already-linked-a",
+                "identical text tokens here for matching purposes",
+                Some("linked"),
+            ),
+            verdict_text(
+                "okf-core",
+                "already-linked-b",
+                "identical text tokens here for matching purposes",
+                Some("linked"),
+            ),
+        ];
+        let suggestions = suggest_duplicates(&entries);
+        assert!(
+            suggestions.is_empty(),
+            "entries with an authored finding_id must never be suggested, even if similar"
+        );
+    }
+
+    #[test]
+    fn suggest_duplicates_accepts_on_jaccard_or_overlap_and_orders_pair_canonically() {
+        let entries = vec![
+            verdict_text(
+                "zeta-repo",
+                "zzz-slug",
+                "shared overlapping duplicate token corpus words here",
+                None,
+            ),
+            verdict_text(
+                "alpha-repo",
+                "aaa-slug",
+                "shared overlapping duplicate token corpus words here",
+                None,
+            ),
+        ];
+        let suggestions = suggest_duplicates(&entries);
+        assert_eq!(suggestions.len(), 1);
+        let s = &suggestions[0];
+        // Canonical ordering by (repo, slug): "alpha-repo" sorts before "zeta-repo".
+        assert_eq!(s.a_repo, "alpha-repo");
+        assert_eq!(s.b_repo, "zeta-repo");
+        assert!(s.jaccard >= DEDUP_JACCARD_MIN || s.overlap >= DEDUP_OVERLAP_MIN);
+    }
+
+    #[test]
+    fn suggest_duplicates_emits_each_pair_at_most_once() {
+        let entries = vec![
+            verdict_text("a", "one", "shared overlapping duplicate token words", None),
+            verdict_text("b", "two", "shared overlapping duplicate token words", None),
+        ];
+        let suggestions = suggest_duplicates(&entries);
+        assert_eq!(suggestions.len(), 1, "one unordered pair, one suggestion");
+    }
+
+    #[test]
+    fn suggest_duplicates_allows_same_repo_pairs() {
+        let entries = vec![
+            verdict_text(
+                "mev",
+                "dup-one",
+                "shared overlapping duplicate token words",
+                None,
+            ),
+            verdict_text(
+                "mev",
+                "dup-two",
+                "shared overlapping duplicate token words",
+                None,
+            ),
+        ];
+        let suggestions = suggest_duplicates(&entries);
+        assert_eq!(
+            suggestions.len(),
+            1,
+            "a duplicate filed twice in one repo is still a duplicate"
+        );
+        assert_eq!(suggestions[0].a_repo, "mev");
+        assert_eq!(suggestions[0].b_repo, "mev");
+    }
+
+    #[test]
+    fn suggest_duplicates_rejects_pairs_below_both_thresholds() {
+        let entries = vec![
+            verdict_text(
+                "mev",
+                "unrelated-one",
+                "completely different topic entirely",
+                None,
+            ),
+            verdict_text(
+                "okf-core",
+                "unrelated-two",
+                "another distinct subject matter altogether",
+                None,
+            ),
+        ];
+        let suggestions = suggest_duplicates(&entries);
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn suggest_duplicates_output_is_deterministically_ordered() {
+        let entries = vec![
+            verdict_text(
+                "mev",
+                "pair-one-a",
+                "alpha bravo charlie delta echo foxtrot",
+                None,
+            ),
+            verdict_text(
+                "okf-core",
+                "pair-one-b",
+                "alpha bravo charlie delta echo foxtrot",
+                None,
+            ),
+            verdict_text(
+                "mev",
+                "pair-two-a",
+                "golf hotel india juliet kilo lima",
+                None,
+            ),
+            verdict_text(
+                "okf-core",
+                "pair-two-b",
+                "golf hotel india juliet kilo lima",
+                None,
+            ),
+        ];
+        let run_a = suggest_duplicates(&entries);
+        let mut shuffled = entries.clone();
+        shuffled.reverse();
+        let run_b = suggest_duplicates(&shuffled);
+
+        let keys_a: Vec<(String, String, String, String)> = run_a
+            .iter()
+            .map(|s| {
+                (
+                    s.a_repo.clone(),
+                    s.a_slug.clone(),
+                    s.b_repo.clone(),
+                    s.b_slug.clone(),
+                )
+            })
+            .collect();
+        let keys_b: Vec<(String, String, String, String)> = run_b
+            .iter()
+            .map(|s| {
+                (
+                    s.a_repo.clone(),
+                    s.a_slug.clone(),
+                    s.b_repo.clone(),
+                    s.b_slug.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(keys_a, keys_b, "identical output regardless of input order");
     }
 }

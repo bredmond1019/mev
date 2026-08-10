@@ -1471,6 +1471,40 @@ Every reported entry also carries its repo, slug, kind, `age_days`, and a `stale
 from the existing `carryover_stale_age` helper (honouring `reviewed` / `snoozed_until`) — no
 staleness logic is reimplemented here.
 
+#### Cross-repo dedup: clusters, suggestions, and the typo guard
+
+`MV.ticket.carryover-dedup-clusters` adds a second, orthogonal pass over the same loaded
+`entries` — no new file reads, no second discovery walk. It answers "is this the same finding
+filed more than once?" using the free-form, authored `finding_id: Option<String>` field.
+
+- **`clusters`** (`CarryoverReport.clusters`, human section `CLUSTERS`) — every entry sharing a
+  non-empty `finding_id`, grouped exactly one cluster per distinct id string. Grouping is exact
+  (no case-folding, no fuzzy join): `finding_id` is hand-written by a human, so the human is the
+  identity authority, not the tool. Two or more entries in the *same* repo may legitimately share
+  one `finding_id` (many-to-one) — they still appear as distinct members, never collapsed.
+  **Per-repo priority divergence is shown side by side and is never reconciled.** A claim can be
+  genuinely P0 in one repo and genuinely P2 in another (the measured case: a `nextest` claim is
+  P0 in `okf-core`, where the hook does not fire, and P2 in `mev`, where it works as documented) —
+  dedup merges the *claim*, never the *priority*. No merged/effective/max/min priority field
+  exists anywhere in the shape, and no diagnostic is emitted merely because priorities diverge.
+- **`suggestions`** (`CarryoverReport.suggestions`, human section `SUGGESTED DUPLICATES —
+  UNCONFIRMED`) — candidate duplicate pairs among entries that carry **no** `finding_id`, from a
+  crude token-overlap pass over `slug` + `text` (stopwords removed, tokens under 3 chars
+  dropped). A pair is suggested when `jaccard >= 0.18` **or** `overlap_coefficient >= 0.34` —
+  both operator-measured against the live corpus, in `DEDUP_JACCARD_MIN` /
+  `DEDUP_OVERLAP_MIN`. **Suggestions are never auto-applied.** They do not mutate `finding_id`
+  and are not written to any file; a human confirms a suggested pair by hand-authoring the same
+  `finding_id` string onto both entries' `planning/state.json`. The heading itself carries
+  UNCONFIRMED, not only a trailing note, since a heading is what survives a skim.
+- **`single_repo_finding_ids`** (human section `SINGLE-REPO finding_id WARNINGS`) — the sorted
+  list of `finding_id` values whose cluster spans exactly one repo. A `finding_id` is meant to
+  link the *same* finding **across** repos; one that never left a single repo usually means the
+  id was mistyped somewhere and silently failed to group with its intended match — the same
+  "field nothing validates" defect class this feature exists to close.
+
+All three sections are omitted from the human summary when empty, matching the existing lane
+behaviour, and none of them affects the exit code.
+
 #### Exit codes
 
 | Code | Meaning |

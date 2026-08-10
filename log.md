@@ -19,6 +19,42 @@ timestamp: "2026-08-09T13:30:00Z"
 
 ## [run: 2026-08-09]
 
+### `MV.ticket.carryover-dedup-clusters` shipped (full spec, 6 tasks, PASS)
+
+Gave the authored `finding_id` field work to do. Tasks 1-2 added pure, dependency-free
+tokenization/similarity primitives (`dedup_tokens`, `jaccard`, `overlap_coefficient`,
+`DEDUP_STOPWORDS`, `DEDUP_JACCARD_MIN`/`DEDUP_OVERLAP_MIN`) plus `FindingCluster`/`ClusterMember`
+and `cluster_by_finding_id` — exact grouping on the authored `finding_id`, many-to-one within a
+repo, per-repo priority preserved side by side rather than reconciled into one number (the ticket's
+governing design decision), with a `single_repo` typo-guard flag. Task 3 added the untrusted
+`suggest_duplicates` heuristic pass over entries with no `finding_id` (pure token-overlap, never
+auto-merges, never writes back), pinned against a fixture recovering all 5 operator-measured
+duplicate pairs and asserting the documented hard-miss pair stays unsuggested. Task 4 wired
+`clusters`/`suggestions`/`single_repo_finding_ids` onto `CarryoverReport`, populated purely from
+`evaluate_carryover`'s existing entries vector with no new I/O, re-exported from `lib.rs`. Task 5
+extended `mev carryover`'s human renderer with CLUSTERS / SUGGESTED DUPLICATES — UNCONFIRMED /
+SINGLE-REPO WARNINGS sections (all omitted when empty, never affecting exit code) and documented
+the new sections plus `--json` fields in `docs/cli.md`. Task 6 ran the full gate suite (fmt,
+clippy `-D warnings`, full `cargo test`, release build) — all green with zero fixes needed — and
+confirmed by inspection that no code path writes `finding_id` back to any file, no reconciled
+cluster priority exists anywhere, and no new filesystem read was introduced. Final verdict: PASS.
+Next: `MV.ticket.unqualified-related-suggests-scope`.
+
+```
+779d30e feat: implement ticket-carryover-dedup-clusters-task5
+869c869 feat: implement ticket-carryover-dedup-clusters-task4
+959508e feat: implement ticket-carryover-dedup-clusters-task3
+fb103b5 feat: implement ticket-carryover-dedup-clusters-task2
+1efd645 feat: implement ticket-carryover-dedup-clusters-task1
+31f940c Merge pull request #32 from bredmond1019/ticket-clears-when-evaluation-flow
+b4022ab chore: wrap up ticket-clears-when-evaluation
+7c60999 feat: implement ticket-clears-when-evaluation-task4
+```
+
+---
+
+## [run: 2026-08-09]
+
 ### `MV.ticket.clears-when-evaluation` shipped (full spec, 5 tasks, PASS)
 
 Gave `carryover[]` an outflow: `evaluate_carryover` now evaluates all four typed `clears_when`
