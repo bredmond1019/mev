@@ -38,8 +38,18 @@
 //! deleting a live, unresolved known_issue. A false `cleared` is the only verdict here
 //! that destroys durable knowledge; every ambiguity resolves away from it.
 //!
-//! **Class B — path existence.** Only when `clears_when` contains the literal word
-//! `exists` ([`path_refs_from_prose`]).
+//! **Class B — path assertions.** A path token (contains `/`, ends in a known
+//! extension) is extracted only when `clears_when` also contains a word-bounded
+//! entry from [`PATH_PRESENCE_VERBS`] (`exists`, `created`, `added`, `written`,
+//! `present`, `corrected`, `fixed`) or [`PATH_ABSENCE_VERBS`] (`removed`,
+//! `deleted`, `gone`) — the path analogue of [`CLOSURE_VERBS`]: a path named
+//! with no assertion verb is a *subject*, not a *condition*
+//! ([`path_refs_from_prose`]). Presence verbs are satisfied when the path
+//! exists ([`CarryoverRef::Path`]); absence verbs are satisfied when it does
+//! **not** ([`CarryoverRef::PathAbsent`]) — a distinct ref variant because the
+//! satisfaction polarity is flipped and conflating the two would let "X is
+//! deleted" read as cleared merely because X is *named*, not because it is
+//! actually gone.
 //!
 //! No `regex` dependency is used or added — the grammar is small and fixed, so it is
 //! matched by hand (char scanning) in [`extract_block_id_tokens`].
@@ -49,7 +59,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use okf_core::{BlockedBy, Carryover, StateFile, StateSource};
+use okf_core::{BlockedBy, Carryover, ClearsWhen, ClearsWhenPredicate, StateFile, StateSource};
 
 use crate::brain::config::AttentionThresholds;
 use crate::brain::state::{carryover_stale_age, is_snoozed, staleness_anchor};
@@ -90,6 +100,21 @@ pub enum NotEvaluableReason {
     /// condition, so the predicate is not machine-checkable. See
     /// [`CLOSURE_VERBS`].
     NoClosureVerb,
+    /// A `CommandExitsZero` predicate was present but execution is not
+    /// opted in (see `allow_exec` on [`evaluate_carryover`]). Never
+    /// `Cleared` regardless of what the command would have exited — an
+    /// unrun command is unknown, and unknown must never read as cleared.
+    ExecutionNotAllowed,
+    /// `clears_when` mentions a validator/gate/CI concept (see
+    /// [`GATE_MENTION_WORDS`]) but no path or block reference could be
+    /// extracted from it — e.g. *"the validator is green"* alone. Not
+    /// checkable from a data file; surfaced distinctly from plain
+    /// [`Self::Prose`] so an operator sees it as a candidate for a typed
+    /// `command_exits_zero` predicate rather than as generic unstructured
+    /// text. Deriving and running a command from this prose automatically
+    /// is explicitly out of scope — this reason only names the possibility
+    /// for a human.
+    GateMentionNotCheckable,
 }
 
 /// One extracted, resolved reference and whether it is currently satisfied.
@@ -102,6 +127,42 @@ pub enum CarryoverRef {
     /// A path-existence reference. Satisfied when the path resolves to an
     /// existing file (relative to the brain root or the owning repo's path).
     Path { path: String, satisfied: bool },
+    /// A path-*absence* reference, produced when prose asserts a path was
+    /// removed/deleted/gone rather than that it exists (see
+    /// [`PATH_ABSENCE_VERBS`]). Satisfied when the path does **not** resolve
+    /// to an existing file — the inverse polarity of [`Self::Path`]. Kept as
+    /// a distinct variant rather than a flag on `Path` so a reader of the
+    /// enum (and `print_carryover_report`) cannot mistake "the path exists"
+    /// for "the path is gone", which is exactly the false-`cleared` shape
+    /// this reference exists to avoid.
+    PathAbsent { path: String, satisfied: bool },
+    /// A typed `block_closed` predicate whose `"{repo}:{id}"` key has no
+    /// entry at all in the loaded status map — an unresolvable target
+    /// (wrong repo slug, wrong ID, or a corpus that simply never loaded that
+    /// repo). Always unsatisfied, and kept distinct from [`Self::Block`] so
+    /// the report can tell "the block exists and is open" (an ordinary,
+    /// actionable unmet ref) apart from "the block was never found" (a data
+    /// problem worth flagging differently) rather than rendering both as an
+    /// identical "unmet: key" line.
+    UnresolvedBlock { key: String },
+    /// A typed `file_contains` predicate. Satisfied when the path resolves
+    /// (same two-root strategy as [`Self::Path`]) and its contents contain
+    /// `pattern` as a literal substring. Every failure mode — missing file,
+    /// unreadable file, non-UTF8 contents, oversized file — is `satisfied:
+    /// false`, never a panic.
+    FileContains {
+        path: String,
+        pattern: String,
+        satisfied: bool,
+    },
+    /// A typed `command_exits_zero` predicate, evaluated only when the sweep
+    /// opted in (see `allow_exec` on [`evaluate_carryover`]). Satisfied iff
+    /// the command's exit status is exactly 0; spawn failure, non-zero exit,
+    /// signal death, and an in-process watchdog timeout are all `satisfied:
+    /// false`. When execution is not opted in, no `CommandExitsZero` ref is
+    /// produced at all — the entry surfaces as `NotEvaluable` with
+    /// [`NotEvaluableReason::ExecutionNotAllowed`] instead.
+    CommandExitsZero { command: String, satisfied: bool },
 }
 
 /// The evaluated verdict for a single `carryover[]` entry.
@@ -252,6 +313,34 @@ fn match_block_id_at(chars: &[char], start: usize) -> Option<usize> {
     None
 }
 
+/// The prose string of a `clears_when`, if it is the legacy free-form form.
+///
+/// Returns `Some(s)` for [`ClearsWhen::Prose`], `None` for
+/// [`ClearsWhen::Predicate`]. Every site that previously did
+/// `item.clears_when.as_deref()` against the old `Option<String>` shape
+/// should now do `item.clears_when.as_ref().and_then(clears_when_prose)` —
+/// behaviour-identical for prose entries, and a `Predicate` value produces
+/// exactly what a `None` did before (no refs extracted, no display string).
+/// This is deliberately temporary: predicate evaluation and a richer display
+/// form are `MV.ticket.clears-when-evaluation`'s job, not this one's.
+pub fn clears_when_prose(cw: &ClearsWhen) -> Option<&str> {
+    match cw {
+        ClearsWhen::Prose(s) => Some(s.as_str()),
+        ClearsWhen::Predicate(_) => None,
+    }
+}
+
+/// Human-facing display string for a `clears_when`, for the report/summary
+/// sites (`CarryoverVerdict.clears_when`, the staleness-warning and
+/// Attention-section formatters). Currently identical to
+/// [`clears_when_prose`] — `Predicate` entries have no display string yet —
+/// kept as a separate name so those call sites read as "what do I show a
+/// human" rather than "what do I evaluate", and so a future predicate
+/// summary (`MV.ticket.clears-when-evaluation`) has one place to land.
+pub fn clears_when_display(cw: &ClearsWhen) -> Option<&str> {
+    clears_when_prose(cw)
+}
+
 /// Verbs that turn a block ID mentioned in `clears_when` into a *closure*
 /// condition rather than a passing reference.
 ///
@@ -336,18 +425,75 @@ pub fn block_refs_from_prose(
 /// File extensions a path-existence token may end in.
 const PATH_EXTENSIONS: &[&str] = &["md", "rs", "py", "sh", "ts", "tsx", "json", "toml"];
 
-/// Path tokens matched in `clears_when` prose — only when the text contains the
-/// literal word `exists` (case-insensitive, word-bounded). Every
-/// whitespace-delimited token containing `/` and ending in one of
-/// [`PATH_EXTENSIONS`] is returned, trimmed of surrounding punctuation/quotes.
-/// Returns `[]` when the word `exists` is absent.
-pub fn path_refs_from_prose(clears_when: &str) -> Vec<String> {
-    let has_exists = clears_when
-        .split(|c: char| !c.is_alphanumeric())
-        .any(|w| w.eq_ignore_ascii_case("exists"));
-    if !has_exists {
-        return Vec::new();
+/// Whether a path assertion in `clears_when` claims the path is *present* or
+/// *absent* — see [`PATH_PRESENCE_VERBS`] / [`PATH_ABSENCE_VERBS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathAssertion {
+    /// The predicate claims the path exists / was created / written /
+    /// corrected — satisfied when it resolves to an existing file.
+    Present,
+    /// The predicate claims the path was removed / deleted / is gone —
+    /// satisfied when it does **not** resolve to an existing file.
+    Absent,
+}
+
+/// Verbs asserting that a named path's *presence* is the clearing condition —
+/// the path analogue of [`CLOSURE_VERBS`] for the path axis. Includes the
+/// `corrected`/`fixed` family: a predicate like *"the count in X.md is
+/// corrected"* is only checkable via the named file's existence, so those
+/// verbs widen the presence vocabulary rather than adding new grammar (see
+/// module header).
+pub const PATH_PRESENCE_VERBS: &[&str] = &[
+    "exists",
+    "created",
+    "added",
+    "written",
+    "present",
+    "corrected",
+    "fixed",
+];
+
+/// Verbs asserting that a named path's *absence* is the clearing condition —
+/// satisfied when the path does **not** exist. See [`CarryoverRef::PathAbsent`].
+pub const PATH_ABSENCE_VERBS: &[&str] = &["removed", "deleted", "gone"];
+
+/// Word-bounded scan of `clears_when` for a [`PATH_ABSENCE_VERBS`] or
+/// [`PATH_PRESENCE_VERBS`] entry. Absence verbs are checked first: they are
+/// the smaller, more specific vocabulary, and a predicate is expected to
+/// assert one polarity, not both. Returns `None` when neither vocabulary is
+/// present — a path named with no assertion verb at all is a *subject*, not
+/// a *condition* (the identical trap [`CLOSURE_VERBS`] closes for block IDs).
+fn path_assertion(clears_when: &str) -> Option<PathAssertion> {
+    let lower = clears_when.to_ascii_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.iter().any(|w| PATH_ABSENCE_VERBS.contains(w)) {
+        Some(PathAssertion::Absent)
+    } else if words.iter().any(|w| PATH_PRESENCE_VERBS.contains(w)) {
+        Some(PathAssertion::Present)
+    } else {
+        None
     }
+}
+
+/// Path tokens matched in `clears_when` prose, each paired with the
+/// [`PathAssertion`] polarity the predicate asserts for it.
+///
+/// Returns `[]` when [`path_assertion`] finds neither a presence nor an
+/// absence verb — a bounded, documented gate (not the previous single literal
+/// `exists` check) that still keeps a bare path mention from being read as a
+/// clearing condition. Every whitespace-delimited token containing `/` and
+/// ending in one of [`PATH_EXTENSIONS`] is returned, trimmed of surrounding
+/// punctuation/quotes. All paths in one predicate share the same polarity —
+/// a predicate asserting both presence of one path and absence of another in
+/// the same sentence is outside this module's grammar (same "keep it small
+/// and fixed" bias as [`extract_block_id_tokens`]).
+pub fn path_refs_from_prose(clears_when: &str) -> Vec<(String, PathAssertion)> {
+    let Some(assertion) = path_assertion(clears_when) else {
+        return Vec::new();
+    };
 
     clears_when
         .split_whitespace()
@@ -358,12 +504,40 @@ pub fn path_refs_from_prose(clears_when: &str) -> Vec<String> {
             }
             let ext = trimmed.rsplit('.').next()?;
             if PATH_EXTENSIONS.contains(&ext) {
-                Some(trimmed.to_string())
+                Some((trimmed.to_string(), assertion))
             } else {
                 None
             }
         })
         .collect()
+}
+
+/// Words naming a validator/gate/CI concept in `clears_when` — see
+/// [`NotEvaluableReason::GateMentionNotCheckable`]. Matched word-bounded and
+/// case-insensitively, the same way [`has_closure_verb`] matches
+/// [`CLOSURE_VERBS`]. Deliberately does NOT include the bare word `check` —
+/// too common in ordinary English to be a reliable gate signal on its own.
+pub const GATE_MENTION_WORDS: &[&str] = &[
+    "validator",
+    "validators",
+    "gate",
+    "gates",
+    "lint",
+    "linter",
+    "harness",
+    "pipeline",
+    "suite",
+    "ci",
+];
+
+/// Whether `clears_when` contains a word-bounded [`GATE_MENTION_WORDS`] entry.
+pub fn mentions_gate(clears_when: &str) -> bool {
+    let lower = clears_when.to_ascii_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.iter().any(|w| GATE_MENTION_WORDS.contains(w))
 }
 
 // ---------------------------------------------------------------------------
@@ -378,12 +552,111 @@ fn path_ref_satisfied(
     repo_paths: &HashMap<String, PathBuf>,
     owning_repo: &str,
 ) -> bool {
-    if brain_root.join(path).exists() {
-        return true;
+    resolve_existing_path(path, brain_root, repo_paths, owning_repo).is_some()
+}
+
+/// Resolve a path reference against the same two-root strategy
+/// [`path_ref_satisfied`] uses (brain root first, then the owning repo's
+/// `repo_path`), returning the first candidate that actually exists.
+fn resolve_existing_path(
+    path: &str,
+    brain_root: &Path,
+    repo_paths: &HashMap<String, PathBuf>,
+    owning_repo: &str,
+) -> Option<PathBuf> {
+    let brain_candidate = brain_root.join(path);
+    if brain_candidate.exists() {
+        return Some(brain_candidate);
     }
-    repo_paths
-        .get(owning_repo)
-        .is_some_and(|repo_path| repo_path.join(path).exists())
+    repo_paths.get(owning_repo).and_then(|repo_path| {
+        let candidate = repo_path.join(path);
+        candidate.exists().then_some(candidate)
+    })
+}
+
+/// Bound on how much of a `file_contains` target we will read into memory —
+/// a stray binary or huge path named in a data file must not blow up memory
+/// during a fleet sweep. 5 MiB comfortably covers any real doc/source file
+/// this predicate is meant to check.
+const FILE_CONTAINS_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Whether a `file_contains` predicate is satisfied: the path resolves (same
+/// two-root strategy as [`path_ref_satisfied`]), its size is within
+/// [`FILE_CONTAINS_MAX_BYTES`], its contents decode as UTF-8, and `pattern`
+/// appears as a literal substring (never a regex — see the module header).
+/// Every failure mode — missing file, oversized file, unreadable file,
+/// non-UTF8 contents, IO error — returns `false`, never panics.
+fn file_contains_satisfied(
+    path: &str,
+    pattern: &str,
+    brain_root: &Path,
+    repo_paths: &HashMap<String, PathBuf>,
+    owning_repo: &str,
+) -> bool {
+    let Some(resolved) = resolve_existing_path(path, brain_root, repo_paths, owning_repo) else {
+        return false;
+    };
+    let Ok(metadata) = std::fs::metadata(&resolved) else {
+        return false;
+    };
+    if metadata.len() > FILE_CONTAINS_MAX_BYTES {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(&resolved) else {
+        return false;
+    };
+    let Ok(contents) = String::from_utf8(bytes) else {
+        return false;
+    };
+    contents.contains(pattern)
+}
+
+/// Wall-clock bound for a `command_exits_zero` child process. `timeout(1)`
+/// does not exist on this macOS shell, so the bound is enforced in-process
+/// by polling `try_wait` and killing the child on expiry — never by
+/// shelling out to `timeout`.
+const COMMAND_EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Poll interval for the in-process watchdog.
+const COMMAND_EXEC_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Whether a `command_exits_zero` predicate is satisfied: spawns `sh -c
+/// <command>` in `cwd`, and returns `true` only on a clean exit status of 0
+/// observed within [`COMMAND_EXEC_TIMEOUT`]. Spawn failure, non-zero exit,
+/// signal death, and timeout (the child is killed and reaped) all return
+/// `false` — never `true`, and never a panic that aborts the sweep. Only
+/// called when the caller has already confirmed `allow_exec` is set.
+fn command_exit_zero_satisfied(command: &str, cwd: &Path) -> bool {
+    use std::process::Stdio;
+
+    let mut child = match std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if start.elapsed() >= COMMAND_EXEC_TIMEOUT {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(COMMAND_EXEC_POLL_INTERVAL);
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
 /// Rank used to sort lanes `Cleared` < `Actionable` < `NotEvaluable`.
@@ -407,7 +680,10 @@ fn lane_rank(lane: CarryoverLane) -> u8 {
 /// unparseable value degrades every entry's `age_days` to `None` and `stale`
 /// to `false` rather than panicking. `repo_filter`, when set, restricts the
 /// sweep to one repo's entries (matched against the owning file's
-/// `StateSource::repo_slug`).
+/// `StateSource::repo_slug`). `allow_exec` is the opt-in gate for the
+/// `CommandExitsZero` typed predicate — see that arm's doc comment for the
+/// safe-direction reasoning; it has no effect on any other predicate or on
+/// prose extraction.
 ///
 /// **References are combined conjunctively (AND), even when the source prose
 /// reads as a disjunction ("or").** This is a deliberate safe-direction bias:
@@ -416,6 +692,7 @@ fn lane_rank(lane: CarryoverLane) -> u8 {
 /// `cleared` verdict destroys durable knowledge; a false `actionable` verdict
 /// merely wastes a glance. Disjunction parsing is explicitly out of scope
 /// (see `planning/ticket-carryover-sweep-command/tasks.md`).
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_carryover(
     files: &[(StateSource, StateFile)],
     status_map: &HashMap<String, Option<String>>,
@@ -424,6 +701,7 @@ pub fn evaluate_carryover(
     today: &str,
     thresholds: &AttentionThresholds,
     repo_filter: Option<&str>,
+    allow_exec: bool,
 ) -> CarryoverReport {
     let known_keys: HashSet<String> = status_map.keys().cloned().collect();
     let today_date = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d").ok();
@@ -442,38 +720,136 @@ pub fn evaluate_carryover(
 
             let mut refs: Vec<CarryoverRef> = Vec::new();
             let mut ambiguous = false;
+            let mut forced_reason: Option<NotEvaluableReason> = None;
 
             // `related[]` is deliberately NOT consulted here. It is documented
             // as "optional related edges" — a *see also*, not a clearing
             // condition. A carryover related to block X does not clear when X
             // closes, and treating it as one produced false `cleared` verdicts
             // against the live corpus. Only `clears_when` decides the lane.
-            if let Some(clears_when) = item.clears_when.as_deref() {
-                // Class A: prose block IDs, resolved against the corpus, and
-                // only when the predicate actually asserts closure.
-                let (prose_keys, prose_ambiguous) =
-                    block_refs_from_prose(clears_when, Some(own_repo), &known_keys);
-                ambiguous = prose_ambiguous;
-                for key in prose_keys {
-                    let satisfied = status_map
-                        .get(&key)
-                        .map(|s| s.as_deref() == Some("closed"))
-                        .unwrap_or(false);
-                    refs.push(CarryoverRef::Block { key, satisfied });
-                }
+            match item.clears_when.as_ref() {
+                Some(ClearsWhen::Prose(clears_when)) => {
+                    // Class A: prose block IDs, resolved against the corpus, and
+                    // only when the predicate actually asserts closure.
+                    let (prose_keys, prose_ambiguous) =
+                        block_refs_from_prose(clears_when, Some(own_repo), &known_keys);
+                    ambiguous = prose_ambiguous;
+                    for key in prose_keys {
+                        let satisfied = status_map
+                            .get(&key)
+                            .map(|s| s.as_deref() == Some("closed"))
+                            .unwrap_or(false);
+                        refs.push(CarryoverRef::Block { key, satisfied });
+                    }
 
-                // Class B: path existence, only when "exists" appears.
-                for path in path_refs_from_prose(clears_when) {
-                    let satisfied =
-                        path_ref_satisfied(&path, brain_root, repo_paths, src.repo_slug.as_str());
-                    refs.push(CarryoverRef::Path { path, satisfied });
+                    // Class B: path assertions, gated by a bounded presence/
+                    // absence verb vocabulary (see `path_assertion`).
+                    for (path, assertion) in path_refs_from_prose(clears_when) {
+                        let exists = path_ref_satisfied(
+                            &path,
+                            brain_root,
+                            repo_paths,
+                            src.repo_slug.as_str(),
+                        );
+                        match assertion {
+                            PathAssertion::Present => {
+                                refs.push(CarryoverRef::Path {
+                                    path,
+                                    satisfied: exists,
+                                });
+                            }
+                            PathAssertion::Absent => {
+                                refs.push(CarryoverRef::PathAbsent {
+                                    path,
+                                    satisfied: !exists,
+                                });
+                            }
+                        }
+                    }
                 }
+                Some(ClearsWhen::Predicate(ClearsWhenPredicate::BlockClosed {
+                    repo, id, ..
+                })) => {
+                    let key = format!("{repo}:{id}");
+                    match status_map.get(&key) {
+                        // Present in the corpus: satisfied iff its authored
+                        // status is exactly "closed" — same predicate the
+                        // prose path uses above.
+                        Some(status) => {
+                            let satisfied = status.as_deref() == Some("closed");
+                            refs.push(CarryoverRef::Block { key, satisfied });
+                        }
+                        // Absent from the corpus entirely: an unresolvable
+                        // target, never satisfied, and reported distinctly
+                        // from a plain unmet `Block` ref (see
+                        // `CarryoverRef::UnresolvedBlock`).
+                        None => {
+                            refs.push(CarryoverRef::UnresolvedBlock { key });
+                        }
+                    }
+                }
+                Some(ClearsWhen::Predicate(ClearsWhenPredicate::FileExists { path, .. })) => {
+                    // Reuse `path_ref_satisfied` verbatim — no second
+                    // resolution strategy for the typed form.
+                    let satisfied = path_ref_satisfied(path, brain_root, repo_paths, own_repo);
+                    refs.push(CarryoverRef::Path {
+                        path: path.clone(),
+                        satisfied,
+                    });
+                }
+                Some(ClearsWhen::Predicate(ClearsWhenPredicate::FileContains {
+                    path,
+                    pattern,
+                    ..
+                })) => {
+                    // Same two-root resolution strategy as `FileExists`;
+                    // every failure mode (missing/oversized/unreadable/
+                    // non-UTF8) folds into `satisfied: false`.
+                    let satisfied =
+                        file_contains_satisfied(path, pattern, brain_root, repo_paths, own_repo);
+                    refs.push(CarryoverRef::FileContains {
+                        path: path.clone(),
+                        pattern: pattern.clone(),
+                        satisfied,
+                    });
+                }
+                Some(ClearsWhen::Predicate(ClearsWhenPredicate::CommandExitsZero {
+                    command,
+                    ..
+                })) => {
+                    if allow_exec {
+                        let cwd = repo_paths.get(own_repo).map(PathBuf::as_path).unwrap_or(
+                            // Falls back to the brain root when the owning
+                            // repo has no known path — still a real cwd,
+                            // never a no-op.
+                            brain_root,
+                        );
+                        let satisfied = command_exit_zero_satisfied(command, cwd);
+                        refs.push(CarryoverRef::CommandExitsZero {
+                            command: command.clone(),
+                            satisfied,
+                        });
+                    } else {
+                        // Opt-in is off: this predicate is NOT evaluated at
+                        // all — no ref is produced, and the entry is
+                        // reported via a dedicated reason rather than
+                        // falling through to the generic `NoPredicate`
+                        // case. An unrun command is unknown, and unknown
+                        // must never read as `Cleared`.
+                        forced_reason = Some(NotEvaluableReason::ExecutionNotAllowed);
+                    }
+                }
+                None => {}
             }
 
             let (lane, reason) = if !refs.is_empty() {
                 let all_satisfied = refs.iter().all(|r| match r {
                     CarryoverRef::Block { satisfied, .. } => *satisfied,
                     CarryoverRef::Path { satisfied, .. } => *satisfied,
+                    CarryoverRef::PathAbsent { satisfied, .. } => *satisfied,
+                    CarryoverRef::UnresolvedBlock { .. } => false,
+                    CarryoverRef::FileContains { satisfied, .. } => *satisfied,
+                    CarryoverRef::CommandExitsZero { satisfied, .. } => *satisfied,
                 });
                 let lane = if all_satisfied {
                     CarryoverLane::Cleared
@@ -481,7 +857,9 @@ pub fn evaluate_carryover(
                     CarryoverLane::Actionable
                 };
                 (lane, None)
-            } else if let Some(clears_when) = item.clears_when.as_deref() {
+            } else if let Some(reason) = forced_reason {
+                (CarryoverLane::NotEvaluable, Some(reason))
+            } else if let Some(ClearsWhen::Prose(clears_when)) = item.clears_when.as_ref() {
                 let reason = if ambiguous {
                     NotEvaluableReason::AmbiguousReference
                 } else if !has_closure_verb(clears_when)
@@ -489,6 +867,12 @@ pub fn evaluate_carryover(
                 {
                     // Names a block but never says it must close.
                     NotEvaluableReason::NoClosureVerb
+                } else if mentions_gate(clears_when) {
+                    // Names a validator/gate/CI concept but nothing checkable
+                    // (no path, no block) could be extracted from it — a
+                    // candidate for a typed `command_exits_zero` predicate,
+                    // never something this sweep derives and runs itself.
+                    NotEvaluableReason::GateMentionNotCheckable
                 } else {
                     NotEvaluableReason::Prose
                 };
@@ -520,7 +904,11 @@ pub fn evaluate_carryover(
                 slug: item.slug.clone(),
                 kind: item.kind.clone(),
                 text: item.text.clone(),
-                clears_when: item.clears_when.clone(),
+                clears_when: item
+                    .clears_when
+                    .as_ref()
+                    .and_then(clears_when_display)
+                    .map(String::from),
                 created: item.created.clone(),
                 age_days,
                 stale,
@@ -749,8 +1137,14 @@ mod tests {
         assert_eq!(
             refs,
             vec![
-                "docs/decisions/D58-us-market-entry-and-two-domain-split.md",
-                "docs/decisions/index.md",
+                (
+                    "docs/decisions/D58-us-market-entry-and-two-domain-split.md".to_string(),
+                    PathAssertion::Present
+                ),
+                (
+                    "docs/decisions/index.md".to_string(),
+                    PathAssertion::Present
+                ),
             ]
         );
     }
@@ -766,7 +1160,94 @@ mod tests {
     fn path_refs_from_prose_trims_surrounding_punctuation_and_quotes() {
         let text = "exists: \"docs/index.md\", (planning/status.md).";
         let refs = path_refs_from_prose(text);
-        assert_eq!(refs, vec!["docs/index.md", "planning/status.md"]);
+        assert_eq!(
+            refs,
+            vec![
+                ("docs/index.md".to_string(), PathAssertion::Present),
+                ("planning/status.md".to_string(), PathAssertion::Present),
+            ]
+        );
+    }
+
+    // -- Task 3: broadened path assertion vocabulary -------------------------
+
+    /// RED-FIRST GUARD (a): a path named in prose with no assertion verb at
+    /// all — presence or absence — must stay unextracted. Before this task's
+    /// widening, this test was equivalent to
+    /// `path_refs_from_prose_empty_when_no_exists_word` and passed trivially;
+    /// it is kept as its own guard because the widening below adds many new
+    /// verbs and this is the case a careless widening (e.g. dropping the gate
+    /// instead of bounding it) would break first.
+    #[test]
+    fn path_refs_from_prose_stays_empty_for_a_bare_path_mention_with_no_assertion_verb() {
+        let text = "see docs/decisions/D58-foo.md for the rationale";
+        assert!(path_refs_from_prose(text).is_empty());
+    }
+
+    #[test]
+    fn path_refs_from_prose_extracts_via_created_added_written_present_verbs() {
+        assert_eq!(
+            path_refs_from_prose("docs/new.md is created"),
+            vec![("docs/new.md".to_string(), PathAssertion::Present)]
+        );
+        assert_eq!(
+            path_refs_from_prose("docs/new.md is added to the index"),
+            vec![("docs/new.md".to_string(), PathAssertion::Present)]
+        );
+        assert_eq!(
+            path_refs_from_prose("docs/new.md is written"),
+            vec![("docs/new.md".to_string(), PathAssertion::Present)]
+        );
+        assert_eq!(
+            path_refs_from_prose("docs/new.md is present"),
+            vec![("docs/new.md".to_string(), PathAssertion::Present)]
+        );
+    }
+
+    /// (b) corrected/fixed pair with a named file — extraction goes through
+    /// the widened presence vocabulary, not new grammar.
+    #[test]
+    fn path_refs_from_prose_extracts_via_corrected_and_fixed_verbs() {
+        assert_eq!(
+            path_refs_from_prose("the count in docs/report.md is corrected"),
+            vec![("docs/report.md".to_string(), PathAssertion::Present)]
+        );
+        assert_eq!(
+            path_refs_from_prose("docs/report.md is fixed"),
+            vec![("docs/report.md".to_string(), PathAssertion::Present)]
+        );
+    }
+
+    /// "X is corrected" alone, with nothing checkable named, stays
+    /// NotEvaluable — verified at the `evaluate_carryover` level below
+    /// (`corrected_predicate_naming_nothing_checkable_stays_not_evaluable`).
+    #[test]
+    fn path_refs_from_prose_extracts_via_removed_deleted_gone_verbs_as_absent() {
+        assert_eq!(
+            path_refs_from_prose("docs/old.md is removed"),
+            vec![("docs/old.md".to_string(), PathAssertion::Absent)]
+        );
+        assert_eq!(
+            path_refs_from_prose("docs/old.md is deleted"),
+            vec![("docs/old.md".to_string(), PathAssertion::Absent)]
+        );
+        assert_eq!(
+            path_refs_from_prose("docs/old.md is gone"),
+            vec![("docs/old.md".to_string(), PathAssertion::Absent)]
+        );
+    }
+
+    // -- mentions_gate ---------------------------------------------------------
+
+    #[test]
+    fn mentions_gate_matches_word_bounded_validator_and_gate_vocabulary() {
+        assert!(mentions_gate("the validator is green"));
+        assert!(mentions_gate("CI passes"));
+        assert!(mentions_gate("the harness gate is satisfied"));
+        assert!(!mentions_gate("the count is corrected"));
+        // Word-bounding: "gated" must not match "gate" as a substring of an
+        // unrelated word (mirrors `has_closure_verb_is_word_bounded`).
+        assert!(!mentions_gate("the feature is gated behind a flag"));
     }
 
     // -- evaluate_carryover ----------------------------------------------------
@@ -838,7 +1319,7 @@ mod tests {
             kind: kind.to_string(),
             text: "some carryover text".to_string(),
             related,
-            clears_when: clears_when.map(str::to_string),
+            clears_when: clears_when.map(|s| ClearsWhen::Prose(s.to_string())),
             created: created.to_string(),
             reviewed: reviewed.map(str::to_string),
             snoozed_until: snoozed_until.map(str::to_string),
@@ -898,6 +1379,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.total, 1);
         assert_eq!(report.cleared, 1);
@@ -937,6 +1419,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.total, 1);
         assert_eq!(report.actionable, 1);
@@ -978,6 +1461,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.not_evaluable, 1);
         let entry = &report.entries[0];
@@ -1025,6 +1509,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.not_evaluable, 1);
         let entry = &report.entries[0];
@@ -1072,6 +1557,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.cleared, 0, "a related[] edge must never clear");
         assert_eq!(report.not_evaluable, 1);
@@ -1131,6 +1617,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(
             report.cleared, 0,
@@ -1181,6 +1668,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.cleared, 1);
         assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
@@ -1213,6 +1701,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.not_evaluable, 1);
         assert_eq!(
@@ -1253,6 +1742,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         assert_eq!(report.actionable, 1, "one path missing -> actionable");
         let entry = &report.entries[0];
@@ -1306,6 +1796,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         let by_slug = |slug: &str| report.entries.iter().find(|e| e.slug == slug).unwrap();
         assert!(
@@ -1364,6 +1855,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             Some("mev"),
+            false,
         );
         assert_eq!(report.total, 1);
         assert_eq!(report.entries[0].repo, "mev");
@@ -1416,6 +1908,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         let report2 = evaluate_carryover(
             &files,
@@ -1425,6 +1918,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
         );
         let lanes1: Vec<CarryoverLane> = report1.entries.iter().map(|e| e.lane).collect();
         let lanes2: Vec<CarryoverLane> = report2.entries.iter().map(|e| e.lane).collect();
@@ -1437,5 +1931,1044 @@ mod tests {
                 CarryoverLane::NotEvaluable,
             ]
         );
+    }
+
+    // -- typed predicates: BlockClosed / FileExists -------------------------
+
+    /// Builds a `Carryover` with a typed `clears_when` predicate instead of
+    /// prose, sharing every other field with [`item`]'s defaults.
+    fn predicate_item(slug: &str, kind: &str, predicate: ClearsWhenPredicate) -> Carryover {
+        Carryover {
+            clears_when: Some(ClearsWhen::Predicate(predicate)),
+            ..item(slug, kind, None, vec![], "2020-01-01", None, None)
+        }
+    }
+
+    #[test]
+    fn block_closed_predicate_naming_a_closed_block_clears() {
+        let files = vec![(
+            src("engine-rs"),
+            state_file(
+                "engine-rs",
+                vec![("EN.5.B1", "closed")],
+                vec![predicate_item(
+                    "typed-closed",
+                    "deferred",
+                    ClearsWhenPredicate::BlockClosed {
+                        repo: "engine-rs".to_string(),
+                        id: "EN.5.B1".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.cleared, 1);
+        assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::Block {
+                key: "engine-rs:EN.5.B1".to_string(),
+                satisfied: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn block_closed_predicate_naming_an_open_block_is_actionable_with_unmet_ref() {
+        let files = vec![(
+            src("engine-rs"),
+            state_file(
+                "engine-rs",
+                vec![("EN.5.B1", "in-progress")],
+                vec![predicate_item(
+                    "typed-open",
+                    "deferred",
+                    ClearsWhenPredicate::BlockClosed {
+                        repo: "engine-rs".to_string(),
+                        id: "EN.5.B1".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.actionable, 1);
+        assert_eq!(report.entries[0].lane, CarryoverLane::Actionable);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::Block {
+                key: "engine-rs:EN.5.B1".to_string(),
+                satisfied: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn block_closed_predicate_whose_target_is_absent_from_status_map_is_never_cleared() {
+        // A false `cleared` here would mean a typo'd repo/id silently
+        // vanishing the entry instead of flagging the data problem.
+        let files = vec![(
+            src("engine-rs"),
+            state_file(
+                "engine-rs",
+                vec![],
+                vec![predicate_item(
+                    "typed-unresolvable",
+                    "deferred",
+                    ClearsWhenPredicate::BlockClosed {
+                        repo: "engine-rs".to_string(),
+                        id: "EN.99.Z".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.cleared, 0);
+        assert_eq!(report.actionable, 1);
+        assert_eq!(report.entries[0].lane, CarryoverLane::Actionable);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::UnresolvedBlock {
+                key: "engine-rs:EN.99.Z".to_string(),
+            }],
+            "an absent target must be surfaced distinctly from a plain unmet Block ref"
+        );
+    }
+
+    #[test]
+    fn file_exists_predicate_resolves_against_brain_root() {
+        let dir = std::env::temp_dir().join(format!(
+            "mev-carryover-file-exists-brain-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("marker.md");
+        std::fs::write(&target, "present").unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-exists-brain-root",
+                    "deferred",
+                    ClearsWhenPredicate::FileExists {
+                        path: "marker.md".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.cleared, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::Path {
+                path: "marker.md".to_string(),
+                satisfied: true,
+            }]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_exists_predicate_resolves_against_owning_repo_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "mev-carryover-file-exists-repo-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("marker.md");
+        std::fs::write(&target, "present").unwrap();
+
+        let mut repo_paths = HashMap::new();
+        repo_paths.insert("mev".to_string(), dir.clone());
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-exists-repo-path",
+                    "deferred",
+                    ClearsWhenPredicate::FileExists {
+                        path: "marker.md".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/definitely/not/the/brain/root"),
+            &repo_paths,
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.cleared, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_exists_predicate_naming_a_missing_path_is_actionable() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-missing",
+                    "deferred",
+                    ClearsWhenPredicate::FileExists {
+                        path: "definitely/does/not/exist.md".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.actionable, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::Path {
+                path: "definitely/does/not/exist.md".to_string(),
+                satisfied: false,
+            }]
+        );
+    }
+
+    /// Scratch dir helper for `file_contains` fixtures — mirrors the
+    /// `file_exists_predicate_*` tests' `std::env::temp_dir()` pattern.
+    fn scratch_dir(suffix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "mev-carryover-file-contains-{suffix}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn file_contains_predicate_matching_pattern_clears() {
+        let dir = scratch_dir("match");
+        std::fs::write(dir.join("target.md"), "the quick brown fox").unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-contains-match",
+                    "deferred",
+                    ClearsWhenPredicate::FileContains {
+                        path: "target.md".to_string(),
+                        pattern: "brown fox".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.cleared, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::FileContains {
+                path: "target.md".to_string(),
+                pattern: "brown fox".to_string(),
+                satisfied: true,
+            }]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_contains_predicate_non_matching_pattern_is_actionable() {
+        let dir = scratch_dir("no-match");
+        std::fs::write(dir.join("target.md"), "the quick brown fox").unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-contains-no-match",
+                    "deferred",
+                    ClearsWhenPredicate::FileContains {
+                        path: "target.md".to_string(),
+                        pattern: "lazy dog".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.actionable, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::FileContains {
+                path: "target.md".to_string(),
+                pattern: "lazy dog".to_string(),
+                satisfied: false,
+            }]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_contains_predicate_absent_file_is_actionable_never_panics() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-contains-absent",
+                    "deferred",
+                    ClearsWhenPredicate::FileContains {
+                        path: "definitely/does/not/exist.md".to_string(),
+                        pattern: "anything".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.actionable, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::FileContains {
+                path: "definitely/does/not/exist.md".to_string(),
+                pattern: "anything".to_string(),
+                satisfied: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn file_contains_predicate_oversized_file_is_actionable_never_panics() {
+        let dir = scratch_dir("oversized");
+        // One byte past FILE_CONTAINS_MAX_BYTES — must be rejected, not read.
+        let oversized = vec![b'x'; (FILE_CONTAINS_MAX_BYTES + 1) as usize];
+        std::fs::write(dir.join("huge.md"), &oversized).unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-contains-oversized",
+                    "deferred",
+                    ClearsWhenPredicate::FileContains {
+                        path: "huge.md".to_string(),
+                        pattern: "x".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.actionable, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::FileContains {
+                path: "huge.md".to_string(),
+                pattern: "x".to_string(),
+                satisfied: false,
+            }],
+            "an oversized file must never be read into memory to satisfy the predicate"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_contains_predicate_non_utf8_file_is_actionable_never_panics() {
+        let dir = scratch_dir("non-utf8");
+        // 0xFF is never valid as a UTF-8 lead byte.
+        std::fs::write(dir.join("binary.md"), [0xFFu8, 0xFE, 0x00, 0x01]).unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-contains-non-utf8",
+                    "deferred",
+                    ClearsWhenPredicate::FileContains {
+                        path: "binary.md".to_string(),
+                        pattern: "anything".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.actionable, 1);
+        assert!(!matches!(report.entries[0].lane, CarryoverLane::Cleared));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn command_exits_zero_with_opt_in_and_exit_zero_clears() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-command-exit-zero",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        command: "true".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            std::env::temp_dir().as_path(),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            true, // allow_exec
+        );
+        assert_eq!(report.cleared, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::CommandExitsZero {
+                command: "true".to_string(),
+                satisfied: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn command_exits_zero_with_opt_in_and_nonzero_exit_is_actionable() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-command-exit-one",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        command: "false".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            std::env::temp_dir().as_path(),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            true,
+        );
+        assert_eq!(report.actionable, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::CommandExitsZero {
+                command: "false".to_string(),
+                satisfied: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn command_exits_zero_with_opt_in_and_nonexistent_binary_is_actionable_never_panics() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-command-nonexistent",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        command: "definitely-not-a-real-binary-xyz".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            std::env::temp_dir().as_path(),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            true,
+        );
+        assert_eq!(report.actionable, 1);
+        assert!(!matches!(report.entries[0].lane, CarryoverLane::Cleared));
+    }
+
+    #[test]
+    fn command_exits_zero_with_opt_in_and_slow_command_times_out_and_is_actionable() {
+        // Exceeds COMMAND_EXEC_TIMEOUT; the in-process watchdog must kill it
+        // and report not-satisfied within roughly the bound rather than
+        // hanging the sweep. `timeout(1)` is never invoked to enforce this.
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-command-timeout",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        command: "sleep 30".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+
+        let start = std::time::Instant::now();
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            std::env::temp_dir().as_path(),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            true,
+        );
+        let elapsed = start.elapsed();
+
+        assert_eq!(report.actionable, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::CommandExitsZero {
+                command: "sleep 30".to_string(),
+                satisfied: false,
+            }]
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "watchdog should kill the child at roughly COMMAND_EXEC_TIMEOUT, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn command_exits_zero_opt_in_off_is_not_evaluable_never_cleared_even_if_would_exit_zero() {
+        // The safe-direction bias on a new axis: an unrun command is
+        // unknown, and unknown must never read as Cleared — even though
+        // `true` would have exited 0 had it run.
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-command-opt-in-off",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        command: "true".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false, // allow_exec off
+        );
+        assert_eq!(report.cleared, 0);
+        assert_eq!(report.not_evaluable, 1);
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
+        assert!(report.entries[0].refs.is_empty());
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::ExecutionNotAllowed)
+        );
+    }
+
+    #[test]
+    fn mixed_typed_satisfied_and_prose_unsatisfied_entries_each_preserve_conjunctive_and() {
+        // The schema allows exactly one `clears_when` per carryover entry, so
+        // "mixed typed-and-prose reference sets" is exercised across a fleet
+        // sweep containing one entry of each kind, each independently
+        // proving the same `refs`-vec AND logic governs both source types.
+        let files = vec![(
+            src("engine-rs"),
+            state_file(
+                "engine-rs",
+                vec![("EN.5.B1", "closed"), ("EN.5.B2", "in-progress")],
+                vec![
+                    predicate_item(
+                        "typed-satisfied",
+                        "deferred",
+                        ClearsWhenPredicate::BlockClosed {
+                            repo: "engine-rs".to_string(),
+                            id: "EN.5.B1".to_string(),
+                            note: None,
+                        },
+                    ),
+                    item(
+                        "prose-unsatisfied",
+                        "deferred",
+                        Some("EN.5.B2 lands"),
+                        vec![],
+                        "2020-01-01",
+                        None,
+                        None,
+                    ),
+                ],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        let by_slug = |slug: &str| {
+            report
+                .entries
+                .iter()
+                .find(|e| e.slug == slug)
+                .unwrap_or_else(|| panic!("missing entry {slug}"))
+        };
+        assert_eq!(by_slug("typed-satisfied").lane, CarryoverLane::Cleared);
+        assert_eq!(by_slug("prose-unsatisfied").lane, CarryoverLane::Actionable);
+    }
+
+    #[test]
+    fn closure_verbs_and_pinning_test_guard_are_untouched_by_typed_predicate_support() {
+        // Re-affirms the CLOSURE_VERBS gate still applies on the prose path
+        // even though the typed BlockClosed path (correctly) bypasses it —
+        // see the module-level doc on `evaluate_carryover`'s Predicate arm.
+        assert!(has_closure_verb("BA.0.A closes"));
+        assert!(!has_closure_verb("one of the two BA.0.A blocks is renamed"));
+    }
+
+    // -- Task 3: prose widening, wired through evaluate_carryover ------------
+
+    /// RED-FIRST GUARD (a): a bare path mention with no assertion verb, run
+    /// through the full evaluator (not just the extractor), stays
+    /// NotEvaluable — never Actionable, and certainly never Cleared, merely
+    /// because a path-shaped token happens to appear in the prose.
+    #[test]
+    fn bare_path_mention_with_no_assertion_verb_stays_not_evaluable() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![item(
+                    "bare-path-mention",
+                    "deferred",
+                    Some("see docs/decisions/D58-foo.md for the rationale"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
+        assert_eq!(report.entries[0].reason, Some(NotEvaluableReason::Prose));
+    }
+
+    /// RED-FIRST GUARD (a continued) — the polarity guard: an
+    /// absence-assertion ("X is removed") over a path that in fact still
+    /// EXISTS must land Actionable, never Cleared. Before `PathAbsent`
+    /// existed, the only representable ref was `Path { satisfied: exists }`,
+    /// which would have reported this entry `cleared` purely because the
+    /// path is named and resolves — exactly the false-`cleared` shape this
+    /// guard exists to catch.
+    #[test]
+    fn absence_assertion_over_a_still_existing_path_is_actionable_never_cleared() {
+        let dir = std::env::temp_dir().join(format!(
+            "mev-carryover-path-absent-still-exists-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/stale.md"), "still here").unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![item(
+                    "absence-over-existing",
+                    "deferred",
+                    Some("docs/stale.md is removed"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.entries[0].lane, CarryoverLane::Actionable);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::PathAbsent {
+                path: "docs/stale.md".to_string(),
+                satisfied: false,
+            }]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The positive case, for completeness: an absence-assertion over a path
+    /// that has genuinely been removed clears.
+    #[test]
+    fn absence_assertion_over_a_missing_path_clears() {
+        let dir = std::env::temp_dir().join(format!(
+            "mev-carryover-path-absent-gone-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![item(
+                    "absence-over-missing",
+                    "deferred",
+                    Some("docs/stale.md is deleted"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// (b) "X is corrected" alone, with nothing checkable named, stays
+    /// NotEvaluable — the widening only reaches predicates that resolve to
+    /// an already-checkable file/block reference.
+    #[test]
+    fn corrected_predicate_naming_nothing_checkable_stays_not_evaluable() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![item(
+                    "corrected-nothing-checkable",
+                    "deferred",
+                    Some("the count is corrected"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
+        assert_eq!(report.entries[0].reason, Some(NotEvaluableReason::Prose));
+    }
+
+    /// RED-FIRST GUARD (c): a gate/validator mention with nothing checkable
+    /// stays NotEvaluable with the dedicated reason, never Actionable or
+    /// Cleared — no ref is fabricated from "the validator is green" and no
+    /// command is derived from it and run.
+    #[test]
+    fn gate_mention_with_nothing_checkable_stays_not_evaluable_never_cleared() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![item(
+                    "gate-mention-only",
+                    "deferred",
+                    Some("the validator is green"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
+        assert!(report.entries[0].refs.is_empty());
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::GateMentionNotCheckable)
+        );
+    }
+
+    /// A gate mention that ALSO names a closing block still evaluates via
+    /// the existing block path — `mentions_gate` only supplies a more
+    /// specific reason label when nothing else was extracted; it never
+    /// suppresses real extraction.
+    #[test]
+    fn gate_mention_paired_with_a_closing_block_still_evaluates_via_block_ref() {
+        let files = vec![(
+            src("engine-rs"),
+            state_file(
+                "engine-rs",
+                vec![("EN.5.B1", "closed")],
+                vec![item(
+                    "gate-mention-with-block",
+                    "deferred",
+                    Some("the CI gate clears when EN.5.B1 lands"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
+    }
+
+    /// Live-data twin of the CLOSURE_VERBS pinning test, re-run through the
+    /// widened Task 3 code path: the 2026-08-03 false-cleared shape must
+    /// still stay NotEvaluable even with the broadened path/gate vocabulary
+    /// in play.
+    #[test]
+    fn ba_0_a_id_collision_shape_stays_not_evaluable_after_task3_widening() {
+        let files = vec![(
+            src("core"),
+            state_file(
+                "core",
+                vec![("BA.0.A", "closed")],
+                vec![item(
+                    "core:ba-0-a-id-collision",
+                    "known_issue",
+                    Some("one of the two BA.0.A blocks is renamed and Phase 0 is backfilled"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_ne!(report.entries[0].lane, CarryoverLane::Cleared);
     }
 }

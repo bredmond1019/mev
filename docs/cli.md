@@ -1346,14 +1346,14 @@ mev --json doc opportunity ingest --input company-brief.json
 
 ---
 
-### `carryover [--repo <slug>] [--json] [path]`
+### `carryover [--repo <slug>] [--json] [--allow-exec] [path]`
 
 Fleet-wide, **read-only** sweep of every discovered `planning/state.json`'s `carryover[]`
 array. Evaluates each entry's `clears_when` predicate where it is machine-checkable and sorts
 the fleet into three lanes.
 
 ```bash
-mev carryover [--repo <SLUG>] [--json] [path]
+mev carryover [--repo <SLUG>] [--json] [--allow-exec] [path]
 ```
 
 | Argument / Flag | Default | Description |
@@ -1361,6 +1361,7 @@ mev carryover [--repo <SLUG>] [--json] [path]
 | `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
 | `--repo <SLUG>` | unset | Restrict the sweep to one repo's `carryover[]` entries. An unknown slug is a hard error naming the valid slugs |
 | `--json` | off | Emit the `CarryoverReport` as compact JSON instead of the human, lane-grouped summary |
+| `--allow-exec` | off | Opt in to running `command_exits_zero` predicates. Without it, every such entry reports `not-evaluable` (reason `execution-not-allowed`) and **no command is ever run** |
 
 Resolves `brain.toml` by walking up from `path`, discovers and loads every repo's
 `planning/state.json` (individual load failures are skipped, not fatal), and evaluates every
@@ -1376,12 +1377,45 @@ command) to act on — it is never an automatic deletion.
 |---|---|
 | `cleared` | At least one reference was extracted from the entry and **every** extracted reference is currently satisfied — a recommendation to delete the entry |
 | `actionable` | At least one reference was extracted, but **at least one** is unsatisfied — the specific unmet reference(s) are named so a reader can act without re-reading the predicate |
-| `not-evaluable` | No reference could be extracted. Reason `prose` (`clears_when` is present but is pure prose), `no-closure-verb` (it names a block but never says the block must close), `ambiguous-reference` (a bare block ID matched more than one repo and was dropped), or `no-predicate` (`clears_when` is `None`) |
+| `not-evaluable` | No reference could be extracted. Reason `prose` (`clears_when` is present but is pure prose), `no-closure-verb` (it names a block but never says the block must close), `ambiguous-reference` (a bare block ID matched more than one repo and was dropped), `execution-not-allowed` (a `command_exits_zero` predicate was present but `--allow-exec` was not passed), `gate-mention-not-checkable` (it names a validator/gate/CI concept but nothing checkable — no path, no block — could be extracted, flagged as a candidate for a typed `command_exits_zero` predicate), or `no-predicate` (`clears_when` is `None`) |
 
-#### The two evaluable predicate classes
+#### Typed `clears_when` predicates
 
-Only two classes of `clears_when` predicate are ever machine-evaluated; anything else falls
-into `not-evaluable` rather than being guessed at:
+Alongside prose, `clears_when` may be a typed predicate object (`{"type": "block_closed", ...}`
+etc.). All four typed predicate kinds are evaluated:
+
+- **`block_closed { repo, id }`** — satisfied when `"{repo}:{id}"`'s authored status in the
+  loaded corpus is exactly `closed`. A `{repo, id}` pair with **no matching node at all** in the
+  loaded corpus (a typo'd repo slug or ID) is never satisfied and is reported distinctly from an
+  ordinary unmet reference — `unresolvable: {repo}:{id} (not found in loaded corpus)` in the
+  human summary, `{"type": "unresolved_block", "key": "..."}` in `--json` — so a data problem
+  doesn't read the same as "the block just hasn't closed yet". Unlike the prose grammar, the
+  typed form needs no [`CLOSURE_VERBS`](#the-two-evaluable-predicate-classes) gate: it is
+  unambiguous by construction.
+- **`file_exists { path }`** — satisfied under the same two-root resolution as the prose Class B
+  reference below (brain root, then the owning repo's path).
+- **`file_contains { path, pattern }`** — satisfied when `path` resolves under that same
+  two-root strategy **and** its contents contain `pattern` as a literal substring (never a
+  regex). Every failure mode — missing file, unreadable file, non-UTF8 contents, or a file
+  larger than 5 MiB (never read into memory) — is `satisfied: false`, never a panic and never
+  `satisfied: true`.
+- **`command_exits_zero { command }`** — satisfied only when running `sh -c <command>` (cwd: the
+  owning repo's path if known, else the brain root) exits with status `0` **and** `--allow-exec`
+  was passed. This is the one predicate that executes arbitrary shell from a data file, so it
+  carries three deliberate safety properties:
+  1. **Opt-in, off by default.** Without `--allow-exec`, `command_exits_zero` entries are never
+     run — they report `not-evaluable` with reason `execution-not-allowed` instead. An unrun
+     command is unknown, and unknown must never read as `cleared`.
+  2. **In-process wall-clock timeout.** `timeout(1)` does not exist on macOS, so the ~2s bound is
+     enforced by polling `try_wait` and killing the child on expiry — a bad predicate cannot hang
+     a fleet-wide sweep.
+  3. **Failure is never success.** Spawn failure, non-zero exit, signal death, and timeout are
+     all `satisfied: false`; only a clean exit status of `0` satisfies.
+
+#### The two evaluable prose predicate classes
+
+Only two classes of prose `clears_when` are ever machine-evaluated; anything else falls into
+`not-evaluable` rather than being guessed at:
 
 - **Block references — from `clears_when` only.** Block IDs matched in the prose by a strict
   grammar (`[A-Z]{2,3}\.(?:\d+\.[A-Z0-9]+|ticket\.[a-z0-9][a-z0-9-]*|chore\.[a-z0-9][a-z0-9-]*)`).
@@ -1407,10 +1441,26 @@ into `not-evaluable` rather than being guessed at:
 > backfilled"*, and `BA.0.A` **is** `closed`. Without the closure-verb gate the sweep
 > recommended deleting a live, unresolved `known_issue`. A false `cleared` is the only verdict
 > here that destroys durable knowledge.
-- **Path-existence references** — extracted only when the `clears_when` text contains the
-  literal word `exists`. Whitespace-delimited tokens containing `/` and ending in one of
-  `.md .rs .py .sh .ts .tsx .json .toml` are resolved against the brain root and against the
-  owning repo's `repo_path`; satisfied when either resolves to an existing file.
+- **Path assertion references** — extracted only when the `clears_when` text contains a
+  word-bounded entry from a bounded, documented verb vocabulary — the path analogue of the
+  closure-verb gate above. A path named with no assertion verb at all is a *subject*, not a
+  *condition*, and nothing is extracted for it (`not-evaluable`, reason `prose`).
+  - **Presence verbs** — `exists` · `created` · `added` · `written` · `present` · `corrected` ·
+    `fixed`. Whitespace-delimited tokens containing `/` and ending in one of
+    `.md .rs .py .sh .ts .tsx .json .toml` are resolved against the brain root and against the
+    owning repo's `repo_path`; satisfied when either resolves to an existing file. The
+    `corrected`/`fixed` verbs pair with an already-checkable file this way rather than attempting
+    to parse what "corrected" means — a predicate like *"X is corrected"* with no named file/block
+    stays `not-evaluable`.
+  - **Absence verbs** — `removed` · `deleted` · `gone`. Same path resolution, but satisfied when
+    the path does **not** resolve to an existing file — the inverse polarity, reported as a
+    distinct `path_absent` reference (`{"type": "path_absent", "path": "...", "satisfied": ...}`
+    in `--json`) so "the path exists" is never conflated with "the path is gone".
+  - When a predicate names a validator/gate/CI concept (`validator` · `gate` · `lint` · `linter` ·
+    `harness` · `pipeline` · `suite` · `ci`) but nothing checkable was extracted from it, it is
+    reported `not-evaluable` with reason `gate-mention-not-checkable` rather than plain `prose` —
+    a hint that it is a candidate for a typed `command_exits_zero` predicate. Nothing derives a
+    command from this prose and runs it automatically; that stays explicitly out of scope.
 
 **All extracted references are combined conjunctively (AND), even when the prose says "or".**
 This is a deliberate, safe-failure-direction bias: it can mis-report a genuinely-cleared
@@ -1442,6 +1492,9 @@ mev carryover --repo mev
 
 # From an explicit brain root
 mev carryover ~/Dev/agentic-portfolio
+
+# Opt in to running command_exits_zero predicates
+mev carryover --allow-exec
 ```
 
 ---

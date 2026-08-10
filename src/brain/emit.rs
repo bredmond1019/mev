@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::brain::carryover::clears_when_display;
 use crate::brain::config::BrainConfig;
 use crate::brain::distill::{DistilledEntry, distill_stale_age, parse_distilled};
 use crate::brain::state::{
@@ -1227,7 +1228,8 @@ pub fn render_attention_section_with_distilled(
         if let Some(age) = carryover_stale_age(item, today, thresholds) {
             let clears = item
                 .clears_when
-                .as_deref()
+                .as_ref()
+                .and_then(clears_when_display)
                 .map(|c| format!(" (clears when: {})", attention_snippet(c, 60)))
                 .unwrap_or_default();
             carry_rows.push(AttentionRow {

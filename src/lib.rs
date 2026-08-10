@@ -1325,11 +1325,18 @@ pub fn visualize_brain(root: &std::path::Path, out_dir: Option<PathBuf>) -> anyh
 /// `BrainConfig`'s `[[repos]]` entries (the HQ root itself keyed by its own slug), and
 /// delegates to [`evaluate_carryover`] for the lane assignment. `today` is taken from the
 /// local wall clock; thresholds come from the resolved config's `[attention]` section.
+/// `allow_exec` is passed straight through to [`evaluate_carryover`] as the opt-in gate
+/// for the `CommandExitsZero` predicate — off by default, and this function never turns
+/// it on implicitly.
 ///
-/// Never writes anything — this is a pure read + report.
+/// Never writes anything — this is a pure read + report. `allow_exec: true` does run an
+/// external command when a loaded entry has a `CommandExitsZero` predicate, but the
+/// command itself is the caller's/author's responsibility; the sweep only observes its
+/// exit status.
 pub fn carryover_sweep(
     root: &std::path::Path,
     repo_filter: Option<&str>,
+    allow_exec: bool,
 ) -> anyhow::Result<brain::carryover::CarryoverReport> {
     use brain::config::find_brain_config;
     use brain::state::{discover_state_files, load_state};
@@ -1399,6 +1406,7 @@ pub fn carryover_sweep(
         &today,
         &config.attention,
         repo_filter,
+        allow_exec,
     ))
 }
 

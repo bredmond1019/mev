@@ -48,6 +48,10 @@
 //!   `complete` (warn-only; never auto-flipped).
 //! - `W_STATE_EPIC_UNREACHABLE_DEP` — an unclosed epic block depends on an unclosed
 //!   block that belongs to no epic (a gate invisible on the epic's board).
+//! - `E_STATE_SCHEMA_BAD_FINDING_ID` — a carryover `finding_id` is not kebab-case.
+//! - `E_STATE_SCHEMA_BAD_CLEARS_WHEN` — a carryover `clears_when` typed predicate is
+//!   missing a required member, has an empty required member, or (for `file_exists` /
+//!   `file_contains`) names an absolute path. Well-formedness only — never evaluation.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -55,6 +59,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::Diagnostic;
+use crate::brain::carryover::clears_when_display;
 use crate::brain::config::BrainConfig;
 
 // ---------------------------------------------------------------------------
@@ -70,10 +75,10 @@ use crate::brain::config::BrainConfig;
 /// `BrainConfig`/`Diagnostic` types and stays here — it consumes these shared
 /// types instead of duplicating them.
 pub use okf_core::{
-    Backlog, BacklogOrigin, Block, BlockedBy, Carryover, CarryoverScope, CrossRepoEdge, Endpoint,
-    Epic, Focus, Origin, RepoRollup, StateEdge, StateEdgeKind, StateFile, StateGraph,
-    StateLoadError, StateNode, StateSource, TierEntry, Track, TrackBlock, build_state_graph,
-    load_state,
+    Backlog, BacklogOrigin, Block, BlockedBy, Carryover, CarryoverScope, ClearsWhen,
+    ClearsWhenPredicate, CrossRepoEdge, Endpoint, Epic, Focus, Origin, RepoRollup, StateEdge,
+    StateEdgeKind, StateFile, StateGraph, StateLoadError, StateNode, StateSource, TierEntry, Track,
+    TrackBlock, build_state_graph, load_state,
 };
 
 // ---------------------------------------------------------------------------
@@ -401,7 +406,8 @@ pub fn check_carryover_staleness(
             let threshold = thresholds.carryover_threshold(&item.kind);
             let clears = item
                 .clears_when
-                .as_deref()
+                .as_ref()
+                .and_then(clears_when_display)
                 .map(|c| format!(" (clears when: {c})"))
                 .unwrap_or_default();
             diags.push(Diagnostic::warning(
@@ -763,9 +769,156 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                 ));
             }
         }
+
+        for dep in &item.blocks {
+            match dep {
+                BlockedBy::Block { repo, id, .. } => {
+                    let repo_empty = repo.trim().is_empty();
+                    let id_empty = id.trim().is_empty();
+                    if repo_empty || id_empty {
+                        diags.push(Diagnostic::error(
+                            path,
+                            "E_STATE_SCHEMA_BAD_BLOCKED_BY",
+                            format!(
+                                "blocks entry in carryover item '{}' is missing required \
+                                 field(s): {}",
+                                item.slug,
+                                [repo_empty.then_some("'repo'"), id_empty.then_some("'id'")]
+                                    .into_iter()
+                                    .flatten()
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        ));
+                    }
+                }
+                BlockedBy::External { what } => {
+                    if what.trim().is_empty() {
+                        diags.push(Diagnostic::error(
+                            path,
+                            "E_STATE_SCHEMA_BAD_BLOCKED_BY",
+                            format!(
+                                "blocks entry in carryover item '{}' is an External \
+                                 dependency with an empty 'what'",
+                                item.slug
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some(finding_id) = &item.finding_id
+            && !crate::shared::is_kebab_case(finding_id)
+        {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_SCHEMA_BAD_FINDING_ID",
+                format!(
+                    "carryover item '{}' has malformed finding_id '{}'; must be kebab-case \
+                     ([a-z0-9] separated by single hyphens)",
+                    item.slug, finding_id
+                ),
+            ));
+        }
+
+        if let Some(ClearsWhen::Predicate(predicate)) = &item.clears_when {
+            for msg in clears_when_predicate_errors(&item.slug, predicate) {
+                diags.push(Diagnostic::error(
+                    path,
+                    "E_STATE_SCHEMA_BAD_CLEARS_WHEN",
+                    msg,
+                ));
+            }
+        }
     }
 
     diags
+}
+
+/// Well-formedness checks for a `clears_when` typed predicate.
+///
+/// Returns one message per violation, each spelling out the correct JSON shape for
+/// the offending variant so the operator never has to guess the fix. This checks
+/// well-formedness only — never evaluation (no filesystem access, no command
+/// execution, no block-status lookup); that is `MV.ticket.clears-when-evaluation`'s
+/// job.
+fn clears_when_predicate_errors(slug: &str, predicate: &ClearsWhenPredicate) -> Vec<String> {
+    let mut errs = Vec::new();
+
+    match predicate {
+        ClearsWhenPredicate::BlockClosed { repo, id, .. } => {
+            let repo_empty = repo.trim().is_empty();
+            let id_empty = id.trim().is_empty();
+            if repo_empty || id_empty {
+                errs.push(format!(
+                    "carryover '{slug}' has a malformed clears_when predicate: \
+                     'block_closed' requires non-empty '{}'; correct form is \
+                     {{\"type\": \"block_closed\", \"repo\": \"<repo-slug>\", \"id\": \"<block-id>\"}}",
+                    [repo_empty.then_some("repo"), id_empty.then_some("id")]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join("' and '"),
+                ));
+            }
+        }
+        ClearsWhenPredicate::FileExists { path, .. } => {
+            if path.trim().is_empty() {
+                errs.push(format!(
+                    "carryover '{slug}' has a malformed clears_when predicate: \
+                     'file_exists' requires a non-empty 'path'; correct form is \
+                     {{\"type\": \"file_exists\", \"path\": \"<repo-relative path>\"}}"
+                ));
+            } else if path.starts_with('/') {
+                errs.push(format!(
+                    "carryover '{slug}' has a malformed clears_when predicate: \
+                     'file_exists' path '{path}' is absolute; paths resolve relative to the \
+                     brain root or the owning repo, so an absolute path never matches either — \
+                     correct form is {{\"type\": \"file_exists\", \"path\": \"<repo-relative path>\"}}"
+                ));
+            }
+        }
+        ClearsWhenPredicate::FileContains { path, pattern, .. } => {
+            let path_empty = path.trim().is_empty();
+            let pattern_empty = pattern.trim().is_empty();
+            if path_empty || pattern_empty {
+                errs.push(format!(
+                    "carryover '{slug}' has a malformed clears_when predicate: \
+                     'file_contains' requires a non-empty '{}'; correct form is \
+                     {{\"type\": \"file_contains\", \"path\": \"<repo-relative path>\", \
+                     \"pattern\": \"<substring>\"}}",
+                    [
+                        path_empty.then_some("path"),
+                        pattern_empty.then_some("pattern")
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("' and '"),
+                ));
+            } else if path.starts_with('/') {
+                errs.push(format!(
+                    "carryover '{slug}' has a malformed clears_when predicate: \
+                     'file_contains' path '{path}' is absolute; paths resolve relative to the \
+                     brain root or the owning repo, so an absolute path never matches either — \
+                     correct form is {{\"type\": \"file_contains\", \"path\": \"<repo-relative path>\", \
+                     \"pattern\": \"<substring>\"}}"
+                ));
+            }
+        }
+        ClearsWhenPredicate::CommandExitsZero { command, .. } => {
+            if command.trim().is_empty() {
+                errs.push(format!(
+                    "carryover '{slug}' has a malformed clears_when predicate: \
+                     'command_exits_zero' requires a non-empty 'command'; correct form is \
+                     {{\"type\": \"command_exits_zero\", \"command\": \"<shell command>\"}}"
+                ));
+            }
+        }
+    }
+
+    errs
 }
 
 // ---------------------------------------------------------------------------
@@ -828,6 +981,21 @@ pub fn check_field_policy(src: &StateSource, file: &StateFile) -> Vec<Diagnostic
                     }
                 }
             }
+        }
+    }
+
+    for item in &file.carryover {
+        if let Some(priority) = item.priority
+            && priority > 3
+        {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_PRIORITY_RANGE",
+                format!(
+                    "carryover '{}' has out-of-range priority {}; must be 0..=3",
+                    item.slug, priority
+                ),
+            ));
         }
     }
 
@@ -1138,6 +1306,11 @@ pub fn check_epics(config: &BrainConfig, files: &[(StateSource, StateFile)]) -> 
 /// 5. **`E_STATE_DANGLING_CROSS_REPO`** — a brain `cross_repo[]` edge's
 ///    `from` or `to` endpoint's block does not exist in the named repo's
 ///    `tracks[]` (repo is known, block is not).
+/// 6. **`E_STATE_DANGLING_BLOCKED_BY`** — a carryover `blocks[]` entry of
+///    `{type:"block",repo,id}` targets a `repo:id` that does not exist in
+///    the corpus-wide node set. `External` entries and entries with an
+///    empty `repo` (already reported by [`check_schema`]'s structural
+///    check) are skipped.
 pub fn check_state_graph(
     graph: &StateGraph,
     files: &[(StateSource, StateFile)],
@@ -1272,6 +1445,40 @@ pub fn check_state_graph(
                         format!(
                             "cross_repo 'to' block '{to_id}' does not exist in repo \
                              '{to_repo}' tracks[]"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    // --- 6. Carryover blocks[] dangling targets ---
+    //
+    // `blocks[]` is not part of `okf_core::build_state_graph`'s edges (that graph
+    // only covers `tracks[].blocks[].depends_on` and brain `cross_repo[]`), so it
+    // gets its own pass here rather than a `graph.edges` entry. Reuses the same
+    // `node_set` the edge-integrity checks above already built — no second index.
+    for (src, file) in files {
+        let path = &src.abs_path;
+        for item in &file.carryover {
+            for dep in &item.blocks {
+                let BlockedBy::Block { repo, id, .. } = dep else {
+                    continue; // External has no target node.
+                };
+                if repo.trim().is_empty() {
+                    // Reported by check_schema's structural check; skip here
+                    // rather than double-reporting.
+                    continue;
+                }
+                let key = format!("{repo}:{id}");
+                if !node_set.contains(key.as_str()) {
+                    diags.push(Diagnostic::error(
+                        path,
+                        "E_STATE_DANGLING_BLOCKED_BY",
+                        format!(
+                            "carryover '{}' blocks[] entry targets '{key}', which does not \
+                             exist in repo '{repo}' tracks[]",
+                            item.slug
                         ),
                     ));
                 }
@@ -4237,6 +4444,175 @@ mod tests {
             dangling_cross.len(),
             1,
             "expected exactly one E_STATE_DANGLING_CROSS_REPO for ghost 'to' endpoint, got: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 5 — carryover blocks[] dangling-target check
+    // -----------------------------------------------------------------------
+
+    /// Fixture: alpha has block AL.1.A in tracks[]; beta carries a carryover
+    /// item whose `blocks[]` targets `blocks_repo:blocks_id`.
+    fn beta_with_carryover_blocks(
+        dir: &std::path::Path,
+        blocks_repo: &str,
+        blocks_id: &str,
+    ) -> (StateSource, StateFile) {
+        let json = format!(
+            r#"{{
+  "repo": "beta",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": {{ "now": [], "next": [], "blocked": [] }},
+  "tracks": [],
+  "carryover": [
+    {{
+      "slug": "waiting-on-alpha",
+      "scope": {{ "repo": "beta" }},
+      "kind": "deferred",
+      "text": "Waiting on a block elsewhere.",
+      "created": "2026-06-29",
+      "blocks": [ {{ "type": "block", "repo": "{blocks_repo}", "id": "{blocks_id}" }} ]
+    }}
+  ]
+}}"#
+        );
+        make_pair(dir, "beta-state.json", "project", &json)
+    }
+
+    #[test]
+    fn carryover_blocks_dangling_target_emits_dangling_blocked_by() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let pair_a = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let pair_b = beta_with_carryover_blocks(dir.path(), "alpha", "AL.1.GHOST");
+
+        let files = vec![pair_a, pair_b];
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files);
+
+        let dangling: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+            .collect();
+        assert_eq!(
+            dangling.len(),
+            1,
+            "expected exactly one E_STATE_DANGLING_BLOCKED_BY for carryover blocks[] ghost \
+             target, got: {diags:?}"
+        );
+        assert!(dangling[0].message.contains("waiting-on-alpha"));
+        assert!(dangling[0].message.contains("alpha:AL.1.GHOST"));
+        assert!(dangling[0].message.contains("blocks[]"));
+    }
+
+    #[test]
+    fn carryover_blocks_resolvable_target_emits_no_diagnostic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let pair_a = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let pair_b = beta_with_carryover_blocks(dir.path(), "alpha", "AL.1.A");
+
+        let files = vec![pair_a, pair_b];
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files);
+
+        let dangling: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+            .collect();
+        assert!(
+            dangling.is_empty(),
+            "resolvable carryover blocks[] target should emit no diagnostic, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn carryover_blocks_external_entry_is_skipped_by_graph_check() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let json = r#"{
+  "repo": "beta",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [],
+  "carryover": [
+    {
+      "slug": "fleet-wide-block",
+      "scope": { "repo": "beta" },
+      "kind": "deferred",
+      "text": "Blocks everything, no node target.",
+      "created": "2026-06-29",
+      "blocks": [ { "type": "external", "what": "vendor outage" } ]
+    }
+  ]
+}"#;
+        let pair_b = make_pair(dir.path(), "beta-state.json", "project", json);
+
+        let files = vec![pair_b];
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files);
+
+        let dangling: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+            .collect();
+        assert!(
+            dangling.is_empty(),
+            "External blocks[] entries have no target node and must be skipped, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn carryover_blocks_empty_repo_is_not_double_reported_by_graph_check() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let json = r#"{
+  "repo": "beta",
+  "kind": "project",
+  "updated": "2026-06-29",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [],
+  "carryover": [
+    {
+      "slug": "malformed-block-ref",
+      "scope": { "repo": "beta" },
+      "kind": "deferred",
+      "text": "Malformed blocks[] entry.",
+      "created": "2026-06-29",
+      "blocks": [ { "type": "block", "repo": "", "id": "" } ]
+    }
+  ]
+}"#;
+        let pair_b = make_pair(dir.path(), "beta-state.json", "project", json);
+
+        let files = vec![pair_b];
+        let graph = build_state_graph(&files);
+
+        // check_schema (task 3) reports the empty-repo/id shape once.
+        let schema_diags = check_schema(&files[0].0, &files[0].1);
+        let schema_bad_blocked_by: Vec<_> = schema_diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_BLOCKED_BY")
+            .collect();
+        assert_eq!(
+            schema_bad_blocked_by.len(),
+            1,
+            "expected check_schema to report the malformed blocks[] entry once, got: \
+             {schema_diags:?}"
+        );
+
+        // check_state_graph (task 5) must defer to it, not double-report.
+        let graph_diags = check_state_graph(&graph, &files);
+        let graph_dangling: Vec<_> = graph_diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+            .collect();
+        assert!(
+            graph_dangling.is_empty(),
+            "empty-repo blocks[] entry must not be double-reported by check_state_graph, got: \
+             {graph_diags:?}"
         );
     }
 
@@ -7814,6 +8190,667 @@ fn carryover_schema_checks() {
     assert!(bad_scope, "Should flag malformed scope");
 }
 
+#[test]
+fn carryover_blocks_block_empty_repo_and_id_emit_bad_blocked_by() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "ghost-block",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Blocks a ghost.",
+      "created": "2026-06-30",
+      "blocks": [ { "type": "block", "repo": "", "id": "" } ]
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_BLOCKED_BY")
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one E_STATE_SCHEMA_BAD_BLOCKED_BY, got: {diags:?}"
+    );
+    assert!(matches[0].message.contains("ghost-block"));
+    assert!(matches[0].message.contains("blocks"));
+    assert!(matches[0].message.contains("'repo'"));
+    assert!(matches[0].message.contains("'id'"));
+}
+
+#[test]
+fn carryover_blocks_well_formed_block_emits_no_diagnostic() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "real-block",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Blocks a real block.",
+      "created": "2026-06-30",
+      "blocks": [ { "type": "block", "repo": "bastion", "id": "B.1" } ]
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.locator != "E_STATE_SCHEMA_BAD_BLOCKED_BY"),
+        "well-formed blocks[] entry should not error: {diags:?}"
+    );
+}
+
+#[test]
+fn carryover_blocks_external_empty_what_emits_bad_blocked_by() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "external-blocker",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Blocks fleet-wide.",
+      "created": "2026-06-30",
+      "blocks": [ { "type": "external", "what": "" } ]
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_BLOCKED_BY")
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one E_STATE_SCHEMA_BAD_BLOCKED_BY for empty External what, got: {diags:?}"
+    );
+    assert!(matches[0].message.contains("external-blocker"));
+}
+
+#[test]
+fn carryover_blocks_external_nonempty_what_emits_no_diagnostic() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "external-blocker",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Blocks fleet-wide.",
+      "created": "2026-06-30",
+      "blocks": [ { "type": "external", "what": "blocks every ticket run fleet-wide" } ]
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.locator != "E_STATE_SCHEMA_BAD_BLOCKED_BY"),
+        "well-formed External blocks[] entry should not error: {diags:?}"
+    );
+}
+
+#[test]
+fn carryover_finding_id_bad_shape_emits_dedicated_locator() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "bad-finding",
+      "scope": { "repo": "bastion" },
+      "kind": "known_issue",
+      "text": "Bad finding id.",
+      "created": "2026-06-30",
+      "finding_id": "Not_Kebab--Case"
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_FINDING_ID")
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one E_STATE_SCHEMA_BAD_FINDING_ID, got: {diags:?}"
+    );
+    assert!(matches[0].message.contains("bad-finding"));
+    assert!(matches[0].message.contains("kebab-case"));
+}
+
+#[test]
+fn carryover_finding_id_valid_shape_emits_no_diagnostic() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "good-finding",
+      "scope": { "repo": "bastion" },
+      "kind": "known_issue",
+      "text": "Valid finding id.",
+      "created": "2026-06-30",
+      "finding_id": "auth-timeout-2026"
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.locator != "E_STATE_SCHEMA_BAD_FINDING_ID"),
+        "valid kebab-case finding_id should not error: {diags:?}"
+    );
+}
+
+#[test]
+fn carryover_finding_id_absent_emits_no_diagnostic_never_checked_against_registry() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "no-finding",
+      "scope": { "repo": "bastion" },
+      "kind": "known_issue",
+      "text": "No finding id at all.",
+      "created": "2026-06-30",
+      "finding_id": "some-completely-unseen-value-never-registered-anywhere"
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.locator != "E_STATE_SCHEMA_BAD_FINDING_ID"),
+        "an unseen finding_id value (no registry) should not error on shape: {diags:?}"
+    );
+}
+
+#[test]
+fn carryover_clears_when_block_closed_well_formed_emits_no_diagnostic() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "waits-on-block",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Clears when a block closes.",
+      "created": "2026-06-30",
+      "clears_when": { "type": "block_closed", "repo": "bastion", "id": "B.1" }
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.locator != "E_STATE_SCHEMA_BAD_CLEARS_WHEN"),
+        "well-formed block_closed predicate should not error: {diags:?}"
+    );
+}
+
+#[test]
+fn carryover_clears_when_block_closed_empty_members_emits_bad_clears_when() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "waits-on-block",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Clears when a block closes.",
+      "created": "2026-06-30",
+      "clears_when": { "type": "block_closed", "repo": "", "id": "" }
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_CLEARS_WHEN")
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one E_STATE_SCHEMA_BAD_CLEARS_WHEN, got: {diags:?}"
+    );
+    assert!(matches[0].message.contains("waits-on-block"));
+    assert!(matches[0].message.contains(r#"{"type": "block_closed""#));
+}
+
+#[test]
+fn carryover_clears_when_file_exists_well_formed_emits_no_diagnostic() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "waits-on-file",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Clears when a path exists.",
+      "created": "2026-06-30",
+      "clears_when": { "type": "file_exists", "path": "planning/artifact.md" }
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.locator != "E_STATE_SCHEMA_BAD_CLEARS_WHEN"),
+        "well-formed file_exists predicate should not error: {diags:?}"
+    );
+}
+
+#[test]
+fn carryover_clears_when_file_exists_empty_path_emits_bad_clears_when() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "waits-on-file",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Clears when a path exists.",
+      "created": "2026-06-30",
+      "clears_when": { "type": "file_exists", "path": "" }
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_CLEARS_WHEN")
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one E_STATE_SCHEMA_BAD_CLEARS_WHEN, got: {diags:?}"
+    );
+    assert!(matches[0].message.contains(r#"{"type": "file_exists""#));
+}
+
+#[test]
+fn carryover_clears_when_file_exists_absolute_path_emits_bad_clears_when() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "waits-on-file",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Clears when a path exists.",
+      "created": "2026-06-30",
+      "clears_when": { "type": "file_exists", "path": "/etc/passwd" }
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_CLEARS_WHEN")
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one E_STATE_SCHEMA_BAD_CLEARS_WHEN for absolute path, got: {diags:?}"
+    );
+    assert!(matches[0].message.contains("absolute"));
+    assert!(matches[0].message.contains("brain root"));
+}
+
+#[test]
+fn carryover_clears_when_file_contains_well_formed_emits_no_diagnostic() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "waits-on-pattern",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Clears when a pattern is found.",
+      "created": "2026-06-30",
+      "clears_when": { "type": "file_contains", "path": "Cargo.toml", "pattern": "mev" }
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.locator != "E_STATE_SCHEMA_BAD_CLEARS_WHEN"),
+        "well-formed file_contains predicate should not error: {diags:?}"
+    );
+}
+
+#[test]
+fn carryover_clears_when_file_contains_empty_members_emits_bad_clears_when() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "waits-on-pattern",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Clears when a pattern is found.",
+      "created": "2026-06-30",
+      "clears_when": { "type": "file_contains", "path": "", "pattern": "" }
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_CLEARS_WHEN")
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one E_STATE_SCHEMA_BAD_CLEARS_WHEN, got: {diags:?}"
+    );
+    assert!(matches[0].message.contains(r#"{"type": "file_contains""#));
+}
+
+#[test]
+fn carryover_clears_when_file_contains_absolute_path_emits_bad_clears_when() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "waits-on-pattern",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Clears when a pattern is found.",
+      "created": "2026-06-30",
+      "clears_when": { "type": "file_contains", "path": "/tmp/x", "pattern": "ok" }
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_CLEARS_WHEN")
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one E_STATE_SCHEMA_BAD_CLEARS_WHEN for absolute path, got: {diags:?}"
+    );
+    assert!(matches[0].message.contains("absolute"));
+}
+
+#[test]
+fn carryover_clears_when_command_exits_zero_well_formed_emits_no_diagnostic() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "waits-on-command",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Clears when a command exits zero.",
+      "created": "2026-06-30",
+      "clears_when": { "type": "command_exits_zero", "command": "cargo build" }
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.locator != "E_STATE_SCHEMA_BAD_CLEARS_WHEN"),
+        "well-formed command_exits_zero predicate should not error: {diags:?}"
+    );
+}
+
+#[test]
+fn carryover_clears_when_command_exits_zero_empty_command_emits_bad_clears_when() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "waits-on-command",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Clears when a command exits zero.",
+      "created": "2026-06-30",
+      "clears_when": { "type": "command_exits_zero", "command": "   " }
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_CLEARS_WHEN")
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one E_STATE_SCHEMA_BAD_CLEARS_WHEN, got: {diags:?}"
+    );
+    assert!(
+        matches[0]
+            .message
+            .contains(r#"{"type": "command_exits_zero""#)
+    );
+}
+
+#[test]
+fn carryover_clears_when_prose_string_emits_no_bad_clears_when_diagnostic() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "prose-clearer",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Clears when the migration lands.",
+      "created": "2026-06-30",
+      "clears_when": "BA.11.C lands"
+    }
+  ]
+}"#;
+    let file: StateFile = serde_json::from_str(json).unwrap();
+    let src = StateSource {
+        repo_slug: "bastion".to_string(),
+        abs_path: PathBuf::from("planning/state.json"),
+        expected_kind: "project",
+    };
+    let diags = check_schema(&src, &file);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.locator != "E_STATE_SCHEMA_BAD_CLEARS_WHEN"),
+        "a prose clears_when string must never trip the predicate well-formedness check: {diags:?}"
+    );
+}
+
+/// Near-miss test (records the Amendment Log finding): a typed `clears_when`
+/// object missing a required member (`file_exists` with no `path`) does NOT
+/// reach `check_schema` as a `Predicate` with an empty member — `ClearsWhen`
+/// is `#[serde(untagged)]` with `Prose(String)` tried first, and a JSON
+/// *object* can never match `Prose`, so serde falls through to `Predicate`;
+/// there `FileExists { path, .. }` has no `#[serde(default)]` on `path`, so a
+/// missing `path` key fails deserialization of the whole enum, which fails
+/// deserialization of the whole `Carryover`, which fails deserialization of
+/// the whole `StateFile`. This surfaces as a `serde_json::Error` from
+/// `serde_json::from_str`/`load_state`, NOT as an `E_STATE_SCHEMA_BAD_CLEARS_WHEN`
+/// diagnostic — at the call site that is `E_STATE_MALFORMED_JSON` (`src/lib.rs`),
+/// same as any other unparseable `state.json`. `check_schema`'s predicate checks
+/// in this module only ever see *structurally complete* predicates whose
+/// required members are present but may be empty strings or absolute paths.
+#[test]
+fn carryover_clears_when_missing_required_member_fails_deserialization_not_check_schema() {
+    let json = r#"{
+  "repo": "bastion",
+  "kind": "project",
+  "updated": "2026-06-30",
+  "carryover": [
+    {
+      "slug": "near-miss",
+      "scope": { "repo": "bastion" },
+      "kind": "deferred",
+      "text": "Near-miss predicate.",
+      "created": "2026-06-30",
+      "clears_when": { "type": "file_exists" }
+    }
+  ]
+}"#;
+    let result: Result<StateFile, _> = serde_json::from_str(json);
+    assert!(
+        result.is_err(),
+        "a typed predicate missing a required member should fail to deserialize the whole \
+         StateFile, not silently land as a Predicate with an empty member"
+    );
+}
+
 // --- check_field_policy tests ---
 
 #[cfg(test)]
@@ -7909,6 +8946,48 @@ mod check_field_policy_tests {
         let diags = run_field_policy(b);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].locator, "E_STATE_MODEL_ENUM");
+    }
+
+    fn run_carryover_field_policy(item: okf_core::Carryover) -> Vec<Diagnostic> {
+        let mut file: StateFile =
+            serde_json::from_str(tests::leaf_json("test_repo").as_str()).unwrap();
+        file.carryover = vec![item];
+        let src = StateSource {
+            repo_slug: "test_repo".to_string(),
+            abs_path: PathBuf::from("test.json"),
+            expected_kind: "project",
+        };
+        check_field_policy(&src, &file)
+    }
+
+    fn base_carryover() -> okf_core::Carryover {
+        okf_core::Carryover {
+            slug: "some-caveat".to_string(),
+            kind: "constraint".to_string(),
+            text: "A durable caveat.".to_string(),
+            priority: None,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_carryover_valid_all_none() {
+        assert!(run_carryover_field_policy(base_carryover()).is_empty());
+    }
+
+    #[test]
+    fn test_carryover_priority_range() {
+        let mut item = base_carryover();
+        item.priority = Some(0);
+        assert!(run_carryover_field_policy(item.clone()).is_empty());
+        item.priority = Some(3);
+        assert!(run_carryover_field_policy(item.clone()).is_empty());
+        item.priority = Some(4);
+        let diags = run_carryover_field_policy(item);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].locator, "E_STATE_PRIORITY_RANGE");
+        assert!(diags[0].message.contains("some-caveat"));
+        assert!(diags[0].message.contains('4'));
     }
 }
 
