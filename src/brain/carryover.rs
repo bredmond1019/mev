@@ -195,6 +195,13 @@ pub struct CarryoverVerdict {
     /// linked to a cross-repo finding.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finding_id: Option<String>,
+    /// Edges to the work this carryover blocks, passed through verbatim from
+    /// the source [`Carryover`] item's `blocks[]`. Never authored as a
+    /// `blocking: bool` — blocking-ness is always derived from this list, by
+    /// [`assign_triage_lane`] (unmet-block membership) and
+    /// [`carryover_effective_priorities`] (priority propagation).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub blocks: Vec<BlockedBy>,
 }
 
 /// The full fleet-wide sweep result.
@@ -945,6 +952,7 @@ pub fn evaluate_carryover(
                 reason,
                 priority: item.priority,
                 finding_id: item.finding_id.clone(),
+                blocks: item.blocks.clone(),
             });
         }
     }
@@ -1418,6 +1426,142 @@ pub fn assign_triage_lane(v: &CarryoverVerdict, unmet_blocks: &[String]) -> Tria
         return TriageLane::Aging;
     }
     TriageLane::Standing
+}
+
+// ---------------------------------------------------------------------------
+// Effective priority across carryover blocks[] edges (MV.ticket.carryover-
+// triage-ranking, task 2) — mirrors state::effective_priorities (MV.7.A)
+// ---------------------------------------------------------------------------
+
+/// Compute each carryover entry's **effective priority** by reverse-topological
+/// `min`-propagation over its `blocks[]` edges, generalizing the same pass used
+/// for blocks ([`crate::brain::state::effective_priorities`], mirrored at
+/// [`crate::brain::emit::effective_priority_for`] /
+/// [`crate::brain::block_graph`]'s recursion guard) rather than writing a
+/// second one.
+///
+/// `effective(c) = min(own(c), min{ target_effective(t) : t in c.blocks })` —
+/// a carryover gating a hotter dependent (block *or* carryover) inherits that
+/// hotness. `block_priorities` supplies the already-computed effective
+/// priority for every **block** node, keyed `"{repo}:{id}"` (the same map
+/// produced by [`crate::brain::state::effective_priorities`]); this pass
+/// never recomputes a block's priority and therefore never changes it — a
+/// block target is always treated as terminal.
+///
+/// A `blocks[]` edge is resolved in this order:
+/// 1. `BlockedBy::Block { repo, id, .. }` — empty `repo` falls back to the
+///    carryover's own `repo` field (mirroring [`block_refs_from_related`]'s
+///    fallback). The resolved `"{repo}:{id}"` key is looked up first in
+///    `block_priorities` (a block target — terminal); if absent there but
+///    present among `entries` (another carryover's `"{repo}:{slug}"` key),
+///    it is treated as a carryover target and its effective priority is
+///    computed recursively. An unresolvable key in neither map contributes
+///    nothing.
+/// 2. `BlockedBy::External { .. }` — has no node target and contributes no
+///    priority. It still counts as an unmet `blocks[]` edge for
+///    [`assign_triage_lane`]'s BLOCKING membership, but that is a distinct
+///    question this function does not answer.
+///
+/// **Cycle-safe**: the walk is memoized DFS with an on-stack recursion
+/// guard, identical in shape to
+/// [`crate::brain::state::effective_priorities`]'s — a key already being
+/// computed further up the DFS path short-circuits to its own priority
+/// instead of recursing again, so a two-carryover cycle (or a self-edge)
+/// terminates deterministically without hanging or panicking.
+///
+/// Only keys whose effective value lands in the real priority range
+/// (`0..=3`) get a map entry; an entry with no own priority and no hotter
+/// target, transitively, is **absent** from the result — matching
+/// [`crate::brain::state::effective_priorities`]'s absent-not-`u8::MAX`
+/// convention, so callers `.get(key).copied()` naturally read it as `None`.
+pub fn carryover_effective_priorities(
+    entries: &[CarryoverVerdict],
+    block_priorities: &HashMap<String, u8>,
+) -> HashMap<String, u8> {
+    // Own priority per "{repo}:{slug}" key; absent -> u8::MAX (never wins a min).
+    let mut own: HashMap<String, u8> = HashMap::new();
+    let mut by_key: HashMap<String, &CarryoverVerdict> = HashMap::new();
+    for entry in entries {
+        let key = format!("{}:{}", entry.repo, entry.slug);
+        own.insert(key.clone(), entry.priority.unwrap_or(u8::MAX));
+        by_key.insert(key, entry);
+    }
+
+    let mut memo: HashMap<String, u8> = HashMap::new();
+    let mut on_stack: HashSet<String> = HashSet::new();
+
+    #[allow(clippy::too_many_arguments)]
+    fn compute(
+        key: &str,
+        own: &HashMap<String, u8>,
+        by_key: &HashMap<String, &CarryoverVerdict>,
+        block_priorities: &HashMap<String, u8>,
+        memo: &mut HashMap<String, u8>,
+        on_stack: &mut HashSet<String>,
+    ) -> u8 {
+        if let Some(&v) = memo.get(key) {
+            return v;
+        }
+        let own_priority = own.get(key).copied().unwrap_or(u8::MAX);
+        // Cycle guard: `key` is already being computed further up this DFS
+        // path (a two-carryover cycle, or a self-edge) — short-circuit to
+        // its own priority instead of recursing again.
+        if on_stack.contains(key) {
+            return own_priority;
+        }
+        on_stack.insert(key.to_string());
+
+        let mut best = own_priority;
+        if let Some(entry) = by_key.get(key) {
+            for edge in &entry.blocks {
+                match edge {
+                    BlockedBy::Block { repo, id, .. } => {
+                        let target_repo = if repo.is_empty() {
+                            entry.repo.as_str()
+                        } else {
+                            repo.as_str()
+                        };
+                        let target_key = format!("{target_repo}:{id}");
+                        if let Some(&bp) = block_priorities.get(&target_key) {
+                            // A block target is terminal — never recomputed,
+                            // so no block's effective priority can change.
+                            if bp < best {
+                                best = bp;
+                            }
+                        } else if by_key.contains_key(&target_key) {
+                            let v =
+                                compute(&target_key, own, by_key, block_priorities, memo, on_stack);
+                            if v < best {
+                                best = v;
+                            }
+                        }
+                        // Unresolvable in both maps: contributes nothing.
+                    }
+                    // No node target, so no priority to propagate — see
+                    // this function's doc comment.
+                    BlockedBy::External { .. } => {}
+                }
+            }
+        }
+
+        on_stack.remove(key);
+        memo.insert(key.to_string(), best);
+        best
+    }
+
+    let keys: Vec<String> = own.keys().cloned().collect();
+    for key in &keys {
+        compute(
+            key,
+            &own,
+            &by_key,
+            block_priorities,
+            &mut memo,
+            &mut on_stack,
+        );
+    }
+
+    memo.into_iter().filter(|(_, v)| *v <= 3).collect()
 }
 
 #[cfg(test)]
@@ -3584,6 +3728,7 @@ mod tests {
             reason: None,
             priority,
             finding_id: finding_id.map(str::to_string),
+            blocks: Vec::new(),
         }
     }
 
@@ -3736,6 +3881,7 @@ mod tests {
             reason: None,
             priority: None,
             finding_id: finding_id.map(str::to_string),
+            blocks: Vec::new(),
         }
     }
 
@@ -3918,6 +4064,7 @@ mod tests {
             reason: None,
             priority,
             finding_id: None,
+            blocks: Vec::new(),
         }
     }
 
@@ -3985,5 +4132,159 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -- carryover_effective_priorities (MV.ticket.carryover-triage-ranking, task 2) ----
+
+    fn ranking_verdict(
+        repo: &str,
+        slug: &str,
+        priority: Option<u8>,
+        blocks: Vec<BlockedBy>,
+    ) -> CarryoverVerdict {
+        CarryoverVerdict {
+            repo: repo.to_string(),
+            slug: slug.to_string(),
+            kind: "known_issue".to_string(),
+            text: format!("some text for {slug}"),
+            clears_when: None,
+            created: "2026-01-01".to_string(),
+            age_days: Some(1),
+            stale: false,
+            lane: CarryoverLane::NotEvaluable,
+            refs: Vec::new(),
+            reason: None,
+            priority,
+            finding_id: None,
+            blocks,
+        }
+    }
+
+    fn block_edge(repo: &str, id: &str) -> BlockedBy {
+        BlockedBy::Block {
+            repo: repo.to_string(),
+            id: id.to_string(),
+            what: None,
+        }
+    }
+
+    #[test]
+    fn carryover_effective_priorities_p3_blocking_p0_block_resolves_to_zero() {
+        let entries = vec![ranking_verdict(
+            "mev",
+            "gates-a-p0",
+            Some(3),
+            vec![block_edge("mev", "MV.1.A")],
+        )];
+        let block_priorities = HashMap::from([("mev:MV.1.A".to_string(), 0u8)]);
+
+        let effective = carryover_effective_priorities(&entries, &block_priorities);
+
+        assert_eq!(effective.get("mev:gates-a-p0"), Some(&0));
+    }
+
+    #[test]
+    fn carryover_effective_priorities_no_blocks_keeps_own_priority() {
+        let entries = vec![ranking_verdict("mev", "solo", Some(2), Vec::new())];
+        let effective = carryover_effective_priorities(&entries, &HashMap::new());
+        assert_eq!(effective.get("mev:solo"), Some(&2));
+    }
+
+    #[test]
+    fn carryover_effective_priorities_no_priority_no_blocks_is_absent() {
+        let entries = vec![ranking_verdict("mev", "bare", None, Vec::new())];
+        let effective = carryover_effective_priorities(&entries, &HashMap::new());
+        assert_eq!(effective.get("mev:bare"), None);
+        assert!(!effective.contains_key("mev:bare"));
+    }
+
+    #[test]
+    fn carryover_effective_priorities_unresolvable_target_contributes_nothing() {
+        let entries = vec![ranking_verdict(
+            "mev",
+            "dangling",
+            Some(2),
+            vec![block_edge("mev", "MV.99.Z")],
+        )];
+        let effective = carryover_effective_priorities(&entries, &HashMap::new());
+        assert_eq!(effective.get("mev:dangling"), Some(&2));
+    }
+
+    #[test]
+    fn carryover_effective_priorities_external_edge_contributes_no_priority() {
+        let entries = vec![ranking_verdict(
+            "mev",
+            "external-only",
+            Some(3),
+            vec![BlockedBy::External {
+                what: "nightly cron".to_string(),
+            }],
+        )];
+        let effective = carryover_effective_priorities(&entries, &HashMap::new());
+        assert_eq!(effective.get("mev:external-only"), Some(&3));
+    }
+
+    #[test]
+    fn carryover_effective_priorities_empty_repo_falls_back_to_own_repo() {
+        let entries = vec![ranking_verdict(
+            "mev",
+            "own-repo-target",
+            Some(3),
+            vec![BlockedBy::Block {
+                repo: String::new(),
+                id: "MV.1.A".to_string(),
+                what: None,
+            }],
+        )];
+        let block_priorities = HashMap::from([("mev:MV.1.A".to_string(), 1u8)]);
+        let effective = carryover_effective_priorities(&entries, &block_priorities);
+        assert_eq!(effective.get("mev:own-repo-target"), Some(&1));
+    }
+
+    #[test]
+    fn carryover_effective_priorities_two_node_cycle_terminates_without_hang_or_panic() {
+        let entries = vec![
+            ranking_verdict("mev", "a", Some(3), vec![block_edge("mev", "b")]),
+            ranking_verdict("mev", "b", Some(2), vec![block_edge("mev", "a")]),
+        ];
+        let effective = carryover_effective_priorities(&entries, &HashMap::new());
+        // Must terminate and produce a deterministic, non-panicking result.
+        // `a` sees `b`'s own priority (2) via one hop; `b` sees `a`'s own
+        // priority (3) via one hop but keeps its own (2) since 2 < 3.
+        assert_eq!(effective.get("mev:a"), Some(&2));
+        assert_eq!(effective.get("mev:b"), Some(&2));
+    }
+
+    #[test]
+    fn carryover_effective_priorities_self_edge_terminates_without_hang_or_panic() {
+        let entries = vec![ranking_verdict(
+            "mev",
+            "self-blocker",
+            Some(1),
+            vec![block_edge("mev", "self-blocker")],
+        )];
+        let effective = carryover_effective_priorities(&entries, &HashMap::new());
+        assert_eq!(effective.get("mev:self-blocker"), Some(&1));
+    }
+
+    #[test]
+    fn carryover_effective_priorities_reuses_block_pass_without_changing_block_priorities() {
+        // A carryover gating a block must never mutate the block's own
+        // effective priority map — block targets are terminal.
+        let entries = vec![ranking_verdict(
+            "mev",
+            "gates-block",
+            Some(3),
+            vec![block_edge("mev", "MV.2.B")],
+        )];
+        let block_priorities = HashMap::from([("mev:MV.2.B".to_string(), 1u8)]);
+        let before = block_priorities.clone();
+
+        let _effective = carryover_effective_priorities(&entries, &block_priorities);
+
+        assert_eq!(
+            block_priorities, before,
+            "block_priorities must be untouched"
+        );
     }
 }
