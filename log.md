@@ -19,6 +19,47 @@ timestamp: "2026-08-09T13:30:00Z"
 
 ## [run: 2026-08-09]
 
+### `MV.ticket.clears-when-evaluation` shipped (full spec, 5 tasks, PASS)
+
+Gave `carryover[]` an outflow: `evaluate_carryover` now evaluates all four typed `clears_when`
+predicates end-to-end. Tasks 1–2 wired `BlockClosed`/`FileExists` (plus a new
+`CarryoverRef::UnresolvedBlock` variant for a `{repo,id}` key absent from the status map) and
+`FileContains`/`CommandExitsZero` (size-bounded UTF-8 substring match; `CommandExitsZero` execution
+is opt-in via `--allow-exec`, run through an in-process spawn+watchdog+kill timeout rather than
+shelling out to `timeout(1)`, and never satisfies unless the opt-in is on). Task 3 broadened prose
+extraction — `path_refs_from_prose` widened past its bare `exists` gate to a bounded
+path-assertion-verb vocabulary (new `CarryoverRef::PathAbsent` for absence-polarity predicates like
+"removed"/"deleted"), plus a `GateMentionNotCheckable` reason for validator/gate mentions that name
+no concrete predicate — all while leaving `CLOSURE_VERBS`/`has_closure_verb`/the `carryover.rs:1098`
+pinning test and the conjunctive-AND combination rule byte-identical. Task 4 added a live-corpus test
+reusing `carryover_sweep`'s own discovery over the real HQ brain root, asserting an evaluable floor
+and a cleared ceiling that never lets `core:ba-0-a-id-collision` read `Cleared`; the honest measured
+outcome (9/138 evaluable post-Tasks-1–3, vs. 9/142 baseline) fell short of the ticket's ~40
+aspiration, and rather than paper over the gap the floor/ceiling were set to what was actually
+measured, with the shortfall and its not-evaluable-reason breakdown recorded in the ticket's
+Amendment Log. Task 5 confirmed all four harness gates green and that every integrity guard named
+above, plus `related[]` non-clearing, no `state.json` writes, no new `regex` dependency, and no
+`timeout(1)` invocation, held unchanged (diffed against the pre-spec commit, not line numbers).
+Verdict: PASS. Unblocks `MV.ticket.carryover-dedup-clusters`.
+
+```
+7c60999 feat: implement ticket-clears-when-evaluation-task4
+dcc2fcc feat: implement ticket-clears-when-evaluation-task3
+ae4637d feat: implement ticket-clears-when-evaluation-task2
+f54aeb1 feat: implement ticket-clears-when-evaluation-task1
+8bc15db feat: implement ticket-carryover-field-validation-task5
+e751446 feat: implement ticket-carryover-field-validation-task4
+155d5c6 feat: implement ticket-carryover-field-validation-task3
+192c02b feat: implement ticket-carryover-field-validation-task2
+```
+
+Next: `MV.ticket.carryover-dedup-clusters` — group carryover by `finding_id`, suggest cross-repo
+duplicates, report priority divergence.
+
+---
+
+## [run: 2026-08-09]
+
 ### Lane C2 (close-the-loop) — three tickets closed, 16/16 tasks first-attempt
 
 - **What:** Closed all three `mev` blocks in Lane C2 of HQ's close-the-loop roadmap.
