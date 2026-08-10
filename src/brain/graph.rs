@@ -253,10 +253,8 @@ pub fn check_graph(artifact: &GraphArtifact, ephemeral_ids: &HashSet<String>) ->
                         match candidates.len() {
                             0 => {}
                             1 => {
-                                message.push_str(&format!(
-                                    " — did you mean `{}`?",
-                                    candidates[0].id
-                                ));
+                                message
+                                    .push_str(&format!(" — did you mean `{}`?", candidates[0].id));
                             }
                             _ => {
                                 let names: Vec<&str> =
@@ -838,7 +836,9 @@ mod tests {
             dangling.message
         );
         assert!(
-            !dangling.message.contains("did you mean `mev:shared-target`")
+            !dangling
+                .message
+                .contains("did you mean `mev:shared-target`")
                 && !dangling.message.contains("(mev:shared-target"),
             "the referrer's own-scope owner must never appear as a candidate: {:?}",
             dangling.message
@@ -865,7 +865,11 @@ mod tests {
             .iter()
             .filter(|d| d.locator == "E_GRAPH_DANGLING_RELATED")
             .collect();
-        assert_eq!(dangling.len(), 4, "expected four dangling errors: {diags:?}");
+        assert_eq!(
+            dangling.len(),
+            4,
+            "expected four dangling errors: {diags:?}"
+        );
         for d in &dangling {
             assert_eq!(d.locator, "E_GRAPH_DANGLING_RELATED");
             assert_eq!(d.severity, crate::Severity::Error);

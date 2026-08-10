@@ -340,7 +340,8 @@ fn crawled_cross_scope_unqualified_related_dangling_suggests_qualified_form() {
         .find(|d| d.message.contains("nothing-owns-this"))
         .unwrap_or_else(|| panic!("no dangling diagnostic named nothing-owns-this: {dangling:#?}"));
     assert!(
-        !unmatched.message.contains("did you mean") && !unmatched.message.contains("qualify explicitly"),
+        !unmatched.message.contains("did you mean")
+            && !unmatched.message.contains("qualify explicitly"),
         "a bare ref owned by no scope must not gain a suggestion: {:?}",
         unmatched.message
     );
