@@ -869,7 +869,42 @@ forever. Dry-run (no `--write`) never takes the lock and is unaffected by conten
 - **Tier rollup tables** (each tier sub-brain's sibling `status.md`): splices a rendered per-repo now/next/blocked rollup table into the `<!-- BEGIN generated:tier-rollup -->` / `<!-- END generated:tier-rollup -->` sentinels. Only brain files scoped to a single tier (`tier_scope_for` resolves to `TierScope::Tier`) are targeted — the HQ root (`TierScope::All`) is skipped by this planner.
 - **HQ Operating Board** (the HQ brain's `status.md`): splices a rendered NOW/NEXT/BLOCKED board across every registered repo into the `<!-- BEGIN generated:hq-board -->` / `<!-- END generated:hq-board -->` sentinels.
 - **HQ unified priority board** (the same HQ brain's `status.md`, independent sentinel region): splices a priority-ranked NOW/NEXT/BLOCKED/DUE-SOON board into the `<!-- BEGIN generated:unified-board -->` / `<!-- END generated:unified-board -->` sentinels. Rows are tagged `[BIZ]`/`[ENG]` by the source repo's configured tier; `NEXT` is stably re-sorted by `(effective priority asc, due asc)` (absent values last, wave order as the implicit tiebreak). Effective priority (MV.7.A) is computed by `effective_priorities` via reverse-topological `min`-propagation over the `depends_on` DAG, so a block with no own priority that gates a hotter dependent inherits that dependent's priority and floats to the top instead of sorting last; it falls back to the block's own raw `priority` when no hotter dependent exists. `DUE-SOON` lists blocks due within 14 days (overdue included and annotated) sorted by due date ascending.
-- **Attention board** (every brain-level `status.md`, tier-scoped): splices the stale-item board into the `<!-- BEGIN generated:attention -->` / `<!-- END generated:attention -->` sentinels. Unlike the boards above (HQ root only), this emits for **both** scopes: the HQ root (`TierScope::All`) unions `carryover[]` from every loaded repo/tier plus the whole HQ `backlog[]`; each tier sub-brain (`TierScope::Tier`) shows its own tier's leaf-repo carryover (plus the tier brain's own) and the HQ backlog nodes whose `repo` belongs to that tier. Four lanes — Stale carryover · Aging backlog · Orphaned captures · Stale distilled knowledge — each row `[<repo>]`-tagged and sorted oldest-first, showing only items past their `[attention]` threshold (the visible twin of `W_STATE_CARRYOVER_STALE`/`W_STATE_BACKLOG_STALE`/`W_DISTILL_STALE`). The fourth lane (distill-freshness-lane) reads each repo's `knowledge.md`/`memory.md` once (cached across boards) and lists D35-distilled entries whose `distill_stale_age` exceeds the `[attention]` `knowledge_days`/`memory_days` threshold, capped at 10 rows per board with an "…and N more" tail — the same predicate `check_distill_staleness` fires `W_DISTILL_STALE` on, so the board never shows an entry the warning didn't also flag.
+- **Attention board** (every brain-level `status.md`, tier-scoped): splices the stale-item board into the `<!-- BEGIN generated:attention -->` / `<!-- END generated:attention -->` sentinels. Unlike the boards above (HQ root only), this emits for **both** scopes: the HQ root (`TierScope::All`) unions `carryover[]` from every loaded repo/tier plus the whole HQ `backlog[]`; each tier sub-brain (`TierScope::Tier`) shows its own tier's leaf-repo carryover (plus the tier brain's own) and the HQ backlog nodes whose `repo` belongs to that tier. Seven lanes total: four **carryover triage lanes** — `BLOCKING` · `HOT` · `AGING` · `STANDING` (`MV.ticket.carryover-triage-ranking`) — followed by Aging backlog · Orphaned captures · Stale distilled knowledge, each row `[<repo>]`-tagged. See [Carryover triage lanes](#carryover-triage-lanes) below for how the first four are populated and ordered; the latter three are unchanged — sorted oldest-first, showing only items past their `[attention]` threshold (the visible twin of `W_STATE_BACKLOG_STALE`/`W_DISTILL_STALE`). The fourth lane (distill-freshness-lane) reads each repo's `knowledge.md`/`memory.md` once (cached across boards) and lists D35-distilled entries whose `distill_stale_age` exceeds the `[attention]` `knowledge_days`/`memory_days` threshold, capped at 10 rows per board with an "…and N more" tail — the same predicate `check_distill_staleness` fires `W_DISTILL_STALE` on, so the board never shows an entry the warning didn't also flag.
+
+#### Carryover triage lanes
+
+**Board membership no longer gates on staleness alone.** Before `MV.ticket.carryover-triage-ranking`,
+the carryover lane was a single age-sorted "Stale carryover" list gated by `carryover_stale_age`
+(the visible twin of `W_STATE_CARRYOVER_STALE`) — measured against the live corpus, only **6 of 142**
+`carryover[]` entries were stale, so the board hid the other **136**, including every P0 filed that
+day. Every non-snoozed `carryover[]` entry is now ranked via the public `rank_carryover` function
+(re-exported from `src/lib.rs`; see [`docs/carryover-contract.md`](carryover-contract.md) for the
+full, versioned, producer-owned contract) and lands in exactly one of four lanes, assigned in this
+order so membership is total and mutually exclusive:
+
+| Lane | Membership | Within-lane order |
+|---|---|---|
+| `BLOCKING` | at least one unmet `blocks[]` edge | effective priority of what it blocks, ascending (0 hottest); then age descending |
+| `HOT` | authored `priority` 0 or 1, not already `BLOCKING` | priority ascending, then age descending |
+| `AGING` | stale (per `carryover_stale_age`), and `priority` 2/3 or absent | age descending |
+| `STANDING` | no `priority` and no `blocks[]` | age descending |
+
+`carryover_stale_age` remains the single source of the `stale` flag and feeds only `AGING`
+membership plus every row's displayed age — it is never reimplemented for this pass.
+`effective_priority` propagates across a carryover's `blocks[]` edges by the same cycle-safe
+reverse-topological min-propagation the block dependency graph already uses, so a low-priority
+carryover gating a hot block inherits that hotness; ties and cycles resolve deterministically and
+never hang.
+
+`STANDING` is a **low-frequency re-affirm lane**, not a backlog: it exists so permanent
+constraints (e.g. "`planning/` is a symlink, pass `-L`") stop competing for attention with
+actionable P0/P1 work and blocking edges.
+
+Each triage lane is capped at `CARRYOVER_LANE_CAP` (20) rows, oldest/lowest-ranked dropped first
+within the lane's own order, with an explicit `- …and N more` line stating the true hidden count
+when the lane is over cap — never a silent truncation, matching the existing convention on the
+distilled-knowledge lane's cap. `mev carryover --json` remains the uncapped, full-fidelity export
+for a consumer that needs every entry.
 - **Portfolio `state.json`** (`kind == "portfolio"`): not regenerated at all (no `focus` to derive — these are terminal repos), and skipped entirely by the wave-table splice pass — no `master-plan.md` is expected, so no `W_EMIT_NO_SENTINEL` is raised for these repos.
 
 All of the project-cache, tier-rollup, HQ-board, and unified-board planners share the same fixed-point and sentinel-safety guarantees as the wave-table splice: a target document missing its sentinel pair produces a `W_EMIT_NO_SENTINEL` warning and is left untouched, and re-running the emit over already-emitted content produces no further `EmitAction`/`I_EMIT_WROTE`.
@@ -1469,7 +1504,14 @@ Disjunction parsing is out of scope.
 
 Every reported entry also carries its repo, slug, kind, `age_days`, and a `stale` flag derived
 from the existing `carryover_stale_age` helper (honouring `reviewed` / `snoozed_until`) — no
-staleness logic is reimplemented here.
+staleness logic is reimplemented here. As of `MV.ticket.carryover-triage-ranking`, each entry
+additionally passes through its authored `priority` (0..=3, absent when not set), `finding_id`,
+and `blocks[]` (the `BlockedBy` edges the entry gates) verbatim — the same fields the Attention
+board's carryover triage lanes are ranked on (see [Carryover triage lanes](#carryover-triage-lanes)
+above and [`docs/carryover-contract.md`](carryover-contract.md) for the full, versioned wire
+shape). `mev carryover`/`mev carryover --json` itself still sorts and reports the three
+`clears_when` lanes (`cleared`/`actionable`/`not-evaluable`) below — those are an orthogonal
+question from the four triage lanes and are unaffected by this block.
 
 #### Cross-repo dedup: clusters, suggestions, and the typo guard
 
