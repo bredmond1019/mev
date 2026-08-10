@@ -235,3 +235,179 @@ fn suggest_duplicates_never_suggests_an_entry_that_already_has_a_finding_id() {
         "entries already carrying an authored finding_id must never be re-suggested"
     );
 }
+
+// ---------------------------------------------------------------------------
+// End-to-end through `carryover_sweep` — `MV.ticket.carryover-dedup-clusters` task 4.
+//
+// Follows the temp-dir fixture style of `tests/brain_carryover.rs` (`temp_dir`,
+// `write_brain_toml`, two leaf repos), but this file keeps its own copies of those
+// helpers since they are private to that file.
+// ---------------------------------------------------------------------------
+
+use std::fs;
+use std::path::Path;
+
+/// Make a fresh uniquely-named temp dir for a test and return its path.
+fn temp_dir(suffix: &str) -> std::path::PathBuf {
+    let dir = mev::testsupport::unique_temp_dir(&format!("mev-brain-carryover-dedup-it-{suffix}"));
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Write `brain.toml` with two leaf repos (alpha, beta) and a standard `[vocab]` block.
+fn write_brain_toml(root: &Path) {
+    let toml = r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "alpha"
+tier = "primary"
+repo_path = "repos/alpha"
+status_file = "repos/alpha/planning/status.md"
+cache_doc = "docs/projects/alpha.md"
+heading = "Alpha"
+
+[[repos]]
+slug = "beta"
+tier = "primary"
+repo_path = "repos/beta"
+status_file = "repos/beta/planning/status.md"
+cache_doc = "docs/projects/beta.md"
+heading = "Beta"
+"#;
+    fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
+}
+
+/// Serialize `value` as pretty JSON and write it to `root/rel`.
+fn write_json(root: &Path, rel: &str, value: &serde_json::Value) {
+    let full = root.join(rel);
+    fs::create_dir_all(full.parent().unwrap()).unwrap();
+    fs::write(
+        &full,
+        serde_json::to_string_pretty(value).unwrap().as_bytes(),
+    )
+    .unwrap();
+}
+
+/// Write alpha's leaf state: one entry sharing `finding_id: "shared-nextest-claim"` with
+/// beta (the cross-repo cluster case) and one entry with a `finding_id` alpha alone uses
+/// (the single-repo typo-guard case).
+fn write_alpha_dedup_state(root: &Path) {
+    let state = serde_json::json!({
+        "repo": "alpha",
+        "kind": "project",
+        "updated": "2026-08-01",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "tracks": [],
+        "carryover": [
+            {
+                "slug": "alpha-nextest-scoped",
+                "scope": { "repo": "alpha" },
+                "kind": "known_issue",
+                "text": "The nextest policy override rule is scoped to this repo only.",
+                "created": "2026-06-01",
+                "priority": 2,
+                "finding_id": "shared-nextest-claim"
+            },
+            {
+                "slug": "alpha-only-finding",
+                "scope": { "repo": "alpha" },
+                "kind": "constraint",
+                "text": "A finding_id authored only in this repo, never linked elsewhere.",
+                "created": "2026-06-01",
+                "priority": 1,
+                "finding_id": "alpha-only-typo-suspect"
+            }
+        ]
+    });
+    write_json(root, "repos/alpha/planning/state.json", &state);
+}
+
+/// Write beta's leaf state: one entry sharing `finding_id: "shared-nextest-claim"` with
+/// alpha, at a divergent priority (P0 here vs P2 in alpha) — per the governing design
+/// decision, both priorities must render side by side, never reconciled.
+fn write_beta_dedup_state(root: &Path) {
+    let state = serde_json::json!({
+        "repo": "beta",
+        "kind": "project",
+        "updated": "2026-08-01",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "tracks": [],
+        "carryover": [
+            {
+                "slug": "beta-nextest-hook-bail",
+                "scope": { "repo": "beta" },
+                "kind": "known_issue",
+                "text": "The nextest policy override hook does not fire here — a real bail.",
+                "created": "2026-06-01",
+                "priority": 0,
+                "finding_id": "shared-nextest-claim"
+            }
+        ]
+    });
+    write_json(root, "repos/beta/planning/state.json", &state);
+}
+
+/// Build the complete fixture: brain.toml + alpha leaf + beta leaf.
+fn write_dedup_fixture(root: &Path) {
+    write_brain_toml(root);
+    write_alpha_dedup_state(root);
+    write_beta_dedup_state(root);
+}
+
+#[test]
+fn carryover_sweep_clusters_shared_finding_id_across_repos_and_flags_single_repo_ids() {
+    let dir = temp_dir("e2e");
+    write_dedup_fixture(&dir);
+
+    let report = mev::carryover_sweep(&dir, None, false).expect("carryover_sweep should not error");
+
+    // The shared finding_id spans both repos and forms exactly one cluster with both
+    // members, priorities preserved verbatim (never reconciled).
+    let shared_cluster = report
+        .clusters
+        .iter()
+        .find(|c| c.finding_id == "shared-nextest-claim")
+        .expect("shared-nextest-claim cluster should be present");
+    assert_eq!(shared_cluster.members.len(), 2);
+    assert!(!shared_cluster.single_repo);
+    assert_eq!(
+        shared_cluster.repos,
+        vec!["alpha".to_string(), "beta".to_string()]
+    );
+    let alpha_member = shared_cluster
+        .members
+        .iter()
+        .find(|m| m.repo == "alpha")
+        .expect("alpha member should be present");
+    let beta_member = shared_cluster
+        .members
+        .iter()
+        .find(|m| m.repo == "beta")
+        .expect("beta member should be present");
+    assert_eq!(alpha_member.priority, Some(2));
+    assert_eq!(beta_member.priority, Some(0));
+
+    // The single-repo finding_id shows up in the typo-guard list, and the shared one does
+    // NOT.
+    assert!(
+        report
+            .single_repo_finding_ids
+            .contains(&"alpha-only-typo-suspect".to_string()),
+        "single-repo finding_id should be flagged, got: {:#?}",
+        report.single_repo_finding_ids
+    );
+    assert!(
+        !report
+            .single_repo_finding_ids
+            .contains(&"shared-nextest-claim".to_string()),
+        "cross-repo finding_id must not be flagged as single-repo, got: {:#?}",
+        report.single_repo_finding_ids
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

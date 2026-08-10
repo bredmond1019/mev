@@ -205,6 +205,23 @@ pub struct CarryoverReport {
     pub actionable: usize,
     pub not_evaluable: usize,
     pub entries: Vec<CarryoverVerdict>,
+    /// Every `carryover[]` entry sharing an authored `finding_id`, grouped one
+    /// cluster per distinct id. See [`cluster_by_finding_id`].
+    pub clusters: Vec<FindingCluster>,
+    /// Heuristic candidate-duplicate pairs over entries that carry no
+    /// `finding_id` yet. Always unconfirmed — see [`suggest_duplicates`].
+    pub suggestions: Vec<DedupSuggestion>,
+    /// Sorted list of `finding_id` values whose cluster spans exactly one
+    /// repo — the typo guard.
+    ///
+    /// A `finding_id` is meant to link the *same* finding across repos. One
+    /// used in only a single repo did not link anything: the entry *looks*
+    /// deduplicated (it carries a `finding_id`) while actually being alone,
+    /// which is usually a mistyped id that silently failed to group rather
+    /// than a genuinely solitary cross-repo finding. This is the same "field
+    /// nothing validates" defect class `MV.ticket.carryover-dedup-clusters`
+    /// exists to remove from `finding_id` itself.
+    pub single_repo_finding_ids: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -954,12 +971,29 @@ pub fn evaluate_carryover(
         .count();
     let total = entries.len();
 
+    // Dedup: cluster on the authored `finding_id`, suggest candidates for the
+    // rest, and flag single-repo clusters as likely typos. All three operate
+    // purely on the already-built `entries` vector — no re-walk of `files`, no
+    // filesystem access, no new discovery pass (`MV.ticket.carryover-dedup-
+    // clusters` task 4's no-new-I/O constraint).
+    let clusters = cluster_by_finding_id(&entries);
+    let suggestions = suggest_duplicates(&entries);
+    let mut single_repo_finding_ids: Vec<String> = clusters
+        .iter()
+        .filter(|c| c.single_repo)
+        .map(|c| c.finding_id.clone())
+        .collect();
+    single_repo_finding_ids.sort();
+
     CarryoverReport {
         total,
         cleared,
         actionable,
         not_evaluable,
         entries,
+        clusters,
+        suggestions,
+        single_repo_finding_ids,
     }
 }
 
