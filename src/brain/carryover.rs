@@ -184,6 +184,17 @@ pub struct CarryoverVerdict {
     pub refs: Vec<CarryoverRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<NotEvaluableReason>,
+    /// Authored value-if-resolved priority, passed through verbatim from the
+    /// source [`Carryover`] item. Per-repo, never reconciled — see
+    /// [`cluster_by_finding_id`]'s doc comment for why divergence across
+    /// repos on the same `finding_id` is correct, not a conflict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
+    /// Free-form shared identity string, passed through verbatim from the
+    /// source [`Carryover`] item. `None`/empty means the entry has not been
+    /// linked to a cross-repo finding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding_id: Option<String>,
 }
 
 /// The full fleet-wide sweep result.
@@ -915,6 +926,8 @@ pub fn evaluate_carryover(
                 lane,
                 refs,
                 reason,
+                priority: item.priority,
+                finding_id: item.finding_id.clone(),
             });
         }
     }
@@ -1056,6 +1069,110 @@ pub const DEDUP_JACCARD_MIN: f64 = 0.18;
 /// trades a known, documented miss for an unknown number of false positives across
 /// the fleet. Do not lower it.
 pub const DEDUP_OVERLAP_MIN: f64 = 0.34;
+
+// --- Dedup: authored clustering by finding_id ---
+//
+// `MV.ticket.carryover-dedup-clusters` task 2. This is the TRUSTED half of dedup:
+// `finding_id` is hand-written by a human onto a `carryover[]` entry, so grouping on
+// it is exact — no normalization, no fuzzy join. Contrast with `suggest_duplicates`
+// (task 3), which is the untrusted heuristic half over entries that carry no
+// `finding_id` at all.
+
+/// One entry inside a [`FindingCluster`] — a flattened, report-friendly view of the
+/// source [`CarryoverVerdict`] fields a cluster reader needs.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClusterMember {
+    pub repo: String,
+    pub slug: String,
+    pub priority: Option<u8>,
+    pub kind: String,
+    pub text: String,
+}
+
+/// Every `carryover[]` entry sharing one authored `finding_id`.
+///
+/// # Per-repo priority divergence is correct, not a conflict
+///
+/// Each [`ClusterMember`] keeps its own `priority` verbatim. There is
+/// deliberately no reconciled/effective/max/min priority field on this type and
+/// no diagnostic emitted when members disagree — the measured case is the
+/// `nextest` claim, which is genuinely P0 in `okf-core` (the hook does not fire
+/// there — a real bail) and genuinely P2 in `mev` (it works exactly as
+/// documented). Dedup merges the *claim*; it never merges the *priority*. See
+/// `planning/ticket-carryover-dedup-clusters/tasks.md`, governing decision 1.
+#[derive(Debug, Clone, Serialize)]
+pub struct FindingCluster {
+    pub finding_id: String,
+    pub members: Vec<ClusterMember>,
+    /// Sorted, deduplicated set of repos represented among `members`.
+    pub repos: Vec<String>,
+    /// `true` iff every member shares one repo. A cluster with `single_repo:
+    /// true` is the typo-guard signal upstream (`MV.ticket.carryover-dedup-
+    /// clusters` task 4): a `finding_id` used in only one repo did not link
+    /// anything across repos, which is usually a mistyped id silently failing
+    /// to group rather than a genuinely solitary finding.
+    pub single_repo: bool,
+}
+
+/// Group every entry carrying a non-empty, authored `finding_id` into one
+/// [`FindingCluster`] per distinct id.
+///
+/// Grouping is on the **exact** string — no case-folding, no trimming-based
+/// joining, no fuzzy matching. An authored id is authored; the human who wrote
+/// it is the identity authority, not this function.
+///
+/// Many-to-one is normal and expected: two or more entries in the *same* repo
+/// may legitimately share one `finding_id` (e.g. a lesson filed once per
+/// affected module within a repo). Such entries are never collapsed to one
+/// member — both/all appear as distinct [`ClusterMember`]s.
+///
+/// Entries with `finding_id: None` or an empty string are excluded from every
+/// cluster; they are candidates for [`suggest_duplicates`] instead.
+///
+/// Ordering is fully deterministic: members sort by `(repo, slug)`, clusters
+/// sort by `finding_id`. The report is diffed by humans across runs, so a
+/// stable order (not insertion order, not a hash-map iteration order) is load-
+/// bearing here, not cosmetic.
+pub fn cluster_by_finding_id(entries: &[CarryoverVerdict]) -> Vec<FindingCluster> {
+    let mut by_id: std::collections::BTreeMap<String, Vec<ClusterMember>> =
+        std::collections::BTreeMap::new();
+
+    for entry in entries {
+        let Some(finding_id) = entry.finding_id.as_ref() else {
+            continue;
+        };
+        if finding_id.is_empty() {
+            continue;
+        }
+        by_id
+            .entry(finding_id.clone())
+            .or_default()
+            .push(ClusterMember {
+                repo: entry.repo.clone(),
+                slug: entry.slug.clone(),
+                priority: entry.priority,
+                kind: entry.kind.clone(),
+                text: entry.text.clone(),
+            });
+    }
+
+    by_id
+        .into_iter()
+        .map(|(finding_id, mut members)| {
+            members.sort_by(|a, b| a.repo.cmp(&b.repo).then_with(|| a.slug.cmp(&b.slug)));
+            let mut repos: Vec<String> = members.iter().map(|m| m.repo.clone()).collect();
+            repos.sort();
+            repos.dedup();
+            let single_repo = repos.len() == 1;
+            FindingCluster {
+                finding_id,
+                members,
+                repos,
+                single_repo,
+            }
+        })
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {
@@ -3196,5 +3313,158 @@ mod tests {
         let ov = overlap_coefficient(&a, &b);
         let jac = jaccard(&a, &b);
         assert!(ov > jac, "overlap {ov} should exceed jaccard {jac}");
+    }
+
+    // -- cluster_by_finding_id -----------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    fn verdict(
+        repo: &str,
+        slug: &str,
+        priority: Option<u8>,
+        finding_id: Option<&str>,
+    ) -> CarryoverVerdict {
+        CarryoverVerdict {
+            repo: repo.to_string(),
+            slug: slug.to_string(),
+            kind: "known_issue".to_string(),
+            text: format!("some text for {slug}"),
+            clears_when: None,
+            created: "2026-01-01".to_string(),
+            age_days: None,
+            stale: false,
+            lane: CarryoverLane::NotEvaluable,
+            refs: Vec::new(),
+            reason: None,
+            priority,
+            finding_id: finding_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn cluster_by_finding_id_groups_across_repos_into_one_cluster() {
+        let entries = vec![
+            verdict(
+                "okf-core",
+                "nextest-bail",
+                Some(0),
+                Some("nextest-hook-gap"),
+            ),
+            verdict("mev", "nextest-scoped", Some(2), Some("nextest-hook-gap")),
+        ];
+        let clusters = cluster_by_finding_id(&entries);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].finding_id, "nextest-hook-gap");
+        assert_eq!(clusters[0].members.len(), 2);
+        assert!(!clusters[0].single_repo);
+        assert_eq!(clusters[0].repos, vec!["mev", "okf-core"]);
+    }
+
+    #[test]
+    fn cluster_by_finding_id_many_to_one_same_repo_yields_two_distinct_members() {
+        let entries = vec![
+            verdict("mev", "issue-a", None, Some("shared-lesson")),
+            verdict("mev", "issue-b", None, Some("shared-lesson")),
+        ];
+        let clusters = cluster_by_finding_id(&entries);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].members.len(), 2);
+        assert!(clusters[0].single_repo, "both members are in 'mev'");
+        assert_eq!(clusters[0].repos, vec!["mev"]);
+        let slugs: Vec<&str> = clusters[0]
+            .members
+            .iter()
+            .map(|m| m.slug.as_str())
+            .collect();
+        assert_eq!(slugs, vec!["issue-a", "issue-b"]);
+    }
+
+    #[test]
+    fn cluster_by_finding_id_preserves_divergent_priorities_verbatim() {
+        let entries = vec![
+            verdict(
+                "okf-core",
+                "nextest-bail",
+                Some(0),
+                Some("nextest-hook-gap"),
+            ),
+            verdict("mev", "nextest-scoped", Some(2), Some("nextest-hook-gap")),
+        ];
+        let clusters = cluster_by_finding_id(&entries);
+        let member_priority = |repo: &str| {
+            clusters[0]
+                .members
+                .iter()
+                .find(|m| m.repo == repo)
+                .and_then(|m| m.priority)
+        };
+        assert_eq!(
+            member_priority("okf-core"),
+            Some(0),
+            "okf-core keeps its own P0"
+        );
+        assert_eq!(member_priority("mev"), Some(2), "mev keeps its own P2");
+    }
+
+    #[test]
+    fn cluster_by_finding_id_excludes_none_and_empty_finding_id() {
+        let entries = vec![
+            verdict("mev", "no-id", None, None),
+            verdict("mev", "empty-id", None, Some("")),
+            verdict("mev", "has-id", None, Some("real-id")),
+        ];
+        let clusters = cluster_by_finding_id(&entries);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].finding_id, "real-id");
+        assert_eq!(clusters[0].members.len(), 1);
+        assert_eq!(clusters[0].members[0].slug, "has-id");
+    }
+
+    #[test]
+    fn cluster_by_finding_id_ordering_is_stable_regardless_of_input_order() {
+        let forward = vec![
+            verdict("bastion", "z-slug", None, Some("beta-id")),
+            verdict("mev", "a-slug", None, Some("alpha-id")),
+            verdict("mev", "b-slug", None, Some("alpha-id")),
+        ];
+        let mut shuffled = forward.clone();
+        shuffled.reverse();
+
+        let clusters_a = cluster_by_finding_id(&forward);
+        let clusters_b = cluster_by_finding_id(&shuffled);
+
+        let ids_a: Vec<&str> = clusters_a.iter().map(|c| c.finding_id.as_str()).collect();
+        let ids_b: Vec<&str> = clusters_b.iter().map(|c| c.finding_id.as_str()).collect();
+        assert_eq!(ids_a, ids_b);
+        assert_eq!(ids_a, vec!["alpha-id", "beta-id"]);
+
+        let alpha_slugs_a: Vec<&str> = clusters_a[0]
+            .members
+            .iter()
+            .map(|m| m.slug.as_str())
+            .collect();
+        let alpha_slugs_b: Vec<&str> = clusters_b[0]
+            .members
+            .iter()
+            .map(|m| m.slug.as_str())
+            .collect();
+        assert_eq!(alpha_slugs_a, alpha_slugs_b);
+        assert_eq!(alpha_slugs_a, vec!["a-slug", "b-slug"]);
+    }
+
+    #[test]
+    fn cluster_by_finding_id_no_diagnostic_field_exists_for_divergence() {
+        // Compile-time-adjacent guard: FindingCluster carries no reconciled
+        // priority and no diagnostic/warning field. This test documents that
+        // invariant by construction — if a future edit adds such a field, this
+        // struct literal (and every other FindingCluster construction site)
+        // will fail to compile unless updated, forcing a conscious decision.
+        let cluster = FindingCluster {
+            finding_id: "id".to_string(),
+            members: vec![],
+            repos: vec![],
+            single_repo: true,
+        };
+        assert_eq!(cluster.finding_id, "id");
     }
 }
