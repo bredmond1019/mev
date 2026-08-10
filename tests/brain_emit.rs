@@ -7032,11 +7032,22 @@ mod attention_board {
     };
     use mev::brain::state::{
         Backlog, BacklogOrigin, Carryover, CarryoverScope, StateFile, StateSource,
+        build_state_graph,
     };
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     fn day(s: &str) -> chrono::NaiveDate {
         chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    /// Empty block-side maps for tests that don't exercise `blocks[]`
+    /// propagation or `BLOCKING` membership — `rank_carryover` treats an
+    /// absent block target as unresolvable/no-priority, matching the
+    /// production caller's `effective_priorities`/`global_status_map` when
+    /// there are simply no `tracks[]` blocks in the fixture.
+    fn no_blocks() -> (HashMap<String, u8>, HashMap<String, Option<String>>) {
+        (HashMap::new(), HashMap::new())
     }
 
     fn carry(slug: &str, kind: &str, created: &str, repo: &str) -> Carryover {
@@ -7148,14 +7159,32 @@ mod attention_board {
         });
         let backlog = vec![("mev".to_string(), &idea), ("mev".to_string(), &cap)];
 
-        let out = render_attention_section(&carryover, &backlog, today, &cfg);
+        let (block_priorities, block_status) = no_blocks();
+        let out = render_attention_section(
+            &carryover,
+            &backlog,
+            today,
+            &cfg,
+            &block_priorities,
+            &block_status,
+        );
 
-        assert!(out.contains("## Stale carryover"));
+        // Board membership no longer gates on staleness alone
+        // (`MV.ticket.carryover-triage-ranking`): the stale deferred entry
+        // (no priority, no blocks -> stale) lands in AGING, and the fresh
+        // env entry (no priority, no blocks, not stale) now ALSO appears —
+        // in STANDING — where the old staleness-only gate would have hidden
+        // it.
+        assert!(out.contains("## AGING"));
+        assert!(out.contains("## STANDING"));
         assert!(
             out.contains("deferred old"),
-            "stale deferred should show: {out}"
+            "stale deferred should show in AGING: {out}"
         );
-        assert!(!out.contains(" new "), "fresh env must be excluded: {out}");
+        assert!(
+            out.contains("env new"),
+            "fresh env must now appear (in STANDING) — membership is not staleness-only: {out}"
+        );
         assert!(!out.contains("zzz"), "snoozed must be excluded: {out}");
         assert!(out.contains("## Aging backlog"));
         assert!(out.contains("aged-idea"));
@@ -7172,16 +7201,157 @@ mod attention_board {
 
     #[test]
     fn render_section_empty_lanes_are_none() {
-        let out =
-            render_attention_section(&[], &[], day("2026-07-15"), &AttentionThresholds::default());
+        let (block_priorities, block_status) = no_blocks();
+        let out = render_attention_section(
+            &[],
+            &[],
+            day("2026-07-15"),
+            &AttentionThresholds::default(),
+            &block_priorities,
+            &block_status,
+        );
+        assert!(out.contains("## BLOCKING"));
+        assert!(out.contains("## HOT"));
+        assert!(out.contains("## AGING"));
+        assert!(out.contains("## STANDING"));
         assert!(
             out.contains("## Stale distilled knowledge"),
-            "4th lane heading present even with no distilled entries: {out}"
+            "distilled lane heading present even with no distilled entries: {out}"
         );
         assert_eq!(
             out.matches("_none_").count(),
-            4,
-            "all four lanes empty: {out}"
+            7,
+            "all seven lanes (4 triage + backlog + captures + distilled) empty: {out}"
+        );
+    }
+
+    #[test]
+    fn fresh_p0_appears_where_the_old_staleness_gate_hid_it() {
+        // Measured before this block: only 6 of 142 entries were stale, so
+        // the old `if let Some(age) = carryover_stale_age(...)` membership
+        // gate hid 136 entries — including every P0 filed the same day,
+        // which is by construction not yet stale. This is the litmus test
+        // for the fix: a fresh (1-day-old), non-stale P0 must now surface,
+        // in HOT.
+        let today = day("2026-07-15");
+        let mut fresh_p0 = carry("urgent", "deferred", "2026-07-14", "mev");
+        fresh_p0.priority = Some(0);
+        let carryover = vec![("mev".to_string(), &fresh_p0)];
+
+        let (block_priorities, block_status) = no_blocks();
+        let out = render_attention_section(
+            &carryover,
+            &[],
+            today,
+            &AttentionThresholds::default(),
+            &block_priorities,
+            &block_status,
+        );
+
+        let hot_lane = out
+            .split("## HOT")
+            .nth(1)
+            .expect("HOT lane present")
+            .split("## AGING")
+            .next()
+            .unwrap();
+        assert!(
+            hot_lane.contains("urgent"),
+            "fresh P0 must appear in HOT, not be hidden by a staleness gate: {out}"
+        );
+        assert!(
+            !hot_lane.contains("_none_"),
+            "HOT lane must not read empty once a fresh P0 exists: {hot_lane}"
+        );
+    }
+
+    #[test]
+    fn carryover_lane_caps_with_accurate_hidden_count() {
+        let today = day("2026-07-15");
+        // 25 non-stale, no-priority, no-blocks entries -> all land in
+        // STANDING, which is capped at `CARRYOVER_LANE_CAP` (20).
+        let entries: Vec<Carryover> = (0..25)
+            .map(|i| carry(&format!("standing-{i}"), "deferred", "2026-07-14", "mev"))
+            .collect();
+        let carryover: Vec<(String, &Carryover)> =
+            entries.iter().map(|c| ("mev".to_string(), c)).collect();
+
+        let (block_priorities, block_status) = no_blocks();
+        let out = render_attention_section(
+            &carryover,
+            &[],
+            today,
+            &AttentionThresholds::default(),
+            &block_priorities,
+            &block_status,
+        );
+
+        let standing_lane = out
+            .split("## STANDING")
+            .nth(1)
+            .expect("STANDING lane present");
+        let shown = standing_lane.matches("- [mev] deferred standing-").count();
+        assert_eq!(
+            shown, 20,
+            "must cap at CARRYOVER_LANE_CAP rows: {standing_lane}"
+        );
+        assert!(
+            standing_lane.contains("…and 5 more"),
+            "must print the true hidden count: {standing_lane}"
+        );
+    }
+
+    #[test]
+    fn backlog_capture_and_distilled_lanes_stay_byte_identical() {
+        // This block only touches carryover triage rendering — the
+        // backlog / capture / distilled lanes must render exactly as they
+        // did before `AttentionRow` grew structured fields.
+        let today = day("2026-07-15");
+        let cfg = AttentionThresholds::default();
+
+        let mut idea = Backlog {
+            slug: "aged-idea".to_string(),
+            title: "Aged idea".to_string(),
+            repo: "mev".to_string(),
+            kind: "research".to_string(),
+            status: "idea".to_string(),
+            created: Some("2026-07-01".to_string()),
+            ..Default::default()
+        };
+        let mut cap = idea.clone();
+        cap.slug = "captured".to_string();
+        cap.origin = Some(BacklogOrigin {
+            kind: "capture".to_string(),
+            notes: Some("core/planning/captured/notes.md".to_string()),
+        });
+        idea.origin = Some(BacklogOrigin {
+            kind: "backlog".to_string(),
+            notes: None,
+        });
+        let backlog = vec![("mev".to_string(), &idea), ("mev".to_string(), &cap)];
+
+        let (block_priorities, block_status) = no_blocks();
+        let out =
+            render_attention_section(&[], &backlog, today, &cfg, &block_priorities, &block_status);
+
+        let aging_backlog = out
+            .split("## Aging backlog")
+            .nth(1)
+            .unwrap()
+            .split("## Orphaned captures")
+            .next()
+            .unwrap();
+        assert!(
+            aging_backlog.contains("- [mev] aged-idea (idea) — Aged idea — 14d"),
+            "backlog row format must be unchanged: {aging_backlog}"
+        );
+
+        let captures = out.split("## Orphaned captures").nth(1).unwrap();
+        assert!(
+            captures.contains(
+                "- [mev] captured — Aged idea — notes: core/planning/captured/notes.md — 14d"
+            ),
+            "capture row format must be unchanged: {captures}"
         );
     }
 
@@ -7263,7 +7433,8 @@ mod attention_board {
             ..Default::default()
         };
 
-        let plan = plan_attention_board(&files, &config, day("2026-07-15"));
+        let graph = build_state_graph(&files);
+        let plan = plan_attention_board(&files, &graph, &config, day("2026-07-15"));
 
         let by_path = |needle: &str| -> String {
             plan.actions
@@ -7312,7 +7483,8 @@ mod attention_board {
 
         // Idempotency: apply core content back, re-plan, expect no core action.
         std::fs::write(tmp.path().join("core/planning/status.md"), &core_doc).unwrap();
-        let plan2 = plan_attention_board(&files, &config, day("2026-07-15"));
+        let graph = build_state_graph(&files);
+        let plan2 = plan_attention_board(&files, &graph, &config, day("2026-07-15"));
         assert!(
             !plan2.actions.iter().any(|a| a
                 .path
@@ -7347,7 +7519,8 @@ mod attention_board {
             ..Default::default()
         };
 
-        let plan = plan_attention_board(&files, &config, day("2026-07-15"));
+        let graph = build_state_graph(&files);
+        let plan = plan_attention_board(&files, &graph, &config, day("2026-07-15"));
         assert!(plan.actions.is_empty(), "no write without sentinels");
         assert!(
             plan.diagnostics
@@ -7378,7 +7551,16 @@ mod attention_board {
             ("mev".to_string(), "memory", &fresh),
         ];
 
-        let out = render_attention_section_with_distilled(&[], &[], &distilled, today, &cfg);
+        let (block_priorities, block_status) = no_blocks();
+        let out = render_attention_section_with_distilled(
+            &[],
+            &[],
+            &distilled,
+            today,
+            &cfg,
+            &block_priorities,
+            &block_status,
+        );
 
         assert!(out.contains("## Stale distilled knowledge"));
         assert!(
@@ -7404,7 +7586,16 @@ mod attention_board {
             .map(|e| ("mev".to_string(), "knowledge", e))
             .collect();
 
-        let out = render_attention_section_with_distilled(&[], &[], &distilled, today, &cfg);
+        let (block_priorities, block_status) = no_blocks();
+        let out = render_attention_section_with_distilled(
+            &[],
+            &[],
+            &distilled,
+            today,
+            &cfg,
+            &block_priorities,
+            &block_status,
+        );
 
         let lane = out
             .split("## Stale distilled knowledge")
@@ -7476,7 +7667,8 @@ mod attention_board {
 
         let today = day("2026-08-01"); // 61d past the 2026-06-01 stamp, > 45d threshold
 
-        let plan = plan_attention_board(&files, &config, today);
+        let graph = build_state_graph(&files);
+        let plan = plan_attention_board(&files, &graph, &config, today);
 
         let by_path = |needle: &str| -> String {
             plan.actions
@@ -7539,7 +7731,8 @@ mod attention_board {
         )];
         let config = BrainConfig::default();
 
-        let plan = plan_attention_board(&files, &config, day("2026-08-01"));
+        let graph = build_state_graph(&files);
+        let plan = plan_attention_board(&files, &graph, &config, day("2026-08-01"));
         assert!(
             !plan
                 .diagnostics
