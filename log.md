@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-09T13:30:00Z"
+timestamp: "2026-08-10T08:15:00Z"
 ---
 
 # Log — mev
@@ -16,6 +16,60 @@ timestamp: "2026-08-09T13:30:00Z"
 *Append-only working log. One dated entry per session. Newest entries at the top.*
 
 ---
+
+## [run: 2026-08-10]
+
+### carryover-improvements lane complete — 5 blocks, 28/28 tasks, all first-attempt
+
+Drove the `mev` lane of HQ's carryover-improvements roadmap end to end via `/begin-orchestration`:
+`carryover-field-validation` (6/6) → `clears-when-evaluation` (5/5, PR #32) →
+`carryover-dedup-clusters` (6/6, PR #33) → `carryover-triage-ranking` (7/7, PR #34) →
+`unqualified-related-suggests-scope` (4/4). No bails, no HELD blocks, no merge conflicts, and
+**zero state repairs** — every engine wrote its own status correctly. Corpus stayed at 0 errors at
+every checkpoint. Full review with hand-runnable verification commands and eight ranked lingering
+items: `planning/orchestration-run/carryover-improvements/review.md`.
+
+### `MV.ticket.unqualified-related-suggests-scope` shipped (4 tasks, added mid-run)
+
+An unqualified OKF `related:` target is qualified into the **referrer's own** scope
+(`okf-core/src/graph.rs:126-132`), so a mev-vault doc naming a brain-vault `doc_id` dangles and
+red-gates the whole corpus — which happened twice in six days, both times costing a *different*
+lane than the one that authored the edge. `check_graph` now builds a `doc_id → canonical id` index
+once before the edge loop and, for a dangling **unqualified** ref, names the owning scope
+(`— did you mean \`brain:x\`?`) or lists every candidate when several match. An already-qualified
+ref never gains a suggestion, even when another scope owns that bare `doc_id`: an explicit prefix
+is an authored decision. Locator and severity deliberately unchanged — three test files and
+`docs/architecture.md:267` key off both. Single-repo by construction: `resolve_edge` lives in
+okf-core, but `scope`/`doc_id` are already on the `GraphArtifact` mev holds, so no shared-crate
+bump and no downstream recompile.
+
+### The chain shipped four capabilities with zero rows of input
+
+Measured on the live corpus with the release binary: **0 of 138** carryover entries author
+`priority`, `blocks[]`, `finding_id`, or a typed `clears_when`. So the Attention board's BLOCKING
+and HOT lanes are structurally empty, dedup's CLUSTERS section is empty, and evaluable
+`clears_when` stayed at 9 (baseline 142/3/6/133 → 138/3/6/129). The code is correct at every
+surface and inert on real data until `HQ.4.E`'s typed backfill lands — and that block sits at wave
+207 *behind* this whole chain, though its backfill half depends only on `HQ.4.D`, which closed
+2026-08-09. The roadmap's "~40 evaluable" target was additionally unreachable by construction: it
+counted the 30 gate-mention prose predicates, which can only be evaluated by deriving a command
+from prose — forbidden by the same program.
+
+### Post-chain: `bastion` cannot compile against the current okf-core
+
+Rebuilding the PATH binaries to make the new board live: `mev` reinstalled clean, **`bastion`
+failed** — `src/serve/handlers/attention.rs:101` still assigns `Option<ClearsWhen>` into a
+`Option<String>` DTO field (`E0308`). okf-core's type change was adapted in mev's block 1 and never
+in bastion. Consequences: the installed `bastion` (Jul 31) embeds a Jul-31 mev **as a library**, so
+`bastion emit-state --write` — which `scripts/validate_brain.sh` and the nightly `scripts/routine.sh`
+both call — regenerates the Attention board with pre-chain code and silently reverts the four-lane
+re-cut. Observed live during this run. `routine.sh` does not self-heal, because it cannot
+`cargo install` what will not compile. Not repaired here: `dto.rs:1290`'s `clears_when:
+Option<String>` is the serve API's data contract, so the fix is a D20 contract decision (render to
+a display string vs expose the typed shape), which is exactly `BA.ticket.carryover-triage-dto` —
+now unblocked, since its only dependency was this lane's ranking block. This break was invisible
+all evening because the orchestrate downstream check correctly refuses to run against a dirty
+consumer, and bastion has carried 4 uncommitted doc files throughout.
 
 ## [run: 2026-08-09]
 
