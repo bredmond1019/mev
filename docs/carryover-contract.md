@@ -7,7 +7,7 @@ layer: [brain, console]
 project: mev
 status: active
 keywords: [carryover, triage, ranking, attention, effective-priority, contract, blocks]
-related: [carryover-improvements-plan, state-json-schema, cli-reference]
+related: [brain:carryover-improvements-plan, brain:state-json-schema, cli-reference]
 ---
 
 # Carryover Triage Ranking Contract
