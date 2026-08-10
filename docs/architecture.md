@@ -264,7 +264,7 @@ The graph module builds and validates the serializable `scope:doc_id` knowledge 
 | Locator | Severity | Condition |
 |---|---|---|
 | `E_GRAPH_DUPLICATE_DOC_ID` | Error | Two or more corpus files share the same `scope:doc_id`. |
-| `related` | Error | A `related:` entry resolves to no node and no leaf (`E_GRAPH_DANGLING_RELATED`). |
+| `related` | Error | A `related:` entry resolves to no node and no leaf (`E_GRAPH_DANGLING_RELATED`). If the target was written unqualified and its bare `doc_id` is owned by exactly one other scope, the message names that scope's canonical `scope:doc_id` as the likely intent (`— did you mean \`scope:doc_id\`?`); if owned by two or more other scopes, it lists all of them and advises qualifying explicitly. An already-qualified target never gets a suggestion, even if another scope owns that bare `doc_id`. |
 | `related` | Warning | A `related:` entry resolves to a real corpus file that has no `doc_id` (`W_GRAPH_LEAF_TARGET`). |
 
 #### Public library entry point
