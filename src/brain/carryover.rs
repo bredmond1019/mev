@@ -57,7 +57,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use okf_core::{BlockedBy, Carryover, ClearsWhen, ClearsWhenPredicate, StateFile, StateSource};
 
@@ -1346,7 +1346,7 @@ pub fn suggest_duplicates(entries: &[CarryoverVerdict]) -> Vec<DedupSuggestion> 
 /// first, then HOT, then AGING, then STANDING. See that function's doc comment
 /// for the full membership rules, and in particular why board membership must
 /// **not** gate on staleness alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TriageLane {
     /// At least one unmet `blocks[]` edge — this entry is gating other work.
