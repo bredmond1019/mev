@@ -23,14 +23,17 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::brain::carryover::clears_when_display;
+use crate::brain::carryover::{
+    CarryoverLane, CarryoverVerdict, TriageLane, clears_when_display, rank_carryover,
+};
 use crate::brain::config::BrainConfig;
 use crate::brain::distill::{DistilledEntry, distill_stale_age, parse_distilled};
 use crate::brain::state::{
     Backlog, Block, BlockedBy, Carryover, CrossRepoEdge, Epic, EpicEdge, EpicEdges, Focus,
     RepoRollup, StateFile, StateGraph, StateSource, TierScope, TrackBlock, backlog_stale_age,
     carryover_stale_age, derive_brain_focus, derive_cross_repo, derive_epic_edges,
-    derive_epic_focus, derive_focus, derive_rollup, effective_priorities, tier_scope_for,
+    derive_epic_focus, derive_focus, derive_rollup, effective_priorities, is_snoozed,
+    staleness_anchor, tier_scope_for,
 };
 
 // ---------------------------------------------------------------------------
@@ -1143,12 +1146,42 @@ fn has_unmet_dep(block: &TrackBlock, global_status: &HashMap<String, Option<Stri
 // render_attention_section — stale carryover / aging backlog / orphaned captures
 // ---------------------------------------------------------------------------
 
-/// One row on the Attention board: its source repo tag, computed age (days),
-/// and the rendered detail line.
+/// One row on the Attention board: structured fields only — **no
+/// pre-flattened display string**. Flattening to a rendered line happens at
+/// render time (in [`render_triage_lane`]/[`render_attention_lane_capped`]),
+/// never before sorting/ranking, so a downstream consumer (or a future
+/// re-rank) always has the real fields to work with instead of parsing text.
+///
+/// The carryover triage lanes (BLOCKING/HOT/AGING/STANDING) populate every
+/// field from a [`crate::brain::carryover::CarryoverRanking`]. The backlog /
+/// capture / distilled lanes are not this block's target — they populate
+/// `repo`/`age`/`kind`/`slug`/`title_or_text` only and leave the
+/// carryover-only fields (`priority`, `effective_priority`, `lane`,
+/// `clears_when`) at their defaults (`None`), matching yesterday's rendered
+/// output byte-for-byte (see `render_section_lanes_and_snooze_and_capture`
+/// and friends in `tests/brain_emit.rs`).
 struct AttentionRow {
     repo: String,
-    age: i64,
-    detail: String,
+    /// `None` when the entry has no parseable anchor date (or, for
+    /// carryover, is currently snoozed) — rendered as `—` rather than a
+    /// fabricated `0d`.
+    age: Option<i64>,
+    kind: String,
+    slug: String,
+    /// The free-text portion of the row: a carryover's snippeted `text`, a
+    /// backlog node's `title`, a capture's `"{title} — notes: {notes}"`, or
+    /// a distilled entry's snippeted claim — already truncated at
+    /// construction time by [`attention_snippet`].
+    title_or_text: String,
+    /// Carryover-only: the authored `priority`, absent for every other lane.
+    priority: Option<u8>,
+    /// Carryover-only: the effective priority after `blocks[]`
+    /// min-propagation, absent for every other lane.
+    effective_priority: Option<u8>,
+    /// Carryover-only: which [`TriageLane`] this row landed in.
+    lane: Option<TriageLane>,
+    /// Carryover-only: the display form of `clears_when`, if any.
+    clears_when: Option<String>,
 }
 
 /// Truncate `text` to a single tidy line of at most `max` chars for a board row.
@@ -1163,17 +1196,31 @@ fn attention_snippet(text: &str, max: usize) -> String {
 }
 
 /// Render one `## {heading}` Attention sub-lane from `rows` (already filtered to
-/// stale items). Rows are sorted oldest-first (largest age). Empty → `_none_`.
-fn render_attention_lane(heading: &str, rows: Vec<AttentionRow>) -> String {
-    render_attention_lane_capped(heading, rows, usize::MAX)
+/// stale items), flattening each row to a display line via `detail` at RENDER
+/// TIME only. Rows are sorted oldest-first (largest age). Empty → `_none_`.
+///
+/// Used by the backlog / capture / distilled lanes — the carryover triage
+/// lanes use [`render_triage_lane`] instead, since their rows arrive
+/// pre-ordered by [`rank_carryover`] and must not be re-sorted by age.
+fn render_attention_lane(
+    heading: &str,
+    rows: Vec<AttentionRow>,
+    detail: impl Fn(&AttentionRow) -> String,
+) -> String {
+    render_attention_lane_capped(heading, rows, usize::MAX, detail)
 }
 
 /// Same as [`render_attention_lane`], but shows at most `cap` rows (oldest-first)
 /// and — when more than `cap` rows are stale — appends an explicit
 /// `…and N more` line stating the true count of hidden rows. Never truncates
 /// silently: the hidden count is always printed when rows are dropped.
-fn render_attention_lane_capped(heading: &str, mut rows: Vec<AttentionRow>, cap: usize) -> String {
-    rows.sort_by_key(|r| std::cmp::Reverse(r.age));
+fn render_attention_lane_capped(
+    heading: &str,
+    mut rows: Vec<AttentionRow>,
+    cap: usize,
+    detail: impl Fn(&AttentionRow) -> String,
+) -> String {
+    rows.sort_by_key(|r| std::cmp::Reverse(r.age.unwrap_or(i64::MIN)));
     let mut lines = vec![format!("## {heading}")];
     if rows.is_empty() {
         lines.push("_none_".to_string());
@@ -1181,7 +1228,8 @@ fn render_attention_lane_capped(heading: &str, mut rows: Vec<AttentionRow>, cap:
         let total = rows.len();
         let shown = rows.into_iter().take(cap);
         for row in shown {
-            lines.push(format!("- [{}] {} — {}d", row.repo, row.detail, row.age));
+            let age = row.age.unwrap_or_default();
+            lines.push(format!("- [{}] {} — {}d", row.repo, detail(&row), age));
         }
         if total > cap {
             lines.push(format!("- …and {} more", total - cap));
@@ -1190,25 +1238,111 @@ fn render_attention_lane_capped(heading: &str, mut rows: Vec<AttentionRow>, cap:
     lines.join("\n")
 }
 
+/// Render one `## {heading}` carryover triage sub-lane (BLOCKING / HOT / AGING
+/// / STANDING) from `rows`, which arrive **already ordered** by
+/// [`rank_carryover`] — this function does not re-sort, unlike
+/// [`render_attention_lane_capped`]. Shows at most `cap` rows and — when more
+/// than `cap` rows exist — appends an explicit `…and N more` line stating the
+/// true hidden count (same never-truncate-silently principle as
+/// [`DISTILL_LANE_CAP`]).
+fn render_triage_lane(heading: &str, rows: &[AttentionRow], cap: usize) -> String {
+    let mut lines = vec![format!("## {heading}")];
+    if rows.is_empty() {
+        lines.push("_none_".to_string());
+    } else {
+        let total = rows.len();
+        for row in rows.iter().take(cap) {
+            let age = row
+                .age
+                .map(|a| format!("{a}d"))
+                .unwrap_or_else(|| "—".to_string());
+            lines.push(format!(
+                "- [{}] {} — {age}",
+                row.repo,
+                render_triage_detail(row)
+            ));
+        }
+        if total > cap {
+            lines.push(format!("- …and {} more", total - cap));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Flatten one triage row to a display line at RENDER TIME — the only place
+/// carryover fields are ever joined into a string. Surfaces the authored and
+/// effective priority so a reader can see *why* a row ranks where it does
+/// (the pain point this block exists to fix), not just that it does.
+fn render_triage_detail(row: &AttentionRow) -> String {
+    let mut detail = format!("{} {} — {}", row.kind, row.slug, row.title_or_text);
+    match (row.priority, row.effective_priority) {
+        (Some(p), Some(ep)) if p == ep => detail.push_str(&format!(" [P{p}]")),
+        (Some(p), Some(ep)) => detail.push_str(&format!(" [P{p} -> effective P{ep}]")),
+        (Some(p), None) => detail.push_str(&format!(" [P{p}]")),
+        (None, Some(ep)) => detail.push_str(&format!(" [effective P{ep}]")),
+        (None, None) => {}
+    }
+    if let Some(c) = &row.clears_when {
+        detail.push_str(&format!(" (clears when: {c})"));
+    }
+    // `row.lane` is redundant with the enclosing `## HEADING` for the four
+    // triage lanes rendered today, but the field stays real data on the row
+    // (not re-derived from which `Vec` it landed in) so a future single-list
+    // export — grepping across lanes rather than by section — still carries
+    // it, matching the discipline the rest of this row's fields already
+    // follow: nothing gets flattened away before render time.
+    if let Some(lane) = row.lane {
+        detail.push_str(&format!(" ({lane:?})"));
+    }
+    detail
+}
+
 /// Cap applied to the "Stale distilled knowledge" lane — the 10 oldest entries
 /// render, with an explicit `…and N more` line for the rest. Required, not
 /// cosmetic: the June D35 fan-out cohort is large enough (hundreds of entries
 /// at some tiers) that an uncapped lane is a wall, not a triage surface.
 const DISTILL_LANE_CAP: usize = 10;
 
-/// Render the Attention board: four sub-lanes (Stale carryover / Aging backlog
-/// / Orphaned captures / Stale distilled knowledge) built from the pre-scoped,
-/// repo-tagged inputs. Only items past their staleness threshold appear (the
+/// Cap applied to each carryover triage lane (BLOCKING/HOT/AGING/STANDING),
+/// with the same explicit `…and N more` treatment as [`DISTILL_LANE_CAP`] —
+/// never truncate silently. 20 mirrors the distilled cap's order of
+/// magnitude: a triage lane is a glanceable board, not a full export (`mev
+/// carryover --json` is the uncapped surface), and BLOCKING/HOT are the
+/// lanes most likely to threaten it, since board membership no longer gates
+/// on staleness alone.
+const CARRYOVER_LANE_CAP: usize = 20;
+
+/// Render the Attention board: the four carryover triage sub-lanes (BLOCKING
+/// / HOT / AGING / STANDING, `MV.ticket.carryover-triage-ranking`) plus Aging
+/// backlog / Orphaned captures / Stale distilled knowledge, built from the
+/// pre-scoped, repo-tagged inputs.
+///
+/// Carryover lane **membership no longer gates on staleness alone** — every
+/// non-snoozed `carryover[]` entry is ranked via [`rank_carryover`] and lands
+/// in exactly one of the four triage lanes; `carryover_stale_age` still
+/// supplies the single `stale` predicate (feeding AGING membership and every
+/// row's displayed age) and is never reimplemented. The other three lanes
+/// are unchanged: only items past their staleness threshold appear (the
 /// visible twin of the `W_STATE_*_STALE` / `W_DISTILL_STALE` warnings — same
-/// predicates). The `[<repo>]` tag is a separate axis from the unified board's
-/// `[BIZ]/[ENG]` tag.
+/// predicates). The `[<repo>]` tag is a separate axis from the unified
+/// board's `[BIZ]/[ENG]` tag.
 pub fn render_attention_section(
     carryover: &[(String, &Carryover)],
     backlog: &[(String, &Backlog)],
     today: chrono::NaiveDate,
     thresholds: &crate::brain::config::AttentionThresholds,
+    block_priorities: &HashMap<String, u8>,
+    block_status: &HashMap<String, Option<String>>,
 ) -> String {
-    render_attention_section_with_distilled(carryover, backlog, &[], today, thresholds)
+    render_attention_section_with_distilled(
+        carryover,
+        backlog,
+        &[],
+        today,
+        thresholds,
+        block_priorities,
+        block_status,
+    )
 }
 
 /// Full form of [`render_attention_section`] that also takes the pre-scoped,
@@ -1216,33 +1350,92 @@ pub fn render_attention_section(
 /// "Stale distilled knowledge" lane. `stem` is `"knowledge"` or `"memory"`,
 /// used to look up the entry's own threshold via
 /// [`crate::brain::config::AttentionThresholds::distill_threshold`].
+///
+/// `block_priorities` (keyed `"repo:id"`) and `block_status` (keyed
+/// `"repo:id"`) are the same maps [`plan_attention_board`] already computes
+/// for the whole corpus ([`effective_priorities`] / [`global_status_map`]) —
+/// passed straight through to [`rank_carryover`], never recomputed here.
 pub fn render_attention_section_with_distilled(
     carryover: &[(String, &Carryover)],
     backlog: &[(String, &Backlog)],
     distilled: &[(String, &str, &DistilledEntry)],
     today: chrono::NaiveDate,
     thresholds: &crate::brain::config::AttentionThresholds,
+    block_priorities: &HashMap<String, u8>,
+    block_status: &HashMap<String, Option<String>>,
 ) -> String {
-    let mut carry_rows: Vec<AttentionRow> = Vec::new();
+    // Build a `CarryoverVerdict` per non-snoozed entry — just enough for
+    // `rank_carryover` (age/stale/priority/blocks), never re-running the
+    // `clears_when` predicate evaluation (`MV.ticket.clears-when-evaluation`'s
+    // job, not this render path's) — `lane` stays `NotEvaluable` and
+    // `clears_when_satisfied` is therefore always `false` here; that field is
+    // deliberately not surfaced on the board today. A snoozed entry is
+    // excluded from every triage lane, same as before this block.
+    let mut verdicts: Vec<CarryoverVerdict> = Vec::with_capacity(carryover.len());
+    let mut item_by_key: HashMap<String, &Carryover> = HashMap::with_capacity(carryover.len());
     for (repo, item) in carryover {
-        if let Some(age) = carryover_stale_age(item, today, thresholds) {
-            let clears = item
+        if is_snoozed(item.snoozed_until.as_deref(), today) {
+            continue;
+        }
+        let age_days = staleness_anchor(Some(item.created.as_str()), item.reviewed.as_deref())
+            .map(|anchor| (today - anchor).num_days());
+        let stale = carryover_stale_age(item, today, thresholds).is_some();
+        let key = format!("{repo}:{}", item.slug);
+        verdicts.push(CarryoverVerdict {
+            repo: repo.clone(),
+            slug: item.slug.clone(),
+            kind: item.kind.clone(),
+            text: item.text.clone(),
+            clears_when: item
                 .clears_when
                 .as_ref()
                 .and_then(clears_when_display)
-                .map(|c| format!(" (clears when: {})", attention_snippet(c, 60)))
-                .unwrap_or_default();
-            carry_rows.push(AttentionRow {
-                repo: repo.clone(),
-                age,
-                detail: format!(
-                    "{} {} — {}{}",
-                    item.kind,
-                    item.slug,
-                    attention_snippet(&item.text, 80),
-                    clears
-                ),
-            });
+                .map(String::from),
+            created: item.created.clone(),
+            age_days,
+            stale,
+            lane: CarryoverLane::NotEvaluable,
+            refs: Vec::new(),
+            reason: None,
+            priority: item.priority,
+            finding_id: item.finding_id.clone(),
+            blocks: item.blocks.clone(),
+        });
+        item_by_key.insert(key, item);
+    }
+
+    let ranked = rank_carryover(&verdicts, block_priorities, block_status);
+
+    let mut blocking_rows: Vec<AttentionRow> = Vec::new();
+    let mut hot_rows: Vec<AttentionRow> = Vec::new();
+    let mut aging_rows: Vec<AttentionRow> = Vec::new();
+    let mut standing_rows: Vec<AttentionRow> = Vec::new();
+    for r in &ranked {
+        let key = format!("{}:{}", r.repo, r.slug);
+        let source = item_by_key.get(&key).copied();
+        let title_or_text = source
+            .map(|item| attention_snippet(&item.text, 80))
+            .unwrap_or_default();
+        let clears_when = source
+            .and_then(|item| item.clears_when.as_ref())
+            .and_then(clears_when_display)
+            .map(|c| attention_snippet(c, 60));
+        let row = AttentionRow {
+            repo: r.repo.clone(),
+            age: r.age_days,
+            kind: r.kind.clone(),
+            slug: r.slug.clone(),
+            title_or_text,
+            priority: r.priority,
+            effective_priority: r.effective_priority,
+            lane: Some(r.lane),
+            clears_when,
+        };
+        match r.lane {
+            TriageLane::Blocking => blocking_rows.push(row),
+            TriageLane::Hot => hot_rows.push(row),
+            TriageLane::Aging => aging_rows.push(row),
+            TriageLane::Standing => standing_rows.push(row),
         }
     }
 
@@ -1260,14 +1453,26 @@ pub fn render_attention_section_with_distilled(
                     .unwrap_or("(no notes path)");
                 capture_rows.push(AttentionRow {
                     repo: repo.clone(),
-                    age,
-                    detail: format!("{} — {} — notes: {}", item.slug, item.title, notes),
+                    age: Some(age),
+                    kind: String::new(),
+                    slug: item.slug.clone(),
+                    title_or_text: format!("{} — notes: {}", item.title, notes),
+                    priority: None,
+                    effective_priority: None,
+                    lane: None,
+                    clears_when: None,
                 });
             } else {
                 backlog_rows.push(AttentionRow {
                     repo: repo.clone(),
-                    age,
-                    detail: format!("{} ({}) — {}", item.slug, item.status, item.title),
+                    age: Some(age),
+                    kind: item.status.clone(),
+                    slug: item.slug.clone(),
+                    title_or_text: item.title.clone(),
+                    priority: None,
+                    effective_priority: None,
+                    lane: None,
+                    clears_when: None,
                 });
             }
         }
@@ -1283,17 +1488,35 @@ pub fn render_attention_section_with_distilled(
             };
             distill_rows.push(AttentionRow {
                 repo: repo.clone(),
-                age,
-                detail: format!("{stem} — {}", attention_snippet(&claim, 80)),
+                age: Some(age),
+                kind: (*stem).to_string(),
+                slug: String::new(),
+                title_or_text: attention_snippet(&claim, 80),
+                priority: None,
+                effective_priority: None,
+                lane: None,
+                clears_when: None,
             });
         }
     }
 
     [
-        render_attention_lane("Stale carryover", carry_rows),
-        render_attention_lane("Aging backlog", backlog_rows),
-        render_attention_lane("Orphaned captures", capture_rows),
-        render_attention_lane_capped("Stale distilled knowledge", distill_rows, DISTILL_LANE_CAP),
+        render_triage_lane("BLOCKING", &blocking_rows, CARRYOVER_LANE_CAP),
+        render_triage_lane("HOT", &hot_rows, CARRYOVER_LANE_CAP),
+        render_triage_lane("AGING", &aging_rows, CARRYOVER_LANE_CAP),
+        render_triage_lane("STANDING", &standing_rows, CARRYOVER_LANE_CAP),
+        render_attention_lane("Aging backlog", backlog_rows, |r| {
+            format!("{} ({}) — {}", r.slug, r.kind, r.title_or_text)
+        }),
+        render_attention_lane("Orphaned captures", capture_rows, |r| {
+            format!("{} — {}", r.slug, r.title_or_text)
+        }),
+        render_attention_lane_capped(
+            "Stale distilled knowledge",
+            distill_rows,
+            DISTILL_LANE_CAP,
+            |r| format!("{} — {}", r.kind, r.title_or_text),
+        ),
     ]
     .join("\n\n")
 }
@@ -2656,8 +2879,16 @@ pub fn plan_epic_sequences(
 /// So `/prime`, `/session-recap`, and `/attention` run inside a tier show that
 /// tier's stale items, while HQ shows the whole corpus. Missing `status.md`, or
 /// one lacking the sentinels, yields a `W_EMIT_NO_SENTINEL` warning and no write.
+///
+/// `graph` drives the block-side [`effective_priorities`] pass
+/// (`MV.ticket.carryover-triage-ranking`, task 2/3) — its output is the
+/// `block_priorities` map every board's carryover union is ranked against
+/// via [`render_attention_section_with_distilled`]/[`rank_carryover`]; a
+/// carryover's own priority never changes any block's effective priority
+/// (that pass treats block targets as terminal).
 pub fn plan_attention_board(
     files: &[(StateSource, StateFile)],
+    graph: &StateGraph,
     config: &BrainConfig,
     today: chrono::NaiveDate,
 ) -> EmitPlan {
@@ -2669,6 +2900,11 @@ pub fn plan_attention_board(
         .find(|(_, f)| f.kind == "brain" && matches!(tier_scope_for(f, config), TierScope::All))
         .map(|(_, f)| f.backlog.as_slice())
         .unwrap_or(&[]);
+
+    // Shared across every tier/HQ board this function emits — `rank_carryover`
+    // never recomputes either map itself.
+    let block_priorities = effective_priorities(graph, files);
+    let block_status = global_status_map(files);
 
     // Read each repo's sibling `knowledge.md` / `memory.md` at most once, cached by
     // `repo_slug` — the loop below is already O(files²) over the carryover union, and this
@@ -2769,6 +3005,8 @@ pub fn plan_attention_board(
             &distilled,
             today,
             &config.attention,
+            &block_priorities,
+            &block_status,
         );
 
         match splice_generated(&original, markers::ATTENTION, &board) {

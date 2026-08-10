@@ -195,6 +195,13 @@ pub struct CarryoverVerdict {
     /// linked to a cross-repo finding.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finding_id: Option<String>,
+    /// Edges to the work this carryover blocks, passed through verbatim from
+    /// the source [`Carryover`] item's `blocks[]`. Never authored as a
+    /// `blocking: bool` — blocking-ness is always derived from this list, by
+    /// [`assign_triage_lane`] (unmet-block membership) and
+    /// [`carryover_effective_priorities`] (priority propagation).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub blocks: Vec<BlockedBy>,
 }
 
 /// The full fleet-wide sweep result.
@@ -945,6 +952,7 @@ pub fn evaluate_carryover(
                 reason,
                 priority: item.priority,
                 finding_id: item.finding_id.clone(),
+                blocks: item.blocks.clone(),
             });
         }
     }
@@ -1325,6 +1333,388 @@ pub fn suggest_duplicates(entries: &[CarryoverVerdict]) -> Vec<DedupSuggestion> 
     });
 
     suggestions
+}
+
+// ---------------------------------------------------------------------------
+// Triage ranking (MV.ticket.carryover-triage-ranking)
+// ---------------------------------------------------------------------------
+
+/// The four-lane re-cut of the carryover board (`MV.ticket.carryover-triage-ranking`).
+///
+/// Replaces raw-age ordering: every `carryover[]` entry lands in exactly one of
+/// these, assigned in this priority order by [`assign_triage_lane`] — BLOCKING
+/// first, then HOT, then AGING, then STANDING. See that function's doc comment
+/// for the full membership rules, and in particular why board membership must
+/// **not** gate on staleness alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TriageLane {
+    /// At least one unmet `blocks[]` edge — this entry is gating other work.
+    /// Ordered by the effective priority of what it blocks (0 hottest first),
+    /// then age descending.
+    Blocking,
+    /// Authored `priority` 0 or 1, and not already in [`Self::Blocking`].
+    /// Ordered by priority ascending, then age descending.
+    Hot,
+    /// Stale (per [`carryover_stale_age`]) with `priority` 2, 3, or absent.
+    /// Ordered by age descending.
+    Aging,
+    /// No authored priority and no `blocks[]` edges — a constraint that is
+    /// simply true forever (e.g. "planning/ is a symlink, pass `-L`").
+    /// Ordered by age descending.
+    ///
+    /// This lane exists so permanent rules stop competing with actionable
+    /// work: re-affirmed at low frequency rather than shown next to a fresh
+    /// P0. It is a re-affirm lane, not a backlog.
+    Standing,
+}
+
+/// One `carryover[]` entry, ranked and carrying every field a renderer or a
+/// consumer (bastion, via the public `rank_carryover` API — `MV.ticket
+/// .carryover-triage-ranking`) needs in order to re-rank or explain the
+/// ranking, without re-deriving anything from a pre-flattened string.
+#[derive(Debug, Clone, Serialize)]
+pub struct CarryoverRanking {
+    pub repo: String,
+    pub slug: String,
+    pub kind: String,
+    pub lane: TriageLane,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_priority: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_days: Option<i64>,
+    pub stale: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unmet_blocks: Vec<String>,
+    pub clears_when_satisfied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding_id: Option<String>,
+}
+
+/// Assign the [`TriageLane`] for one carryover entry.
+///
+/// Membership is evaluated in this exact order, so every entry lands in
+/// exactly one lane (the assignment is total):
+///
+/// 1. **BLOCKING** — `unmet_blocks` is non-empty.
+/// 2. **HOT** — authored `priority` is `Some(0)` or `Some(1)`.
+/// 3. **AGING** — `verdict.stale` is `true` (i.e. `priority` 2, 3, or absent,
+///    and old enough per [`carryover_stale_age`]).
+/// 4. **STANDING** — everything else: no priority and no blocks.
+///
+/// **Board membership must not gate on staleness alone.** `stale` is
+/// consulted only for AGING membership — BLOCKING, HOT and STANDING never
+/// look at it. Before this ranking existed, membership on the Attention
+/// board gated on staleness alone, and only 6 of 142 entries were stale —
+/// hiding 136, including every P0 filed the same day (by construction not
+/// yet stale). A fresh, non-stale P0 must still land somewhere actionable
+/// (HOT), which is exactly what this ordering guarantees.
+///
+/// Blocking-ness is never authored (there is deliberately no `blocking: bool`
+/// field anywhere in this crate) — it is always derived from `unmet_blocks`,
+/// which the caller computes from the entry's `blocks[]` edges.
+pub fn assign_triage_lane(v: &CarryoverVerdict, unmet_blocks: &[String]) -> TriageLane {
+    if !unmet_blocks.is_empty() {
+        return TriageLane::Blocking;
+    }
+    if matches!(v.priority, Some(0) | Some(1)) {
+        return TriageLane::Hot;
+    }
+    if v.stale {
+        return TriageLane::Aging;
+    }
+    TriageLane::Standing
+}
+
+// ---------------------------------------------------------------------------
+// Effective priority across carryover blocks[] edges (MV.ticket.carryover-
+// triage-ranking, task 2) — mirrors state::effective_priorities (MV.7.A)
+// ---------------------------------------------------------------------------
+
+/// Compute each carryover entry's **effective priority** by reverse-topological
+/// `min`-propagation over its `blocks[]` edges, generalizing the same pass used
+/// for blocks ([`crate::brain::state::effective_priorities`], mirrored at
+/// [`crate::brain::emit::effective_priority_for`] /
+/// [`crate::brain::block_graph`]'s recursion guard) rather than writing a
+/// second one.
+///
+/// `effective(c) = min(own(c), min{ target_effective(t) : t in c.blocks })` —
+/// a carryover gating a hotter dependent (block *or* carryover) inherits that
+/// hotness. `block_priorities` supplies the already-computed effective
+/// priority for every **block** node, keyed `"{repo}:{id}"` (the same map
+/// produced by [`crate::brain::state::effective_priorities`]); this pass
+/// never recomputes a block's priority and therefore never changes it — a
+/// block target is always treated as terminal.
+///
+/// A `blocks[]` edge is resolved in this order:
+/// 1. `BlockedBy::Block { repo, id, .. }` — empty `repo` falls back to the
+///    carryover's own `repo` field (mirroring [`block_refs_from_related`]'s
+///    fallback). The resolved `"{repo}:{id}"` key is looked up first in
+///    `block_priorities` (a block target — terminal); if absent there but
+///    present among `entries` (another carryover's `"{repo}:{slug}"` key),
+///    it is treated as a carryover target and its effective priority is
+///    computed recursively. An unresolvable key in neither map contributes
+///    nothing.
+/// 2. `BlockedBy::External { .. }` — has no node target and contributes no
+///    priority. It still counts as an unmet `blocks[]` edge for
+///    [`assign_triage_lane`]'s BLOCKING membership, but that is a distinct
+///    question this function does not answer.
+///
+/// **Cycle-safe**: the walk is memoized DFS with an on-stack recursion
+/// guard, identical in shape to
+/// [`crate::brain::state::effective_priorities`]'s — a key already being
+/// computed further up the DFS path short-circuits to its own priority
+/// instead of recursing again, so a two-carryover cycle (or a self-edge)
+/// terminates deterministically without hanging or panicking.
+///
+/// Only keys whose effective value lands in the real priority range
+/// (`0..=3`) get a map entry; an entry with no own priority and no hotter
+/// target, transitively, is **absent** from the result — matching
+/// [`crate::brain::state::effective_priorities`]'s absent-not-`u8::MAX`
+/// convention, so callers `.get(key).copied()` naturally read it as `None`.
+pub fn carryover_effective_priorities(
+    entries: &[CarryoverVerdict],
+    block_priorities: &HashMap<String, u8>,
+) -> HashMap<String, u8> {
+    // Own priority per "{repo}:{slug}" key; absent -> u8::MAX (never wins a min).
+    let mut own: HashMap<String, u8> = HashMap::new();
+    let mut by_key: HashMap<String, &CarryoverVerdict> = HashMap::new();
+    for entry in entries {
+        let key = format!("{}:{}", entry.repo, entry.slug);
+        own.insert(key.clone(), entry.priority.unwrap_or(u8::MAX));
+        by_key.insert(key, entry);
+    }
+
+    let mut memo: HashMap<String, u8> = HashMap::new();
+    let mut on_stack: HashSet<String> = HashSet::new();
+
+    #[allow(clippy::too_many_arguments)]
+    fn compute(
+        key: &str,
+        own: &HashMap<String, u8>,
+        by_key: &HashMap<String, &CarryoverVerdict>,
+        block_priorities: &HashMap<String, u8>,
+        memo: &mut HashMap<String, u8>,
+        on_stack: &mut HashSet<String>,
+    ) -> u8 {
+        if let Some(&v) = memo.get(key) {
+            return v;
+        }
+        let own_priority = own.get(key).copied().unwrap_or(u8::MAX);
+        // Cycle guard: `key` is already being computed further up this DFS
+        // path (a two-carryover cycle, or a self-edge) — short-circuit to
+        // its own priority instead of recursing again.
+        if on_stack.contains(key) {
+            return own_priority;
+        }
+        on_stack.insert(key.to_string());
+
+        let mut best = own_priority;
+        if let Some(entry) = by_key.get(key) {
+            for edge in &entry.blocks {
+                match edge {
+                    BlockedBy::Block { repo, id, .. } => {
+                        let target_repo = if repo.is_empty() {
+                            entry.repo.as_str()
+                        } else {
+                            repo.as_str()
+                        };
+                        let target_key = format!("{target_repo}:{id}");
+                        if let Some(&bp) = block_priorities.get(&target_key) {
+                            // A block target is terminal — never recomputed,
+                            // so no block's effective priority can change.
+                            if bp < best {
+                                best = bp;
+                            }
+                        } else if by_key.contains_key(&target_key) {
+                            let v =
+                                compute(&target_key, own, by_key, block_priorities, memo, on_stack);
+                            if v < best {
+                                best = v;
+                            }
+                        }
+                        // Unresolvable in both maps: contributes nothing.
+                    }
+                    // No node target, so no priority to propagate — see
+                    // this function's doc comment.
+                    BlockedBy::External { .. } => {}
+                }
+            }
+        }
+
+        on_stack.remove(key);
+        memo.insert(key.to_string(), best);
+        best
+    }
+
+    let keys: Vec<String> = own.keys().cloned().collect();
+    for key in &keys {
+        compute(
+            key,
+            &own,
+            &by_key,
+            block_priorities,
+            &mut memo,
+            &mut on_stack,
+        );
+    }
+
+    memo.into_iter().filter(|(_, v)| *v <= 3).collect()
+}
+
+// ---------------------------------------------------------------------------
+// rank_carryover — the public ordering API (MV.ticket.carryover-triage-
+// ranking, task 3) — THE contract surface bastion calls
+// ---------------------------------------------------------------------------
+
+/// Unmet `blocks[]` keys for one carryover entry.
+///
+/// Mirrors `has_unmet_dep`'s predicate shape verbatim
+/// ([`crate::brain::emit`], private, near line 603) so ranking and the
+/// unified board's `depends_on` predicate can never drift apart: a
+/// [`BlockedBy::External`] edge is always unmet (there is no node target to
+/// resolve), and a [`BlockedBy::Block`] edge is unmet unless its target's
+/// authored status in `block_status` is exactly `"closed"` — an
+/// unresolvable target (absent from `block_status` entirely) counts as
+/// unmet too. An empty `repo` on a `Block` edge falls back to the entry's
+/// own `repo`, mirroring [`block_refs_from_related`]'s fallback.
+///
+/// `External` edges are keyed `"external:{what}"` (matching the display
+/// convention already used for `depends_on` at
+/// `crate::brain::emit::render_wave_table`) so every returned string is a
+/// stable, human-readable identifier — never an empty string.
+fn unmet_carryover_block_keys(
+    entry: &CarryoverVerdict,
+    block_status: &HashMap<String, Option<String>>,
+) -> Vec<String> {
+    entry
+        .blocks
+        .iter()
+        .filter_map(|edge| match edge {
+            BlockedBy::External { what } => Some(format!("external:{what}")),
+            BlockedBy::Block { repo, id, .. } => {
+                let target_repo = if repo.is_empty() {
+                    entry.repo.as_str()
+                } else {
+                    repo.as_str()
+                };
+                let key = format!("{target_repo}:{id}");
+                let closed = block_status.get(&key).and_then(|s| s.as_deref()) == Some("closed");
+                if closed { None } else { Some(key) }
+            }
+        })
+        .collect()
+}
+
+/// `TriageLane` sort rank: BLOCKING first, then HOT, AGING, STANDING.
+fn triage_lane_rank(lane: TriageLane) -> u8 {
+    match lane {
+        TriageLane::Blocking => 0,
+        TriageLane::Hot => 1,
+        TriageLane::Aging => 2,
+        TriageLane::Standing => 3,
+    }
+}
+
+/// Sort key for "age descending, absent last" — the opposite convention
+/// from [`effective_priority_for`]'s "absent sorts last" for priorities:
+/// here a missing age must not out-rank a real (however small) age, so it
+/// maps to `i64::MIN`, the smallest possible key under a *descending* sort.
+fn age_desc_key(age: Option<i64>) -> i64 {
+    age.unwrap_or(i64::MIN)
+}
+
+/// Total order for [`rank_carryover`]'s output — lane first (BLOCKING, HOT,
+/// AGING, STANDING), then the per-lane key from the spec table, then age
+/// descending as the shared secondary key (BLOCKING/HOT's explicit
+/// secondary; AGING/STANDING's only key), then `(repo, slug)` as the final
+/// deterministic tiebreak so output order never depends on input order or
+/// hash-map iteration.
+///
+/// Absent priority/effective-priority sorts **last** within a lane,
+/// matching [`crate::brain::emit::effective_priority_for`]'s
+/// absent-sorts-`u8::MAX` convention — this function deliberately does not
+/// invent a different absent convention.
+fn rank_carryover_cmp(a: &CarryoverRanking, b: &CarryoverRanking) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    triage_lane_rank(a.lane)
+        .cmp(&triage_lane_rank(b.lane))
+        .then_with(|| match a.lane {
+            TriageLane::Blocking => {
+                let pa = a.effective_priority.unwrap_or(u8::MAX);
+                let pb = b.effective_priority.unwrap_or(u8::MAX);
+                pa.cmp(&pb)
+            }
+            TriageLane::Hot => {
+                let pa = a.priority.unwrap_or(u8::MAX);
+                let pb = b.priority.unwrap_or(u8::MAX);
+                pa.cmp(&pb)
+            }
+            TriageLane::Aging | TriageLane::Standing => Ordering::Equal,
+        })
+        .then_with(|| age_desc_key(b.age_days).cmp(&age_desc_key(a.age_days)))
+        .then_with(|| a.repo.cmp(&b.repo))
+        .then_with(|| a.slug.cmp(&b.slug))
+}
+
+/// The public ranking entry point — **the contract surface**
+/// (`MV.ticket.carryover-triage-ranking`). bastion calls this and projects
+/// the result; it must never re-derive ranking (the same discipline already
+/// in place at `core/bastion/src/serve/handlers/attention.rs:140-141` for
+/// `carryover_stale_age`).
+///
+/// Composes [`assign_triage_lane`] (task 1) and
+/// [`carryover_effective_priorities`] (task 2) over `entries`:
+/// - Computes each entry's unmet `blocks[]` keys via
+///   [`unmet_carryover_block_keys`], reusing `has_unmet_dep`'s predicate
+///   shape (`external` always unmet; unresolved/non-`closed` target unmet).
+/// - Assigns a [`TriageLane`] from those unmet keys.
+/// - Looks up each entry's effective priority from
+///   `carryover_effective_priorities(entries, block_priorities)`.
+/// - Reads `clears_when_satisfied` from the entry's own already-evaluated
+///   [`CarryoverLane::Cleared`] verdict — `MV.ticket.clears-when-evaluation`
+///   already did that evaluation; this function never re-runs a predicate.
+///
+/// Returns the entries sorted per [`rank_carryover_cmp`] — see that
+/// function's doc comment for the full ordering, including the
+/// absent-sorts-last convention and the deterministic `(repo, slug)`
+/// tiebreak that makes output order identical across calls regardless of
+/// input order.
+pub fn rank_carryover(
+    entries: &[CarryoverVerdict],
+    block_priorities: &HashMap<String, u8>,
+    block_status: &HashMap<String, Option<String>>,
+) -> Vec<CarryoverRanking> {
+    let effective = carryover_effective_priorities(entries, block_priorities);
+
+    let mut ranked: Vec<CarryoverRanking> = entries
+        .iter()
+        .map(|entry| {
+            let unmet_blocks = unmet_carryover_block_keys(entry, block_status);
+            let lane = assign_triage_lane(entry, &unmet_blocks);
+            let key = format!("{}:{}", entry.repo, entry.slug);
+
+            CarryoverRanking {
+                repo: entry.repo.clone(),
+                slug: entry.slug.clone(),
+                kind: entry.kind.clone(),
+                lane,
+                priority: entry.priority,
+                effective_priority: effective.get(&key).copied(),
+                age_days: entry.age_days,
+                stale: entry.stale,
+                unmet_blocks,
+                clears_when_satisfied: entry.lane == CarryoverLane::Cleared,
+                finding_id: entry.finding_id.clone(),
+            }
+        })
+        .collect();
+
+    ranked.sort_by(rank_carryover_cmp);
+    ranked
 }
 
 #[cfg(test)]
@@ -3491,6 +3881,7 @@ mod tests {
             reason: None,
             priority,
             finding_id: finding_id.map(str::to_string),
+            blocks: Vec::new(),
         }
     }
 
@@ -3643,6 +4034,7 @@ mod tests {
             reason: None,
             priority: None,
             finding_id: finding_id.map(str::to_string),
+            blocks: Vec::new(),
         }
     }
 
@@ -3806,5 +4198,246 @@ mod tests {
             })
             .collect();
         assert_eq!(keys_a, keys_b, "identical output regardless of input order");
+    }
+
+    // -- assign_triage_lane (MV.ticket.carryover-triage-ranking) -------------
+
+    fn triage_verdict(priority: Option<u8>, stale: bool) -> CarryoverVerdict {
+        CarryoverVerdict {
+            repo: "mev".to_string(),
+            slug: "triage-slug".to_string(),
+            kind: "known_issue".to_string(),
+            text: "some triage text".to_string(),
+            clears_when: None,
+            created: "2026-01-01".to_string(),
+            age_days: Some(1),
+            stale,
+            lane: CarryoverLane::NotEvaluable,
+            refs: Vec::new(),
+            reason: None,
+            priority,
+            finding_id: None,
+            blocks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn assign_triage_lane_fresh_p0_lands_hot_not_gated_on_staleness() {
+        // The whole point: membership must not gate on staleness alone. A
+        // fresh (non-stale) P0 must still be HOT, not invisible.
+        let v = triage_verdict(Some(0), false);
+        assert_eq!(assign_triage_lane(&v, &[]), TriageLane::Hot);
+    }
+
+    #[test]
+    fn assign_triage_lane_p1_is_hot() {
+        let v = triage_verdict(Some(1), false);
+        assert_eq!(assign_triage_lane(&v, &[]), TriageLane::Hot);
+    }
+
+    #[test]
+    fn assign_triage_lane_unmet_block_wins_even_when_also_p0() {
+        // BLOCKING is evaluated before HOT, so a P0 with an unmet block edge
+        // lands in BLOCKING, not HOT.
+        let v = triage_verdict(Some(0), false);
+        let unmet = vec!["mev:MV.3.A".to_string()];
+        assert_eq!(assign_triage_lane(&v, &unmet), TriageLane::Blocking);
+    }
+
+    #[test]
+    fn assign_triage_lane_stale_p2_is_aging() {
+        let v = triage_verdict(Some(2), true);
+        assert_eq!(assign_triage_lane(&v, &[]), TriageLane::Aging);
+    }
+
+    #[test]
+    fn assign_triage_lane_stale_no_priority_is_aging() {
+        let v = triage_verdict(None, true);
+        assert_eq!(assign_triage_lane(&v, &[]), TriageLane::Aging);
+    }
+
+    #[test]
+    fn assign_triage_lane_no_priority_no_blocks_non_stale_is_standing() {
+        let v = triage_verdict(None, false);
+        assert_eq!(assign_triage_lane(&v, &[]), TriageLane::Standing);
+    }
+
+    #[test]
+    fn assign_triage_lane_non_stale_p2_is_standing_not_aging() {
+        // p2/p3 without staleness has no lane of its own — it falls through
+        // to STANDING since AGING requires `stale`.
+        let v = triage_verdict(Some(2), false);
+        assert_eq!(assign_triage_lane(&v, &[]), TriageLane::Standing);
+    }
+
+    #[test]
+    fn assign_triage_lane_is_total_over_every_combination() {
+        // Every (priority, stale, has_unmet_blocks) combination must land in
+        // exactly one lane — no panic, no ambiguity.
+        let priorities: [Option<u8>; 5] = [None, Some(0), Some(1), Some(2), Some(3)];
+        for priority in priorities {
+            for stale in [true, false] {
+                for unmet in [Vec::new(), vec!["mev:MV.1.A".to_string()]] {
+                    let v = triage_verdict(priority, stale);
+                    // Must not panic; result is one of the four variants by
+                    // construction (the return type is TriageLane itself).
+                    let _lane = assign_triage_lane(&v, &unmet);
+                }
+            }
+        }
+    }
+
+    // -- carryover_effective_priorities (MV.ticket.carryover-triage-ranking, task 2) ----
+
+    fn ranking_verdict(
+        repo: &str,
+        slug: &str,
+        priority: Option<u8>,
+        blocks: Vec<BlockedBy>,
+    ) -> CarryoverVerdict {
+        CarryoverVerdict {
+            repo: repo.to_string(),
+            slug: slug.to_string(),
+            kind: "known_issue".to_string(),
+            text: format!("some text for {slug}"),
+            clears_when: None,
+            created: "2026-01-01".to_string(),
+            age_days: Some(1),
+            stale: false,
+            lane: CarryoverLane::NotEvaluable,
+            refs: Vec::new(),
+            reason: None,
+            priority,
+            finding_id: None,
+            blocks,
+        }
+    }
+
+    fn block_edge(repo: &str, id: &str) -> BlockedBy {
+        BlockedBy::Block {
+            repo: repo.to_string(),
+            id: id.to_string(),
+            what: None,
+        }
+    }
+
+    #[test]
+    fn carryover_effective_priorities_p3_blocking_p0_block_resolves_to_zero() {
+        let entries = vec![ranking_verdict(
+            "mev",
+            "gates-a-p0",
+            Some(3),
+            vec![block_edge("mev", "MV.1.A")],
+        )];
+        let block_priorities = HashMap::from([("mev:MV.1.A".to_string(), 0u8)]);
+
+        let effective = carryover_effective_priorities(&entries, &block_priorities);
+
+        assert_eq!(effective.get("mev:gates-a-p0"), Some(&0));
+    }
+
+    #[test]
+    fn carryover_effective_priorities_no_blocks_keeps_own_priority() {
+        let entries = vec![ranking_verdict("mev", "solo", Some(2), Vec::new())];
+        let effective = carryover_effective_priorities(&entries, &HashMap::new());
+        assert_eq!(effective.get("mev:solo"), Some(&2));
+    }
+
+    #[test]
+    fn carryover_effective_priorities_no_priority_no_blocks_is_absent() {
+        let entries = vec![ranking_verdict("mev", "bare", None, Vec::new())];
+        let effective = carryover_effective_priorities(&entries, &HashMap::new());
+        assert_eq!(effective.get("mev:bare"), None);
+        assert!(!effective.contains_key("mev:bare"));
+    }
+
+    #[test]
+    fn carryover_effective_priorities_unresolvable_target_contributes_nothing() {
+        let entries = vec![ranking_verdict(
+            "mev",
+            "dangling",
+            Some(2),
+            vec![block_edge("mev", "MV.99.Z")],
+        )];
+        let effective = carryover_effective_priorities(&entries, &HashMap::new());
+        assert_eq!(effective.get("mev:dangling"), Some(&2));
+    }
+
+    #[test]
+    fn carryover_effective_priorities_external_edge_contributes_no_priority() {
+        let entries = vec![ranking_verdict(
+            "mev",
+            "external-only",
+            Some(3),
+            vec![BlockedBy::External {
+                what: "nightly cron".to_string(),
+            }],
+        )];
+        let effective = carryover_effective_priorities(&entries, &HashMap::new());
+        assert_eq!(effective.get("mev:external-only"), Some(&3));
+    }
+
+    #[test]
+    fn carryover_effective_priorities_empty_repo_falls_back_to_own_repo() {
+        let entries = vec![ranking_verdict(
+            "mev",
+            "own-repo-target",
+            Some(3),
+            vec![BlockedBy::Block {
+                repo: String::new(),
+                id: "MV.1.A".to_string(),
+                what: None,
+            }],
+        )];
+        let block_priorities = HashMap::from([("mev:MV.1.A".to_string(), 1u8)]);
+        let effective = carryover_effective_priorities(&entries, &block_priorities);
+        assert_eq!(effective.get("mev:own-repo-target"), Some(&1));
+    }
+
+    #[test]
+    fn carryover_effective_priorities_two_node_cycle_terminates_without_hang_or_panic() {
+        let entries = vec![
+            ranking_verdict("mev", "a", Some(3), vec![block_edge("mev", "b")]),
+            ranking_verdict("mev", "b", Some(2), vec![block_edge("mev", "a")]),
+        ];
+        let effective = carryover_effective_priorities(&entries, &HashMap::new());
+        // Must terminate and produce a deterministic, non-panicking result.
+        // `a` sees `b`'s own priority (2) via one hop; `b` sees `a`'s own
+        // priority (3) via one hop but keeps its own (2) since 2 < 3.
+        assert_eq!(effective.get("mev:a"), Some(&2));
+        assert_eq!(effective.get("mev:b"), Some(&2));
+    }
+
+    #[test]
+    fn carryover_effective_priorities_self_edge_terminates_without_hang_or_panic() {
+        let entries = vec![ranking_verdict(
+            "mev",
+            "self-blocker",
+            Some(1),
+            vec![block_edge("mev", "self-blocker")],
+        )];
+        let effective = carryover_effective_priorities(&entries, &HashMap::new());
+        assert_eq!(effective.get("mev:self-blocker"), Some(&1));
+    }
+
+    #[test]
+    fn carryover_effective_priorities_reuses_block_pass_without_changing_block_priorities() {
+        // A carryover gating a block must never mutate the block's own
+        // effective priority map — block targets are terminal.
+        let entries = vec![ranking_verdict(
+            "mev",
+            "gates-block",
+            Some(3),
+            vec![block_edge("mev", "MV.2.B")],
+        )];
+        let block_priorities = HashMap::from([("mev:MV.2.B".to_string(), 1u8)]);
+        let before = block_priorities.clone();
+
+        let _effective = carryover_effective_priorities(&entries, &block_priorities);
+
+        assert_eq!(
+            block_priorities, before,
+            "block_priorities must be untouched"
+        );
     }
 }

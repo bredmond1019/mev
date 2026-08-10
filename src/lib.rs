@@ -18,8 +18,9 @@ pub use brain::block_graph::{
     BlockLane, build_block_graph_export,
 };
 pub use brain::carryover::{
-    CarryoverLane, CarryoverRef, CarryoverReport, CarryoverVerdict, ClusterMember, DedupSuggestion,
-    FindingCluster, NotEvaluableReason, evaluate_carryover,
+    CarryoverLane, CarryoverRanking, CarryoverRef, CarryoverReport, CarryoverVerdict,
+    ClusterMember, DedupSuggestion, FindingCluster, NotEvaluableReason, TriageLane,
+    evaluate_carryover, rank_carryover,
 };
 pub use brain::conformance::{
     CheckOutcome, CheckResult, CheckStatus, ConformanceCheck, ConformanceCtx, ConformanceReport,
@@ -1027,8 +1028,11 @@ pub fn emit_state(
     );
     let unified_board_diags = apply_plan(&unified_board_plan, write);
 
-    let attention_plan =
-        filter_plan_by_scope(plan_attention_board(&loaded, &config, today), root, scope);
+    let attention_plan = filter_plan_by_scope(
+        plan_attention_board(&loaded, &graph, &config, today),
+        root,
+        scope,
+    );
     let attention_diags = apply_plan(&attention_plan, write);
 
     let brain_caches_plan = filter_plan_by_scope(

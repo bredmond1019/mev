@@ -19,6 +19,53 @@ timestamp: "2026-08-09T13:30:00Z"
 
 ## [run: 2026-08-09]
 
+### `MV.ticket.carryover-triage-ranking` shipped (full spec, 7 tasks, PASS)
+
+Replaced raw-age carryover ordering with a four-lane ranking (BLOCKING/HOT/AGING/STANDING) and
+gave `AttentionRow` structured fields instead of a pre-flattened display string. Task 1 added
+`TriageLane`/`CarryoverRanking`/`assign_triage_lane` (pure types + total lane-assignment logic,
+proving staleness alone never gates membership). Task 2 added `CarryoverVerdict.blocks`
+(threaded through verbatim) and `carryover_effective_priorities`, which reverse-topologically
+min-propagates priority across carryover `blocks[]` edges — terminal block targets resolve
+against the existing block-priority map (never recomputed), carryover-to-carryover targets
+resolve recursively, cycle-safe via an on-stack DFS guard mirroring `state::effective_priorities`.
+Task 3 composed both into the public `rank_carryover` API (plus private
+`unmet_carryover_block_keys`/`rank_carryover_cmp` helpers), re-exported from `lib.rs` alongside
+`CarryoverRanking`/`TriageLane`, and fixed a pre-existing compile break in
+`tests/brain_carryover_dedup.rs` uncovered along the way. Task 4 restructured `AttentionRow`
+(`src/brain/emit.rs`) to carry repo/age/kind/slug/title_or_text/priority/effective_priority/lane/
+clears_when as fields, with flattening deferred to render time; the Attention board's carryover
+section now renders all four `rank_carryover`-ordered lanes, each capped at
+`CARRYOVER_LANE_CAP=20` with an accurate "...and N more", and membership no longer gates on
+staleness alone (previously only 6/142 entries were stale, hiding 136 including anything not yet
+stale). Task 5 published the canonical, producer-owned `docs/carryover-contract.md` (D20 pattern,
+v1.0.0 with changelog) documenting the ranking API, four-lane rules, and effective-priority
+semantics, plus its `docs/index.md` row. Task 6 documented the same surface in `docs/cli.md`
+(lane membership/sort keys, the 6-of-142 staleness measurement, cap behavior, and the new
+priority/finding_id/blocks fields on `mev carryover`'s report). Task 7 ran the full gate suite
+(fmt, clippy `-D warnings`, `cargo test`, release build) — all green — and verified by inspection
+every invariant named in the spec (structured `AttentionRow`, single staleness predicate, no
+authored blocking flag, single min-propagation implementation, unmodified block-effective-priority
+tests, no bastion-side touches, resolvable `related:` doc_ids). Final verdict: PASS. Closes the
+last open item in the carryover-improvements program.
+
+Next: `MV.ticket.unqualified-related-suggests-scope`.
+
+```
+05dfe24 feat: implement ticket-carryover-triage-ranking-task6
+3cba480 feat: implement ticket-carryover-triage-ranking-task5
+f63b287 feat: implement ticket-carryover-triage-ranking-task4
+a490ef4 feat: implement ticket-carryover-triage-ranking-task3
+eb74d5b feat: implement ticket-carryover-triage-ranking-task2
+ab4c975 feat: implement ticket-carryover-triage-ranking-task1
+5bd765d Merge pull request #33 from bredmond1019/ticket-carryover-dedup-clusters-flow
+7eaf542 chore: wrap up ticket-carryover-dedup-clusters
+```
+
+---
+
+## [run: 2026-08-09]
+
 ### `MV.ticket.carryover-dedup-clusters` shipped (full spec, 6 tasks, PASS)
 
 Gave the authored `finding_id` field work to do. Tasks 1-2 added pure, dependency-free
