@@ -276,6 +276,79 @@ fn cross_scope_related_after_target_removed_is_dangling() {
 }
 
 // ---------------------------------------------------------------------------
+// 4c. Cross-scope unqualified related, dangling → suggestion names the qualified form
+// ---------------------------------------------------------------------------
+
+/// A `mev`-scope doc writes an UNQUALIFIED `related:` target whose bare `doc_id` is
+/// actually owned by a `brain`-scope node. Because the ref is unqualified, it resolves
+/// (per okf-core) into the referrer's own scope first — i.e. `mev:carryover-plan` — which
+/// is dangling. The message must name the real owner's qualified form, `brain:carryover-plan`.
+/// This is the crawl-path guard for ticket-unqualified-related-suggests-scope: the unit
+/// tests in task 1 hand-build `CorpusEntry` scopes directly and cannot prove the real
+/// directory-derived crawl produces the same suggestion.
+#[test]
+fn crawled_cross_scope_unqualified_related_dangling_suggests_qualified_form() {
+    let dir = temp_dir("crawl-unqualified-suggest");
+    write_brain_toml(&dir);
+
+    // brain-scope doc owning the doc_id the mev doc will reference unqualified.
+    write_file(
+        &dir,
+        "planning/carryover-plan.md",
+        &okf_with_doc_id("carryover-plan"),
+    );
+    // mev-scope doc: unqualified related target matching that doc_id, but from mev's
+    // own scope it is dangling (unqualified refs resolve into the referrer's scope).
+    write_file(
+        &dir,
+        "core/mev/docs/referrer.md",
+        &okf_with_doc_id_and_related("mev-referrer", &["carryover-plan"]),
+    );
+    // Second mev-scope doc: a bare ref that no scope owns — must stay unsuggested.
+    write_file(
+        &dir,
+        "core/mev/docs/unmatched.md",
+        &okf_with_doc_id_and_related("mev-unmatched", &["nothing-owns-this"]),
+    );
+
+    let report = mev::validate_brain_graph(&dir).expect("validate_brain_graph must not error");
+
+    let dangling: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == mev::Severity::Error && d.locator == "E_GRAPH_DANGLING_RELATED")
+        .collect();
+    assert_eq!(
+        dangling.len(),
+        2,
+        "expected exactly two dangling-related errors, got: {:#?}",
+        report.diagnostics
+    );
+
+    let suggested = dangling
+        .iter()
+        .find(|d| d.message.contains("carryover-plan"))
+        .unwrap_or_else(|| panic!("no dangling diagnostic named carryover-plan: {dangling:#?}"));
+    assert!(
+        suggested.message.contains("brain:carryover-plan"),
+        "unqualified dangling target must suggest the qualified owner: {:?}",
+        suggested.message
+    );
+
+    let unmatched = dangling
+        .iter()
+        .find(|d| d.message.contains("nothing-owns-this"))
+        .unwrap_or_else(|| panic!("no dangling diagnostic named nothing-owns-this: {dangling:#?}"));
+    assert!(
+        !unmatched.message.contains("did you mean") && !unmatched.message.contains("qualify explicitly"),
+        "a bare ref owned by no scope must not gain a suggestion: {:?}",
+        unmatched.message
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
 // 5. related: entry pointing at a leaf → exactly one W_GRAPH_LEAF_TARGET, 0 errors
 // ---------------------------------------------------------------------------
 
