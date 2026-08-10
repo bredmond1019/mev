@@ -411,3 +411,88 @@ fn carryover_sweep_clusters_shared_finding_id_across_repos_and_flags_single_repo
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// CLI-level: `mev carryover`'s human summary — `MV.ticket.carryover-dedup-clusters`
+// task 5. Drives the built binary directly (`CARGO_BIN_EXE_mev`), following the pattern
+// `tests/doc_cli.rs` uses, so the UNCONFIRMED heading (not just the note) is genuinely
+// exercised through the real print path rather than the library types alone.
+// ---------------------------------------------------------------------------
+
+/// Write two leaf repos whose entries carry no `finding_id` but overlap enough on
+/// `slug` + `text` tokens to clear `suggest_duplicates`'s accept rule.
+fn write_suggestion_fixture(root: &Path) {
+    write_brain_toml(root);
+    let alpha = serde_json::json!({
+        "repo": "alpha",
+        "kind": "project",
+        "updated": "2026-08-01",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "tracks": [],
+        "carryover": [
+            {
+                "slug": "wave0-tickets-ship-without-tasks-json",
+                "scope": { "repo": "alpha" },
+                "kind": "known_issue",
+                "text": "Wave 0 tickets ship without a tasks.json file, leaving the block spec incomplete.",
+                "created": "2026-06-01"
+            }
+        ]
+    });
+    write_json(root, "repos/alpha/planning/state.json", &alpha);
+    let beta = serde_json::json!({
+        "repo": "beta",
+        "kind": "project",
+        "updated": "2026-08-01",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "tracks": [],
+        "carryover": [
+            {
+                "slug": "ticket-specs-ship-without-tasks-json",
+                "scope": { "repo": "beta" },
+                "kind": "known_issue",
+                "text": "Ticket specs ship without a tasks.json file, leaving the block underspecified.",
+                "created": "2026-06-01"
+            }
+        ]
+    });
+    write_json(root, "repos/beta/planning/state.json", &beta);
+}
+
+#[test]
+fn cli_human_summary_labels_suggestions_unconfirmed() {
+    let dir = temp_dir("cli-suggest");
+    write_suggestion_fixture(&dir);
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mev"))
+        .arg("carryover")
+        .arg(&dir)
+        .output()
+        .expect("mev carryover should run");
+    assert!(
+        output.status.success(),
+        "mev carryover should exit 0 regardless of section contents, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("SUGGESTED DUPLICATES"),
+        "expected a SUGGESTED DUPLICATES section, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("UNCONFIRMED"),
+        "the UNCONFIRMED label must appear whenever suggestions are printed, got:\n{stdout}"
+    );
+    // The label must be on the heading line itself, not only in the trailing note.
+    let heading_line = stdout
+        .lines()
+        .find(|l| l.contains("SUGGESTED DUPLICATES"))
+        .expect("SUGGESTED DUPLICATES heading line should exist");
+    assert!(
+        heading_line.contains("UNCONFIRMED"),
+        "UNCONFIRMED must appear on the heading line itself, got: {heading_line}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
