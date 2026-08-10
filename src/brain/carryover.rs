@@ -1174,6 +1174,125 @@ pub fn cluster_by_finding_id(entries: &[CarryoverVerdict]) -> Vec<FindingCluster
         .collect()
 }
 
+// --- Dedup: heuristic suggestion pass over ungrouped entries ---
+//
+// `MV.ticket.carryover-dedup-clusters` task 3. This is the UNTRUSTED half of dedup:
+// a crude token-overlap pass over entries that carry no `finding_id` at all, offered
+// as candidate duplicates for a human to confirm. Contrast with `cluster_by_finding_id`
+// (task 2), which is exact and trusted because a human authored the `finding_id`.
+
+/// One candidate duplicate pair surfaced by [`suggest_duplicates`].
+///
+/// `a_repo`/`a_slug` and `b_repo`/`b_slug` are ordered by `(repo, slug)` so the same
+/// unordered pair always renders identically across runs — there is no "first" or
+/// "second" entry with any semantic meaning beyond that canonical ordering.
+#[derive(Debug, Clone, Serialize)]
+pub struct DedupSuggestion {
+    pub a_repo: String,
+    pub a_slug: String,
+    pub b_repo: String,
+    pub b_slug: String,
+    pub jaccard: f64,
+    pub overlap: f64,
+}
+
+/// Heuristic candidate-duplicate pass over every `carryover[]` entry that carries no
+/// `finding_id` yet.
+///
+/// # This is a suggestion, never a merge
+///
+/// Every pair returned here is **unconfirmed**. This function must never be trusted as
+/// ground truth: it does not, and must never, mutate `finding_id` on anything, take
+/// `&mut` to any entry, or write to any file — it is a pure read over borrowed
+/// [`CarryoverVerdict`] slices. A human confirms a suggestion by hand-authoring a
+/// shared `finding_id` into both entries' `state.json`; nothing in this module does
+/// that automatically. A false merge destroys durable knowledge the same way a false
+/// `cleared` verdict does — this module already biases in exactly that direction
+/// elsewhere (the conjunctive reference combination and the [`CLOSURE_VERBS`] gate,
+/// both added after a live false-`cleared` incident) and this pass follows the same
+/// discipline.
+///
+/// # Scope and rules
+///
+/// - Only entries whose `finding_id` is `None` or empty are considered. An authored
+///   `finding_id` is the human's answer for that entry; this pass never second-guesses
+///   it, so entries that already have one are excluded entirely (they were handled by
+///   [`cluster_by_finding_id`] instead).
+/// - Every unordered pair is considered at most once (same-repo pairs included — a
+///   duplicate filed twice in one repo is still a duplicate).
+/// - A pair is accepted when `jaccard >= DEDUP_JACCARD_MIN || overlap >= DEDUP_OVERLAP_MIN`.
+///   The `OR` is deliberate: the operator-measured recovery set needs both metrics —
+///   some real pairs clear only on Jaccard, others only on overlap coefficient.
+/// - Output is sorted by `overlap` descending, then `jaccard` descending, then by the
+///   canonical `(a_repo, a_slug, b_repo, b_slug)` tuple, so two runs over the same
+///   input always produce the same order. Float comparisons use `partial_cmp(..)
+///   .unwrap_or(Ordering::Equal)` — never a bare `unwrap()` — because a comparison
+///   would panic on `NaN`, which `jaccard`/`overlap_coefficient` never produce but a
+///   defensive comparator should not assume.
+pub fn suggest_duplicates(entries: &[CarryoverVerdict]) -> Vec<DedupSuggestion> {
+    let candidates: Vec<&CarryoverVerdict> = entries
+        .iter()
+        .filter(|entry| entry.finding_id.as_deref().unwrap_or("").is_empty())
+        .collect();
+
+    let mut suggestions = Vec::new();
+    for i in 0..candidates.len() {
+        for j in (i + 1)..candidates.len() {
+            let left = candidates[i];
+            let right = candidates[j];
+            let left_tokens = dedup_tokens(&left.slug, &left.text);
+            let right_tokens = dedup_tokens(&right.slug, &right.text);
+            let score_jaccard = jaccard(&left_tokens, &right_tokens);
+            let score_overlap = overlap_coefficient(&left_tokens, &right_tokens);
+            if score_jaccard < DEDUP_JACCARD_MIN && score_overlap < DEDUP_OVERLAP_MIN {
+                continue;
+            }
+            let (first, second) = if (left.repo.as_str(), left.slug.as_str())
+                <= (right.repo.as_str(), right.slug.as_str())
+            {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            suggestions.push(DedupSuggestion {
+                a_repo: first.repo.clone(),
+                a_slug: first.slug.clone(),
+                b_repo: second.repo.clone(),
+                b_slug: second.slug.clone(),
+                jaccard: score_jaccard,
+                overlap: score_overlap,
+            });
+        }
+    }
+
+    suggestions.sort_by(|a, b| {
+        b.overlap
+            .partial_cmp(&a.overlap)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.jaccard
+                    .partial_cmp(&a.jaccard)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                (
+                    a.a_repo.as_str(),
+                    a.a_slug.as_str(),
+                    a.b_repo.as_str(),
+                    a.b_slug.as_str(),
+                )
+                    .cmp(&(
+                        b.a_repo.as_str(),
+                        b.a_slug.as_str(),
+                        b.b_repo.as_str(),
+                        b.b_slug.as_str(),
+                    ))
+            })
+    });
+
+    suggestions
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3466,5 +3585,192 @@ mod tests {
             single_repo: true,
         };
         assert_eq!(cluster.finding_id, "id");
+    }
+
+    // -- suggest_duplicates ---------------------------------------------------
+
+    fn verdict_text(
+        repo: &str,
+        slug: &str,
+        text: &str,
+        finding_id: Option<&str>,
+    ) -> CarryoverVerdict {
+        CarryoverVerdict {
+            repo: repo.to_string(),
+            slug: slug.to_string(),
+            kind: "known_issue".to_string(),
+            text: text.to_string(),
+            clears_when: None,
+            created: "2026-01-01".to_string(),
+            age_days: None,
+            stale: false,
+            lane: CarryoverLane::NotEvaluable,
+            refs: Vec::new(),
+            reason: None,
+            priority: None,
+            finding_id: finding_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn suggest_duplicates_skips_entries_that_already_carry_a_finding_id() {
+        let entries = vec![
+            verdict_text(
+                "mev",
+                "already-linked-a",
+                "identical text tokens here for matching purposes",
+                Some("linked"),
+            ),
+            verdict_text(
+                "okf-core",
+                "already-linked-b",
+                "identical text tokens here for matching purposes",
+                Some("linked"),
+            ),
+        ];
+        let suggestions = suggest_duplicates(&entries);
+        assert!(
+            suggestions.is_empty(),
+            "entries with an authored finding_id must never be suggested, even if similar"
+        );
+    }
+
+    #[test]
+    fn suggest_duplicates_accepts_on_jaccard_or_overlap_and_orders_pair_canonically() {
+        let entries = vec![
+            verdict_text(
+                "zeta-repo",
+                "zzz-slug",
+                "shared overlapping duplicate token corpus words here",
+                None,
+            ),
+            verdict_text(
+                "alpha-repo",
+                "aaa-slug",
+                "shared overlapping duplicate token corpus words here",
+                None,
+            ),
+        ];
+        let suggestions = suggest_duplicates(&entries);
+        assert_eq!(suggestions.len(), 1);
+        let s = &suggestions[0];
+        // Canonical ordering by (repo, slug): "alpha-repo" sorts before "zeta-repo".
+        assert_eq!(s.a_repo, "alpha-repo");
+        assert_eq!(s.b_repo, "zeta-repo");
+        assert!(s.jaccard >= DEDUP_JACCARD_MIN || s.overlap >= DEDUP_OVERLAP_MIN);
+    }
+
+    #[test]
+    fn suggest_duplicates_emits_each_pair_at_most_once() {
+        let entries = vec![
+            verdict_text("a", "one", "shared overlapping duplicate token words", None),
+            verdict_text("b", "two", "shared overlapping duplicate token words", None),
+        ];
+        let suggestions = suggest_duplicates(&entries);
+        assert_eq!(suggestions.len(), 1, "one unordered pair, one suggestion");
+    }
+
+    #[test]
+    fn suggest_duplicates_allows_same_repo_pairs() {
+        let entries = vec![
+            verdict_text(
+                "mev",
+                "dup-one",
+                "shared overlapping duplicate token words",
+                None,
+            ),
+            verdict_text(
+                "mev",
+                "dup-two",
+                "shared overlapping duplicate token words",
+                None,
+            ),
+        ];
+        let suggestions = suggest_duplicates(&entries);
+        assert_eq!(
+            suggestions.len(),
+            1,
+            "a duplicate filed twice in one repo is still a duplicate"
+        );
+        assert_eq!(suggestions[0].a_repo, "mev");
+        assert_eq!(suggestions[0].b_repo, "mev");
+    }
+
+    #[test]
+    fn suggest_duplicates_rejects_pairs_below_both_thresholds() {
+        let entries = vec![
+            verdict_text(
+                "mev",
+                "unrelated-one",
+                "completely different topic entirely",
+                None,
+            ),
+            verdict_text(
+                "okf-core",
+                "unrelated-two",
+                "another distinct subject matter altogether",
+                None,
+            ),
+        ];
+        let suggestions = suggest_duplicates(&entries);
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn suggest_duplicates_output_is_deterministically_ordered() {
+        let entries = vec![
+            verdict_text(
+                "mev",
+                "pair-one-a",
+                "alpha bravo charlie delta echo foxtrot",
+                None,
+            ),
+            verdict_text(
+                "okf-core",
+                "pair-one-b",
+                "alpha bravo charlie delta echo foxtrot",
+                None,
+            ),
+            verdict_text(
+                "mev",
+                "pair-two-a",
+                "golf hotel india juliet kilo lima",
+                None,
+            ),
+            verdict_text(
+                "okf-core",
+                "pair-two-b",
+                "golf hotel india juliet kilo lima",
+                None,
+            ),
+        ];
+        let run_a = suggest_duplicates(&entries);
+        let mut shuffled = entries.clone();
+        shuffled.reverse();
+        let run_b = suggest_duplicates(&shuffled);
+
+        let keys_a: Vec<(String, String, String, String)> = run_a
+            .iter()
+            .map(|s| {
+                (
+                    s.a_repo.clone(),
+                    s.a_slug.clone(),
+                    s.b_repo.clone(),
+                    s.b_slug.clone(),
+                )
+            })
+            .collect();
+        let keys_b: Vec<(String, String, String, String)> = run_b
+            .iter()
+            .map(|s| {
+                (
+                    s.a_repo.clone(),
+                    s.a_slug.clone(),
+                    s.b_repo.clone(),
+                    s.b_slug.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(keys_a, keys_b, "identical output regardless of input order");
     }
 }
