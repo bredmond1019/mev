@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-10T08:15:00Z"
+timestamp: "2026-08-10T21:15:00Z"
 ---
 
 # Log — mev
@@ -18,6 +18,26 @@ timestamp: "2026-08-10T08:15:00Z"
 ---
 
 ## [run: 2026-08-10]
+
+### `evaluate_carryover_with_dedup` — skip the O(n²) dedup pass on the HTTP hot path
+
+`bastion serve`'s `/api/attention?scope=hq` was taking ~2.2s (vs ~0.02-0.1s for other scopes/
+endpoints), causing a visible ~1s "Rendering" stall on every tab/space switch in bastion-web's
+Command Center. Root cause: `evaluate_carryover()` unconditionally ran `suggest_duplicates()`
+(`src/brain/carryover.rs:988`, added by the `ticket-carryover-dedup-clusters` chain the day
+before) — an O(n²) pairwise scan over finding_id-less entries, re-tokenizing both sides of every
+pair with no memoization (145 such entries at HQ scope → ~10,440 pairs). `AttentionDto` in
+`bastion` never exposed a `clusters`/`suggestions` field, so the whole pass was pure waste on
+that path — confirmed by grepping all of `core/bastion` for `.suggestions`/`.clusters` (zero
+hits) and by timing (`mev carryover --json`: 2.24s, 99% CPU, matching the HTTP number).
+
+Fix: extracted the real body into `evaluate_carryover_with_dedup(..., include_dedup: bool)`;
+`evaluate_carryover()` is now a thin wrapper passing `true`, so all 37 existing call sites (tests
++ the `mev carryover` CLI, the pass's one real consumer) are behavior-unchanged. Added
+`evaluate_carryover_with_dedup_false_skips_clusters_and_suggestions`, which proves the fixture
+pair *would* trigger a suggestion with the flag on and confirms it's empty with the flag off. 98
+carryover tests pass. `bastion`'s `build_attention()` now calls the new function with
+`include_dedup: false`.
 
 ### carryover-improvements lane complete — 5 blocks, 28/28 tasks, all first-attempt
 

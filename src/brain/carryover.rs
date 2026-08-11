@@ -738,6 +738,41 @@ pub fn evaluate_carryover(
     repo_filter: Option<&str>,
     allow_exec: bool,
 ) -> CarryoverReport {
+    evaluate_carryover_with_dedup(
+        files,
+        status_map,
+        brain_root,
+        repo_paths,
+        today,
+        thresholds,
+        repo_filter,
+        allow_exec,
+        true,
+    )
+}
+
+/// Same as [`evaluate_carryover`], with the O(n²) `clusters`/`suggestions` dedup
+/// pass made explicit via `include_dedup`.
+///
+/// That pass (`cluster_by_finding_id` + `suggest_duplicates`) re-tokenizes every
+/// pair of `finding_id`-less entries — cheap at CLI scale, but ~2.2s at the
+/// HQ-scoped ~150-entry corpus `bastion serve`'s `/api/attention` sees on every
+/// request, none of which is read: `AttentionDto` has no `clusters`/`suggestions`
+/// field (`bastion-web-attention-perf`, 2026-08-10). Callers that only need
+/// `entries` (`build_attention` in `bastion`) should pass `false`; callers that
+/// print or serialize the report (`mev carryover`) should pass `true`.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_carryover_with_dedup(
+    files: &[(StateSource, StateFile)],
+    status_map: &HashMap<String, Option<String>>,
+    brain_root: &Path,
+    repo_paths: &HashMap<String, PathBuf>,
+    today: &str,
+    thresholds: &AttentionThresholds,
+    repo_filter: Option<&str>,
+    allow_exec: bool,
+    include_dedup: bool,
+) -> CarryoverReport {
     let known_keys: HashSet<String> = status_map.keys().cloned().collect();
     let today_date = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d").ok();
 
@@ -984,14 +1019,24 @@ pub fn evaluate_carryover(
     // purely on the already-built `entries` vector — no re-walk of `files`, no
     // filesystem access, no new discovery pass (`MV.ticket.carryover-dedup-
     // clusters` task 4's no-new-I/O constraint).
-    let clusters = cluster_by_finding_id(&entries);
-    let suggestions = suggest_duplicates(&entries);
-    let mut single_repo_finding_ids: Vec<String> = clusters
-        .iter()
-        .filter(|c| c.single_repo)
-        .map(|c| c.finding_id.clone())
-        .collect();
-    single_repo_finding_ids.sort();
+    //
+    // Gated behind `include_dedup`: `suggest_duplicates` is O(n²) over
+    // finding_id-less entries and costs ~2.2s at HQ scope, but its output is
+    // discarded by `bastion serve`'s `/api/attention` — see
+    // `evaluate_carryover_with_dedup`'s doc comment.
+    let (clusters, suggestions, single_repo_finding_ids) = if include_dedup {
+        let clusters = cluster_by_finding_id(&entries);
+        let suggestions = suggest_duplicates(&entries);
+        let mut single_repo_finding_ids: Vec<String> = clusters
+            .iter()
+            .filter(|c| c.single_repo)
+            .map(|c| c.finding_id.clone())
+            .collect();
+        single_repo_finding_ids.sort();
+        (clusters, suggestions, single_repo_finding_ids)
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
 
     CarryoverReport {
         total,
@@ -2626,6 +2671,100 @@ mod tests {
         );
         assert_eq!(report.total, 1);
         assert_eq!(report.entries[0].repo, "mev");
+    }
+
+    #[test]
+    fn evaluate_carryover_with_dedup_false_skips_clusters_and_suggestions() {
+        // Two entries with identical `text` (from `item()`'s fixed fixture text)
+        // and no `finding_id` — enough token overlap for `suggest_duplicates` to
+        // flag them when the dedup pass runs at all.
+        let files = vec![
+            (
+                src("mev"),
+                state_file(
+                    "mev",
+                    vec![],
+                    vec![item(
+                        "similar-entry-a",
+                        "env",
+                        None,
+                        vec![],
+                        "2020-01-01",
+                        None,
+                        None,
+                    )],
+                ),
+            ),
+            (
+                src("okf-core"),
+                state_file(
+                    "okf-core",
+                    vec![],
+                    vec![item(
+                        "similar-entry-b",
+                        "env",
+                        None,
+                        vec![],
+                        "2020-01-01",
+                        None,
+                        None,
+                    )],
+                ),
+            ),
+        ];
+        let status = status_map(&files);
+
+        let with_dedup = evaluate_carryover_with_dedup(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+            false,
+            true,
+        );
+        assert!(
+            !with_dedup.suggestions.is_empty(),
+            "sanity check: this fixture pair must actually trigger a suggestion \
+             when the dedup pass runs, or the negative case below proves nothing"
+        );
+
+        let without_dedup = evaluate_carryover_with_dedup(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+            false,
+            false,
+        );
+        assert!(
+            without_dedup.clusters.is_empty(),
+            "include_dedup: false must skip cluster_by_finding_id entirely"
+        );
+        assert!(
+            without_dedup.suggestions.is_empty(),
+            "include_dedup: false must skip suggest_duplicates entirely"
+        );
+        assert!(without_dedup.single_repo_finding_ids.is_empty());
+        // Everything else in the report is unaffected by the flag.
+        assert_eq!(without_dedup.total, with_dedup.total);
+        assert_eq!(
+            without_dedup
+                .entries
+                .iter()
+                .map(|e| e.slug.as_str())
+                .collect::<Vec<_>>(),
+            with_dedup
+                .entries
+                .iter()
+                .map(|e| e.slug.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
