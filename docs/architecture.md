@@ -37,12 +37,13 @@ src/
     ├── scope.rs    ← scope_units(), scope_for(), owning_unit() — registry-driven scope resolver
     ├── sync.rs     ← (internal) sync helpers
     ├── graph.rs    ← EdgeKind, Edge, Node, Graph, GraphArtifact, EdgeResolution, resolve_edge (re-exported from okf-core, BA.15.12/D16), DocMeta; build_graph(), check_graph() — Phase 3 Block J (read_doc_metadata removed by D5 extract-once refactor in Block Q)
-    ├── state.rs    ← serde schema, StateGraph, StateNode, StateEdge, StateSource, TierEntry, load_state(), build_state_graph() (re-exported from okf-core, BA.15.12/D15/D16); mev-local: discover_state_files(), check_schema(), check_state_graph(), check_rollup(), detect_cycles(), ready_order(), check_focus_drift(), derive_focus(), derive_rollup(), derive_cross_repo(), tier_scope_for(), derive_brain_focus(), check_epics(), derive_epic_focus(), derive_epic_edges() — Phase 3 Block P / P2 / T / MV.3B.U (v2: depends_on DAG, cycle detection, derived-blocked enforcement, backlog nodes, focus-drift warnings, single-source derivation helpers; MV.3B.U: tier-scoped non-destructive rollup + brain-focus union; epics: cross-repo initiative registry + membership integrity + derived cross-epic relationships)
+    ├── state.rs    ← serde schema, StateGraph, StateNode, StateEdge, StateSource, TierEntry, load_state(), build_state_graph() (re-exported from okf-core, BA.15.12/D15/D16); mev-local: discover_state_files(), check_schema(), check_state_graph(), check_rollup(), detect_cycles(), ready_order(), check_focus_drift(), derive_focus(), derive_rollup(), derive_cross_repo(), tier_scope_for(), derive_brain_focus(), check_epics(), derive_epic_focus(), derive_epic_edges(), is_terminal_block_status() (`closed`|`wontfix`, shared by ready_order/derive_focus/check_status_consistency), check_operator_staleness() (W_STATE_OPERATOR_STALE), is_well_formed_digest() (pub(crate), `<algorithm>:<hex>` shape check backing E_STATE_APPROVAL_DIGEST_SHAPE) — Phase 3 Block P / P2 / T / MV.3B.U (v2: depends_on DAG, cycle detection, derived-blocked enforcement, backlog nodes, focus-drift warnings, single-source derivation helpers; MV.3B.U: tier-scoped non-destructive rollup + brain-focus union; epics: cross-repo initiative registry + membership integrity + derived cross-epic relationships; ticket-operator-edge-graph: `Operator`/`Approval` `depends_on` edges treated unmet-while-present in readiness/priority propagation, `wontfix` terminal block status, operator/approval schema + staleness checks)
     ├── distill.rs  ← DistilledEntry, parse_distilled(), distill_stale_age(), check_distill_staleness() — D35-distilled `knowledge.md`/`memory.md` entry parsing + the single shared staleness predicate feeding both `validate-brain`'s `W_DISTILL_STALE` warning and the `emit-state` Attention board's "Stale distilled knowledge" lane (distill-freshness-lane)
     ├── emit.rs     ← EmitError, EmitAction, EmitPlan, markers (WAVE_TABLE, PROJECT_CACHE, TIER_ROLLUP, HQ_BOARD, UNIFIED_BOARD); wave_order(), render_wave_table(), global_status_map(), splice_generated(), plan_state_json(), plan_master_plan_tables(), plan_project_caches(), plan_tier_rollups(), render_hq_board(), plan_hq_board(), render_unified_board(), plan_unified_board(), apply_plan(), filter_plan_by_scope(), write_atomic() (pub) — Phase 3 Block T (derived-view generation: wave tables, focus regen, brain rollup; MV.4.A: cross-repo depends_on resolution via global_status_map; MV.4.B: project-cache + tier-rollup splice; MV.4.C: HQ root Operating Board splice; MV.6.B: priority-ranked unified NOW/NEXT/BLOCKED/DUE-SOON board splice; ticket-emit-state-scope-and-lock: filter_plan_by_scope() narrows an already-built EmitPlan down to one repo's ScopeDependencySet targets, applied after planning so scoping cannot change which actions the unscoped planners themselves would compute; ticket-append-only-emit-state-writer: apply_plan() now snapshots an existing file's prior content into brain::history before each overwrite (non-fatal W_HISTORY_FAILED on snapshot/prune failure) and writes atomically via write_atomic() — a same-directory temp file + rename)
     ├── history.rs  ← Revision, HistoryError; record_revision(), list_revisions(), read_revision(), prune(), history_dir() — append-only per-file revision store under `<dir>/.mev-history/<name>/`, monotonic seq recomputed by directory scan on every record_revision call (crash-safe, no counter file); ticket-append-only-emit-state-writer
     ├── epics.rs    ← EpicAction, plan_defer_epic(), plan_resume_epic(), plan_sync_epics(), action_for() (pub(crate), shared with blocks.rs) — epic-level *authored* mutation: park/un-park an initiative, cascading the HQ `epics[]` registry status and its member blocks' statuses together
-    ├── blocks.rs   ← plan_set_block_status() — block-level *authored* mutation (MV.11.B): sets exactly one `tracks[].blocks[].status` addressed by a `repo:id` key, validated against `VALID_TRACK_BLOCK_STATUSES` (never the derived-only `blocked`)
+    ├── blocks.rs   ← plan_set_block_status() — block-level *authored* mutation (MV.11.B): sets exactly one `tracks[].blocks[].status` addressed by a `repo:id` key, validated against `VALID_TRACK_BLOCK_STATUSES` (now includes the terminal `wontfix` status alongside `open`/`in_progress`/`deferred`/`closed`; never the derived-only `blocked`)
+    ├── operator.rs ← plan_close_operator_gate(), plan_approve(), plan_reject(), E_OPERATOR_GATE_NOT_VERIFIED, E_OPERATOR_GATE_UNKNOWN, E_APPROVAL_DIGEST_MISMATCH — ticket-operator-edge-graph: verified-or-refused edge-removal mutations backing `mev close-operator-gate`/`approve`/`reject`, strips matching Operator/Approval `depends_on` entries fleet-wide under the emit lock
     ├── lock.rs     ← LockError, LockGuard, acquire_lock(), DEFAULT_LOCK_TIMEOUT — advisory lockfile (`<root>/.mev-emit.lock`) guarding `emit-state --write` against concurrent writers; stale (dead-pid) lockfiles are reclaimed automatically (ticket-emit-state-scope-and-lock)
     ├── links.rs    ← LinkKind, LinkRef; extract_links(), check_links(), collect_doc_ids(), read_moves_pending(), check_moved_references() — Phase 3 Block K
     ├── structure.rs ← check_structure() — Phase 3 Block L (bidirectional index.md <-> directory structural coverage: orphan files, dangling rows)
@@ -73,7 +74,11 @@ tests/
 ├── doc_cli.rs         ← integration tests for the `mev doc ...` CLI surface
 ├── emit_state_scope.rs ← integration tests for `emit-state --scope` (byte-identity of unvisited repos, unknown-slug diagnostic, unscoped-unchanged) — ticket-emit-state-scope-and-lock
 ├── emit_state_lock.rs ← integration tests for the advisory lock (contention, stale-lock reclaim) — ticket-emit-state-scope-and-lock
-├── set_block_status.rs ← integration tests for `mev set-block-status`, driving the real binary (happy path, byte-identical dry run, idempotent re-write, every rejection incl. `blocked`, and the chained-emit-state ripple) — MV.11.B
+├── set_block_status.rs ← integration tests for `mev set-block-status`, driving the real binary (happy path, byte-identical dry run, idempotent re-write, every rejection incl. `blocked`, and the chained-emit-state ripple; ticket-operator-edge-graph: `wontfix` accepted as an authorable status) — MV.11.B
+├── close_operator_gate.rs ← integration tests for `mev close-operator-gate` — refusal without `--exit-verified`, unknown-slug refusal, fleet-wide edge removal, chained emit-state ripple — ticket-operator-edge-graph
+├── approve_reject.rs ← integration tests for `mev approve`/`mev reject` — digest match/mismatch, multi-edge shared-slug refusal, rejection recorded via I_EMIT_WROTE, chained emit-state ripple — ticket-operator-edge-graph
+├── force_operator_gate.rs ← integration tests for `set-block-status ... in_progress`'s operator-gate refusal and the `--force-operator-gate` override, including its non-TTY hard refusal — ticket-operator-edge-graph
+├── fleet_regression.rs ← gate test: loads the real fleet's `state.json` files and asserts `derive_focus`/`derive_brain_focus` output is unchanged from each file's stored focus snapshot for every block with no operator/approval edge; skips gracefully outside the fleet checkout — ticket-operator-edge-graph
 ├── brain_last_touched.rs ← integration tests for derive_last_touched() — Phase 10 Block MV.10.D (full-ID/bare-ID/prefix-stripped folder resolution, archive inclusion, newest-wins, determinism, read-only guarantee, consumption-path join)
 ├── smoke.rs           ← integration tests for the learn-ai validate() public API
 ├── blog_validate.rs   ← integration tests for validate_blog()/validate_with_lint() — all six blog/lint diagnostic codes, a regression pin for byte-identical lint-off mev::validate() output, and a live-tree smoke test — Phase 12 Block A
@@ -460,6 +465,8 @@ never sit drifted from the edit that just landed.
 | `plan_resume_epic` | `epics.rs` | same | The inverse: registry → `active`, `deferred` members → `open`. |
 | `plan_sync_epics` | `epics.rs` | `(&BrainConfig, &[(StateSource, StateFile)]) -> EmitPlan` | Reconcile the whole registry without naming a slug. Deliberately asymmetric — nothing is ever un-deferred automatically. `focused` counts as live alongside `active` (MV.11.A). |
 | `plan_set_block_status` | `blocks.rs` | `(&str, &str, &BrainConfig, &[(StateSource, StateFile)]) -> EmitPlan` | Block-level, one block, status only. See below. |
+| `plan_close_operator_gate` | `operator.rs` | `(&str, &BrainConfig, &[(StateSource, StateFile)]) -> EmitPlan` | Verified-or-refused: strips every `Operator` `depends_on` entry matching `slug` fleet-wide. Refuses (`E_OPERATOR_GATE_NOT_VERIFIED`) unless the caller passed `--exit-verified`; refuses (`E_OPERATOR_GATE_UNKNOWN`) if no loaded file has a matching edge. ticket-operator-edge-graph |
+| `plan_approve` / `plan_reject` | `operator.rs` | same shape | Strips every `Approval` `depends_on` entry matching `slug`. `plan_approve` additionally requires the supplied `--digest` to match every matching edge's stored digest — any mismatch refuses the whole call (`E_APPROVAL_DIGEST_MISMATCH`), changing nothing. `plan_reject` takes no digest and always clears. Both back onto the same `load_corpus_for_gate_write()` helper in `src/lib.rs` as `plan_close_operator_gate`. ticket-operator-edge-graph |
 
 **`plan_set_block_status`** (Phase 11, Block MV.11.B) is the block-level sibling of the epic
 cascade: where those move a whole initiative, this moves exactly one block's `status` and
@@ -470,12 +477,23 @@ stays precise instead of pushing per-field validation to runtime.
   `effective_priorities` use. Block ids are only unique within a repo, so an unqualified id
   raises `E_BLOCK_BAD_KEY` rather than being guessed at.
 - **Validated against `VALID_TRACK_BLOCK_STATUSES`** (`open` · `in_progress` · `deferred` ·
-  `closed`), lifted to `pub(crate)` for exactly this — and pointedly **not** against
+  `closed` · `wontfix`), lifted to `pub(crate)` for exactly this — and pointedly **not** against
   `VALID_STATUSES`, which also admits `blocked`. `blocked` is a *derived* lane the emitter
   stamps onto `focus.blocked[]` entries from unmet `depends_on` edges; authoring it onto a
   `tracks[]` block is what `E_STATE_AUTHORED_BLOCKED` exists to reject, so accepting it here
   would let the command write a value `validate-brain` immediately fails on. It is rejected
-  with `E_BLOCK_BAD_STATUS`.
+  with `E_BLOCK_BAD_STATUS`. **`wontfix`** (ticket-operator-edge-graph) is a second terminal
+  status alongside `closed`: `is_terminal_block_status()` treats the two identically for
+  readiness (`ready_order`, `derive_focus`) and `check_status_consistency`, but `EpicProgress`
+  tallies it in its own `wontfix` count so it never inflates the `closed` count in the epic
+  progress line.
+- **Starting an operator-gated block is refused.** `main.rs`'s `SetBlockStatus` dispatch (not
+  `plan_set_block_status` itself) refuses `--write`ing a block to `in_progress` while it carries
+  an unmet `Operator` `depends_on` edge, unless `--force-operator-gate` is passed —
+  `E_BLOCK_OPERATOR_GATED` otherwise. `--force-operator-gate` itself is refused
+  (`E_FORCE_OPERATOR_GATE_NOT_TTY`) whenever stdin is not a TTY, with no other bypass. The gate
+  only guards *starting* a block — moving an operator-gated block to any other status needs no
+  override. — ticket-operator-edge-graph
 - **`E_BLOCK_NOT_FOUND`** when no loaded file owns the key; the message lists the known repo
   slugs (from `BrainConfig::repos`) when the *repo* half is what failed to resolve.
 - **A no-op is success**, not an error: a block already at the target status plans zero
