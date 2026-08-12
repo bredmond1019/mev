@@ -637,6 +637,14 @@ fn render_hq_board_line(block: &Block, edges: &[CrossRepoEdge]) -> String {
 
 /// Render one `blocked_by` dependency of the block `{from_repo}:{from_id}` as
 /// its Operating Board annotation.
+///
+/// `Operator` and `Approval` entries render in full rather than as a bare
+/// `operator:<slug>`/`approval:<slug>` gloss (Task 6, `ticket-operator-edge-graph`):
+/// an operator gate shows its `exit` condition and paste-ready `start` command —
+/// the two things a reader needs to actually clear it — and an approval shows
+/// its `what` explicitly labeled `decision:` so it reads as a one-decision item
+/// rather than a described task. Blocks with no operator/approval edge are
+/// untouched by this change; only these two match arms grew.
 fn render_hq_board_blocker(
     from_repo: &str,
     from_id: &str,
@@ -645,8 +653,12 @@ fn render_hq_board_blocker(
 ) -> String {
     match dep {
         BlockedBy::External { what } => format!("external:{what}"),
-        BlockedBy::Operator { slug, .. } => format!("operator:{slug}"),
-        BlockedBy::Approval { slug, .. } => format!("approval:{slug}"),
+        BlockedBy::Operator {
+            slug, exit, start, ..
+        } => format!("operator:{slug} — exit: {exit}; start: `{start}`"),
+        BlockedBy::Approval { slug, what, .. } => {
+            format!("approval:{slug} — decision: {what}")
+        }
         BlockedBy::Block {
             repo: dep_repo,
             id: dep_id,
@@ -1306,11 +1318,15 @@ pub fn render_epic_sequence_table(
             .map(|dep| match dep {
                 BlockedBy::Block { repo, id, .. } => format!("{repo}:{id}"),
                 BlockedBy::External { what } => format!("external:{what}"),
-                // Minimal display form — full exit/start/decision rendering lands in
-                // the dedicated rendering task; this keeps the board compiling and
-                // legible in the meantime.
-                BlockedBy::Operator { slug, .. } => format!("operator:{slug}"),
-                BlockedBy::Approval { slug, .. } => format!("approval:{slug}"),
+                // Full exit/start/decision rendering (Task 6, `ticket-operator-edge-graph`) —
+                // matches render_hq_board_blocker's annotation form so the epic sequence
+                // table and the NOW/NEXT/BLOCKED boards read consistently.
+                BlockedBy::Operator {
+                    slug, exit, start, ..
+                } => format!("operator:{slug} — exit: {exit}; start: `{start}`"),
+                BlockedBy::Approval { slug, what, .. } => {
+                    format!("approval:{slug} — decision: {what}")
+                }
             })
             .collect();
         let deps_cell = if deps.is_empty() {

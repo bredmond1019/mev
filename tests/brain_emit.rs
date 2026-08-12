@@ -8916,3 +8916,190 @@ mod task5_shared_identity_dedup {
         assert!(groups[0].gate.is_none());
     }
 }
+
+// ---------------------------------------------------------------------------
+// task6_rendering — focus.blocked[] and the board show exit, start, and
+// decisions in full (ticket-operator-edge-graph, Task 6)
+// ---------------------------------------------------------------------------
+
+mod task6_rendering {
+    use mev::brain::emit::{render_epic_sequence_table, render_hq_board, render_unified_board};
+    use mev::brain::state::{Block, BlockedBy, Focus, TrackBlock};
+    use std::collections::HashMap;
+
+    fn blocked_block(repo: &str, id: &str, title: &str, blocked_by: Vec<BlockedBy>) -> Block {
+        Block {
+            epics: Vec::new(),
+            due: None,
+            priority: None,
+            id: id.to_string(),
+            title: title.to_string(),
+            status: None,
+            note: None,
+            repo: Some(repo.to_string()),
+            blocked_by,
+        }
+    }
+
+    fn operator_gate(slug: &str, exit: &str, start: &str) -> BlockedBy {
+        BlockedBy::Operator {
+            slug: slug.to_string(),
+            exit: exit.to_string(),
+            start: start.to_string(),
+            what: None,
+        }
+    }
+
+    fn approval_gate(slug: &str, what: &str, digest: &str) -> BlockedBy {
+        BlockedBy::Approval {
+            slug: slug.to_string(),
+            what: what.to_string(),
+            digest: digest.to_string(),
+        }
+    }
+
+    #[test]
+    fn hq_board_operator_gate_renders_exit_and_start() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![blocked_block(
+                "core",
+                "A.1",
+                "Block A1",
+                vec![operator_gate(
+                    "gate-x",
+                    "log.md entry exists",
+                    "mev close-operator-gate gate-x --exit-verified",
+                )],
+            )],
+            deferred: Vec::new(),
+        };
+
+        let rendered = render_hq_board(&focus, &[]);
+
+        assert!(rendered.contains("exit: log.md entry exists"), "{rendered}");
+        assert!(
+            rendered.contains("start: `mev close-operator-gate gate-x --exit-verified`"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn unified_board_operator_gate_renders_exit_and_start() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![blocked_block(
+                "core",
+                "A.1",
+                "Block A1",
+                vec![operator_gate(
+                    "gate-y",
+                    "artifact published",
+                    "mev close-operator-gate gate-y --exit-verified",
+                )],
+            )],
+            deferred: Vec::new(),
+        };
+        let config = mev::brain::config::BrainConfig::default();
+
+        let rendered = render_unified_board(
+            &focus,
+            &[],
+            &HashMap::new(),
+            &config,
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 5).expect("valid date"),
+        );
+
+        assert!(rendered.contains("exit: artifact published"), "{rendered}");
+        assert!(
+            rendered.contains("start: `mev close-operator-gate gate-y --exit-verified`"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn hq_board_approval_renders_what_as_a_decision() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![blocked_block(
+                "core",
+                "A.1",
+                "Block A1",
+                vec![approval_gate("ship-v2", "ship it?", "deadbeef")],
+            )],
+            deferred: Vec::new(),
+        };
+
+        let rendered = render_hq_board(&focus, &[]);
+
+        assert!(
+            rendered.contains("decision: ship it?"),
+            "approval must render `what` labeled as a decision, not a description: {rendered}"
+        );
+    }
+
+    #[test]
+    fn epic_sequence_table_renders_operator_exit_start_and_approval_decision() {
+        let operator_block = TrackBlock {
+            id: "A.1".to_string(),
+            title: "Block A1".to_string(),
+            depends_on: vec![operator_gate(
+                "gate-z",
+                "PR merged",
+                "mev close-operator-gate gate-z --exit-verified",
+            )],
+            ..Default::default()
+        };
+        let approval_block = TrackBlock {
+            id: "A.2".to_string(),
+            title: "Block A2".to_string(),
+            depends_on: vec![approval_gate("ship-v3", "ship it?", "cafebabe")],
+            ..Default::default()
+        };
+        let members: Vec<(String, &TrackBlock)> = vec![
+            ("core".to_string(), &operator_block),
+            ("core".to_string(), &approval_block),
+        ];
+
+        let table = render_epic_sequence_table(&members, &HashMap::new());
+
+        assert!(table.contains("exit: PR merged"), "{table}");
+        assert!(
+            table.contains("start: `mev close-operator-gate gate-z --exit-verified`"),
+            "{table}"
+        );
+        assert!(table.contains("decision: ship it?"), "{table}");
+    }
+
+    /// Blocks with no operator/approval edge must render byte-identically to
+    /// before this task — a plain `Block` dependency's annotation is untouched.
+    #[test]
+    fn plain_block_dependency_rendering_is_unchanged() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![blocked_block(
+                "core",
+                "A.1",
+                "Block A1",
+                vec![BlockedBy::Block {
+                    repo: "core".to_string(),
+                    id: "A.0".to_string(),
+                    what: Some("needs the shared schema".to_string()),
+                }],
+            )],
+            deferred: Vec::new(),
+        };
+
+        let rendered = render_hq_board(&focus, &[]);
+
+        assert!(
+            rendered
+                .contains("core:A.1 — Block A1 (blocked by core:A.0 (needs the shared schema))"),
+            "{rendered}"
+        );
+    }
+}
