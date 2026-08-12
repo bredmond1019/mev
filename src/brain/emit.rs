@@ -423,6 +423,107 @@ pub fn global_status_map(files: &[(StateSource, StateFile)]) -> HashMap<String, 
 }
 
 // ---------------------------------------------------------------------------
+// group_blocked_by_gate — shared-identity dedup for operator/approval edges
+// ---------------------------------------------------------------------------
+
+/// One item in a rendered `BLOCKED` (or any other) section: either a plain
+/// block, or a group of blocks that share one `operator`/`approval`
+/// `depends_on` slug (Task 5, MV shared-identity dedup — `ticket-operator-edge-graph`).
+///
+/// A shared slug is a join key: several otherwise-unrelated blocks across any
+/// number of repos can name the same operator session or approval decision.
+/// Without collapsing them, one cleared gate produces N identical-looking
+/// lines instead of one — the "new noise source" the ticket calls out as the
+/// single highest-risk failure mode of this mechanism. `blocks.len() == 1`
+/// covers both a plain block (no operator/approval entry at all) and a slug
+/// that happens to gate only one block; both render identically to how a lone
+/// block always rendered.
+#[derive(Debug, Clone)]
+pub struct BlockedGroup<'a> {
+    /// The blocks sharing this slug, in first-appearance order within the
+    /// input. Never empty.
+    pub blocks: Vec<&'a Block>,
+    /// The shared `operator`/`approval` edge this group is keyed on. `None`
+    /// for a plain block whose `blocked_by` carries no such entry (e.g. only a
+    /// `Block`/`External` dependency, or none at all) — dedup does not apply.
+    pub gate: Option<&'a BlockedBy>,
+}
+
+impl<'a> BlockedGroup<'a> {
+    /// The minimum effective priority across every block in this group — "the
+    /// deduped item carries the minimum effective priority of the blocks it
+    /// gates" (Task 5 AC). Delegates to [`effective_priority_for`] per block,
+    /// so an absent `effective` entry falls back to the block's own raw
+    /// `priority`, and a fully-absent priority sorts last (`u8::MAX`). Never
+    /// panics on an empty group — `blocks` is always non-empty by
+    /// construction — but returns `u8::MAX` defensively if it ever were.
+    pub fn effective_priority(&self, effective: &HashMap<String, u8>) -> u8 {
+        self.blocks
+            .iter()
+            .map(|b| effective_priority_for(b, effective))
+            .min()
+            .unwrap_or(u8::MAX)
+    }
+}
+
+/// The `("operator"|"approval", slug)` grouping key for one block, taken from
+/// the first `Operator`/`Approval` entry in its `blocked_by` (a block is not
+/// expected to carry more than one gate; if it does, the first one present
+/// wins deterministically). `None` when `blocked_by` carries no such entry.
+fn gate_key(block: &Block) -> Option<(&'static str, &str)> {
+    block.blocked_by.iter().find_map(|dep| match dep {
+        BlockedBy::Operator { slug, .. } => Some(("operator", slug.as_str())),
+        BlockedBy::Approval { slug, .. } => Some(("approval", slug.as_str())),
+        BlockedBy::Block { .. } | BlockedBy::External { .. } => None,
+    })
+}
+
+/// Group `blocks` by shared `operator`/`approval` `depends_on` slug (Task 5,
+/// `ticket-operator-edge-graph`) so a rendered section can emit one item per
+/// slug instead of one per block.
+///
+/// Order-preserving: a group occupies the position of its first member's
+/// first occurrence in `blocks`; later members sharing the same slug are
+/// folded into that existing group rather than each claiming a new slot. A
+/// block with no `operator`/`approval` entry in `blocked_by` — including one
+/// with no `blocked_by` at all (`NOW`/`NEXT`/`DEFERRED` entries) — forms its
+/// own singleton group with `gate: None`, so a section with no such edges
+/// groups to exactly one group per block, identical to the pre-dedup
+/// rendering.
+pub fn group_blocked_by_gate(blocks: &[Block]) -> Vec<BlockedGroup<'_>> {
+    let mut groups: Vec<BlockedGroup<'_>> = Vec::new();
+    let mut index_by_key: HashMap<(&'static str, String), usize> = HashMap::new();
+
+    for block in blocks {
+        match gate_key(block) {
+            Some((kind, slug)) => {
+                let key = (kind, slug.to_string());
+                if let Some(&idx) = index_by_key.get(&key) {
+                    groups[idx].blocks.push(block);
+                } else {
+                    let gate = block.blocked_by.iter().find(|dep| match dep {
+                        BlockedBy::Operator { slug: s, .. } => s == slug,
+                        BlockedBy::Approval { slug: s, .. } => s == slug,
+                        BlockedBy::Block { .. } | BlockedBy::External { .. } => false,
+                    });
+                    index_by_key.insert(key, groups.len());
+                    groups.push(BlockedGroup {
+                        blocks: vec![block],
+                        gate,
+                    });
+                }
+            }
+            None => groups.push(BlockedGroup {
+                blocks: vec![block],
+                gate: None,
+            }),
+        }
+    }
+
+    groups
+}
+
+// ---------------------------------------------------------------------------
 // render_hq_board — pure NOW/NEXT/BLOCKED Operating Board renderer
 // ---------------------------------------------------------------------------
 
@@ -463,19 +564,57 @@ pub fn render_hq_board(focus: &Focus, edges: &[CrossRepoEdge]) -> String {
 }
 
 /// Render one `## {heading}` section of the Operating Board for `blocks`.
+///
+/// Blocks sharing an `operator`/`approval` `depends_on` slug are collapsed
+/// into one line via [`group_blocked_by_gate`] (Task 5, MV shared-identity
+/// dedup) — a heading with no such edges renders exactly as before, one line
+/// per block.
 fn render_hq_board_section(heading: &str, blocks: &[Block], edges: &[CrossRepoEdge]) -> String {
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!("## {heading}"));
 
-    if blocks.is_empty() {
+    let groups = group_blocked_by_gate(blocks);
+    if groups.is_empty() {
         lines.push("_none_".to_string());
     } else {
-        for block in blocks {
-            lines.push(format!("- {}", render_hq_board_line(block, edges)));
+        for group in &groups {
+            lines.push(format!("- {}", render_hq_board_group_line(group, edges)));
         }
     }
 
     lines.join("\n")
+}
+
+/// Render one [`BlockedGroup`] as its Operating Board line.
+///
+/// A singleton group (no shared operator/approval slug, or a slug gating only
+/// this one block) renders exactly like [`render_hq_board_line`] always did.
+/// A real group (`> 1` member) renders every member's `repo:id — title` joined
+/// with `; `, followed by a single `(blocked by ...)` annotation for the
+/// shared gate — not one annotation per member, which is the noise this dedup
+/// exists to remove.
+fn render_hq_board_group_line(group: &BlockedGroup<'_>, edges: &[CrossRepoEdge]) -> String {
+    if group.blocks.len() == 1 {
+        return render_hq_board_line(group.blocks[0], edges);
+    }
+
+    let names: Vec<String> = group
+        .blocks
+        .iter()
+        .map(|b| {
+            let repo = b.repo.as_deref().unwrap_or("");
+            format!("{repo}:{} — {}", b.id, b.title)
+        })
+        .collect();
+
+    match group.gate {
+        Some(dep) => format!(
+            "{} (blocked by {})",
+            names.join("; "),
+            render_hq_board_blocker("", "", dep, edges)
+        ),
+        None => names.join("; "),
+    }
 }
 
 /// Render a single Operating Board line for `block`: `repo:id — title`,
@@ -656,6 +795,11 @@ const BOARD_LANE_LEVEL: &str = "##";
 const EPIC_LANE_LEVEL: &str = "####";
 
 /// Render one `{level} {heading}` section of a board for `blocks`.
+///
+/// Blocks sharing an `operator`/`approval` `depends_on` slug are collapsed
+/// into one line via [`group_blocked_by_gate`] (Task 5, MV shared-identity
+/// dedup) — a heading with no such edges renders exactly as before, one line
+/// per block.
 fn render_unified_board_section(
     level: &str,
     heading: &str,
@@ -666,18 +810,54 @@ fn render_unified_board_section(
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!("{level} {heading}"));
 
-    if blocks.is_empty() {
+    let groups = group_blocked_by_gate(blocks);
+    if groups.is_empty() {
         lines.push("_none_".to_string());
     } else {
-        for block in blocks {
+        for group in &groups {
             lines.push(format!(
                 "- {}",
-                render_unified_board_line(block, edges, config)
+                render_unified_board_group_line(group, edges, config)
             ));
         }
     }
 
     lines.join("\n")
+}
+
+/// Render one [`BlockedGroup`] as its unified-board line.
+///
+/// A singleton group renders exactly like [`render_unified_board_line`]
+/// always did. A real group (`> 1` member) renders every member's
+/// `[BIZ]|[ENG] repo:id — title` joined with `; `, followed by a single
+/// `(blocked by ...)` annotation for the shared gate.
+fn render_unified_board_group_line(
+    group: &BlockedGroup<'_>,
+    edges: &[CrossRepoEdge],
+    config: &BrainConfig,
+) -> String {
+    if group.blocks.len() == 1 {
+        return render_unified_board_line(group.blocks[0], edges, config);
+    }
+
+    let names: Vec<String> = group
+        .blocks
+        .iter()
+        .map(|b| {
+            let tag = unified_board_tag(b, config);
+            let repo = b.repo.as_deref().unwrap_or("");
+            format!("{tag} {repo}:{} — {}", b.id, b.title)
+        })
+        .collect();
+
+    match group.gate {
+        Some(dep) => format!(
+            "{} (blocked by {})",
+            names.join("; "),
+            render_hq_board_blocker("", "", dep, edges)
+        ),
+        None => names.join("; "),
+    }
 }
 
 /// Render a single unified board line for `block`: `[BIZ]|[ENG] repo:id — title`,
