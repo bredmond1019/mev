@@ -49,6 +49,13 @@
 //! - `W_STATE_EPIC_UNREACHABLE_DEP` — an unclosed epic block depends on an unclosed
 //!   block that belongs to no epic (a gate invisible on the epic's board).
 //! - `E_STATE_SCHEMA_BAD_FINDING_ID` — a carryover `finding_id` is not kebab-case.
+//! - `E_STATE_OPERATOR_MISSING_EXIT` — a `depends_on` `{type:"operator"}` entry has
+//!   an empty `exit` condition.
+//! - `E_STATE_APPROVAL_DIGEST_SHAPE` — a `depends_on` `{type:"approval"}` entry has
+//!   a missing or malformed `digest` (expected `<algorithm>:<hex>`).
+//! - `W_STATE_OPERATOR_STALE` — a `depends_on` `{type:"operator"}` edge unmet past
+//!   the `brain.toml [attention] operator_days` threshold (anchored on the owning
+//!   file's `updated` date).
 //! - `E_STATE_SCHEMA_BAD_CLEARS_WHEN` — a carryover `clears_when` typed predicate is
 //!   missing a required member, has an empty required member, or (for `file_exists` /
 //!   `file_contains`) names an absolute path. Well-formedness only — never evaluation.
@@ -487,6 +494,85 @@ pub fn check_backlog_staleness(
     diags
 }
 
+/// Whether a `depends_on` `{type:"approval"}` `digest` value is well-formed:
+/// `<algorithm>:<hex>`, e.g. `"sha256:abc123"`. Both halves must be non-empty;
+/// the algorithm half must be alphanumeric and the hex half must be valid hex
+/// digits. An empty string (the "missing" case — okf-core's `digest` field is
+/// required at deserialize time, so "missing" in practice means authored as
+/// `""`) is rejected by the `split_once` failing to find a value on either
+/// side.
+pub(crate) fn is_well_formed_digest(digest: &str) -> bool {
+    let Some((alg, hex)) = digest.split_once(':') else {
+        return false;
+    };
+    let alg = alg.trim();
+    let hex = hex.trim();
+    !alg.is_empty()
+        && !hex.is_empty()
+        && alg.chars().all(|c| c.is_ascii_alphanumeric())
+        && hex.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The staleness verdict for an unmet `depends_on` `operator` edge:
+/// `Some(age_days)` when the owning file's `updated` date is more than
+/// `thresholds.operator_days` in the past, else `None`.
+///
+/// Anchored on the **file's** `updated` date rather than a per-edge
+/// timestamp — `okf-core`'s `BlockedBy::Operator` carries no date field of
+/// its own, and `updated` is the freshest available signal for "how long has
+/// this still-open gate sat unmet". A file with no parseable `updated`
+/// cannot age (mirrors [`carryover_stale_age`]'s "no date, no staleness"
+/// behaviour; the malformed/missing date itself is caught separately by
+/// `check_schema`).
+pub fn operator_stale_age(
+    file_updated: &str,
+    today: chrono::NaiveDate,
+    thresholds: &crate::brain::config::AttentionThresholds,
+) -> Option<i64> {
+    let anchor = parse_state_date(file_updated)?;
+    let age = (today - anchor).num_days();
+    (age > thresholds.operator_days).then_some(age)
+}
+
+/// Staleness warnings for unmet `depends_on` `operator` edges — one
+/// `W_STATE_OPERATOR_STALE` per operator edge in a file whose `updated` date
+/// has aged past `[attention].operator_days`. WARNING severity only — never
+/// flips the exit code.
+pub fn check_operator_staleness(
+    src: &StateSource,
+    file: &StateFile,
+    today: chrono::NaiveDate,
+    thresholds: &crate::brain::config::AttentionThresholds,
+) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let path = &src.abs_path;
+
+    let Some(age) = operator_stale_age(&file.updated, today, thresholds) else {
+        return diags;
+    };
+
+    for track in &file.tracks {
+        for block in &track.blocks {
+            for dep in &block.depends_on {
+                if let BlockedBy::Operator { slug, .. } = dep {
+                    diags.push(Diagnostic::warning(
+                        path,
+                        "W_STATE_OPERATOR_STALE",
+                        format!(
+                            "operator gate '{slug}' on track block '{}' is {age}d old \
+                             (threshold {}d) — clear it with \
+                             `mev close-operator-gate {slug} --exit-verified` or re-affirm by \
+                             bumping 'updated'",
+                            block.id, thresholds.operator_days
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    diags
+}
+
 /// Validate the schema-ring constraints for a successfully-deserialized
 /// [`StateFile`].
 ///
@@ -660,27 +746,60 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                 }
             }
 
-            // check 7: depends_on {type:block} entries must have non-empty repo and id
+            // check 7: depends_on {type:block} entries must have non-empty repo and id;
+            // {type:operator} entries must carry a non-empty 'exit'; {type:approval}
+            // entries must carry a well-formed 'digest'.
             for dep in &block.depends_on {
-                if let BlockedBy::Block { repo, id, .. } = dep {
-                    let repo_empty = repo.trim().is_empty();
-                    let id_empty = id.trim().is_empty();
-                    if repo_empty || id_empty {
-                        diags.push(Diagnostic::error(
-                            path,
-                            "E_STATE_SCHEMA_BAD_BLOCKED_BY",
-                            format!(
-                                "depends_on entry in track block '{}' is missing required \
-                                 field(s): {}",
-                                block.id,
-                                [repo_empty.then_some("'repo'"), id_empty.then_some("'id'")]
-                                    .into_iter()
-                                    .flatten()
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ),
-                        ));
+                match dep {
+                    BlockedBy::Block { repo, id, .. } => {
+                        let repo_empty = repo.trim().is_empty();
+                        let id_empty = id.trim().is_empty();
+                        if repo_empty || id_empty {
+                            diags.push(Diagnostic::error(
+                                path,
+                                "E_STATE_SCHEMA_BAD_BLOCKED_BY",
+                                format!(
+                                    "depends_on entry in track block '{}' is missing required \
+                                     field(s): {}",
+                                    block.id,
+                                    [repo_empty.then_some("'repo'"), id_empty.then_some("'id'")]
+                                        .into_iter()
+                                        .flatten()
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
+                            ));
+                        }
                     }
+                    BlockedBy::Operator { slug, exit, .. } => {
+                        if exit.trim().is_empty() {
+                            diags.push(Diagnostic::error(
+                                path,
+                                "E_STATE_OPERATOR_MISSING_EXIT",
+                                format!(
+                                    "operator depends_on entry '{slug}' in track block '{}' has \
+                                     an empty 'exit' condition — 'exit' must name the artifact \
+                                     whose existence ends the gate",
+                                    block.id
+                                ),
+                            ));
+                        }
+                    }
+                    BlockedBy::Approval { slug, digest, .. } => {
+                        if !is_well_formed_digest(digest) {
+                            diags.push(Diagnostic::error(
+                                path,
+                                "E_STATE_APPROVAL_DIGEST_SHAPE",
+                                format!(
+                                    "approval depends_on entry '{slug}' in track block '{}' has \
+                                     a missing or malformed 'digest' (expected \
+                                     '<algorithm>:<hex>', e.g. 'sha256:abc123'), got '{digest}'",
+                                    block.id
+                                ),
+                            ));
+                        }
+                    }
+                    BlockedBy::External { .. } => {}
                 }
             }
         }

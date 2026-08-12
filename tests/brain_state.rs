@@ -1640,3 +1640,237 @@ fn field_policy_integration() {
     assert!(has_wf, "missing E_STATE_SDLC_WORKFLOW_ENUM");
     assert!(has_model, "missing E_STATE_MODEL_ENUM");
 }
+
+// ---------------------------------------------------------------------------
+// Task 4 — E_STATE_OPERATOR_MISSING_EXIT / E_STATE_APPROVAL_DIGEST_SHAPE /
+// W_STATE_OPERATOR_STALE
+// ---------------------------------------------------------------------------
+
+fn has_locator(diags: &[mev::Diagnostic], locator: &str) -> bool {
+    diags.iter().any(|d| d.locator == locator)
+}
+
+#[test]
+fn check_schema_operator_dep_empty_exit_emits_missing_exit() {
+    use mev::brain::state::check_schema;
+
+    let (src, file) = make_leaf_pair_in_memory(
+        "alpha",
+        serde_json::json!([{
+            "title": "Phase 1",
+            "blocks": [{
+                "id": "AL.1.A",
+                "title": "Gated on an operator step",
+                "status": "open",
+                "depends_on": [{
+                    "type": "operator",
+                    "slug": "mac-mini-setup",
+                    "exit": "",
+                    "start": "/begin-session mac-mini-setup"
+                }]
+            }]
+        }]),
+        serde_json::json!({ "now": [], "next": [], "blocked": [] }),
+    );
+
+    let diags = check_schema(&src, &file);
+
+    assert!(
+        has_locator(&diags, "E_STATE_OPERATOR_MISSING_EXIT"),
+        "expected E_STATE_OPERATOR_MISSING_EXIT, got: {diags:?}"
+    );
+}
+
+#[test]
+fn check_schema_approval_dep_empty_digest_emits_digest_shape() {
+    use mev::brain::state::check_schema;
+
+    let (src, file) = make_leaf_pair_in_memory(
+        "alpha",
+        serde_json::json!([{
+            "title": "Phase 1",
+            "blocks": [{
+                "id": "AL.1.A",
+                "title": "Gated on an approval",
+                "status": "open",
+                "depends_on": [{
+                    "type": "approval",
+                    "slug": "ship-it",
+                    "what": "approve the release payload",
+                    "digest": ""
+                }]
+            }]
+        }]),
+        serde_json::json!({ "now": [], "next": [], "blocked": [] }),
+    );
+
+    let diags = check_schema(&src, &file);
+
+    assert!(
+        has_locator(&diags, "E_STATE_APPROVAL_DIGEST_SHAPE"),
+        "expected E_STATE_APPROVAL_DIGEST_SHAPE for empty digest, got: {diags:?}"
+    );
+}
+
+#[test]
+fn check_schema_approval_dep_malformed_digest_emits_digest_shape() {
+    use mev::brain::state::check_schema;
+
+    // No "algorithm:hex" separator, and non-hex characters — malformed either way.
+    let (src, file) = make_leaf_pair_in_memory(
+        "alpha",
+        serde_json::json!([{
+            "title": "Phase 1",
+            "blocks": [{
+                "id": "AL.1.A",
+                "title": "Gated on an approval",
+                "status": "open",
+                "depends_on": [{
+                    "type": "approval",
+                    "slug": "ship-it",
+                    "what": "approve the release payload",
+                    "digest": "not-a-digest!!"
+                }]
+            }]
+        }]),
+        serde_json::json!({ "now": [], "next": [], "blocked": [] }),
+    );
+
+    let diags = check_schema(&src, &file);
+
+    assert!(
+        has_locator(&diags, "E_STATE_APPROVAL_DIGEST_SHAPE"),
+        "expected E_STATE_APPROVAL_DIGEST_SHAPE for malformed digest, got: {diags:?}"
+    );
+}
+
+#[test]
+fn check_schema_well_formed_operator_and_approval_deps_emit_neither_new_code() {
+    use mev::brain::state::check_schema;
+
+    let (src, file) = make_leaf_pair_in_memory(
+        "alpha",
+        serde_json::json!([{
+            "title": "Phase 1",
+            "blocks": [
+                {
+                    "id": "AL.1.A",
+                    "title": "Gated on a well-formed operator step",
+                    "status": "open",
+                    "depends_on": [{
+                        "type": "operator",
+                        "slug": "mac-mini-setup",
+                        "exit": "planning/handoff.md",
+                        "start": "/begin-session mac-mini-setup"
+                    }]
+                },
+                {
+                    "id": "AL.1.B",
+                    "title": "Gated on a well-formed approval",
+                    "status": "open",
+                    "depends_on": [{
+                        "type": "approval",
+                        "slug": "ship-it",
+                        "what": "approve the release payload",
+                        "digest": "sha256:abc123"
+                    }]
+                }
+            ]
+        }]),
+        serde_json::json!({ "now": [], "next": [], "blocked": [] }),
+    );
+
+    let diags = check_schema(&src, &file);
+
+    assert!(
+        !has_locator(&diags, "E_STATE_OPERATOR_MISSING_EXIT"),
+        "well-formed operator dep must not emit E_STATE_OPERATOR_MISSING_EXIT: {diags:?}"
+    );
+    assert!(
+        !has_locator(&diags, "E_STATE_APPROVAL_DIGEST_SHAPE"),
+        "well-formed approval dep must not emit E_STATE_APPROVAL_DIGEST_SHAPE: {diags:?}"
+    );
+}
+
+/// Build a minimal in-memory (StateSource, StateFile) pair like
+/// [`make_leaf_pair_in_memory`], but with a caller-controlled `updated` date —
+/// needed for [`check_operator_staleness`] tests, which anchor on that field.
+fn make_leaf_pair_with_updated(
+    repo: &str,
+    updated: &str,
+    tracks_json: serde_json::Value,
+) -> (mev::brain::state::StateSource, mev::brain::state::StateFile) {
+    use mev::brain::state::StateSource;
+
+    let path = std::path::PathBuf::from(format!("/tmp/{repo}-state-staleness.json"));
+    let json = serde_json::json!({
+        "repo": repo,
+        "kind": "project",
+        "updated": updated,
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "tracks": tracks_json,
+    });
+    let file: mev::brain::state::StateFile =
+        serde_json::from_value(json).expect("fixture must parse");
+    let src = StateSource {
+        repo_slug: repo.to_string(),
+        abs_path: path,
+        expected_kind: "project",
+    };
+    (src, file)
+}
+
+fn operator_dep_tracks(slug: &str) -> serde_json::Value {
+    serde_json::json!([{
+        "title": "Phase 1",
+        "blocks": [{
+            "id": "AL.1.A",
+            "title": "Gated on an operator step",
+            "status": "open",
+            "depends_on": [{
+                "type": "operator",
+                "slug": slug,
+                "exit": "planning/handoff.md",
+                "start": format!("/begin-session {slug}")
+            }]
+        }]
+    }])
+}
+
+#[test]
+fn check_operator_staleness_past_threshold_emits_warning() {
+    use mev::brain::config::AttentionThresholds;
+    use mev::brain::state::check_operator_staleness;
+
+    let thresholds = AttentionThresholds::default(); // operator_days default = 7
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
+    // 2026-07-01 -> 2026-08-12 is 42 days old, well past the 7-day default.
+    let (src, file) =
+        make_leaf_pair_with_updated("alpha", "2026-07-01", operator_dep_tracks("mac-mini-setup"));
+
+    let diags = check_operator_staleness(&src, &file, today, &thresholds);
+
+    assert!(
+        has_locator(&diags, "W_STATE_OPERATOR_STALE"),
+        "expected W_STATE_OPERATOR_STALE for a 42d-old operator gate, got: {diags:?}"
+    );
+}
+
+#[test]
+fn check_operator_staleness_under_threshold_emits_nothing() {
+    use mev::brain::config::AttentionThresholds;
+    use mev::brain::state::check_operator_staleness;
+
+    let thresholds = AttentionThresholds::default(); // operator_days default = 7
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
+    // 2026-08-10 -> 2026-08-12 is 2 days old, under the 7-day default.
+    let (src, file) =
+        make_leaf_pair_with_updated("alpha", "2026-08-10", operator_dep_tracks("mac-mini-setup"));
+
+    let diags = check_operator_staleness(&src, &file, today, &thresholds);
+
+    assert!(
+        diags.is_empty(),
+        "operator gate under threshold must emit no W_STATE_OPERATOR_STALE, got: {diags:?}"
+    );
+}
