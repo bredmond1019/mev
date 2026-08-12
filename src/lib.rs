@@ -894,6 +894,119 @@ pub fn set_block_status(
     Ok(report)
 }
 
+/// Close an operator gate fleet-wide (`mev close-operator-gate <slug> --exit-verified`).
+///
+/// Removes every `depends_on` `{type:"operator", slug: <slug>}` entry across every
+/// loaded `state.json`, then — on success — re-runs [`emit_state`] so the derived
+/// surfaces (`focus`, boards) agree with the cleared gate. Unlike
+/// [`epic_status`]/[`complete_epic`]/[`set_block_status`], this is not dry-run-by-
+/// default/`--write`-shaped: it is verified-or-refused. `exit_verified` **must**
+/// already be `true` by the time this is called — see `brain::operator`'s module
+/// docs for why mev never infers it — and this function still checks it itself
+/// (rather than trusting the caller) so a future call site cannot skip the guard by
+/// omission.
+///
+/// Diagnostics:
+/// - [`brain::operator::E_OPERATOR_GATE_NOT_VERIFIED`] — `exit_verified` was
+///   `false`. Nothing is loaded or touched.
+/// - [`brain::operator::E_OPERATOR_GATE_UNKNOWN`] — no loaded file carries an
+///   operator edge with this slug (see [`brain::operator::plan_close_operator_gate`]).
+/// - `E_STATE_MALFORMED_JSON` / `E_EMIT_INCOMPLETE_CORPUS` — same corpus-completeness
+///   guard as `set_block_status`: a gate can be shared across repos, so a partial
+///   corpus could silently skip the failed-to-load repo's edges.
+pub fn close_operator_gate(
+    root: &std::path::Path,
+    slug: &str,
+    exit_verified: bool,
+) -> anyhow::Result<Report> {
+    use brain::config::find_brain_config;
+    use brain::emit::apply_plan;
+    use brain::operator::{E_OPERATOR_GATE_NOT_VERIFIED, plan_close_operator_gate};
+    use brain::state::{StateLoadError, discover_state_files, load_state};
+
+    let mut report = Report::default();
+
+    if !exit_verified {
+        report.diagnostics.push(Diagnostic::error(
+            root,
+            E_OPERATOR_GATE_NOT_VERIFIED,
+            format!(
+                "refusing to close operator gate '{slug}' without --exit-verified — the exit \
+                 artifact's existence is the operator's assertion, never mev's inference"
+            ),
+        ));
+        return Ok(report);
+    }
+
+    let config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    let (sources, discovery_diags) = discover_state_files(root, &config);
+    report.diagnostics.extend(discovery_diags);
+
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    let mut load_failed = false;
+    for src in &sources {
+        match load_state(&src.abs_path) {
+            Ok(file) => loaded.push((src.clone(), file)),
+            Err(StateLoadError::Parse { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("state.json is not valid JSON or does not match the schema: {source}"),
+                ));
+            }
+            Err(StateLoadError::Io { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("could not read state.json: {source}"),
+                ));
+            }
+        }
+    }
+
+    // Same completeness guard as set_block_status: a shared operator slug can gate
+    // blocks across repos, so a partial corpus could silently skip the failed-to-load
+    // repo's edges, and the chained emit-state must never regenerate cross-repo
+    // derived views from a partial corpus.
+    if load_failed {
+        report.diagnostics.push(Diagnostic::error(
+            root,
+            "E_EMIT_INCOMPLETE_CORPUS",
+            "refusing to write: at least one state.json failed to load, so this gate's edges may \
+             span the unreadable repo, and the chained emit-state would regenerate cross-repo \
+             views from a partial corpus"
+                .to_string(),
+        ));
+        return Ok(report);
+    }
+
+    let plan = plan_close_operator_gate(slug, &config, &loaded);
+
+    let had_actions = !plan.actions.is_empty();
+    report.diagnostics.extend(apply_plan(&plan, true));
+
+    // Regenerate derived views so focus/boards agree with the cleared gate.
+    if had_actions && !report.is_failure() {
+        let emit = emit_state(root, true, None)?;
+        report.diagnostics.extend(emit.diagnostics);
+    }
+
+    Ok(report)
+}
+
 /// Generate derived views for the Bastion Brain repo.
 ///
 /// `scope`, when `Some`, restricts every planner's *writes* (not its
