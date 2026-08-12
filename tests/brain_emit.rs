@@ -8655,3 +8655,41 @@ mod task2_scope_filter {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// task3_wontfix_progress — `wontfix` is tallied separately from `closed`
+// ---------------------------------------------------------------------------
+
+mod task3_wontfix_progress {
+    use super::block;
+    use mev::brain::emit::epic_progress;
+
+    #[test]
+    fn wontfix_members_are_tallied_separately_from_closed() {
+        let a = block("A.1", "A.1", Some("closed"), Some(1));
+        let b = block("A.2", "A.2", Some("wontfix"), Some(2));
+        let c = block("A.3", "A.3", Some("open"), Some(3));
+        let members: Vec<(String, &_)> = vec![
+            ("alpha".to_string(), &a),
+            ("alpha".to_string(), &b),
+            ("alpha".to_string(), &c),
+        ];
+
+        let p = epic_progress(&members);
+
+        assert_eq!(p.closed, 1, "wontfix must not inflate the closed tally");
+        assert_eq!(p.wontfix, 1);
+        assert_eq!(p.open, 1);
+        assert_eq!(p.in_progress, 0);
+        assert_eq!(p.deferred, 0);
+        assert_eq!(p.total(), 3, "total() must still count every member");
+    }
+
+    #[test]
+    fn wontfix_with_no_members_leaves_progress_at_zero() {
+        let members: Vec<(String, &mev::brain::state::TrackBlock)> = vec![];
+        let p = epic_progress(&members);
+        assert_eq!(p.wontfix, 0);
+        assert_eq!(p.total(), 0);
+    }
+}

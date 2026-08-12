@@ -289,11 +289,34 @@ const VALID_STATUSES: &[&str] = &["open", "in_progress", "blocked", "deferred", 
 /// a block on the back burner, which nothing can derive. It is manual and sticky (no
 /// expiry date — edit back to `"open"` to resume).
 ///
+/// `"wontfix"` is also authored: a deliberate human decision that the block will never
+/// be done. It is **terminal for readiness purposes** — a block depending on a
+/// `wontfix` block is not blocked, exactly as if the target were `closed` — but it is
+/// **counted separately from `closed` everywhere `closed` is counted**, so progress
+/// metrics (e.g. epic `N/M closed` lines) do not inflate. It is distinct from
+/// `"deferred"`, which is a park (non-terminal, resumable); `wontfix` never resumes —
+/// supersede the block instead. See [`is_terminal_block_status`].
+///
 /// `pub(crate)` so [`crate::brain::blocks::plan_set_block_status`] validates authored
 /// input against exactly this list rather than a copy that could drift — and, crucially,
 /// not against [`VALID_STATUSES`], which admits the derived-only `"blocked"`.
 pub(crate) const VALID_TRACK_BLOCK_STATUSES: &[&str] =
-    &["open", "in_progress", "deferred", "closed"];
+    &["open", "in_progress", "deferred", "closed", "wontfix"];
+
+/// True for the two authored statuses that satisfy a `{type:"block"}` dependency —
+/// `"closed"` and `"wontfix"`. Both are terminal: nothing further will ever happen to
+/// the block, so anything gated on it may proceed. `"deferred"` is deliberately absent
+/// — it is a park, not a resolution, and an `open` block depending on a deferred one
+/// must still report blocked (see [`derive_focus`]'s doc comment on deferral not
+/// propagating).
+///
+/// Single owner of "does this dependency target count as satisfied" — [`ready_order`],
+/// [`derive_focus`], and [`check_status_consistency`] all call this instead of
+/// re-deriving the closed-or-wontfix test inline, so they cannot drift apart on what
+/// `wontfix` means for a dependent block.
+pub(crate) fn is_terminal_block_status(status: Option<&str>) -> bool {
+    matches!(status, Some("closed") | Some("wontfix"))
+}
 
 /// The focus lanes, in the order they are reported in diagnostics and boards.
 ///
@@ -1553,8 +1576,8 @@ pub fn check_status_consistency(files: &[(StateSource, StateFile)]) -> Vec<Diagn
                         // If the dep target is not in any loaded file, skip — it will
                         // be reported as E_STATE_DANGLING_BLOCKED_BY by check_state_graph.
                         if let Some(dep_status) = status_map.get(&dep_key) {
-                            let dep_is_closed = dep_status.as_deref() == Some("closed");
-                            if !dep_is_closed {
+                            let dep_is_terminal = is_terminal_block_status(dep_status.as_deref());
+                            if !dep_is_terminal {
                                 diags.push(Diagnostic::error(
                                     &src.abs_path,
                                     "E_STATE_STATUS_INCONSISTENT",
@@ -2106,7 +2129,8 @@ pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> V
                 let all_block_deps_closed = block.depends_on.iter().all(|d| {
                     if let BlockedBy::Block { repo, id, .. } = d {
                         let dep_key = format!("{repo}:{id}");
-                        status_map.get(&dep_key).and_then(|s| s.as_deref()) == Some("closed")
+                        let dep_status = status_map.get(&dep_key).and_then(|s| s.as_deref());
+                        is_terminal_block_status(dep_status)
                     } else {
                         true // External/Operator/Approval entries handled above; this branch is unreachable here.
                     }
@@ -2229,8 +2253,9 @@ pub fn derive_focus(
                             | BlockedBy::Approval { .. } => true,
                             BlockedBy::Block { repo, id, .. } => {
                                 let dep_key = format!("{repo}:{id}");
-                                status_map.get(&dep_key).and_then(|s| s.as_deref())
-                                    != Some("closed")
+                                let dep_status =
+                                    status_map.get(&dep_key).and_then(|s| s.as_deref());
+                                !is_terminal_block_status(dep_status)
                             }
                         })
                         .cloned()
@@ -5569,6 +5594,53 @@ mod tests {
     }
 
     #[test]
+    fn derive_focus_open_block_depending_on_wontfix_is_not_blocked() {
+        // Mirror of derive_focus_open_block_depending_on_deferred_is_blocked, but
+        // wontfix IS terminal for readiness — the dependent must derive as ready
+        // (next), not blocked, and the wontfix block itself gets no derived lane
+        // (same as closed: it falls through derive_focus's `_ => {}` arm).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("wontfix"), None, vec![]),
+                (
+                    "AL.1.B",
+                    Some("open"),
+                    None,
+                    vec![BlockedBy::Block {
+                        repo: "alpha".to_string(),
+                        id: "AL.1.A".to_string(),
+                        what: None,
+                    }],
+                ),
+            ],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+
+        let d = derive_focus(src, file, &graph, &files);
+
+        assert!(
+            d.deferred.is_empty(),
+            "wontfix is not deferred: {:?}",
+            d.deferred
+        );
+        assert!(
+            d.blocked.is_empty(),
+            "dependent must not be blocked on a wontfix dep: {:?}",
+            d.blocked
+        );
+        assert_eq!(
+            d.next,
+            vec!["AL.1.B"],
+            "dependent must derive as ready once its only dep is wontfix"
+        );
+    }
+
+    #[test]
     fn ready_order_deferred_block_excluded() {
         // Regression pin. `ready_order`'s gate is `status != "open"`, so a
         // deferred block is excluded for free — but that is load-bearing, not
@@ -5731,6 +5803,55 @@ mod tests {
             order.contains(&"alpha:AL.1.A".to_string()),
             "alpha:AL.1.A should be ready when its only dep is closed; order={order:?}"
         );
+    }
+
+    #[test]
+    fn ready_order_wontfix_dep_is_ready() {
+        // Same shape as ready_order_block_with_closed_dep_is_ready, but the
+        // dependency target is "wontfix" instead of "closed" — terminal for
+        // readiness purposes exactly like closed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let block_dep = BlockedBy::Block {
+            repo: "beta".to_string(),
+            id: "BE.1.A".to_string(),
+            what: None,
+        };
+        let pair_a = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("open"), None, vec![block_dep])],
+        );
+        let pair_b = make_ready_pair(
+            dir.path(),
+            "beta",
+            &[("BE.1.A", Some("wontfix"), None, vec![])],
+        );
+        let files = vec![pair_a, pair_b];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert!(
+            order.contains(&"alpha:AL.1.A".to_string()),
+            "alpha:AL.1.A should be ready when its only dep is wontfix; order={order:?}"
+        );
+    }
+
+    #[test]
+    fn is_terminal_block_status_accepts_closed_and_wontfix_only() {
+        assert!(is_terminal_block_status(Some("closed")));
+        assert!(is_terminal_block_status(Some("wontfix")));
+        assert!(!is_terminal_block_status(Some("open")));
+        assert!(!is_terminal_block_status(Some("in_progress")));
+        assert!(
+            !is_terminal_block_status(Some("deferred")),
+            "deferred is a park, not a resolution — it must not satisfy a dependency"
+        );
+        assert!(!is_terminal_block_status(None));
+    }
+
+    #[test]
+    fn wontfix_is_an_authorable_track_block_status() {
+        assert!(VALID_TRACK_BLOCK_STATUSES.contains(&"wontfix"));
     }
 
     #[test]

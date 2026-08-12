@@ -807,12 +807,19 @@ pub struct EpicProgress {
     pub open: usize,
     /// Members with authored `status == "deferred"`.
     pub deferred: usize,
+    /// Members with authored `status == "wontfix"`.
+    ///
+    /// Terminal like `closed` for readiness — a dependent is not blocked on a
+    /// `wontfix` member — but tallied in its own field so `closed` never
+    /// silently absorbs it. Folding `wontfix` into `closed` would inflate the
+    /// `N/M closed` progress line with work that was declared abandoned, not done.
+    pub wontfix: usize,
 }
 
 impl EpicProgress {
     /// Every member block, in any state.
     pub fn total(&self) -> usize {
-        self.closed + self.in_progress + self.open + self.deferred
+        self.closed + self.in_progress + self.open + self.deferred + self.wontfix
     }
 
     /// Is this epic's remaining work entirely parked?
@@ -838,12 +845,14 @@ pub fn epic_progress(members: &[(String, &TrackBlock)]) -> EpicProgress {
         in_progress: 0,
         open: 0,
         deferred: 0,
+        wontfix: 0,
     };
     for (_, block) in members {
         match block.status.as_deref() {
             Some("closed") => p.closed += 1,
             Some("in_progress") => p.in_progress += 1,
             Some("deferred") => p.deferred += 1,
+            Some("wontfix") => p.wontfix += 1,
             _ => p.open += 1,
         }
     }
@@ -1021,6 +1030,12 @@ fn render_epic_progress_line(p: &EpicProgress) -> String {
     );
     if p.deferred > 0 {
         line.push_str(&format!(" · {} deferred", p.deferred));
+    }
+    // Same never-fold-into-closed rule as `deferred`: omitted when zero so
+    // epics with no wontfix members render byte-identical to before this field
+    // existed.
+    if p.wontfix > 0 {
+        line.push_str(&format!(" · {} wontfix", p.wontfix));
     }
     line
 }
