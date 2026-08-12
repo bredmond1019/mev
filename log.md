@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-09T13:30:00Z"
+timestamp: "2026-08-10T21:15:00Z"
 ---
 
 # Log — mev
@@ -16,6 +16,113 @@ timestamp: "2026-08-09T13:30:00Z"
 *Append-only working log. One dated entry per session. Newest entries at the top.*
 
 ---
+
+## [run: 2026-08-12]
+
+`ticket-operator-edge-graph` resumed from its earlier BAIL (see prior `[run: 2026-08-12]` entry below) after `tasks.json`'s task 5 `validation_commands` was corrected to `cargo nextest run --test brain_emit`, and ran tasks 6–11 to a full PASS (11/11, first attempt each). Task 6 wired the operator/approval enrichment (exit condition, paste-ready start command, or decision label) into `focus.blocked[]` and the NOW/NEXT/BLOCKED boards through the single `render_hq_board_blocker` choke point plus the matching arms in `render_epic_sequence_table`. Task 7 shipped `mev close-operator-gate <slug> --exit-verified`, which strips every matching operator `depends_on` edge fleet-wide under the emit lock and refuses (no changes) without the flag or on an unknown slug. Task 8 shipped `mev approve <slug> --digest <d>` / `mev reject <slug>`, both under the same lock, with a digest mismatch on approve refusing the whole call via a distinct `E_APPROVAL_DIGEST_MISMATCH` rather than partially clearing edges. Task 9 made `set-block-status` refuse to start (`in_progress`) an operator-gated block without `--force-operator-gate`, and refuses that flag itself outright when stdin is not a TTY. Task 10 documented the new `depends_on` forms, derivation rules, `wontfix`, and the three new diagnostics in `docs/state/state-schema.md` — committed separately in the HQ repo, since that doc lives in a third git repo. Task 11 added `tests/fleet_regression.rs`, a gate pinning `derive_focus`/`derive_brain_focus` unchanged against the real fleet's stored `state.json` focus snapshots for every block without an operator/approval edge. Final review verdict: PASS. All four harness gates green throughout (fmt, clippy `-D warnings`, 820+ tests via `cargo test`, release build). `state.json`'s `MV.ticket.operator-edge-graph` block flipped to `closed`; `mev emit-state --write` regenerated derived surfaces fleet-wide (20 warnings, 0 errors — all `I_EMIT_WROTE`/`W_EMIT_NO_SENTINEL`, none new).
+
+Next: pull the next item from `focus.next` — `MV.ticket.reconcile-failed-consumer` (emit-state block graph does not recognize `sdlc-task-state.json`'s `reconcile_failed` terminal status) — or from the HQ backlog. `MV.ticket.attention-queue-delivery` is now unblocked on the mev side but still gated on `engine-rs:EN.8.B`.
+
+```
+8f8ecd4 docs: update docs for ticket-operator-edge-graph
+f0ad8b4 feat: implement ticket-operator-edge-graph-task11
+bf2d2e1 feat: implement ticket-operator-edge-graph-task9
+8818092 feat: implement ticket-operator-edge-graph-task8
+6b02703 feat: implement ticket-operator-edge-graph-task7
+69323d8 feat: implement ticket-operator-edge-graph-task6
+```
+
+---
+
+## [run: 2026-08-12]
+
+`ticket-operator-edge-graph` ran tasks 1–11 and BAILED after task 5. Tasks 1–4 shipped clean (PASS, first attempt each): task 1 widened readiness derivation (`derive_focus`/`ready_order`) to treat `operator`/`approval` `depends_on` entries as unmet-while-present, exactly like `external`, fixing a fleet-wide non-exhaustive `BlockedBy` match break that predated the spec; task 2 pinned that `effective_priorities`' reverse-topo walk is unaffected by operator/approval edges (no production change needed — `okf_core::state::build_state_graph` already treats them as targetless); task 3 added `wontfix` as a terminal block status (readiness-satisfying like `closed`, tallied separately so it never inflates the closed count); task 4 added `E_STATE_OPERATOR_MISSING_EXIT`, `E_STATE_APPROVAL_DIGEST_SHAPE`, and a new `W_STATE_OPERATOR_STALE` staleness check wired through a new `operator_days` field on the existing `[attention]` config surface. Task 5 (dedup rendering of shared operator/approval gates in `render_hq_board`/`render_unified_board` via a new `group_blocked_by_gate`/`BlockedGroup` in `src/brain/emit.rs`) implemented and tested cleanly, but its `tasks.json` `validation_commands` entry — `cargo nextest run brain_emit` — is a malformed nextest invocation: bare positional args filter by test *name*, not binary, so it matches zero tests and exits 4 regardless of correctness. Verified directly against the working tree: `cargo nextest run --test brain_emit` passes all 164 tests in `tests/brain_emit.rs`, confirming task 5's code is correct and the defect is purely in the spec's command syntax. This is a spec-authoring bug, not a code defect, so it needs a human/spec fix to `tasks.json` (`--test brain_emit` or `brain::emit --lib`) rather than a bounded retry; tasks 6–11 were never reached. Amendment logged in the spec's Amendment Log; `planning/status.md` and `state.json` updated accordingly (no block flipped — spec remains open).
+
+Next: fix `tasks.json`'s task 5 `validation_commands` entry, then resume `/sdlc-flow ticket-operator-edge-graph 5` (or `--resume`) to continue through tasks 6–11.
+
+```
+cdb59b8 feat: implement ticket-operator-edge-graph-task5
+b58bc0a feat: implement ticket-operator-edge-graph-task4
+2bc1dda feat: implement ticket-operator-edge-graph-task3
+1b0e0a1 feat: implement ticket-operator-edge-graph-task2
+5c8837d feat: implement ticket-operator-edge-graph-task1
+```
+
+---
+
+## [run: 2026-08-10]
+
+### `evaluate_carryover_with_dedup` — skip the O(n²) dedup pass on the HTTP hot path
+
+`bastion serve`'s `/api/attention?scope=hq` was taking ~2.2s (vs ~0.02-0.1s for other scopes/
+endpoints), causing a visible ~1s "Rendering" stall on every tab/space switch in bastion-web's
+Command Center. Root cause: `evaluate_carryover()` unconditionally ran `suggest_duplicates()`
+(`src/brain/carryover.rs:988`, added by the `ticket-carryover-dedup-clusters` chain the day
+before) — an O(n²) pairwise scan over finding_id-less entries, re-tokenizing both sides of every
+pair with no memoization (145 such entries at HQ scope → ~10,440 pairs). `AttentionDto` in
+`bastion` never exposed a `clusters`/`suggestions` field, so the whole pass was pure waste on
+that path — confirmed by grepping all of `core/bastion` for `.suggestions`/`.clusters` (zero
+hits) and by timing (`mev carryover --json`: 2.24s, 99% CPU, matching the HTTP number).
+
+Fix: extracted the real body into `evaluate_carryover_with_dedup(..., include_dedup: bool)`;
+`evaluate_carryover()` is now a thin wrapper passing `true`, so all 37 existing call sites (tests
++ the `mev carryover` CLI, the pass's one real consumer) are behavior-unchanged. Added
+`evaluate_carryover_with_dedup_false_skips_clusters_and_suggestions`, which proves the fixture
+pair *would* trigger a suggestion with the flag on and confirms it's empty with the flag off. 98
+carryover tests pass. `bastion`'s `build_attention()` now calls the new function with
+`include_dedup: false`.
+
+### carryover-improvements lane complete — 5 blocks, 28/28 tasks, all first-attempt
+
+Drove the `mev` lane of HQ's carryover-improvements roadmap end to end via `/begin-orchestration`:
+`carryover-field-validation` (6/6) → `clears-when-evaluation` (5/5, PR #32) →
+`carryover-dedup-clusters` (6/6, PR #33) → `carryover-triage-ranking` (7/7, PR #34) →
+`unqualified-related-suggests-scope` (4/4). No bails, no HELD blocks, no merge conflicts, and
+**zero state repairs** — every engine wrote its own status correctly. Corpus stayed at 0 errors at
+every checkpoint. Full review with hand-runnable verification commands and eight ranked lingering
+items: `planning/orchestration-run/carryover-improvements/review.md`.
+
+### `MV.ticket.unqualified-related-suggests-scope` shipped (4 tasks, added mid-run)
+
+An unqualified OKF `related:` target is qualified into the **referrer's own** scope
+(`okf-core/src/graph.rs:126-132`), so a mev-vault doc naming a brain-vault `doc_id` dangles and
+red-gates the whole corpus — which happened twice in six days, both times costing a *different*
+lane than the one that authored the edge. `check_graph` now builds a `doc_id → canonical id` index
+once before the edge loop and, for a dangling **unqualified** ref, names the owning scope
+(`— did you mean \`brain:x\`?`) or lists every candidate when several match. An already-qualified
+ref never gains a suggestion, even when another scope owns that bare `doc_id`: an explicit prefix
+is an authored decision. Locator and severity deliberately unchanged — three test files and
+`docs/architecture.md:267` key off both. Single-repo by construction: `resolve_edge` lives in
+okf-core, but `scope`/`doc_id` are already on the `GraphArtifact` mev holds, so no shared-crate
+bump and no downstream recompile.
+
+### The chain shipped four capabilities with zero rows of input
+
+Measured on the live corpus with the release binary: **0 of 138** carryover entries author
+`priority`, `blocks[]`, `finding_id`, or a typed `clears_when`. So the Attention board's BLOCKING
+and HOT lanes are structurally empty, dedup's CLUSTERS section is empty, and evaluable
+`clears_when` stayed at 9 (baseline 142/3/6/133 → 138/3/6/129). The code is correct at every
+surface and inert on real data until `HQ.4.E`'s typed backfill lands — and that block sits at wave
+207 *behind* this whole chain, though its backfill half depends only on `HQ.4.D`, which closed
+2026-08-09. The roadmap's "~40 evaluable" target was additionally unreachable by construction: it
+counted the 30 gate-mention prose predicates, which can only be evaluated by deriving a command
+from prose — forbidden by the same program.
+
+### Post-chain: `bastion` cannot compile against the current okf-core
+
+Rebuilding the PATH binaries to make the new board live: `mev` reinstalled clean, **`bastion`
+failed** — `src/serve/handlers/attention.rs:101` still assigns `Option<ClearsWhen>` into a
+`Option<String>` DTO field (`E0308`). okf-core's type change was adapted in mev's block 1 and never
+in bastion. Consequences: the installed `bastion` (Jul 31) embeds a Jul-31 mev **as a library**, so
+`bastion emit-state --write` — which `scripts/validate_brain.sh` and the nightly `scripts/routine.sh`
+both call — regenerates the Attention board with pre-chain code and silently reverts the four-lane
+re-cut. Observed live during this run. `routine.sh` does not self-heal, because it cannot
+`cargo install` what will not compile. Not repaired here: `dto.rs:1290`'s `clears_when:
+Option<String>` is the serve API's data contract, so the fix is a D20 contract decision (render to
+a display string vs expose the typed shape), which is exactly `BA.ticket.carryover-triage-dto` —
+now unblocked, since its only dependency was this lane's ranking block. This break was invisible
+all evening because the orchestrate downstream check correctly refuses to run against a dirty
+consumer, and bastion has carried 4 uncommitted doc files throughout.
 
 ## [run: 2026-08-09]
 

@@ -49,6 +49,13 @@
 //! - `W_STATE_EPIC_UNREACHABLE_DEP` — an unclosed epic block depends on an unclosed
 //!   block that belongs to no epic (a gate invisible on the epic's board).
 //! - `E_STATE_SCHEMA_BAD_FINDING_ID` — a carryover `finding_id` is not kebab-case.
+//! - `E_STATE_OPERATOR_MISSING_EXIT` — a `depends_on` `{type:"operator"}` entry has
+//!   an empty `exit` condition.
+//! - `E_STATE_APPROVAL_DIGEST_SHAPE` — a `depends_on` `{type:"approval"}` entry has
+//!   a missing or malformed `digest` (expected `<algorithm>:<hex>`).
+//! - `W_STATE_OPERATOR_STALE` — a `depends_on` `{type:"operator"}` edge unmet past
+//!   the `brain.toml [attention] operator_days` threshold (anchored on the owning
+//!   file's `updated` date).
 //! - `E_STATE_SCHEMA_BAD_CLEARS_WHEN` — a carryover `clears_when` typed predicate is
 //!   missing a required member, has an empty required member, or (for `file_exists` /
 //!   `file_contains`) names an absolute path. Well-formedness only — never evaluation.
@@ -289,11 +296,34 @@ const VALID_STATUSES: &[&str] = &["open", "in_progress", "blocked", "deferred", 
 /// a block on the back burner, which nothing can derive. It is manual and sticky (no
 /// expiry date — edit back to `"open"` to resume).
 ///
+/// `"wontfix"` is also authored: a deliberate human decision that the block will never
+/// be done. It is **terminal for readiness purposes** — a block depending on a
+/// `wontfix` block is not blocked, exactly as if the target were `closed` — but it is
+/// **counted separately from `closed` everywhere `closed` is counted**, so progress
+/// metrics (e.g. epic `N/M closed` lines) do not inflate. It is distinct from
+/// `"deferred"`, which is a park (non-terminal, resumable); `wontfix` never resumes —
+/// supersede the block instead. See [`is_terminal_block_status`].
+///
 /// `pub(crate)` so [`crate::brain::blocks::plan_set_block_status`] validates authored
 /// input against exactly this list rather than a copy that could drift — and, crucially,
 /// not against [`VALID_STATUSES`], which admits the derived-only `"blocked"`.
 pub(crate) const VALID_TRACK_BLOCK_STATUSES: &[&str] =
-    &["open", "in_progress", "deferred", "closed"];
+    &["open", "in_progress", "deferred", "closed", "wontfix"];
+
+/// True for the two authored statuses that satisfy a `{type:"block"}` dependency —
+/// `"closed"` and `"wontfix"`. Both are terminal: nothing further will ever happen to
+/// the block, so anything gated on it may proceed. `"deferred"` is deliberately absent
+/// — it is a park, not a resolution, and an `open` block depending on a deferred one
+/// must still report blocked (see [`derive_focus`]'s doc comment on deferral not
+/// propagating).
+///
+/// Single owner of "does this dependency target count as satisfied" — [`ready_order`],
+/// [`derive_focus`], and [`check_status_consistency`] all call this instead of
+/// re-deriving the closed-or-wontfix test inline, so they cannot drift apart on what
+/// `wontfix` means for a dependent block.
+pub(crate) fn is_terminal_block_status(status: Option<&str>) -> bool {
+    matches!(status, Some("closed") | Some("wontfix"))
+}
 
 /// The focus lanes, in the order they are reported in diagnostics and boards.
 ///
@@ -459,6 +489,85 @@ pub fn check_backlog_staleness(
                     item.slug, item.status
                 ),
             ));
+        }
+    }
+    diags
+}
+
+/// Whether a `depends_on` `{type:"approval"}` `digest` value is well-formed:
+/// `<algorithm>:<hex>`, e.g. `"sha256:abc123"`. Both halves must be non-empty;
+/// the algorithm half must be alphanumeric and the hex half must be valid hex
+/// digits. An empty string (the "missing" case — okf-core's `digest` field is
+/// required at deserialize time, so "missing" in practice means authored as
+/// `""`) is rejected by the `split_once` failing to find a value on either
+/// side.
+pub(crate) fn is_well_formed_digest(digest: &str) -> bool {
+    let Some((alg, hex)) = digest.split_once(':') else {
+        return false;
+    };
+    let alg = alg.trim();
+    let hex = hex.trim();
+    !alg.is_empty()
+        && !hex.is_empty()
+        && alg.chars().all(|c| c.is_ascii_alphanumeric())
+        && hex.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The staleness verdict for an unmet `depends_on` `operator` edge:
+/// `Some(age_days)` when the owning file's `updated` date is more than
+/// `thresholds.operator_days` in the past, else `None`.
+///
+/// Anchored on the **file's** `updated` date rather than a per-edge
+/// timestamp — `okf-core`'s `BlockedBy::Operator` carries no date field of
+/// its own, and `updated` is the freshest available signal for "how long has
+/// this still-open gate sat unmet". A file with no parseable `updated`
+/// cannot age (mirrors [`carryover_stale_age`]'s "no date, no staleness"
+/// behaviour; the malformed/missing date itself is caught separately by
+/// `check_schema`).
+pub fn operator_stale_age(
+    file_updated: &str,
+    today: chrono::NaiveDate,
+    thresholds: &crate::brain::config::AttentionThresholds,
+) -> Option<i64> {
+    let anchor = parse_state_date(file_updated)?;
+    let age = (today - anchor).num_days();
+    (age > thresholds.operator_days).then_some(age)
+}
+
+/// Staleness warnings for unmet `depends_on` `operator` edges — one
+/// `W_STATE_OPERATOR_STALE` per operator edge in a file whose `updated` date
+/// has aged past `[attention].operator_days`. WARNING severity only — never
+/// flips the exit code.
+pub fn check_operator_staleness(
+    src: &StateSource,
+    file: &StateFile,
+    today: chrono::NaiveDate,
+    thresholds: &crate::brain::config::AttentionThresholds,
+) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let path = &src.abs_path;
+
+    let Some(age) = operator_stale_age(&file.updated, today, thresholds) else {
+        return diags;
+    };
+
+    for track in &file.tracks {
+        for block in &track.blocks {
+            for dep in &block.depends_on {
+                if let BlockedBy::Operator { slug, .. } = dep {
+                    diags.push(Diagnostic::warning(
+                        path,
+                        "W_STATE_OPERATOR_STALE",
+                        format!(
+                            "operator gate '{slug}' on track block '{}' is {age}d old \
+                             (threshold {}d) — clear it with \
+                             `mev close-operator-gate {slug} --exit-verified` or re-affirm by \
+                             bumping 'updated'",
+                            block.id, thresholds.operator_days
+                        ),
+                    ));
+                }
+            }
         }
     }
     diags
@@ -637,27 +746,60 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                 }
             }
 
-            // check 7: depends_on {type:block} entries must have non-empty repo and id
+            // check 7: depends_on {type:block} entries must have non-empty repo and id;
+            // {type:operator} entries must carry a non-empty 'exit'; {type:approval}
+            // entries must carry a well-formed 'digest'.
             for dep in &block.depends_on {
-                if let BlockedBy::Block { repo, id, .. } = dep {
-                    let repo_empty = repo.trim().is_empty();
-                    let id_empty = id.trim().is_empty();
-                    if repo_empty || id_empty {
-                        diags.push(Diagnostic::error(
-                            path,
-                            "E_STATE_SCHEMA_BAD_BLOCKED_BY",
-                            format!(
-                                "depends_on entry in track block '{}' is missing required \
-                                 field(s): {}",
-                                block.id,
-                                [repo_empty.then_some("'repo'"), id_empty.then_some("'id'")]
-                                    .into_iter()
-                                    .flatten()
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ),
-                        ));
+                match dep {
+                    BlockedBy::Block { repo, id, .. } => {
+                        let repo_empty = repo.trim().is_empty();
+                        let id_empty = id.trim().is_empty();
+                        if repo_empty || id_empty {
+                            diags.push(Diagnostic::error(
+                                path,
+                                "E_STATE_SCHEMA_BAD_BLOCKED_BY",
+                                format!(
+                                    "depends_on entry in track block '{}' is missing required \
+                                     field(s): {}",
+                                    block.id,
+                                    [repo_empty.then_some("'repo'"), id_empty.then_some("'id'")]
+                                        .into_iter()
+                                        .flatten()
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
+                            ));
+                        }
                     }
+                    BlockedBy::Operator { slug, exit, .. } => {
+                        if exit.trim().is_empty() {
+                            diags.push(Diagnostic::error(
+                                path,
+                                "E_STATE_OPERATOR_MISSING_EXIT",
+                                format!(
+                                    "operator depends_on entry '{slug}' in track block '{}' has \
+                                     an empty 'exit' condition — 'exit' must name the artifact \
+                                     whose existence ends the gate",
+                                    block.id
+                                ),
+                            ));
+                        }
+                    }
+                    BlockedBy::Approval { slug, digest, .. } => {
+                        if !is_well_formed_digest(digest) {
+                            diags.push(Diagnostic::error(
+                                path,
+                                "E_STATE_APPROVAL_DIGEST_SHAPE",
+                                format!(
+                                    "approval depends_on entry '{slug}' in track block '{}' has \
+                                     a missing or malformed 'digest' (expected \
+                                     '<algorithm>:<hex>', e.g. 'sha256:abc123'), got '{digest}'",
+                                    block.id
+                                ),
+                            ));
+                        }
+                    }
+                    BlockedBy::External { .. } => {}
                 }
             }
         }
@@ -805,6 +947,11 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                         ));
                     }
                 }
+                // `operator`/`approval` well-formedness for this `blocks[]` field is out
+                // of scope for this check — depends_on's own operator/approval schema
+                // validation (E_STATE_OPERATOR_MISSING_EXIT, E_STATE_APPROVAL_DIGEST_SHAPE)
+                // is added separately.
+                BlockedBy::Operator { .. } | BlockedBy::Approval { .. } => {}
             }
         }
 
@@ -1548,8 +1695,8 @@ pub fn check_status_consistency(files: &[(StateSource, StateFile)]) -> Vec<Diagn
                         // If the dep target is not in any loaded file, skip — it will
                         // be reported as E_STATE_DANGLING_BLOCKED_BY by check_state_graph.
                         if let Some(dep_status) = status_map.get(&dep_key) {
-                            let dep_is_closed = dep_status.as_deref() == Some("closed");
-                            if !dep_is_closed {
+                            let dep_is_terminal = is_terminal_block_status(dep_status.as_deref());
+                            if !dep_is_terminal {
                                 diags.push(Diagnostic::error(
                                     &src.abs_path,
                                     "E_STATE_STATUS_INCONSISTENT",
@@ -2046,8 +2193,10 @@ pub fn effective_priorities(
 ///
 /// A block is *ready* iff:
 /// - Its authored status is `"open"` (or absent — treated as open).
-/// - It has **zero** `{type:"external"}` `depends_on` entries (external dependencies
-///   mean the block is gated on something outside the graph).
+/// - It has **zero** `{type:"external"}`, `{type:"operator"}`, or `{type:"approval"}`
+///   `depends_on` entries — all three are targetless and unmet for as long as they are
+///   present, so their mere presence means the block is gated on something outside the
+///   graph (an environmental condition, an operator gate, or a pending decision).
 /// - Every `{type:"block"}` `depends_on` target has authored status `"closed"`.
 ///
 /// The returned `Vec<String>` lists canonical `"repo:id"` keys ordered by:
@@ -2080,12 +2229,18 @@ pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> V
                     continue;
                 }
 
-                // Any external dep disqualifies the block (not yet runnable).
-                let has_external = block
-                    .depends_on
-                    .iter()
-                    .any(|d| matches!(d, BlockedBy::External { .. }));
-                if has_external {
+                // Any external/operator/approval dep disqualifies the block (not yet
+                // runnable) — all three are targetless and unmet for as long as they are
+                // present, exactly like `external`.
+                let has_unmet_targetless = block.depends_on.iter().any(|d| {
+                    matches!(
+                        d,
+                        BlockedBy::External { .. }
+                            | BlockedBy::Operator { .. }
+                            | BlockedBy::Approval { .. }
+                    )
+                });
+                if has_unmet_targetless {
                     continue;
                 }
 
@@ -2093,9 +2248,10 @@ pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> V
                 let all_block_deps_closed = block.depends_on.iter().all(|d| {
                     if let BlockedBy::Block { repo, id, .. } = d {
                         let dep_key = format!("{repo}:{id}");
-                        status_map.get(&dep_key).and_then(|s| s.as_deref()) == Some("closed")
+                        let dep_status = status_map.get(&dep_key).and_then(|s| s.as_deref());
+                        is_terminal_block_status(dep_status)
                     } else {
-                        true // External entries handled above; this branch is unreachable here.
+                        true // External/Operator/Approval entries handled above; this branch is unreachable here.
                     }
                 });
 
@@ -2159,9 +2315,10 @@ pub struct DerivedFocus {
 /// **Derivation rules:**
 /// - `now` — every `tracks[]` block with authored `status == "in_progress"`.
 /// - `blocked` — every `tracks[]` block that is `open` and has at least one unmet
-///   dependency: any `External` dep, or any `Block` dep whose target is not `closed`.
-///   The returned `blocked` entry carries only the **unmet** subset, not the full
-///   `depends_on` list.
+///   dependency: any `External`, `Operator`, or `Approval` dep (all three are
+///   targetless and unmet for as long as they are present), or any `Block` dep whose
+///   target is not `closed`. The returned `blocked` entry carries only the **unmet**
+///   subset, not the full `depends_on` list.
 /// - `next` — every `tracks[]` block returned by [`ready_order`] for this file
 ///   (open blocks with no external deps and all block deps `closed`), in wave order.
 /// - `deferred` — every `tracks[]` block with authored `status == "deferred"`.
@@ -2208,11 +2365,16 @@ pub fn derive_focus(
                         .depends_on
                         .iter()
                         .filter(|d| match d {
-                            BlockedBy::External { .. } => true,
+                            // External/Operator/Approval are targetless and unmet for as
+                            // long as they are present — exactly like `external`.
+                            BlockedBy::External { .. }
+                            | BlockedBy::Operator { .. }
+                            | BlockedBy::Approval { .. } => true,
                             BlockedBy::Block { repo, id, .. } => {
                                 let dep_key = format!("{repo}:{id}");
-                                status_map.get(&dep_key).and_then(|s| s.as_deref())
-                                    != Some("closed")
+                                let dep_status =
+                                    status_map.get(&dep_key).and_then(|s| s.as_deref());
+                                !is_terminal_block_status(dep_status)
                             }
                         })
                         .cloned()
@@ -5551,6 +5713,53 @@ mod tests {
     }
 
     #[test]
+    fn derive_focus_open_block_depending_on_wontfix_is_not_blocked() {
+        // Mirror of derive_focus_open_block_depending_on_deferred_is_blocked, but
+        // wontfix IS terminal for readiness — the dependent must derive as ready
+        // (next), not blocked, and the wontfix block itself gets no derived lane
+        // (same as closed: it falls through derive_focus's `_ => {}` arm).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("wontfix"), None, vec![]),
+                (
+                    "AL.1.B",
+                    Some("open"),
+                    None,
+                    vec![BlockedBy::Block {
+                        repo: "alpha".to_string(),
+                        id: "AL.1.A".to_string(),
+                        what: None,
+                    }],
+                ),
+            ],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+
+        let d = derive_focus(src, file, &graph, &files);
+
+        assert!(
+            d.deferred.is_empty(),
+            "wontfix is not deferred: {:?}",
+            d.deferred
+        );
+        assert!(
+            d.blocked.is_empty(),
+            "dependent must not be blocked on a wontfix dep: {:?}",
+            d.blocked
+        );
+        assert_eq!(
+            d.next,
+            vec!["AL.1.B"],
+            "dependent must derive as ready once its only dep is wontfix"
+        );
+    }
+
+    #[test]
     fn ready_order_deferred_block_excluded() {
         // Regression pin. `ready_order`'s gate is `status != "open"`, so a
         // deferred block is excluded for free — but that is load-bearing, not
@@ -5713,6 +5922,55 @@ mod tests {
             order.contains(&"alpha:AL.1.A".to_string()),
             "alpha:AL.1.A should be ready when its only dep is closed; order={order:?}"
         );
+    }
+
+    #[test]
+    fn ready_order_wontfix_dep_is_ready() {
+        // Same shape as ready_order_block_with_closed_dep_is_ready, but the
+        // dependency target is "wontfix" instead of "closed" — terminal for
+        // readiness purposes exactly like closed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let block_dep = BlockedBy::Block {
+            repo: "beta".to_string(),
+            id: "BE.1.A".to_string(),
+            what: None,
+        };
+        let pair_a = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("open"), None, vec![block_dep])],
+        );
+        let pair_b = make_ready_pair(
+            dir.path(),
+            "beta",
+            &[("BE.1.A", Some("wontfix"), None, vec![])],
+        );
+        let files = vec![pair_a, pair_b];
+        let graph = build_state_graph(&files);
+
+        let order = ready_order(&graph, &files);
+        assert!(
+            order.contains(&"alpha:AL.1.A".to_string()),
+            "alpha:AL.1.A should be ready when its only dep is wontfix; order={order:?}"
+        );
+    }
+
+    #[test]
+    fn is_terminal_block_status_accepts_closed_and_wontfix_only() {
+        assert!(is_terminal_block_status(Some("closed")));
+        assert!(is_terminal_block_status(Some("wontfix")));
+        assert!(!is_terminal_block_status(Some("open")));
+        assert!(!is_terminal_block_status(Some("in_progress")));
+        assert!(
+            !is_terminal_block_status(Some("deferred")),
+            "deferred is a park, not a resolution — it must not satisfy a dependency"
+        );
+        assert!(!is_terminal_block_status(None));
+    }
+
+    #[test]
+    fn wontfix_is_an_authorable_track_block_status() {
+        assert!(VALID_TRACK_BLOCK_STATUSES.contains(&"wontfix"));
     }
 
     #[test]

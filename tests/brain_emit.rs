@@ -8655,3 +8655,451 @@ mod task2_scope_filter {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// task3_wontfix_progress — `wontfix` is tallied separately from `closed`
+// ---------------------------------------------------------------------------
+
+mod task3_wontfix_progress {
+    use super::block;
+    use mev::brain::emit::epic_progress;
+
+    #[test]
+    fn wontfix_members_are_tallied_separately_from_closed() {
+        let a = block("A.1", "A.1", Some("closed"), Some(1));
+        let b = block("A.2", "A.2", Some("wontfix"), Some(2));
+        let c = block("A.3", "A.3", Some("open"), Some(3));
+        let members: Vec<(String, &_)> = vec![
+            ("alpha".to_string(), &a),
+            ("alpha".to_string(), &b),
+            ("alpha".to_string(), &c),
+        ];
+
+        let p = epic_progress(&members);
+
+        assert_eq!(p.closed, 1, "wontfix must not inflate the closed tally");
+        assert_eq!(p.wontfix, 1);
+        assert_eq!(p.open, 1);
+        assert_eq!(p.in_progress, 0);
+        assert_eq!(p.deferred, 0);
+        assert_eq!(p.total(), 3, "total() must still count every member");
+    }
+
+    #[test]
+    fn wontfix_with_no_members_leaves_progress_at_zero() {
+        let members: Vec<(String, &mev::brain::state::TrackBlock)> = vec![];
+        let p = epic_progress(&members);
+        assert_eq!(p.wontfix, 0);
+        assert_eq!(p.total(), 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// task5_shared_identity_dedup — one operator/approval slug gating N blocks
+// renders as exactly ONE item (ticket-operator-edge-graph, Task 5)
+// ---------------------------------------------------------------------------
+
+mod task5_shared_identity_dedup {
+    use std::collections::HashMap;
+
+    use mev::brain::emit::{group_blocked_by_gate, render_hq_board, render_unified_board};
+    use mev::brain::state::{Block, BlockedBy, Focus};
+
+    /// Build a repo-tagged `Block` with the given `blocked_by` entries.
+    fn blocked_block(repo: &str, id: &str, title: &str, blocked_by: Vec<BlockedBy>) -> Block {
+        Block {
+            epics: Vec::new(),
+            due: None,
+            priority: None,
+            id: id.to_string(),
+            title: title.to_string(),
+            status: None,
+            note: None,
+            repo: Some(repo.to_string()),
+            blocked_by,
+        }
+    }
+
+    fn operator(slug: &str) -> BlockedBy {
+        BlockedBy::Operator {
+            slug: slug.to_string(),
+            exit: "artifact exists".to_string(),
+            start: "mev do-thing".to_string(),
+            what: None,
+        }
+    }
+
+    fn approval(slug: &str) -> BlockedBy {
+        BlockedBy::Approval {
+            slug: slug.to_string(),
+            what: "ship it?".to_string(),
+            digest: "deadbeef".to_string(),
+        }
+    }
+
+    /// Extract the bullet lines (`"- ..."`) of the `## {heading}` (or
+    /// `## {heading}` for the HQ board) section of a rendered board, up to the
+    /// next `##` heading or end of string.
+    fn section_bullets<'a>(rendered: &'a str, heading: &str) -> Vec<&'a str> {
+        let marker = format!("## {heading}\n");
+        let start = rendered.find(&marker).expect("heading present") + marker.len();
+        let rest = &rendered[start..];
+        let end = rest.find("\n\n##").unwrap_or(rest.len());
+        rest[..end]
+            .lines()
+            .filter(|l| l.starts_with("- "))
+            .collect()
+    }
+
+    #[test]
+    fn hq_board_one_operator_slug_on_three_blocks_across_two_repos_renders_one_item() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![
+                blocked_block("core", "A.1", "Block A1", vec![operator("gate-x")]),
+                blocked_block("core", "A.2", "Block A2", vec![operator("gate-x")]),
+                blocked_block("bastion", "B.1", "Block B1", vec![operator("gate-x")]),
+            ],
+            deferred: Vec::new(),
+        };
+
+        let rendered = render_hq_board(&focus, &[]);
+        let bullets = section_bullets(&rendered, "BLOCKED");
+
+        assert_eq!(
+            bullets.len(),
+            1,
+            "one shared slug across 3 blocks must render as exactly one item, got: {bullets:?}"
+        );
+        let item = bullets[0];
+        assert!(item.contains("core:A.1"), "{item}");
+        assert!(item.contains("core:A.2"), "{item}");
+        assert!(item.contains("bastion:B.1"), "{item}");
+        assert!(item.contains("operator:gate-x"), "{item}");
+    }
+
+    #[test]
+    fn unified_board_one_operator_slug_on_three_blocks_across_two_repos_renders_one_item() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![
+                blocked_block("core", "A.1", "Block A1", vec![operator("gate-x")]),
+                blocked_block("core", "A.2", "Block A2", vec![operator("gate-x")]),
+                blocked_block("bastion", "B.1", "Block B1", vec![operator("gate-x")]),
+            ],
+            deferred: Vec::new(),
+        };
+        let config = mev::brain::config::BrainConfig::default();
+
+        let rendered = render_unified_board(
+            &focus,
+            &[],
+            &HashMap::new(),
+            &config,
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 5).expect("valid date"),
+        );
+        let bullets = section_bullets(&rendered, "BLOCKED");
+
+        assert_eq!(
+            bullets.len(),
+            1,
+            "unified board must dedup the shared slug too, got: {bullets:?}"
+        );
+        let item = bullets[0];
+        assert!(item.contains("core:A.1"), "{item}");
+        assert!(item.contains("core:A.2"), "{item}");
+        assert!(item.contains("bastion:B.1"), "{item}");
+        assert!(item.contains("operator:gate-x"), "{item}");
+    }
+
+    #[test]
+    fn two_distinct_operator_slugs_render_as_two_items() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![
+                blocked_block("core", "A.1", "Block A1", vec![operator("gate-x")]),
+                blocked_block("core", "A.2", "Block A2", vec![operator("gate-y")]),
+            ],
+            deferred: Vec::new(),
+        };
+
+        let rendered = render_hq_board(&focus, &[]);
+        let bullets = section_bullets(&rendered, "BLOCKED");
+
+        assert_eq!(bullets.len(), 2, "distinct slugs must not be merged");
+    }
+
+    #[test]
+    fn approval_edges_dedup_by_slug_same_as_operator() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![
+                blocked_block("core", "A.1", "Block A1", vec![approval("ship-v2")]),
+                blocked_block("bastion", "B.1", "Block B1", vec![approval("ship-v2")]),
+            ],
+            deferred: Vec::new(),
+        };
+
+        let rendered = render_hq_board(&focus, &[]);
+        let bullets = section_bullets(&rendered, "BLOCKED");
+
+        assert_eq!(bullets.len(), 1, "shared approval slug must dedup too");
+        assert!(bullets[0].contains("approval:ship-v2"));
+        assert!(bullets[0].contains("core:A.1"));
+        assert!(bullets[0].contains("bastion:B.1"));
+    }
+
+    #[test]
+    fn blocks_with_no_shared_slug_each_render_as_their_own_item() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![
+                blocked_block(
+                    "core",
+                    "A.1",
+                    "Block A1",
+                    vec![BlockedBy::External {
+                        what: "waiting on vendor".to_string(),
+                    }],
+                ),
+                blocked_block("core", "A.2", "Block A2", vec![operator("gate-solo")]),
+            ],
+            deferred: Vec::new(),
+        };
+
+        let rendered = render_hq_board(&focus, &[]);
+        let bullets = section_bullets(&rendered, "BLOCKED");
+
+        assert_eq!(
+            bullets.len(),
+            2,
+            "an external dep and a solo operator gate must not be merged with each other"
+        );
+    }
+
+    #[test]
+    fn group_blocked_by_gate_deduped_group_carries_minimum_effective_priority() {
+        let blocks = vec![
+            blocked_block("core", "A.1", "Block A1", vec![operator("gate-x")]),
+            blocked_block("core", "A.2", "Block A2", vec![operator("gate-x")]),
+            blocked_block("bastion", "B.1", "Block B1", vec![operator("gate-x")]),
+        ];
+
+        let mut effective = HashMap::new();
+        effective.insert("core:A.1".to_string(), 2u8);
+        effective.insert("core:A.2".to_string(), 0u8);
+        effective.insert("bastion:B.1".to_string(), 1u8);
+
+        let groups = group_blocked_by_gate(&blocks);
+        assert_eq!(groups.len(), 1, "all three share one slug");
+        assert_eq!(groups[0].blocks.len(), 3);
+        assert_eq!(
+            groups[0].effective_priority(&effective),
+            0,
+            "the deduped item must carry the MINIMUM effective priority of the blocks it gates"
+        );
+    }
+
+    #[test]
+    fn group_blocked_by_gate_single_block_with_no_gate_is_a_singleton_with_no_gate() {
+        let blocks = vec![blocked_block("core", "A.1", "Block A1", vec![])];
+
+        let groups = group_blocked_by_gate(&blocks);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].blocks.len(), 1);
+        assert!(groups[0].gate.is_none());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// task6_rendering — focus.blocked[] and the board show exit, start, and
+// decisions in full (ticket-operator-edge-graph, Task 6)
+// ---------------------------------------------------------------------------
+
+mod task6_rendering {
+    use mev::brain::emit::{render_epic_sequence_table, render_hq_board, render_unified_board};
+    use mev::brain::state::{Block, BlockedBy, Focus, TrackBlock};
+    use std::collections::HashMap;
+
+    fn blocked_block(repo: &str, id: &str, title: &str, blocked_by: Vec<BlockedBy>) -> Block {
+        Block {
+            epics: Vec::new(),
+            due: None,
+            priority: None,
+            id: id.to_string(),
+            title: title.to_string(),
+            status: None,
+            note: None,
+            repo: Some(repo.to_string()),
+            blocked_by,
+        }
+    }
+
+    fn operator_gate(slug: &str, exit: &str, start: &str) -> BlockedBy {
+        BlockedBy::Operator {
+            slug: slug.to_string(),
+            exit: exit.to_string(),
+            start: start.to_string(),
+            what: None,
+        }
+    }
+
+    fn approval_gate(slug: &str, what: &str, digest: &str) -> BlockedBy {
+        BlockedBy::Approval {
+            slug: slug.to_string(),
+            what: what.to_string(),
+            digest: digest.to_string(),
+        }
+    }
+
+    #[test]
+    fn hq_board_operator_gate_renders_exit_and_start() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![blocked_block(
+                "core",
+                "A.1",
+                "Block A1",
+                vec![operator_gate(
+                    "gate-x",
+                    "log.md entry exists",
+                    "mev close-operator-gate gate-x --exit-verified",
+                )],
+            )],
+            deferred: Vec::new(),
+        };
+
+        let rendered = render_hq_board(&focus, &[]);
+
+        assert!(rendered.contains("exit: log.md entry exists"), "{rendered}");
+        assert!(
+            rendered.contains("start: `mev close-operator-gate gate-x --exit-verified`"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn unified_board_operator_gate_renders_exit_and_start() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![blocked_block(
+                "core",
+                "A.1",
+                "Block A1",
+                vec![operator_gate(
+                    "gate-y",
+                    "artifact published",
+                    "mev close-operator-gate gate-y --exit-verified",
+                )],
+            )],
+            deferred: Vec::new(),
+        };
+        let config = mev::brain::config::BrainConfig::default();
+
+        let rendered = render_unified_board(
+            &focus,
+            &[],
+            &HashMap::new(),
+            &config,
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 5).expect("valid date"),
+        );
+
+        assert!(rendered.contains("exit: artifact published"), "{rendered}");
+        assert!(
+            rendered.contains("start: `mev close-operator-gate gate-y --exit-verified`"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn hq_board_approval_renders_what_as_a_decision() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![blocked_block(
+                "core",
+                "A.1",
+                "Block A1",
+                vec![approval_gate("ship-v2", "ship it?", "deadbeef")],
+            )],
+            deferred: Vec::new(),
+        };
+
+        let rendered = render_hq_board(&focus, &[]);
+
+        assert!(
+            rendered.contains("decision: ship it?"),
+            "approval must render `what` labeled as a decision, not a description: {rendered}"
+        );
+    }
+
+    #[test]
+    fn epic_sequence_table_renders_operator_exit_start_and_approval_decision() {
+        let operator_block = TrackBlock {
+            id: "A.1".to_string(),
+            title: "Block A1".to_string(),
+            depends_on: vec![operator_gate(
+                "gate-z",
+                "PR merged",
+                "mev close-operator-gate gate-z --exit-verified",
+            )],
+            ..Default::default()
+        };
+        let approval_block = TrackBlock {
+            id: "A.2".to_string(),
+            title: "Block A2".to_string(),
+            depends_on: vec![approval_gate("ship-v3", "ship it?", "cafebabe")],
+            ..Default::default()
+        };
+        let members: Vec<(String, &TrackBlock)> = vec![
+            ("core".to_string(), &operator_block),
+            ("core".to_string(), &approval_block),
+        ];
+
+        let table = render_epic_sequence_table(&members, &HashMap::new());
+
+        assert!(table.contains("exit: PR merged"), "{table}");
+        assert!(
+            table.contains("start: `mev close-operator-gate gate-z --exit-verified`"),
+            "{table}"
+        );
+        assert!(table.contains("decision: ship it?"), "{table}");
+    }
+
+    /// Blocks with no operator/approval edge must render byte-identically to
+    /// before this task — a plain `Block` dependency's annotation is untouched.
+    #[test]
+    fn plain_block_dependency_rendering_is_unchanged() {
+        let focus = Focus {
+            now: vec![],
+            next: vec![],
+            blocked: vec![blocked_block(
+                "core",
+                "A.1",
+                "Block A1",
+                vec![BlockedBy::Block {
+                    repo: "core".to_string(),
+                    id: "A.0".to_string(),
+                    what: Some("needs the shared schema".to_string()),
+                }],
+            )],
+            deferred: Vec::new(),
+        };
+
+        let rendered = render_hq_board(&focus, &[]);
+
+        assert!(
+            rendered
+                .contains("core:A.1 — Block A1 (blocked by core:A.0 (needs the shared schema))"),
+            "{rendered}"
+        );
+    }
+}

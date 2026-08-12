@@ -39,6 +39,46 @@ cache_doc = "docs/projects/alpha.md"
 heading = "Alpha"
 "#;
 
+/// Same shape as [`brain`], but `alpha` carries exactly two blocks — `AL.1.A`
+/// (seeded at `a_status`) and `AL.1.B` (`open`, depending on `AL.1.A` via a
+/// `{type:"block"}` `depends_on` entry). Used by the `wontfix` readiness tests,
+/// which need a real dependency edge that `brain`'s flat `(id, status)` shape
+/// does not carry.
+fn brain_with_dependency(a_status: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("planning")).unwrap();
+    std::fs::create_dir_all(root.join("alpha/planning")).unwrap();
+    std::fs::write(root.join("brain.toml"), BRAIN_TOML).unwrap();
+
+    std::fs::write(
+        root.join("alpha/planning/state.json"),
+        format!(
+            r#"{{ "repo": "alpha", "kind": "project", "updated": "2026-08-01",
+  "focus": {{ "now": [], "next": [], "blocked": [] }},
+  "tracks": [{{ "title": "P1", "blocks": [
+    {{ "id": "AL.1.A", "title": "AL.1.A", "status": "{a_status}", "wave": 1 }},
+    {{ "id": "AL.1.B", "title": "AL.1.B", "wave": 2,
+       "depends_on": [{{ "type": "block", "repo": "alpha", "id": "AL.1.A" }}] }}
+  ] }}] }}"#
+        ),
+    )
+    .unwrap();
+
+    std::fs::write(
+        root.join("planning/state.json"),
+        r#"{ "repo": "brain", "kind": "brain", "updated": "2026-08-01",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [], "repos": [], "cross_repo": [] }"#,
+    )
+    .unwrap();
+
+    let fm = "---\ntype: ProjectStatus\ntitle: t\ndescription: d\n---\n\n# S\n";
+    std::fs::write(root.join("alpha/planning/status.md"), fm).unwrap();
+    std::fs::write(root.join("planning/status.md"), fm).unwrap();
+    dir
+}
+
 /// Build a two-repo brain whose `alpha` blocks carry the given `(id, status)`
 /// pairs. Same shape as the epic-mutation fixture.
 fn brain(blocks: &[(&str, &str)]) -> tempfile::TempDir {
@@ -135,8 +175,14 @@ fn status_of(root: &Path, id: &str) -> String {
 
 /// The ids currently sitting in `alpha`'s derived `focus.now` lane.
 fn focus_now(root: &Path) -> Vec<String> {
+    focus_lane(root, "now")
+}
+
+/// The ids currently sitting in `alpha`'s derived `focus.<lane>` lane —
+/// `"now"`, `"next"`, `"blocked"`, or `"deferred"`.
+fn focus_lane(root: &Path, lane: &str) -> Vec<String> {
     let v: serde_json::Value = serde_json::from_slice(&alpha_state(root)).unwrap();
-    v["focus"]["now"]
+    v["focus"][lane]
         .as_array()
         .map(|a| {
             a.iter()
@@ -354,5 +400,65 @@ fn write_reruns_emit_state_so_derived_focus_updates() {
         "a closed block must have been evicted from the derived focus.now lane by the \
          chained emit-state; got {:?}",
         focus_now(root)
+    );
+}
+
+// ── 6. `wontfix` — terminal block status ─────────────────────────────────────
+
+#[test]
+fn wontfix_status_round_trips_and_is_a_fixed_point() {
+    let dir = brain(&[("AL.1.A", "open")]);
+    let root = dir.path();
+
+    let out = run(root, "alpha:AL.1.A", "wontfix", true);
+    assert!(out.status.success(), "{}", stderr_stdout(&out));
+    assert_eq!(status_of(root, "AL.1.A"), "wontfix");
+
+    // Setting it again is a no-op success, exactly like every other authored status.
+    let before = corpus_bytes(root);
+    let again = run(root, "alpha:AL.1.A", "wontfix", true);
+    assert!(again.status.success(), "{}", stderr_stdout(&again));
+    assert_eq!(
+        before,
+        corpus_bytes(root),
+        "already-at-target wontfix must be a byte-identical fixed point"
+    );
+}
+
+#[test]
+fn wontfix_target_unblocks_its_dependent() {
+    // AL.1.B depends_on AL.1.A. Seed AL.1.A as open so AL.1.B starts genuinely
+    // blocked, then move AL.1.A to wontfix and confirm AL.1.B is derived ready
+    // (focus.next) rather than blocked — terminal-for-readiness, exactly like closed.
+    let dir = brain_with_dependency("open");
+    let root = dir.path();
+
+    let seed = Command::new(env!("CARGO_BIN_EXE_mev"))
+        .arg("emit-state")
+        .arg(root)
+        .arg("--write")
+        .current_dir(root)
+        .output()
+        .expect("emit-state should run");
+    assert!(seed.status.success(), "{}", stderr_stdout(&seed));
+    assert!(
+        focus_lane(root, "blocked").iter().any(|id| id == "AL.1.B"),
+        "precondition: AL.1.B should start blocked on open AL.1.A, got {:?}",
+        focus_lane(root, "blocked")
+    );
+
+    let out = run(root, "alpha:AL.1.A", "wontfix", true);
+    assert!(out.status.success(), "{}", stderr_stdout(&out));
+    assert_eq!(status_of(root, "AL.1.A"), "wontfix");
+
+    assert!(
+        !focus_lane(root, "blocked").iter().any(|id| id == "AL.1.B"),
+        "AL.1.B must no longer be blocked once its dependency is wontfix: {:?}",
+        focus_lane(root, "blocked")
+    );
+    assert!(
+        focus_lane(root, "next").iter().any(|id| id == "AL.1.B"),
+        "AL.1.B should now derive as ready (next), got {:?}",
+        focus_lane(root, "next")
     );
 }

@@ -31,7 +31,7 @@
 //!
 //! Input is validated against
 //! [`crate::brain::state::VALID_TRACK_BLOCK_STATUSES`] — `open` · `in_progress`
-//! · `deferred` · `closed` — and **not** against `VALID_STATUSES`. The latter
+//! · `deferred` · `closed` · `wontfix` — and **not** against `VALID_STATUSES`. The latter
 //! also contains `"blocked"`, which is a **derived** lane the emitter stamps
 //! onto `focus.blocked[]` entries; authoring it onto a `tracks[]` block is
 //! exactly what `E_STATE_AUTHORED_BLOCKED` exists to reject. Accepting it here

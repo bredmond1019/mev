@@ -415,8 +415,8 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     use brain::state::{
         StateLoadError, build_state_graph, check_backlog_integrity, check_backlog_staleness,
         check_carryover_staleness, check_epics, check_field_policy, check_focus_drift,
-        check_rollup, check_schema, check_state_graph, check_status_consistency, detect_cycles,
-        discover_state_files, load_state,
+        check_operator_staleness, check_rollup, check_schema, check_state_graph,
+        check_status_consistency, detect_cycles, discover_state_files, load_state,
     };
     use std::collections::HashMap;
 
@@ -529,6 +529,12 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
         report
             .diagnostics
             .extend(check_backlog_staleness(src, file, today, &config.attention));
+        report.diagnostics.extend(check_operator_staleness(
+            src,
+            file,
+            today,
+            &config.attention,
+        ));
     }
 
     // 11. Distilled-knowledge staleness warnings — knowledge.md / memory.md siblings of
@@ -881,6 +887,273 @@ pub fn set_block_status(
 
     // Regenerate derived views so focus/boards agree with the authored edit.
     if write && had_actions && !report.is_failure() {
+        let emit = emit_state(root, true, None)?;
+        report.diagnostics.extend(emit.diagnostics);
+    }
+
+    Ok(report)
+}
+
+/// Close an operator gate fleet-wide (`mev close-operator-gate <slug> --exit-verified`).
+///
+/// Removes every `depends_on` `{type:"operator", slug: <slug>}` entry across every
+/// loaded `state.json`, then — on success — re-runs [`emit_state`] so the derived
+/// surfaces (`focus`, boards) agree with the cleared gate. Unlike
+/// [`epic_status`]/[`complete_epic`]/[`set_block_status`], this is not dry-run-by-
+/// default/`--write`-shaped: it is verified-or-refused. `exit_verified` **must**
+/// already be `true` by the time this is called — see `brain::operator`'s module
+/// docs for why mev never infers it — and this function still checks it itself
+/// (rather than trusting the caller) so a future call site cannot skip the guard by
+/// omission.
+///
+/// Diagnostics:
+/// - [`brain::operator::E_OPERATOR_GATE_NOT_VERIFIED`] — `exit_verified` was
+///   `false`. Nothing is loaded or touched.
+/// - [`brain::operator::E_OPERATOR_GATE_UNKNOWN`] — no loaded file carries an
+///   operator edge with this slug (see [`brain::operator::plan_close_operator_gate`]).
+/// - `E_STATE_MALFORMED_JSON` / `E_EMIT_INCOMPLETE_CORPUS` — same corpus-completeness
+///   guard as `set_block_status`: a gate can be shared across repos, so a partial
+///   corpus could silently skip the failed-to-load repo's edges.
+pub fn close_operator_gate(
+    root: &std::path::Path,
+    slug: &str,
+    exit_verified: bool,
+) -> anyhow::Result<Report> {
+    use brain::config::find_brain_config;
+    use brain::emit::apply_plan;
+    use brain::operator::{E_OPERATOR_GATE_NOT_VERIFIED, plan_close_operator_gate};
+    use brain::state::{StateLoadError, discover_state_files, load_state};
+
+    let mut report = Report::default();
+
+    if !exit_verified {
+        report.diagnostics.push(Diagnostic::error(
+            root,
+            E_OPERATOR_GATE_NOT_VERIFIED,
+            format!(
+                "refusing to close operator gate '{slug}' without --exit-verified — the exit \
+                 artifact's existence is the operator's assertion, never mev's inference"
+            ),
+        ));
+        return Ok(report);
+    }
+
+    let config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    let (sources, discovery_diags) = discover_state_files(root, &config);
+    report.diagnostics.extend(discovery_diags);
+
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    let mut load_failed = false;
+    for src in &sources {
+        match load_state(&src.abs_path) {
+            Ok(file) => loaded.push((src.clone(), file)),
+            Err(StateLoadError::Parse { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("state.json is not valid JSON or does not match the schema: {source}"),
+                ));
+            }
+            Err(StateLoadError::Io { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("could not read state.json: {source}"),
+                ));
+            }
+        }
+    }
+
+    // Same completeness guard as set_block_status: a shared operator slug can gate
+    // blocks across repos, so a partial corpus could silently skip the failed-to-load
+    // repo's edges, and the chained emit-state must never regenerate cross-repo
+    // derived views from a partial corpus.
+    if load_failed {
+        report.diagnostics.push(Diagnostic::error(
+            root,
+            "E_EMIT_INCOMPLETE_CORPUS",
+            "refusing to write: at least one state.json failed to load, so this gate's edges may \
+             span the unreadable repo, and the chained emit-state would regenerate cross-repo \
+             views from a partial corpus"
+                .to_string(),
+        ));
+        return Ok(report);
+    }
+
+    let plan = plan_close_operator_gate(slug, &config, &loaded);
+
+    let had_actions = !plan.actions.is_empty();
+    report.diagnostics.extend(apply_plan(&plan, true));
+
+    // Regenerate derived views so focus/boards agree with the cleared gate.
+    if had_actions && !report.is_failure() {
+        let emit = emit_state(root, true, None)?;
+        report.diagnostics.extend(emit.diagnostics);
+    }
+
+    Ok(report)
+}
+
+/// A loaded corpus for a fleet-wide authored-state write: the resolved config
+/// alongside every successfully-loaded `(source, file)` pair.
+type LoadedGateCorpus = (
+    brain::config::BrainConfig,
+    Vec<(brain::state::StateSource, brain::state::StateFile)>,
+);
+
+/// Load and completeness-check every `state.json` in the corpus rooted at `root`,
+/// the shared prefix of [`close_operator_gate`], [`approve`], and [`reject`].
+///
+/// Returns `Err` only for a hard config failure (`brain.toml` not found); a
+/// partially-loaded corpus is reported via `report.diagnostics` and signalled by
+/// the returned `bool` (`true` means at least one file failed to load — the caller
+/// must refuse to write, since a shared slug's edges may span the unreadable repo).
+fn load_corpus_for_gate_write(
+    root: &std::path::Path,
+    report: &mut Report,
+) -> anyhow::Result<Option<LoadedGateCorpus>> {
+    use brain::config::find_brain_config;
+    use brain::state::{StateLoadError, discover_state_files, load_state};
+
+    let config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(None);
+        }
+    };
+
+    let (sources, discovery_diags) = discover_state_files(root, &config);
+    report.diagnostics.extend(discovery_diags);
+
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    let mut load_failed = false;
+    for src in &sources {
+        match load_state(&src.abs_path) {
+            Ok(file) => loaded.push((src.clone(), file)),
+            Err(StateLoadError::Parse { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("state.json is not valid JSON or does not match the schema: {source}"),
+                ));
+            }
+            Err(StateLoadError::Io { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("could not read state.json: {source}"),
+                ));
+            }
+        }
+    }
+
+    if load_failed {
+        report.diagnostics.push(Diagnostic::error(
+            root,
+            "E_EMIT_INCOMPLETE_CORPUS",
+            "refusing to write: at least one state.json failed to load, so this gate's edges may \
+             span the unreadable repo, and the chained emit-state would regenerate cross-repo \
+             views from a partial corpus"
+                .to_string(),
+        ));
+        return Ok(None);
+    }
+
+    Ok(Some((config, loaded)))
+}
+
+/// Approve a pending decision gate (`mev approve <slug> --digest <d>`).
+///
+/// Verifies `digest` against every `{type:"approval", slug: <slug>}` edge's stored
+/// `digest` across the loaded corpus. On a match, removes every such edge and — on
+/// success — re-runs [`emit_state`] so `focus`/the boards agree, under the same
+/// `<root>/.mev-emit.lock` every other authored-state writer takes. On a mismatch,
+/// nothing is written: the edge stays in place (re-queued) and a distinct
+/// [`brain::operator::E_APPROVAL_DIGEST_MISMATCH`] diagnostic alarms the caller —
+/// per D71, a silent re-queue is the failure mode this guards against.
+///
+/// Diagnostics:
+/// - [`brain::operator::E_APPROVAL_UNKNOWN`] — no loaded file carries an `approval`
+///   edge with this slug.
+/// - [`brain::operator::E_APPROVAL_DIGEST_MISMATCH`] — the passed digest does not
+///   match the stored digest; the alarm.
+/// - `E_STATE_MALFORMED_JSON` / `E_EMIT_INCOMPLETE_CORPUS` — same corpus-completeness
+///   guard as [`close_operator_gate`].
+pub fn approve(root: &std::path::Path, slug: &str, digest: &str) -> anyhow::Result<Report> {
+    use brain::emit::apply_plan;
+    use brain::operator::plan_approve;
+
+    let mut report = Report::default();
+
+    let Some((config, loaded)) = load_corpus_for_gate_write(root, &mut report)? else {
+        return Ok(report);
+    };
+
+    let plan = plan_approve(slug, digest, &config, &loaded);
+
+    let had_actions = !plan.actions.is_empty();
+    report.diagnostics.extend(apply_plan(&plan, true));
+
+    // Regenerate derived views only on the success path (a digest match). A
+    // mismatch plans no actions, so this never fires for it — the edge is left
+    // exactly as it was, which is the re-queue.
+    if had_actions && !report.is_failure() {
+        let emit = emit_state(root, true, None)?;
+        report.diagnostics.extend(emit.diagnostics);
+    }
+
+    Ok(report)
+}
+
+/// Reject a pending decision gate (`mev reject <slug>`).
+///
+/// Removes every `{type:"approval", slug: <slug>}` edge across the loaded corpus,
+/// regardless of `digest` — a rejection ends the decision whether the reviewed
+/// payload is still current or not. Records the rejection via the write's
+/// `I_EMIT_WROTE` diagnostic note (always surfaced, never suppressed). On success,
+/// re-runs [`emit_state`] under the same lock as every other authored-state writer.
+///
+/// Diagnostics:
+/// - [`brain::operator::E_APPROVAL_UNKNOWN`] — no loaded file carries an `approval`
+///   edge with this slug.
+/// - `E_STATE_MALFORMED_JSON` / `E_EMIT_INCOMPLETE_CORPUS` — same corpus-completeness
+///   guard as [`close_operator_gate`].
+pub fn reject(root: &std::path::Path, slug: &str) -> anyhow::Result<Report> {
+    use brain::emit::apply_plan;
+    use brain::operator::plan_reject;
+
+    let mut report = Report::default();
+
+    let Some((config, loaded)) = load_corpus_for_gate_write(root, &mut report)? else {
+        return Ok(report);
+    };
+
+    let plan = plan_reject(slug, &config, &loaded);
+
+    let had_actions = !plan.actions.is_empty();
+    report.diagnostics.extend(apply_plan(&plan, true));
+
+    if had_actions && !report.is_failure() {
         let emit = emit_state(root, true, None)?;
         report.diagnostics.extend(emit.diagnostics);
     }

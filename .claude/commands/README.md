@@ -31,7 +31,7 @@ All commands live directly in `.claude/commands/` — no subdirectories (except 
   wrap-up.md        update-state.md  next.md
 
   breakdown.md      chore.md         generate-master-plan.md  generate-tasks.md
-  plan.md           ticket.md
+  generate-roadmap.md  plan.md       ticket.md
 
   close-out.md      conditional_docs.md  document.md      fix.md
   implement.md      patch.md             process-tasks.md review-PR.md
@@ -52,7 +52,7 @@ All commands live directly in `.claude/commands/` — no subdirectories (except 
 |---|---|
 | Session | `/prime`, `/session-recap`, `/status`, `/next`, `/handoff`, `/wrap-up`, `/log-work`, `/archive`, `/capture` |
 | State | `/update-state` — how to safely edit `planning/state.json` per `state-schema.md` |
-| Planning | `/generate-master-plan`, `/generate-tasks`, `/plan`, `/ticket`, `/chore`, `/breakdown` |
+| Planning | `/generate-roadmap`, `/generate-master-plan`, `/generate-tasks`, `/plan`, `/ticket`, `/chore`, `/breakdown` |
 | SDLC | `/implement`, `/test`, `/fix`, `/patch`, `/document`, `/update-docs`, `/conditional_docs`, `/process-tasks`, `/update-task`, `/review-task`, `/review-workflow`, `/review-PR`, `/close-out` |
 | Git | `/commit`, `/init-worktree`, `/clean-worktree`, `/start-block`, `/merge-train` |
 | E2E | `/test_auth_gate`, `/test_crud_api`, `/test_error_handling`, `/test_ui_form` |
@@ -91,7 +91,7 @@ predictably-named output file.
 | Session Start | `/next` | Briefing on what's up next, blocked, and recommend next action based on goals | chat only |
 | Session End | `/wrap-up [note]` | Log work + commit; clean close without a handoff file | status.md, log.md, git |
 | Session End | `/handoff [note]` | Write handoff + log work + commit; hands off to a fresh session | `planning/handoff.md`, status.md, log.md, git |
-| Session End | `/close-out [--skip-coverage] [--clean-worktree] [note]` | Verify coverage → patch docs → clean worktree (opt.) → hand off; the quality-close pipeline | status.md, log.md, docs/, git |
+| Session End | `/close-out [--base <ref>] [--gap-check-only] [--skip-coverage] [--clean-worktree \| --merge-branch] [note]` | Resolve diff base (loud-fail if none) → verify coverage → patch docs → clean worktree/merge branch (opt.) → hand off; the quality-close pipeline | status.md, log.md, docs/, git |
 | Block Setup | `/start-block [name]` | Flip a spec to `In progress` in status.md | status.md |
 | **1 — Roadmap** | `/generate-master-plan [desc]` | Author the full roadmap as canonical block definitions | `planning/master-plan.md` |
 | **1 — Plan** | `/generate-tasks <name>` · `/generate-tasks --from <path>` | Write the full task spec from a master-plan block, **or** from a standalone block file (`--from`) | `planning/<name>/tasks.md` |
@@ -277,6 +277,18 @@ edits the engines running it), the brain root is always `--no-worktree` (corpus 
 a worktree) — before handing off. `--roadmap` is **required and never inferred**. Also enforces the
 heavy-gate concurrency cap, operator gates, and the same notes-file and decision-recording rules.
 
+### `/begin-session <session-slug> [--roadmap <path>] [--dry-run]`
+Drives one **operator session** — the unit for work an agent cannot do alone: a decision, a
+credential, a judgement call. `/orchestrate` runs what an agent can do; this runs what it cannot.
+Resolves the slug from `state.json` `depends_on` edges of type `session` (their real home once
+`okf-core:OK.ticket.operator-edge-types` lands), else a roadmap's Wave 0 session table, else a
+`/capture` note — and reports **every** block the session gates, with effective priority, since a
+session gating a P0 block *is* P0. Stops if you are in the wrong repo, and groups every step needing
+another machine (the Mac Mini) into one sitting rather than three. Closes **only** when the named
+exit artifact exists: `mev close-session <slug> --exit-verified`, the operator asserting it — mev
+never infers it. A session marked done without its artifact is worse than one never started, because
+the gate is gone and the work is not.
+
 ---
 
 ## Session Orientation
@@ -292,13 +304,22 @@ remaining, open questions, first command for the next agent), then invokes `/log
 `/commit`. `/prime` in the next session detects the handoff file and surfaces it first.
 Delete `planning/handoff.md` once the new session has consumed it.
 
-### `/close-out [--gap-check-only] [--skip-coverage] [--clean-worktree | --merge-branch] [note]`
-Quality-close pipeline for the end of an `sdlc-run` or `sdlc-flow` session. Runs four
-steps in sequence: **(1)** the full validation suite from `planning/harness.json` — stops
-immediately if any gating check fails; **(2)** coverage gap scan — reads changed source
-files, classifies gaps as adequate/non-blocking/blocking, writes minimal targeted tests for
-blocking gaps and re-runs the suite to confirm; **(3)** `/update-docs --patch`; **(4)**
-`/handoff` with the provided note (skips if `--gap-check-only` is set); **(5)**
+### `/close-out [--base <ref>] [--gap-check-only] [--skip-coverage] [--clean-worktree | --merge-branch] [note]`
+Quality-close pipeline for the end of an `sdlc-run` or `sdlc-flow` session. Runs **(0.5)**
+diff-base resolution before anything else: the emoji gate and the coverage sweep must scope to
+the **same** base, resolved from real evidence — an explicit `--base <ref>`, else
+`planning/harness.json`'s `flow.prBase`, else `origin/HEAD`, else a local `main`/`master` — never
+a hard-coded literal. If `HEAD` **is** the resolved base (the default state after an in-place run,
+a plain-branch run, or right after `--auto-merge`/`--merge-branch` land), a two-dot/three-dot diff
+against it is empty by definition; close-out falls back to the merge commit's first parent
+(`HEAD^1..HEAD`) when one exists, and otherwise **refuses to run** rather than report a vacuous
+clean — it names the resolved base, tells you to pass `--base <ref>`, or to run before the branch
+merges. Then runs four steps in sequence: **(1)** the full validation suite from
+`planning/harness.json` — stops immediately if any gating check fails — then the emoji gate,
+scoped to the resolved range; **(2)** coverage gap scan — reads changed source files from the
+**same** resolved range, classifies gaps as adequate/non-blocking/blocking, writes minimal
+targeted tests for blocking gaps and re-runs the suite to confirm; **(3)** `/update-docs --patch`;
+**(4)** `/handoff` with the provided note (skips if `--gap-check-only` is set); **(5)**
 `/clean-worktree` for the current branch to merge and remove the **worktree** (only when
 explicitly requested via `--clean-worktree`); **(5b)** merge the current **plain branch** into
 the base + `mev emit-state --write` (only via `--merge-branch` — the branch-mode `/sdlc-flow`
@@ -348,6 +369,27 @@ it are `Done`), and returns a status table. Read-only.
 ---
 
 ## Phase 1 — Plan
+
+### `/generate-roadmap <slug> [--from <path> ...] [--supersedes <path>]`
+Authors the two things `/begin-orchestration` consumes: a **roadmap document** and one
+`lane-<name>.txt` chain file per lane. A roadmap is a *concurrency plan* — an assignment of work to
+parallel `/orchestrate` sessions that cannot step on each other. Encodes the rules that have cost
+real runs: the lane unit is the **repo, never the wave** (engines are serial inside a repo, so a
+repo holding 10 blocks is the critical path regardless of scheduling); **at most two heavy-gate
+repos concurrently**, read from each `harness.json` rather than memory; `base-template` lands early
+in a worktree with propagation **deferred** to an operator gate; ★ blocks must be registered in
+`state.json` in a hard **Wave 0** or the lane cannot resolve them; the generated `epic-sequence`
+region is the only status surface and no wave table may be authored beside it; and the **Definition
+of Done must be written as observations with commands, not as blocks closed** — the failure that
+left a previous roadmap 30/53 closed with an undeployed demo and an unverified funnel. Authors only;
+never runs `/orchestrate`. Sits above `/generate-master-plan`, which scopes to one repo.
+
+**Runs only from HQ (the brain root) — single-copy, does not sync downstream.** Step 1A resolves
+`BRAIN_ROOT` and requires it: "a roadmap spanning repos cannot be authored from inside one of them."
+`scripts/sync_downstream_harness.py`'s `EXCLUDED_COMMAND_FILENAMES` excludes `generate-roadmap.md`
+from every sync target, HQ included, so it stays the one copy at `base-template/.claude/commands/`
+rather than fanning out to all 17 leaf repos where it has no meaning. Decision + rationale recorded
+in `planning/ticket-generate-roadmap-command/review.md`.
 
 ### `/generate-master-plan`
 Authors (or revises) `planning/master-plan.md` — the roadmap source of truth — as a sequence of

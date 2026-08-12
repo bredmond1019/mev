@@ -22,6 +22,7 @@ pub mod links;
 pub mod lock;
 pub mod manifest;
 pub mod okf;
+pub mod operator;
 pub mod scope;
 pub mod state;
 pub mod structure;

@@ -33,6 +33,16 @@ list), explicit Acceptance Criteria, and a Testing Strategy, feeding directly in
    - If the fix touches more than 3–4 files or needs its own sub-phases, it belongs in `/plan`.
    - Every task in `tasks.json` must name ≥1 concrete file in its `files[]` (the Validate task is
      exempt).
+   - **Compilable task boundaries (outranks the file-based split when the two conflict).** `/ticket`
+     only ever feeds `/sdlc-task` or `/sdlc-flow` — never `/sdlc-block`'s parallel-merge model — and
+     both of those engines run every task **sequentially on one branch/worktree with no inter-task
+     merge step**, gating the project's checks after **every single task**. That means a single
+     breaking public-surface change (a renamed public type, a struct's changed fields, an altered
+     trait/interface signature, and every call site each one touches) must never be split across
+     tasks such that an intermediate task leaves the repository non-compiling — put the whole change
+     in **one** task instead, even if that task then touches more files than usual. This constraint
+     is **unconditional here**, with no `/sdlc-block` carve-out (unlike `generate-tasks.md`'s
+     equivalent rule): `/ticket` never produces a spec that `/sdlc-block` will decompose in parallel.
 5. Choose a short descriptive slug (e.g. `fix-null-deref`, `add-rate-limit`, `patch-auth-refresh`).
    This is the `<slug>` referenced in "Register the block in state.json" below.
 6. Create `planning/ticket-{slug}/` if it does not exist, then write **both**
@@ -42,14 +52,33 @@ list), explicit Acceptance Criteria, and a Testing Strategy, feeding directly in
    below.
 8. **Property self-check.** Before reporting, re-read the spec and **revise in place** until every
    property holds, then re-check:
-   - **`tasks.json` parses as valid JSON** and is a non-empty bare array (not wrapped in an object).
+   - **`tasks.json` must be read BACK off disk and parsed** — this is a verification you perform,
+     not an assertion you write down. Run the concrete command:
+     `python3 -c "import json,sys;d=json.load(open('planning/ticket-{slug}/tasks.json'));assert isinstance(d,list) and d,'tasks.json must be a non-empty bare array';print(len(d),'tasks')"`.
+     If that command errors or you skip running it, the check has not been performed. Reporting the
+     spec path without `tasks.json` actually present on disk is a **failed run** — every SDLC engine
+     enumerates its task loop from `tasks.json`, not `tasks.md`, and a missing or unparseable file
+     hard-aborts the very next step (D16).
+   - **Reaffirm the D45 shape at the point of writing**: a bare array (never a `{"tasks": [...]}`
+     wrapper — that shape is D44, and D44 is superseded), 1-indexed integer `task_id`, `description`
+     as one string, and no `status` or `attempt_count` key authored by you (those are engine-owned).
    - **Every task names ≥1 concrete file** in its `files[]` (Validate is exempt).
+   - **Compilable task boundaries — can fail.** Check whether any single breaking public-surface
+     change (a renamed public type, a struct's changed fields, an altered trait/interface signature)
+     is split across two or more tasks such that an intermediate task would leave the repository
+     non-compiling under `/sdlc-task` or `/sdlc-flow`'s per-task gate. If it is, this check **fails**:
+     merge those tasks into one before proceeding, per the compilable task boundaries rule in step 4,
+     then re-run this self-check.
    - **Acceptance Criteria are non-empty and observable** — each can be judged true/false.
    - **Testing Strategy is non-empty** — names the test file(s) and what each must cover.
    - **Validation Commands are present** (or `planning/harness.json` → `validation.checks[]`
      supplies them as the fallback).
    - **No leftover template sentinels** — no `{{TOKEN}}`, unfilled `<placeholder>`-style angle
      stubs, or empty bullets. Legitimate `<...>` in code/prose is fine.
+   - **Note:** if `tasks.json` is somehow absent when an SDLC engine later runs, the engine's D16
+     preflight will now derive it from `tasks.md` and commit the result rather than aborting — but
+     that derivation is a recovery path for the genuinely unrecoverable case, never a licence to
+     skip writing the file here. `/ticket` still must write and verify `tasks.json` itself.
 9. Report the path and next step.
 
 ## Codebase Structure

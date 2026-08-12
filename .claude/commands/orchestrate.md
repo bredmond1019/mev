@@ -85,16 +85,26 @@ Each of these exists because it has already caused a real failure in this fleet.
    centrally*. Per-repo `state.json` writes do not contend because they are different files; the log
    is append-only; the roadmap regenerates. That is the whole communication channel.
 
-9. **Keep a running notes file — `planning/orchestration-run/notes.md` in this repo.** The lane log
-   carries one line per block for *sibling lanes*; this file carries everything else, for the *next
-   session in this repo*. Defects found in passing, deferred fixes, decisions you took, traps
-   re-confirmed, whatever the roadmap got wrong. None of it survives the session transcript
-   otherwise, and the next agent starts blind and rediscovers it the hard way.
+9. **Keep a running notes file — `planning/orchestration-run/<roadmap-slug>/notes.md` in this
+   repo**, where `<roadmap-slug>` is the driving roadmap's directory name (the one from `$ARGUMENTS`
+   or the list file this chain runs from) — the same directory name `/begin-orchestration` resolves
+   as its `run_record_dir`, so both commands address the same record. If the chain has no roadmap,
+   skip this rule (same as the lane log above). The lane log carries one line per block for
+   *sibling lanes*; this file carries everything else, for the *next session in this repo*. Defects
+   found in passing, deferred fixes, decisions you took, traps re-confirmed, whatever the roadmap
+   got wrong. None of it survives the session transcript otherwise, and the next agent starts blind
+   and rediscovers it the hard way.
 
-   Create it on the first block if absent (OKF frontmatter, `type: Reference`; add a row to
-   `planning/index.md`). **Append after every block — never rewrite.** Status every item so it can
-   be triaged later: `OPEN` · `DONE` · `HELD` · `WONTFIX`. Commit it alongside the lane-log line
-   (rule 7 timing: before the next engine launches).
+   Create the directory and file on the first block if absent; add a row to `planning/index.md`.
+   **Append after every block — never rewrite; never rotate, never move to an archive.** Status
+   every item so it can be triaged later: `OPEN` · `DONE` · `HELD` · `WONTFIX`. Commit it alongside
+   the lane-log line (rule 7 timing: before the next engine launches).
+
+   Required frontmatter, the `doc_id` rule, `lifecycle`, the ledger's `origin_roadmap` column, and
+   the carryover-promotion rule are specified once — in `/begin-orchestration`'s Step 1E / Rule 5 —
+   per `planning/decisions/D57-orchestration-run-artifact-contract.md`. Follow that contract; do not
+   restate it here. In short: unresolved items never carry into a successor file — at lane close,
+   promote any item still `OPEN` into `state.json` `carryover[]`.
 
    Keep it a *log*, not a second `status.md`. If an item turns into real work it becomes a ticket
    and the entry points at it.
@@ -171,6 +181,15 @@ If `planning/<spec-slug>/tasks.md` is missing for block 1, run **`/generate-task
 Run **`/breakdown planning/<spec-slug>/tasks.md`** *only* when it flagged that spec. Never break
 down on your own judgment — an unnecessary breakdown multiplies engine runs for no benefit.
 
+**Two authoring-time rules for any spec or OKF frontmatter this step produces or edits** —
+generalized from a lane that hit both in one day: a `related:` target must resolve to a real
+`doc_id` on a document that has actually been crawled, never a carryover slug or an invented id
+— an unresolved edge red-gates the whole corpus for every concurrent lane when `--graph` gates,
+not just the authoring one. And a `validation_command` must be scoped to the task's own changes,
+never the whole working tree (e.g. never a working-tree-wide `git diff | grep` guard) — a
+tree-wide guard can never pass in a shared index with concurrent lanes and bails the block on an
+unrelated lane's uncommitted files.
+
 ### 5. Decide engine and isolation
 
 **Engine** — take `/generate-tasks`' recommendation unless you have a concrete reason not to:
@@ -205,11 +224,23 @@ Use `--worktree` when:
 `--worktree` / `--no-worktree` on the command line overrides all of the above **except those two** —
 if a flag contradicts the table, stop and report rather than running a chain whose gates cannot pass.
 
-**Concurrency across sessions is not managed by this command.** Rule 3 governs one repo; nothing
-stops four sessions launching `playwright` and `next build` simultaneously. When several lanes run at
-once, keep at most **two heavy-gate repos** (Next/Playwright builds) live concurrently and put the
-rest on cheap-gate repos. Today that is a human decision — the run's roadmap should say which repos
-are heavy.
+**Concurrency across sessions is enforced mechanically, not by human memory.** Rule 3 governs one
+repo; nothing stops four sessions launching `playwright` and `next build` simultaneously on their
+own. `scripts/fleet_concurrency_check.py` lives in the `base-template` checkout (the fleet's shared
+harness source, typically a sibling directory at the brain root, e.g. `../base-template` — resolve
+its actual path for this machine rather than assuming). Before starting a heavy repo
+(browser/production-build checks — determine this by reading the target repo's own
+`planning/harness.json`, never from memory:
+`python3 <path-to-base-template>/scripts/fleet_concurrency_check.py is-heavy --repo-path <target-repo>`),
+register it:
+`python3 <path-to-base-template>/scripts/fleet_concurrency_check.py register --repo <name>`.
+Exit code `3` (or `"allowed": false` in the JSON output) means the fleet is already at capacity
+(`MAX_HEAVY_LANES = 2`) — put this repo on a cheap-gate block instead, or wait. Release the slot
+when the heavy repo's chain finishes: `... release --repo <name>`. A stale entry (a killed lane, or
+one past the TTL) expires automatically on the next registration, so a dead lane never blocks the
+fleet permanently. If the lock store itself is unavailable (no brain root found, unwritable), the
+script reports `"degraded": true, "allowed": true` — same as today's unenforced-prose behavior, not
+a new way to fail. See `planning/decisions/D61-fleet-concurrency-enforcement.md` for the full design.
 
 ### 6. Launch the engine — do not wait idly
 Invoke the workflow **in this session**:
@@ -225,6 +256,20 @@ If the engine **bailed** (triage MAJOR, immediate-bail, review FAIL after its bo
 - `--stop-on-fail` (default) → stop the chain. Report which block, why, and the remaining chain.
 - `--continue-on-fail` → record it, leave the block `open`, continue. **Never mark a bailed block
   closed.**
+
+If the engine did **not** bail but `sdlc-flow`'s return has `stranded: true` — a `PASS` verdict
+that ended with no PR opened and (under `--auto-merge`) no merge, because the PR stage was
+attempted and either errored or could not be independently verified via `gh pr view` — **treat it
+the same as a bail for chain purposes**: it is a completed-looking run whose work never actually
+landed anywhere the next block can build on.
+- `--stop-on-fail` (default) → stop the chain. Report the block, `prOutcome` (`'failed'`) and
+  `state.pr`/the branch name so the operator can open the PR manually, and the remaining chain.
+- `--continue-on-fail` → record it, leave the block `open`, continue — same as a bail. **Never
+  treat a `stranded: true` run as integrated;** the next block would be building on a base missing
+  this one's work.
+- `prOutcome: 'impossible'` (no `gh` / no remote) is **not** `stranded` and needs no special
+  handling here — that is the standalone-repo degradation path working as intended; the branch is
+  intact and ready for a manual PR whenever the operator wants one.
 
 ### 8. Integrate, then verify the state write
 
@@ -258,8 +303,9 @@ Concurrent lanes pushing into one corpus is exactly the condition that accumulat
 checks downstream *code* consumers; nothing else checks the *corpus*, so this belongs here.
 
 Commit the `state.json` and its regenerated surfaces as their own commit, then append **both** the
-lane-log line and this block's `planning/orchestration-run/notes.md` entries (rule 9 — including any
-decision you took under rule 10) and commit those together. **Only then** launch the next engine.
+lane-log line and this block's `planning/orchestration-run/<roadmap-slug>/notes.md` entries (rule 9
+— including any decision you took under rule 10) and commit those together. **Only then** launch
+the next engine.
 
 > **`planning/state.json` is written with `ensure_ascii=False`.** If you edit it with a script,
 > round-trip with `json.dump(..., indent=2, ensure_ascii=False)` plus a trailing newline. Using the
@@ -286,7 +332,7 @@ every other repo's `Cargo.toml`. For each one found:
 
 ```
 git -C <consumer> status --porcelain          # non-empty → SKIP, report SKIPPED-DIRTY
-CARGO_TARGET_DIR=$(mktemp -d) cargo test --no-run --locked \
+CARGO_TARGET_DIR=$(mktemp -d) cargo nextest run --no-run --locked \
     --manifest-path <consumer>/Cargo.toml
 ```
 
@@ -299,14 +345,27 @@ Each flag earns its place — do not simplify this away:
   interfering.
 - **dirty check first** — never blame your shared-crate change for someone else's half-written
   code; a dirty consumer is not evidence of anything.
-- **`cargo test --no-run`, never `cargo build`** — the entire `E0063` class (missing struct fields)
-  is invisible to `build`; only test code constructs the affected literals.
+- **`cargo nextest run --no-run`, never `cargo build`, never plain `cargo test`** — the entire
+  `E0063` class (missing struct fields) is invisible to `build`; only test code constructs the
+  affected literals, so a compile-only test build is still required. Plain `cargo test` is
+  **denied fleet-wide by a `PreToolUse` hook** — see `core/mev/.claude/settings.json`, which
+  matches `cargo\s+test(\s|$)` on any Bash command and returns `permissionDecision: deny` unless
+  the command contains `cargo nextest` or is prefixed `NEXTEST_POLICY_OVERRIDE=1`.
+  `cargo nextest run --no-run` compiles the same test targets and is not denied.
 
 **Report only. Never fix another lane's repo** and never run this against a repo with an active
-worktree lane of its own — a plain `cargo build`/`cargo test` in a repo mid-chain can mutate its
-`Cargo.lock` out from under that lane. If a consumer fails, add it to the final report as a new
+worktree lane of its own — a plain `cargo build`/`cargo nextest run` in a repo mid-chain can mutate
+its `Cargo.lock` out from under that lane. If a consumer fails, add it to the final report as a new
 **BROKEN DOWNSTREAM** line (repo, error class, one-line fix estimate) — do not open a fix block for
 it yourself; that is the operator's call, same as a `HELD` block.
+
+**Concurrent cargo runs in sibling repos can contaminate captured output.** Observed once during
+the audit: a `mev` build capture returned `engine-rs`'s test summary — another lane's build was
+writing to the terminal or a shared capture at the same time. A surprising result (an unexpected
+PASS or an unexpected failure class) from this step is not trustworthy on its own when other lanes
+are active concurrently. Mitigation: if the result looks surprising, re-run the capture in
+isolation (no other lane's cargo command in flight) before reporting it as **BROKEN DOWNSTREAM** or
+as a clean pass.
 
 ### 10. Re-check the next block's dependencies, then launch it
 Cheap, and it catches anything that changed outside the chain. Then return to step 6.
@@ -314,6 +373,13 @@ Cheap, and it catches anything that changed outside the chain. Then return to st
 ### 11. Repeat until the chain is done or stopped.
 
 ---
+
+## Traps
+
+- `rg`/`find` are symlink-blind and every `planning/` is a symlink into a `_planning/` vault — pass
+  `-L`. At the brain root every sub-repo is also **gitignored**, so `-L` alone still skips them all
+  — pass `-uu` too. A sweep reporting "clean" without both is not trustworthy. See
+  `begin-orchestration.md`'s Traps section for the same rule stated for that command.
 
 ## Final report
 
@@ -328,10 +394,18 @@ Then explicitly:
   error class, one-line fix estimate). Empty is the expected case; say so rather than omitting
   the line.
 - **Decisions you took** under rule 10, each with its one-line reasoning — and confirmation they
-  are in `planning/orchestration-run/notes.md`, not only in this report.
+  are in `planning/orchestration-run/<roadmap-slug>/notes.md`, not only in this report.
 - **Open items** the run surfaced but did not fix, as recorded in the notes file (defects found in
   passing, deferred propagation, anything needing its own ticket).
 - **The remaining chain** if you stopped early — as a paste-ready `/orchestrate` invocation.
+- A **terminal `planning/orchestration-run/<roadmap-slug>/review.md`** — required, not optional. It is a
+  plain-English summary of what this chain changed plus the hand-verification recipes an operator
+  would run to confirm it. Every recipe in it must have been **executed at least once by this
+  session before the file is written**, and the file must say so explicitly (e.g. "ran, output:
+  ...") — an authored-but-unrun recipe reads as verification while being a guess, which is worse
+  than no recipe at all. Naming, frontmatter, and lifecycle follow
+  `planning/decisions/D57-orchestration-run-artifact-contract.md`; do not restate that contract
+  here.
 - A reminder to run **`/log-work`**: `sdlc-task`'s bookkeep is deliberately lean and writes no
   `log.md` entry, so a chain of tasks leaves no narrative history without it.
 

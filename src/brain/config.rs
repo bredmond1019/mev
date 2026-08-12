@@ -97,6 +97,13 @@ pub struct AttentionThresholds {
     /// than `knowledge.md` (default 30).
     #[serde(default = "default_memory_days")]
     pub memory_days: i64,
+    /// Unmet `depends_on` `operator` edges (default 7). Anchored on the owning
+    /// file's `updated` date — operator edges carry no per-edge timestamp of
+    /// their own (`okf-core`'s `BlockedBy::Operator` schema). Reuses this same
+    /// `[attention]` surface rather than a second config table, per
+    /// `ticket-operator-edge-graph`.
+    #[serde(default = "default_operator_days")]
+    pub operator_days: i64,
 }
 
 fn default_env_days() -> i64 {
@@ -120,6 +127,9 @@ fn default_knowledge_days() -> i64 {
 fn default_memory_days() -> i64 {
     30
 }
+fn default_operator_days() -> i64 {
+    7
+}
 
 impl Default for AttentionThresholds {
     fn default() -> Self {
@@ -131,6 +141,7 @@ impl Default for AttentionThresholds {
             backlog_days: default_backlog_days(),
             knowledge_days: default_knowledge_days(),
             memory_days: default_memory_days(),
+            operator_days: default_operator_days(),
         }
     }
 }

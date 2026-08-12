@@ -269,7 +269,7 @@ When `--state` is passed, `mev` runs the full OKF schema pass first, then append
 
 1. **Discovery** — finds all `planning/state.json` files: the HQ brain state, each tier sub-brain state (via `tiers[].rollup` in the HQ state), and each leaf project state (via `[[repos]]` in `brain.toml`). A leaf repo whose `brain.toml` `tier` is `"portfolio"` is expected as `kind:"portfolio"` instead of `kind:"project"` — these are terminal repos (published to GitHub, no further planning state), expected to carry a non-empty `note` instead of `tracks[]`, and are skipped entirely by `emit-state`'s wave-table splice (no `master-plan.md` expected). Missing files emit `W_STATE_FILE_MISSING`. If the HQ root's own `state.json` exists but fails to load (parse error), tier sub-brain paths are recovered directly from `brain.toml`'s `[[repos]]` tier config (rather than from the unloadable HQ `tiers[]`) and registered as `expected_kind:"brain"` stubs — this prevents them from falling through to the leaf `[[repos]]` loop and being misclassified as `expected_kind:"project"`. A single `E_STATE_ROOT_LOAD_FAILED` diagnostic names the degraded classification; the root's own detailed `E_STATE_MALFORMED_JSON` remains the actionable error, instead of a cascade of spurious `E_STATE_SCHEMA_BAD_KIND` on every tier.
 2. **Load** — deserializes each discovered file. Unparseable files emit `E_STATE_MALFORMED_JSON`, which now includes the underlying `serde_json::Error` detail (offending field/type and line:column), not just the generic message.
-3. **Schema ring** — checks field validity within each file (kind membership, status enum values, `blocked_by` well-formedness, kind-appropriate sections). In v2 schema files: validates `depends_on[]` entry well-formedness on track blocks, rejects authored `status:"blocked"` (derived, not authored), and validates `backlog[].status` membership.
+3. **Schema ring** — checks field validity within each file (kind membership, status enum values, `blocked_by` well-formedness, kind-appropriate sections). In v2 schema files: validates `depends_on[]` entry well-formedness on track blocks (including `Operator`'s required `exit` and `Approval`'s `<algorithm>:<hex>`-shaped `digest`, see `E_STATE_OPERATOR_MISSING_EXIT`/`E_STATE_APPROVAL_DIGEST_SHAPE` below), rejects authored `status:"blocked"` (derived, not authored), and validates `backlog[].status` membership. A separate pass, `check_operator_staleness`, emits `W_STATE_OPERATOR_STALE` for `Operator` edges whose owning file has aged past the `[attention]` `operator_days` threshold.
 4. **Graph** — builds the cross-repo block-dependency graph from all loaded files (v2: DAG edges sourced from `tracks[].blocks[].depends_on[]`) and checks it for integrity violations, including cycle detection over the `depends_on` DAG and backlog-node integrity.
 5. **Status consistency** — checks that a `closed` block does not depend (via `depends_on`) on a block that is not yet `closed`.
 6. **Rollup** — checks that brain `repos[]` headline entries (now/next) match their children's actual `focus` values.
@@ -305,6 +305,9 @@ When `--state` is passed, `mev` runs the full OKF schema pass first, then append
 | `W_STATE_CARRYOVER_STALE` | Warning | A `carryover[]` entry has aged past its per-`kind` `[attention]` threshold and is not snoozed; exit code is unchanged |
 | `W_STATE_BACKLOG_STALE` | Warning | An HQ `backlog[]` `idea`/`ready` node has aged past the `[attention]` backlog threshold and is not snoozed; exit code is unchanged |
 | `W_DISTILL_STALE` | Warning | A D35-distilled `knowledge.md`/`memory.md` entry has aged past its `[attention]` `knowledge_days`/`memory_days` threshold (`check_distill_staleness`); exit code is unchanged |
+| `E_STATE_OPERATOR_MISSING_EXIT` | Error | A `depends_on[]` `Operator` entry has an empty `exit` field |
+| `E_STATE_APPROVAL_DIGEST_SHAPE` | Error | A `depends_on[]` `Approval` entry's `digest` is missing or not shaped `<algorithm>:<hex>` |
+| `W_STATE_OPERATOR_STALE` | Warning | An `Operator` `depends_on` edge's owning `state.json` has an `updated` date older than the `[attention]` `operator_days` threshold (default 7); exit code is unchanged |
 
 #### `--structure` — structural `index.md` coverage check
 
@@ -1154,7 +1157,7 @@ held (`E_EMIT_LOCK_HELD` on `--write`), or a write failure.
 
 ---
 
-### `set-block-status <repo:id> <status> [path] [--write]`
+### `set-block-status <repo:id> <status> [path] [--write] [--force-operator-gate]`
 
 Set **one** block's authored `status` in its repo's `planning/state.json`. The
 block-level counterpart to the epic commands above: those move a whole initiative,
@@ -1175,6 +1178,7 @@ rather than guessed at.
 | `in_progress` | actively being worked (derives into `focus.now`) |
 | `deferred` | parked on the back burner (derives into `focus.deferred`) |
 | `closed` | done |
+| `wontfix` | terminal, but distinct from `closed` — satisfies a `{type:block}` dependency exactly like `closed`, and is tallied in its own `EpicProgress.wontfix` count so it never inflates the `closed` count in the epic progress line |
 
 > **`blocked` is not authorable, and this command rejects it.** `blocked` is a
 > *derived* lane: `emit-state` computes it from a block's unmet `depends_on` edges
@@ -1201,6 +1205,14 @@ the CLI on bastion-web's behalf — "mark this done", "park this" from the web U
 lands here in mev, the deterministic writer for the brain corpus. The workflow node
 itself is engine-rs work and is not part of this command's contract.
 
+**Starting a block that is operator-gated is refused.** Moving a block to
+`in_progress` with `--write` while it carries an unmet `Operator` `depends_on`
+edge fails with `E_BLOCK_OPERATOR_GATED` unless `--force-operator-gate` is also
+passed. The override itself is refused with `E_FORCE_OPERATOR_GATE_NOT_TTY`
+whenever stdin is not a TTY — there is no other bypass, and no priority
+threshold exempts a block from the gate. The gate only guards *starting*; moving
+an operator-gated block to any other status needs no override.
+
 ```bash
 # What would closing MV.10.A change? (dry run — writes nothing)
 mev set-block-status mev:MV.10.A closed ~/Dev/agentic-portfolio
@@ -1210,6 +1222,12 @@ mev set-block-status mev:MV.10.A closed ~/Dev/agentic-portfolio --write
 
 # Park a single block without touching its epic
 mev set-block-status bella:BE.2.C deferred --write
+
+# Mark a block as intentionally not being done (terminal, distinct from closed)
+mev set-block-status mev:MV.10.B wontfix ~/Dev/agentic-portfolio --write
+
+# Start a block despite an unmet operator gate (interactive shells only)
+mev set-block-status mev:MV.10.C in_progress ~/Dev/agentic-portfolio --write --force-operator-gate
 
 # Machine-readable
 mev --json set-block-status mev:MV.10.A in_progress --write
@@ -1221,10 +1239,64 @@ any error-severity diagnostic or a write failure.
 | Diagnostic | Cause |
 |---|---|
 | `E_BLOCK_BAD_KEY` | the key is not `repo:id` (a bare block id, or an empty half) |
-| `E_BLOCK_BAD_STATUS` | the status is not one of the four authorable values — this is what rejects `blocked` |
+| `E_BLOCK_BAD_STATUS` | the status is not one of the five authorable values — this is what rejects `blocked` |
 | `E_BLOCK_NOT_FOUND` | no loaded `state.json` owns that `repo:id`; the message lists the known repo slugs when the repo half is the problem |
 | `E_EMIT_INCOMPLETE_CORPUS` | `--write` attempted while at least one `state.json` failed to load |
 | `E_EMIT_LOCK_HELD` | another mev write holds the brain-root advisory lock |
+| `E_BLOCK_OPERATOR_GATED` | `--write`ing a block to `in_progress` while it carries an unmet `Operator` `depends_on` edge, without `--force-operator-gate` |
+| `E_FORCE_OPERATOR_GATE_NOT_TTY` | `--force-operator-gate` was passed but stdin is not a TTY |
+
+---
+
+### `close-operator-gate <slug> --exit-verified [path] [--write]`
+
+Removes every `Operator` `depends_on` edge carrying `slug`, fleet-wide, under the
+same advisory lock `emit-state --write` takes. This is a **verified-or-refused**
+command, not a dry-run/`--write`-shaped planner like the epic commands: it refuses
+outright, before any file is read, unless `--exit-verified` is passed — passing
+the flag is the caller asserting the gate's exit condition has actually been
+checked, not a formality. An unknown slug (no loaded file has a matching edge)
+is also refused. A successful `--write` re-runs `emit-state --write` so `focus`
+and the boards drop the closed gate in the same invocation.
+
+```bash
+mev close-operator-gate deploy-approval-2 --exit-verified ~/Dev/agentic-portfolio --write
+```
+
+| Diagnostic | Cause |
+|---|---|
+| `E_OPERATOR_GATE_NOT_VERIFIED` | `--exit-verified` was not passed |
+| `E_OPERATOR_GATE_UNKNOWN` | no loaded `state.json` has an `Operator` edge matching `slug` |
+| `E_EMIT_LOCK_HELD` | another mev write holds the brain-root advisory lock |
+
+Exit codes: `0` applied · `1` refused or a write failure.
+
+---
+
+### `approve <slug> --digest <digest> [path] [--write]` · `reject <slug> [path] [--write]`
+
+Remove every `Approval` `depends_on` edge carrying `slug`, fleet-wide, under the
+same advisory lock. `approve` additionally requires `--digest` to match every
+matching edge's stored `digest`; a mismatch on *any* matching edge refuses the
+whole call and changes nothing (`E_APPROVAL_DIGEST_MISMATCH`) rather than
+silently re-queuing the block — a shared slug is meant to carry one reviewed
+payload. `reject` takes no digest and always clears matching edges; the
+rejection is recorded via a non-suppressible `I_EMIT_WROTE` diagnostic (the same
+pattern `close-operator-gate` uses), not a separate log file. Both re-run
+`emit-state --write` on a successful `--write`.
+
+```bash
+mev approve ship-decision-1 --digest sha256:9f2c... ~/Dev/agentic-portfolio --write
+mev reject ship-decision-1 ~/Dev/agentic-portfolio --write
+```
+
+| Diagnostic | Cause |
+|---|---|
+| `E_APPROVAL_DIGEST_MISMATCH` | (`approve` only) `--digest` does not match a matching edge's stored digest |
+| `E_OPERATOR_GATE_UNKNOWN` | no loaded `state.json` has an `Approval` edge matching `slug` |
+| `E_EMIT_LOCK_HELD` | another mev write holds the brain-root advisory lock |
+
+Exit codes: `0` applied · `1` refused or a write failure.
 
 ---
 

@@ -1,5 +1,6 @@
 //! `mev` CLI entry point. Thin wrapper over the library: parse args, dispatch, set exit code.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -434,9 +435,19 @@ enum Command {
     /// The intended caller is an engine-rs workflow node acting for bastion-web —
     /// `bastion serve` stays read-only per D25, so block mutations are written here.
     ///
+    /// **Operator gate (D71).** A `--write` that would start a block (set it to
+    /// `in_progress`) while it still carries an unmet `operator` depends_on entry
+    /// is refused with `E_BLOCK_OPERATOR_GATED`. The only override is
+    /// `--force-operator-gate`, and that flag is itself human-only: it is refused
+    /// with `E_FORCE_OPERATOR_GATE_NOT_TTY` whenever stdin is not a TTY, so an
+    /// agent can never pass it to clear its own gate. There is no priority
+    /// threshold or other bypass.
+    ///
     /// Exit codes:
     ///   0 — planned (dry-run), applied, or already at the target status
-    ///   1 — bad key, unauthorable status, unknown block, or a write failure
+    ///   1 — bad key, unauthorable status, unknown block, a write failure,
+    ///       an unmet operator gate without --force-operator-gate, or
+    ///       --force-operator-gate on non-TTY stdin
     SetBlockStatus {
         /// Block key in `repo:id` form, e.g. `mev:MV.10.A`.
         key: String,
@@ -448,6 +459,116 @@ enum Command {
         /// Apply the edit. Without this the command prints what it would change.
         #[arg(long)]
         write: bool,
+        /// Human-only override (D71) to start a block despite an unmet `operator`
+        /// depends_on edge. Refused with `E_FORCE_OPERATOR_GATE_NOT_TTY` when
+        /// stdin is not a TTY — an agent can never pass this flag to clear its
+        /// own gate.
+        #[arg(long = "force-operator-gate")]
+        force_operator_gate: bool,
+    },
+    /// Close an operator gate fleet-wide: remove every `depends_on` `{type:"operator"}`
+    /// entry carrying SLUG, across every loaded `state.json`.
+    ///
+    /// One `slug` can gate several blocks (even across repos) — this clears all of
+    /// them in a single call, never one block at a time.
+    ///
+    /// **Not** dry-run/`--write` shaped like `defer-epic`/`set-block-status`: this
+    /// command is verified-or-refused. It **refuses unless `--exit-verified` is
+    /// passed** — the operator edge's `exit` field names an artifact whose existence
+    /// ends the gate, and mev never checks the filesystem for it. `--exit-verified`
+    /// is the caller's plain assertion that they looked; refusing without it (rather
+    /// than defaulting to a dry-run) is what keeps this a human gate. Nothing is
+    /// read or touched when the flag is absent.
+    ///
+    /// SLUG matching no operator edge in the loaded corpus is an error, not a silent
+    /// no-op — almost always a typo.
+    ///
+    /// On success, re-runs `emit-state --write` so `focus`/the boards agree with the
+    /// cleared gate, under the same `<root>/.mev-emit.lock` advisory lock every other
+    /// authored-state writer takes (E_EMIT_LOCK_HELD on contention; a stale lock from
+    /// a dead pid is reclaimed automatically). Refused the same way as its siblings
+    /// when run from inside a linked git worktree.
+    ///
+    /// Exit codes:
+    ///   0 — every matching edge removed and emit-state re-run cleanly
+    ///   1 — missing --exit-verified, unknown slug, a write failure, E_EMIT_LOCK_HELD,
+    ///       or a linked-worktree refusal
+    CloseOperatorGate {
+        /// Operator gate slug, e.g. `session-mac-mini`.
+        slug: String,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Required. Asserts the operator confirmed the edge's `exit` artifact exists.
+        #[arg(long = "exit-verified")]
+        exit_verified: bool,
+    },
+    /// Approve a pending decision gate: `mev approve <slug> --digest <d>`.
+    ///
+    /// Removes every `depends_on` `{type:"approval", slug: <slug>}` entry across
+    /// every loaded `state.json`, but only when `--digest` matches the stored
+    /// `digest` on every matching edge. A shared slug is meant to carry one
+    /// reviewed payload, so a mismatch on even one matching edge refuses the whole
+    /// call rather than clearing the edges that did match.
+    ///
+    /// **Digest mismatch is not a quiet failure.** The passed digest not matching
+    /// the stored digest means the payload changed since it was reviewed — the
+    /// approval is void. Nothing is removed (the edge stays unmet and re-queues as
+    /// a fresh decision) and mev raises a distinct `E_APPROVAL_DIGEST_MISMATCH`
+    /// diagnostic (per D71) rather than silently re-queuing: a payload changing
+    /// under an approval may be legitimate drift or a bug, and the moment the
+    /// digests disagree is the only cheap moment to catch it.
+    ///
+    /// SLUG matching no approval edge in the loaded corpus is an error, not a
+    /// silent no-op — almost always a typo.
+    ///
+    /// On a successful (matched-digest) approval, re-runs `emit-state --write` so
+    /// `focus`/the boards agree with the cleared gate, under the same
+    /// `<root>/.mev-emit.lock` advisory lock every other authored-state writer
+    /// takes (E_EMIT_LOCK_HELD on contention; a stale lock from a dead pid is
+    /// reclaimed automatically). Refused the same way as its siblings when run
+    /// from inside a linked git worktree.
+    ///
+    /// Exit codes:
+    ///   0 — every matching edge removed (digest verified) and emit-state re-run cleanly
+    ///   1 — unknown slug, digest mismatch (alarmed), a write failure,
+    ///       E_EMIT_LOCK_HELD, or a linked-worktree refusal
+    Approve {
+        /// Approval gate slug, e.g. `dev-to-cta-sweep`.
+        slug: String,
+        /// Digest of the exact payload reviewed; must match the edge's stored digest.
+        #[arg(long)]
+        digest: String,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Reject a pending decision gate: `mev reject <slug>`.
+    ///
+    /// Removes every `depends_on` `{type:"approval", slug: <slug>}` entry across
+    /// every loaded `state.json`, regardless of `digest` — a rejection ends the
+    /// decision whether the reviewed payload is still current or not. The
+    /// rejection is recorded via the write's diagnostic note, same mechanism as
+    /// `close-operator-gate`.
+    ///
+    /// SLUG matching no approval edge in the loaded corpus is an error, not a
+    /// silent no-op — almost always a typo.
+    ///
+    /// On success, re-runs `emit-state --write` so `focus`/the boards agree with
+    /// the cleared gate, under the same `<root>/.mev-emit.lock` advisory lock
+    /// every other authored-state writer takes. Refused the same way as its
+    /// siblings when run from inside a linked git worktree.
+    ///
+    /// Exit codes:
+    ///   0 — every matching edge removed and emit-state re-run cleanly
+    ///   1 — unknown slug, a write failure, E_EMIT_LOCK_HELD, or a linked-worktree
+    ///       refusal
+    Reject {
+        /// Approval gate slug, e.g. `dev-to-cta-sweep`.
+        slug: String,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
     },
     /// Generate an interactive HTML visualization of the knowledge graph (graph.html)
     GenerateGraph {
@@ -1019,6 +1140,45 @@ fn doc_read_json(path: &std::path::Path) -> Result<serde_json::Value, ExitCode> 
     })
 }
 
+/// Returns whether the block named by `key` (`repo:id`) currently carries an unmet
+/// `operator` `depends_on` entry — the check behind `set-block-status`'s D71
+/// operator gate.
+///
+/// `None` means "could not determine" (bad key shape, `brain.toml` not found, the
+/// block not found, or a `state.json` failed to load) — callers must treat that as
+/// "don't gate" and let the normal `set-block-status` path surface the real error
+/// (`E_BLOCK_BAD_KEY` / `E_CONFIG_NOT_FOUND` / `E_BLOCK_NOT_FOUND` / etc.), never as
+/// an implicit pass on the gate.
+fn block_has_unmet_operator_gate(root: &std::path::Path, key: &str) -> Option<bool> {
+    use mev::brain::config::find_brain_config;
+    use mev::brain::state::{BlockedBy, discover_state_files, load_state};
+
+    let (repo_slug, block_id) = key.split_once(':')?;
+    let config = find_brain_config(root).ok()?;
+    let (sources, _diags) = discover_state_files(root, &config);
+    for src in &sources {
+        if src.repo_slug != repo_slug {
+            continue;
+        }
+        let Ok(file) = load_state(&src.abs_path) else {
+            continue;
+        };
+        for track in &file.tracks {
+            for block in &track.blocks {
+                if block.id == block_id {
+                    return Some(
+                        block
+                            .depends_on
+                            .iter()
+                            .any(|d| matches!(d, BlockedBy::Operator { .. })),
+                    );
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Shared reporting tail for every `mev doc ...` verb: print diagnostics (or a `--json`
 /// envelope), then a `<label> <mode> <root>: N error(s), M warning(s)` summary, and translate
 /// the report's failure state into the process exit code.
@@ -1515,7 +1675,23 @@ fn main() -> ExitCode {
             status,
             path,
             write,
+            force_operator_gate,
         } => {
+            // --force-operator-gate is the only override that starts a block with an
+            // unmet operator edge, and per D71 it is human-only. Refuse it outright
+            // when stdin is not a TTY, before touching anything else — this is
+            // deliberately not gated on --write: passing the flag from a script or
+            // an agent's non-interactive shell is exactly the failure mode this
+            // closes, dry run or not.
+            if force_operator_gate && !std::io::stdin().is_terminal() {
+                eprintln!(
+                    "error [E_FORCE_OPERATOR_GATE_NOT_TTY] refusing --force-operator-gate on \
+                     non-interactive stdin — this is the only override that starts a block with \
+                     an unmet operator edge, and it is human-only (D71); an agent may never pass \
+                     it, and there is no priority threshold or other bypass."
+                );
+                return ExitCode::FAILURE;
+            }
             // Same worktree guard as emit-state: a --write here chains into emit-state,
             // which resolves every repo's paths from brain.toml rather than CWD.
             if write && mev::brain::config::is_linked_worktree(&path) {
@@ -1532,6 +1708,23 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            // Operator gate (D71): a block carrying an unmet `operator` depends_on
+            // entry cannot be started (moved to `in_progress`) without
+            // --force-operator-gate — and that flag was already refused above if
+            // stdin is not a TTY, so reaching here with it set means a human typed
+            // it. No priority threshold or other condition bypasses this check.
+            if write
+                && status == "in_progress"
+                && !force_operator_gate
+                && let Some(true) = block_has_unmet_operator_gate(&root, &key)
+            {
+                eprintln!(
+                    "error [E_BLOCK_OPERATOR_GATED] refusing to start '{key}': it carries an \
+                     unmet operator depends_on edge. Pass --force-operator-gate (human-only, \
+                     refused on non-TTY stdin) to override."
+                );
+                return ExitCode::FAILURE;
+            }
             // Advisory lock, same contract as emit-state: only --write mutates the
             // corpus, so only --write needs mutual exclusion. This command writes an
             // *authored* field and then chains into emit-state, so racing it against a
@@ -1567,6 +1760,166 @@ fn main() -> ExitCode {
                 cli.json,
                 mev::set_block_status(&root, &key, &status, write),
             )
+        }
+        Command::CloseOperatorGate {
+            slug,
+            path,
+            exit_verified,
+        } => {
+            // Refuse before reading or touching anything — the whole point of
+            // --exit-verified is that mev never infers the exit condition itself.
+            if !exit_verified {
+                eprintln!(
+                    "error [{}] refusing to close operator gate '{slug}' without --exit-verified \
+                     — the exit artifact's existence is the operator's assertion, never mev's \
+                     inference.",
+                    mev::brain::operator::E_OPERATOR_GATE_NOT_VERIFIED
+                );
+                return ExitCode::FAILURE;
+            }
+            // Same worktree guard as emit-state: this chains into emit-state, which
+            // resolves every repo's paths from brain.toml rather than CWD.
+            if mev::brain::config::is_linked_worktree(&path) {
+                eprintln!(
+                    "error: refusing to write from inside a linked git worktree ({}) — \
+                     close-operator-gate chains into emit-state, which resolves derived-file \
+                     paths from brain.toml, not CWD, so this would regenerate the MAIN \
+                     checkout's files. Run from the main working tree instead.",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // Advisory lock, same contract as every other authored-state writer: this
+            // always mutates (there is no dry-run mode), so the lock is always taken.
+            // Released via Drop on every exit path below.
+            let _lock_guard = match mev::brain::lock::acquire_lock(
+                &root,
+                mev::brain::lock::DEFAULT_LOCK_TIMEOUT,
+            ) {
+                Ok(guard) => guard,
+                Err(mev::brain::lock::LockError::Held {
+                    holder_pid,
+                    lock_path,
+                    waited_secs,
+                }) => {
+                    eprintln!(
+                        "error [E_EMIT_LOCK_HELD] another write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
+                        lock_path.display()
+                    );
+                    return ExitCode::FAILURE;
+                }
+                Err(e) => {
+                    eprintln!("error [E_EMIT_LOCK_HELD] {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            report_doc(
+                "close-operator-gate",
+                &root,
+                true,
+                cli.json,
+                mev::close_operator_gate(&root, &slug, exit_verified),
+            )
+        }
+        Command::Approve { slug, digest, path } => {
+            // Same worktree guard as close-operator-gate/emit-state: this chains
+            // into emit-state, which resolves every repo's paths from brain.toml
+            // rather than CWD.
+            if mev::brain::config::is_linked_worktree(&path) {
+                eprintln!(
+                    "error: refusing to write from inside a linked git worktree ({}) — approve \
+                     chains into emit-state, which resolves derived-file paths from brain.toml, \
+                     not CWD, so this would regenerate the MAIN checkout's files. Run from the \
+                     main working tree instead.",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // Advisory lock, same contract as every other authored-state writer.
+            let _lock_guard = match mev::brain::lock::acquire_lock(
+                &root,
+                mev::brain::lock::DEFAULT_LOCK_TIMEOUT,
+            ) {
+                Ok(guard) => guard,
+                Err(mev::brain::lock::LockError::Held {
+                    holder_pid,
+                    lock_path,
+                    waited_secs,
+                }) => {
+                    eprintln!(
+                        "error [E_EMIT_LOCK_HELD] another write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
+                        lock_path.display()
+                    );
+                    return ExitCode::FAILURE;
+                }
+                Err(e) => {
+                    eprintln!("error [E_EMIT_LOCK_HELD] {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            report_doc(
+                "approve",
+                &root,
+                true,
+                cli.json,
+                mev::approve(&root, &slug, &digest),
+            )
+        }
+        Command::Reject { slug, path } => {
+            // Same worktree guard as close-operator-gate/emit-state.
+            if mev::brain::config::is_linked_worktree(&path) {
+                eprintln!(
+                    "error: refusing to write from inside a linked git worktree ({}) — reject \
+                     chains into emit-state, which resolves derived-file paths from brain.toml, \
+                     not CWD, so this would regenerate the MAIN checkout's files. Run from the \
+                     main working tree instead.",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let _lock_guard = match mev::brain::lock::acquire_lock(
+                &root,
+                mev::brain::lock::DEFAULT_LOCK_TIMEOUT,
+            ) {
+                Ok(guard) => guard,
+                Err(mev::brain::lock::LockError::Held {
+                    holder_pid,
+                    lock_path,
+                    waited_secs,
+                }) => {
+                    eprintln!(
+                        "error [E_EMIT_LOCK_HELD] another write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
+                        lock_path.display()
+                    );
+                    return ExitCode::FAILURE;
+                }
+                Err(e) => {
+                    eprintln!("error [E_EMIT_LOCK_HELD] {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            report_doc("reject", &root, true, cli.json, mev::reject(&root, &slug))
         }
         Command::Manifest { path, pretty } => {
             let root = match mev::brain::config::find_brain_root(&path) {
