@@ -46,6 +46,12 @@ use crate::brain::state::StateSource;
 pub const E_OPERATOR_GATE_NOT_VERIFIED: &str = "E_OPERATOR_GATE_NOT_VERIFIED";
 /// Diagnostic code for a `close-operator-gate` call naming a slug with no matching edge.
 pub const E_OPERATOR_GATE_UNKNOWN: &str = "E_OPERATOR_GATE_UNKNOWN";
+/// Diagnostic code for `approve`/`reject` calls naming a slug with no matching
+/// `approval` edge in the loaded corpus.
+pub const E_APPROVAL_UNKNOWN: &str = "E_APPROVAL_UNKNOWN";
+/// Diagnostic code for `mev approve <slug> --digest <d>` when `<d>` does not match
+/// the stored `digest` on (any of) the matching edge(s) — the alarm, per D71.
+pub const E_APPROVAL_DIGEST_MISMATCH: &str = "E_APPROVAL_DIGEST_MISMATCH";
 
 /// Plan the removal of every `{type:"operator", slug: <slug>}` `depends_on` entry
 /// across every loaded file.
@@ -109,6 +115,180 @@ pub fn plan_close_operator_gate(
 
     for (fi, count) in touched {
         let note = format!("close-operator-gate '{slug}' ({count} edge(s) removed)");
+        if let Some(a) = action_for(&work[fi].0, &work[fi].1, note) {
+            plan.actions.push(a);
+        }
+    }
+
+    plan
+}
+
+/// Plan `mev approve <slug> --digest <d>`: verify `digest` against every matching
+/// `{type:"approval", slug: <slug>}` edge's stored digest, then either clear all of
+/// them (match) or refuse and change nothing (mismatch).
+///
+/// Diagnostics:
+/// - [`E_APPROVAL_UNKNOWN`] — no loaded file carries an `approval` edge with this
+///   slug. Nothing is planned; the caller's corpus is never touched.
+/// - [`E_APPROVAL_DIGEST_MISMATCH`] — `digest` does not match the stored digest on
+///   at least one matching edge. This is the D71 alarm: a **distinct** error
+///   diagnostic (never folded into a generic "refused" message) so a re-queue that
+///   looks like a no-op does not silently swallow the disagreement. Nothing is
+///   removed and no action is planned — the edge stays unmet, i.e. re-queued rather
+///   than executed.
+///
+/// A mismatch on even one matching edge refuses the whole call rather than clearing
+/// the edges that did match: a shared slug is meant to carry one reviewed payload,
+/// so a split result (some cleared, some not) would leave the corpus in a state that
+/// implies the approval was reviewed twice with two different outcomes.
+pub fn plan_approve(
+    slug: &str,
+    digest: &str,
+    _config: &BrainConfig,
+    files: &[(StateSource, StateFile)],
+) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+    let here = std::path::Path::new(".");
+
+    let is_match =
+        |dep: &BlockedBy| matches!(dep, BlockedBy::Approval { slug: s, .. } if s == slug);
+
+    let mut work: Vec<(StateSource, StateFile)> = files.to_vec();
+    let mut touched: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    let mut found = false;
+    let mut mismatched_digest: Option<String> = None;
+
+    for (_, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                for dep in &block.depends_on {
+                    if !is_match(dep) {
+                        continue;
+                    }
+                    found = true;
+                    if let BlockedBy::Approval { digest: stored, .. } = dep
+                        && stored != digest
+                    {
+                        mismatched_digest = Some(stored.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    if !found {
+        plan.diagnostics.push(Diagnostic::error(
+            here,
+            E_APPROVAL_UNKNOWN,
+            format!(
+                "no depends_on entry with approval slug '{slug}' was found in the loaded corpus \
+                 — refusing rather than silently succeeding on what is almost certainly a typo"
+            ),
+        ));
+        return plan;
+    }
+
+    if let Some(stored) = mismatched_digest {
+        // D71: the mismatch path must ALARM as well as re-queue. This is a distinct,
+        // always-surfaced Error diagnostic — report_doc/apply_plan never filter or
+        // suppress diagnostics, so pushing this here is what makes it non-suppressible.
+        // No action is planned: the edge is left in place, unmet, which is the re-queue.
+        plan.diagnostics.push(Diagnostic::error(
+            here,
+            E_APPROVAL_DIGEST_MISMATCH,
+            format!(
+                "approval '{slug}': digest mismatch — passed digest does not match the stored \
+                 digest '{stored}' on the reviewed edge. The payload changed since review: the \
+                 approval is void and the item re-queues as a fresh decision rather than \
+                 executing. This may be legitimate drift or a bug upstream — investigate before \
+                 re-approving."
+            ),
+        ));
+        return plan;
+    }
+
+    // Verified: remove every matching edge, exactly like close-operator-gate.
+    for (fi, (_, file)) in files.iter().enumerate() {
+        for (ti, track) in file.tracks.iter().enumerate() {
+            for (bi, block) in track.blocks.iter().enumerate() {
+                let hits = block.depends_on.iter().filter(|d| is_match(d)).count();
+                if hits == 0 {
+                    continue;
+                }
+                work[fi].1.tracks[ti].blocks[bi]
+                    .depends_on
+                    .retain(|d| !is_match(d));
+                *touched.entry(fi).or_insert(0) += hits;
+            }
+        }
+    }
+
+    for (fi, count) in touched {
+        let note = format!("approve '{slug}' (digest verified, {count} edge(s) cleared)");
+        if let Some(a) = action_for(&work[fi].0, &work[fi].1, note) {
+            plan.actions.push(a);
+        }
+    }
+
+    plan
+}
+
+/// Plan `mev reject <slug>`: remove every matching `{type:"approval", slug: <slug>}`
+/// edge, regardless of digest, and record the rejection in the write note.
+///
+/// Diagnostics:
+/// - [`E_APPROVAL_UNKNOWN`] — no loaded file carries an `approval` edge with this
+///   slug. Nothing is planned; the caller's corpus is never touched.
+///
+/// Unlike `approve`, `reject` never checks `digest` — rejecting a stale or a fresh
+/// payload both end the same way: the decision is over and the edge is gone. The
+/// rejection is recorded via the write note (mirrors `close-operator-gate`'s
+/// `I_EMIT_WROTE` diagnostic), which is always surfaced by `apply_plan`.
+pub fn plan_reject(
+    slug: &str,
+    _config: &BrainConfig,
+    files: &[(StateSource, StateFile)],
+) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+    let here = std::path::Path::new(".");
+
+    let is_match =
+        |dep: &BlockedBy| matches!(dep, BlockedBy::Approval { slug: s, .. } if s == slug);
+
+    let mut work: Vec<(StateSource, StateFile)> = files.to_vec();
+    let mut touched: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    let mut found = false;
+
+    for (fi, (_, file)) in files.iter().enumerate() {
+        for (ti, track) in file.tracks.iter().enumerate() {
+            for (bi, block) in track.blocks.iter().enumerate() {
+                let hits = block.depends_on.iter().filter(|d| is_match(d)).count();
+                if hits == 0 {
+                    continue;
+                }
+                found = true;
+                work[fi].1.tracks[ti].blocks[bi]
+                    .depends_on
+                    .retain(|d| !is_match(d));
+                *touched.entry(fi).or_insert(0) += hits;
+            }
+        }
+    }
+
+    if !found {
+        plan.diagnostics.push(Diagnostic::error(
+            here,
+            E_APPROVAL_UNKNOWN,
+            format!(
+                "no depends_on entry with approval slug '{slug}' was found in the loaded corpus \
+                 — refusing rather than silently succeeding on what is almost certainly a typo"
+            ),
+        ));
+        return plan;
+    }
+
+    for (fi, count) in touched {
+        let note = format!("reject '{slug}' ({count} edge(s) removed, decision recorded)");
         if let Some(a) = action_for(&work[fi].0, &work[fi].1, note) {
             plan.actions.push(a);
         }

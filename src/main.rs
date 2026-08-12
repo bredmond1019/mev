@@ -486,6 +486,73 @@ enum Command {
         #[arg(long = "exit-verified")]
         exit_verified: bool,
     },
+    /// Approve a pending decision gate: `mev approve <slug> --digest <d>`.
+    ///
+    /// Removes every `depends_on` `{type:"approval", slug: <slug>}` entry across
+    /// every loaded `state.json`, but only when `--digest` matches the stored
+    /// `digest` on every matching edge. A shared slug is meant to carry one
+    /// reviewed payload, so a mismatch on even one matching edge refuses the whole
+    /// call rather than clearing the edges that did match.
+    ///
+    /// **Digest mismatch is not a quiet failure.** The passed digest not matching
+    /// the stored digest means the payload changed since it was reviewed — the
+    /// approval is void. Nothing is removed (the edge stays unmet and re-queues as
+    /// a fresh decision) and mev raises a distinct `E_APPROVAL_DIGEST_MISMATCH`
+    /// diagnostic (per D71) rather than silently re-queuing: a payload changing
+    /// under an approval may be legitimate drift or a bug, and the moment the
+    /// digests disagree is the only cheap moment to catch it.
+    ///
+    /// SLUG matching no approval edge in the loaded corpus is an error, not a
+    /// silent no-op — almost always a typo.
+    ///
+    /// On a successful (matched-digest) approval, re-runs `emit-state --write` so
+    /// `focus`/the boards agree with the cleared gate, under the same
+    /// `<root>/.mev-emit.lock` advisory lock every other authored-state writer
+    /// takes (E_EMIT_LOCK_HELD on contention; a stale lock from a dead pid is
+    /// reclaimed automatically). Refused the same way as its siblings when run
+    /// from inside a linked git worktree.
+    ///
+    /// Exit codes:
+    ///   0 — every matching edge removed (digest verified) and emit-state re-run cleanly
+    ///   1 — unknown slug, digest mismatch (alarmed), a write failure,
+    ///       E_EMIT_LOCK_HELD, or a linked-worktree refusal
+    Approve {
+        /// Approval gate slug, e.g. `dev-to-cta-sweep`.
+        slug: String,
+        /// Digest of the exact payload reviewed; must match the edge's stored digest.
+        #[arg(long)]
+        digest: String,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Reject a pending decision gate: `mev reject <slug>`.
+    ///
+    /// Removes every `depends_on` `{type:"approval", slug: <slug>}` entry across
+    /// every loaded `state.json`, regardless of `digest` — a rejection ends the
+    /// decision whether the reviewed payload is still current or not. The
+    /// rejection is recorded via the write's diagnostic note, same mechanism as
+    /// `close-operator-gate`.
+    ///
+    /// SLUG matching no approval edge in the loaded corpus is an error, not a
+    /// silent no-op — almost always a typo.
+    ///
+    /// On success, re-runs `emit-state --write` so `focus`/the boards agree with
+    /// the cleared gate, under the same `<root>/.mev-emit.lock` advisory lock
+    /// every other authored-state writer takes. Refused the same way as its
+    /// siblings when run from inside a linked git worktree.
+    ///
+    /// Exit codes:
+    ///   0 — every matching edge removed and emit-state re-run cleanly
+    ///   1 — unknown slug, a write failure, E_EMIT_LOCK_HELD, or a linked-worktree
+    ///       refusal
+    Reject {
+        /// Approval gate slug, e.g. `dev-to-cta-sweep`.
+        slug: String,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Generate an interactive HTML visualization of the knowledge graph (graph.html)
     GenerateGraph {
         /// Path to search from when locating brain.toml. Defaults to the current directory.
@@ -1671,6 +1738,99 @@ fn main() -> ExitCode {
                 cli.json,
                 mev::close_operator_gate(&root, &slug, exit_verified),
             )
+        }
+        Command::Approve { slug, digest, path } => {
+            // Same worktree guard as close-operator-gate/emit-state: this chains
+            // into emit-state, which resolves every repo's paths from brain.toml
+            // rather than CWD.
+            if mev::brain::config::is_linked_worktree(&path) {
+                eprintln!(
+                    "error: refusing to write from inside a linked git worktree ({}) — approve \
+                     chains into emit-state, which resolves derived-file paths from brain.toml, \
+                     not CWD, so this would regenerate the MAIN checkout's files. Run from the \
+                     main working tree instead.",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // Advisory lock, same contract as every other authored-state writer.
+            let _lock_guard = match mev::brain::lock::acquire_lock(
+                &root,
+                mev::brain::lock::DEFAULT_LOCK_TIMEOUT,
+            ) {
+                Ok(guard) => guard,
+                Err(mev::brain::lock::LockError::Held {
+                    holder_pid,
+                    lock_path,
+                    waited_secs,
+                }) => {
+                    eprintln!(
+                        "error [E_EMIT_LOCK_HELD] another write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
+                        lock_path.display()
+                    );
+                    return ExitCode::FAILURE;
+                }
+                Err(e) => {
+                    eprintln!("error [E_EMIT_LOCK_HELD] {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            report_doc(
+                "approve",
+                &root,
+                true,
+                cli.json,
+                mev::approve(&root, &slug, &digest),
+            )
+        }
+        Command::Reject { slug, path } => {
+            // Same worktree guard as close-operator-gate/emit-state.
+            if mev::brain::config::is_linked_worktree(&path) {
+                eprintln!(
+                    "error: refusing to write from inside a linked git worktree ({}) — reject \
+                     chains into emit-state, which resolves derived-file paths from brain.toml, \
+                     not CWD, so this would regenerate the MAIN checkout's files. Run from the \
+                     main working tree instead.",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let _lock_guard = match mev::brain::lock::acquire_lock(
+                &root,
+                mev::brain::lock::DEFAULT_LOCK_TIMEOUT,
+            ) {
+                Ok(guard) => guard,
+                Err(mev::brain::lock::LockError::Held {
+                    holder_pid,
+                    lock_path,
+                    waited_secs,
+                }) => {
+                    eprintln!(
+                        "error [E_EMIT_LOCK_HELD] another write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
+                        lock_path.display()
+                    );
+                    return ExitCode::FAILURE;
+                }
+                Err(e) => {
+                    eprintln!("error [E_EMIT_LOCK_HELD] {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            report_doc("reject", &root, true, cli.json, mev::reject(&root, &slug))
         }
         Command::Manifest { path, pretty } => {
             let root = match mev::brain::config::find_brain_root(&path) {
