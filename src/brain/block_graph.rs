@@ -370,7 +370,9 @@ pub fn build_block_graph_export(
             .iter()
             .filter_map(|d| match d {
                 BlockedBy::External { what } => Some(what.clone()),
-                BlockedBy::Block { .. } => None,
+                BlockedBy::Block { .. }
+                | BlockedBy::Operator { .. }
+                | BlockedBy::Approval { .. } => None,
             })
             .collect();
 

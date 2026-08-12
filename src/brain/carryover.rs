@@ -254,7 +254,9 @@ pub fn block_refs_from_related(item: &Carryover) -> Vec<String> {
                 };
                 Some(format!("{repo}:{id}"))
             }
-            BlockedBy::External { .. } => None,
+            BlockedBy::External { .. }
+            | BlockedBy::Operator { .. }
+            | BlockedBy::Approval { .. } => None,
         })
         .collect()
 }
@@ -1584,7 +1586,9 @@ pub fn carryover_effective_priorities(
                     }
                     // No node target, so no priority to propagate — see
                     // this function's doc comment.
-                    BlockedBy::External { .. } => {}
+                    BlockedBy::External { .. }
+                    | BlockedBy::Operator { .. }
+                    | BlockedBy::Approval { .. } => {}
                 }
             }
         }
@@ -1639,6 +1643,8 @@ fn unmet_carryover_block_keys(
         .iter()
         .filter_map(|edge| match edge {
             BlockedBy::External { what } => Some(format!("external:{what}")),
+            BlockedBy::Operator { slug, .. } => Some(format!("operator:{slug}")),
+            BlockedBy::Approval { slug, .. } => Some(format!("approval:{slug}")),
             BlockedBy::Block { repo, id, .. } => {
                 let target_repo = if repo.is_empty() {
                     entry.repo.as_str()

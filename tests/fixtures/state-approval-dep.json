@@ -1,0 +1,26 @@
+{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-08-11",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [
+    {
+      "title": "Phase 1",
+      "blocks": [
+        {
+          "id": "AL.1.A",
+          "title": "Needs approval",
+          "status": "open",
+          "depends_on": [
+            {
+              "type": "approval",
+              "slug": "ship-it",
+              "what": "approve the release payload",
+              "digest": "sha256:abc123"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-08-11",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [
+    {
+      "title": "Phase 1",
+      "blocks": [
+        {
+          "id": "AL.1.A",
+          "title": "Needs operator",
+          "status": "open",
+          "depends_on": [
+            {
+              "type": "operator",
+              "slug": "mac-mini-setup",
+              "exit": "mini is racked and reachable over tailscale",
+              "start": "bastion sessions new mac-mini-setup"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

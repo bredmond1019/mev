@@ -178,7 +178,9 @@ pub fn topo_order(graph: &StateGraph, files: &[(StateSource, StateFile)]) -> Vec
                     let dep_key = format!("{repo}:{id}");
                     by_key.contains_key(&dep_key).then_some(dep_key)
                 }
-                BlockedBy::External { .. } => None,
+                BlockedBy::External { .. }
+                | BlockedBy::Operator { .. }
+                | BlockedBy::Approval { .. } => None,
             })
             .collect();
         deps.insert(key.as_str(), ds);
@@ -344,7 +346,9 @@ pub fn render_wave_table(
             // Check for unmet deps — conservative: external deps always unmet;
             // block deps only resolved for same-repo.
             let has_unmet = block.depends_on.iter().any(|dep| match dep {
-                BlockedBy::External { .. } => true,
+                BlockedBy::External { .. }
+                | BlockedBy::Operator { .. }
+                | BlockedBy::Approval { .. } => true,
                 BlockedBy::Block { repo, id, .. } => {
                     if repo == repo_slug {
                         // Same-repo: check authored status.
@@ -373,6 +377,8 @@ pub fn render_wave_table(
                 .map(|dep| match dep {
                     BlockedBy::Block { repo, id, .. } => format!("{repo}:{id}"),
                     BlockedBy::External { what } => format!("external:{what}"),
+                    BlockedBy::Operator { slug, .. } => format!("operator:{slug}"),
+                    BlockedBy::Approval { slug, .. } => format!("approval:{slug}"),
                 })
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -500,6 +506,8 @@ fn render_hq_board_blocker(
 ) -> String {
     match dep {
         BlockedBy::External { what } => format!("external:{what}"),
+        BlockedBy::Operator { slug, .. } => format!("operator:{slug}"),
+        BlockedBy::Approval { slug, .. } => format!("approval:{slug}"),
         BlockedBy::Block {
             repo: dep_repo,
             id: dep_id,
@@ -1103,6 +1111,11 @@ pub fn render_epic_sequence_table(
             .map(|dep| match dep {
                 BlockedBy::Block { repo, id, .. } => format!("{repo}:{id}"),
                 BlockedBy::External { what } => format!("external:{what}"),
+                // Minimal display form — full exit/start/decision rendering lands in
+                // the dedicated rendering task; this keeps the board compiling and
+                // legible in the meantime.
+                BlockedBy::Operator { slug, .. } => format!("operator:{slug}"),
+                BlockedBy::Approval { slug, .. } => format!("approval:{slug}"),
             })
             .collect();
         let deps_cell = if deps.is_empty() {
@@ -1128,11 +1141,14 @@ pub fn render_epic_sequence_table(
 }
 
 /// Whether `block` has at least one `depends_on` entry that is not yet met — any
-/// `external` entry, or a `block` entry whose target's authored status in
-/// `global_status` is not `closed` (an unresolvable target counts as unmet).
+/// `external`/`operator`/`approval` entry (all three are targetless and unmet for
+/// as long as they are present), or a `block` entry whose target's authored status
+/// in `global_status` is not `closed` (an unresolvable target counts as unmet).
 fn has_unmet_dep(block: &TrackBlock, global_status: &HashMap<String, Option<String>>) -> bool {
     block.depends_on.iter().any(|dep| match dep {
-        BlockedBy::External { .. } => true,
+        BlockedBy::External { .. } | BlockedBy::Operator { .. } | BlockedBy::Approval { .. } => {
+            true
+        }
         BlockedBy::Block { repo, id, .. } => {
             global_status
                 .get(&format!("{repo}:{id}"))

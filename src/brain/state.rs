@@ -805,6 +805,11 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                         ));
                     }
                 }
+                // `operator`/`approval` well-formedness for this `blocks[]` field is out
+                // of scope for this check — depends_on's own operator/approval schema
+                // validation (E_STATE_OPERATOR_MISSING_EXIT, E_STATE_APPROVAL_DIGEST_SHAPE)
+                // is added separately.
+                BlockedBy::Operator { .. } | BlockedBy::Approval { .. } => {}
             }
         }
 
@@ -2046,8 +2051,10 @@ pub fn effective_priorities(
 ///
 /// A block is *ready* iff:
 /// - Its authored status is `"open"` (or absent — treated as open).
-/// - It has **zero** `{type:"external"}` `depends_on` entries (external dependencies
-///   mean the block is gated on something outside the graph).
+/// - It has **zero** `{type:"external"}`, `{type:"operator"}`, or `{type:"approval"}`
+///   `depends_on` entries — all three are targetless and unmet for as long as they are
+///   present, so their mere presence means the block is gated on something outside the
+///   graph (an environmental condition, an operator gate, or a pending decision).
 /// - Every `{type:"block"}` `depends_on` target has authored status `"closed"`.
 ///
 /// The returned `Vec<String>` lists canonical `"repo:id"` keys ordered by:
@@ -2080,12 +2087,18 @@ pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> V
                     continue;
                 }
 
-                // Any external dep disqualifies the block (not yet runnable).
-                let has_external = block
-                    .depends_on
-                    .iter()
-                    .any(|d| matches!(d, BlockedBy::External { .. }));
-                if has_external {
+                // Any external/operator/approval dep disqualifies the block (not yet
+                // runnable) — all three are targetless and unmet for as long as they are
+                // present, exactly like `external`.
+                let has_unmet_targetless = block.depends_on.iter().any(|d| {
+                    matches!(
+                        d,
+                        BlockedBy::External { .. }
+                            | BlockedBy::Operator { .. }
+                            | BlockedBy::Approval { .. }
+                    )
+                });
+                if has_unmet_targetless {
                     continue;
                 }
 
@@ -2095,7 +2108,7 @@ pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> V
                         let dep_key = format!("{repo}:{id}");
                         status_map.get(&dep_key).and_then(|s| s.as_deref()) == Some("closed")
                     } else {
-                        true // External entries handled above; this branch is unreachable here.
+                        true // External/Operator/Approval entries handled above; this branch is unreachable here.
                     }
                 });
 
@@ -2159,9 +2172,10 @@ pub struct DerivedFocus {
 /// **Derivation rules:**
 /// - `now` — every `tracks[]` block with authored `status == "in_progress"`.
 /// - `blocked` — every `tracks[]` block that is `open` and has at least one unmet
-///   dependency: any `External` dep, or any `Block` dep whose target is not `closed`.
-///   The returned `blocked` entry carries only the **unmet** subset, not the full
-///   `depends_on` list.
+///   dependency: any `External`, `Operator`, or `Approval` dep (all three are
+///   targetless and unmet for as long as they are present), or any `Block` dep whose
+///   target is not `closed`. The returned `blocked` entry carries only the **unmet**
+///   subset, not the full `depends_on` list.
 /// - `next` — every `tracks[]` block returned by [`ready_order`] for this file
 ///   (open blocks with no external deps and all block deps `closed`), in wave order.
 /// - `deferred` — every `tracks[]` block with authored `status == "deferred"`.
@@ -2208,7 +2222,11 @@ pub fn derive_focus(
                         .depends_on
                         .iter()
                         .filter(|d| match d {
-                            BlockedBy::External { .. } => true,
+                            // External/Operator/Approval are targetless and unmet for as
+                            // long as they are present — exactly like `external`.
+                            BlockedBy::External { .. }
+                            | BlockedBy::Operator { .. }
+                            | BlockedBy::Approval { .. } => true,
                             BlockedBy::Block { repo, id, .. } => {
                                 let dep_key = format!("{repo}:{id}");
                                 status_map.get(&dep_key).and_then(|s| s.as_deref())

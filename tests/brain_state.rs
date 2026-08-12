@@ -1048,6 +1048,109 @@ fn derive_focus_external_dep_goes_to_blocked() {
     );
 }
 
+/// Load a full `state.json` fixture from `tests/fixtures/<name>` and return it
+/// as a `(StateSource, StateFile)` pair, mirroring [`make_leaf_pair_in_memory`]
+/// but reading real fixture files (per this task's acceptance criteria) rather
+/// than building JSON inline.
+fn load_fixture(name: &str) -> (mev::brain::state::StateSource, mev::brain::state::StateFile) {
+    use mev::brain::state::{StateFile, StateSource};
+
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read fixture {}: {e}", path.display()));
+    let file: StateFile =
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("fixture must parse: {e}"));
+    let src = StateSource {
+        repo_slug: file.repo.clone(),
+        abs_path: path,
+        expected_kind: "project",
+    };
+    (src, file)
+}
+
+#[test]
+fn derive_focus_operator_dep_goes_to_blocked() {
+    use mev::brain::state::{BlockedBy, build_state_graph, derive_focus};
+
+    let (src, file) = load_fixture("state-operator-dep.json");
+    let files = vec![(src.clone(), file.clone())];
+    let graph = build_state_graph(&files);
+
+    let derived = derive_focus(&src, &file, &graph, &files);
+
+    assert_eq!(derived.blocked.len(), 1);
+    assert_eq!(derived.blocked[0].0, "AL.1.A");
+    match &derived.blocked[0].1[0] {
+        BlockedBy::Operator { slug, .. } => assert_eq!(slug, "mac-mini-setup"),
+        other => panic!("expected BlockedBy::Operator, got {other:?}"),
+    }
+    assert!(
+        derived.next.is_empty(),
+        "operator-dep block must not be in next"
+    );
+}
+
+#[test]
+fn derive_focus_approval_dep_goes_to_blocked() {
+    use mev::brain::state::{BlockedBy, build_state_graph, derive_focus};
+
+    let (src, file) = load_fixture("state-approval-dep.json");
+    let files = vec![(src.clone(), file.clone())];
+    let graph = build_state_graph(&files);
+
+    let derived = derive_focus(&src, &file, &graph, &files);
+
+    assert_eq!(derived.blocked.len(), 1);
+    assert_eq!(derived.blocked[0].0, "AL.1.A");
+    match &derived.blocked[0].1[0] {
+        BlockedBy::Approval { slug, .. } => assert_eq!(slug, "ship-it"),
+        other => panic!("expected BlockedBy::Approval, got {other:?}"),
+    }
+    assert!(
+        derived.next.is_empty(),
+        "approval-dep block must not be in next"
+    );
+}
+
+#[test]
+fn derive_focus_removing_operator_dep_makes_block_ready_again() {
+    use mev::brain::state::{build_state_graph, derive_focus};
+
+    // Same block as `derive_focus_operator_dep_goes_to_blocked`, but with the
+    // operator entry removed — must derive as ready (in `next`, not `blocked`)
+    // in the same derivation pass, exactly like the `external` case.
+    let (src, file) = make_leaf_pair_in_memory(
+        "alpha",
+        serde_json::json!([{
+            "title": "Phase 1",
+            "blocks": [{
+                "id": "AL.1.A",
+                "title": "Operator gate cleared",
+                "status": "open",
+                "depends_on": []
+            }]
+        }]),
+        serde_json::json!({ "now": [], "next": [], "blocked": [] }),
+    );
+    let files = vec![(src.clone(), file.clone())];
+    let graph = build_state_graph(&files);
+
+    let derived = derive_focus(&src, &file, &graph, &files);
+
+    assert!(
+        derived.blocked.is_empty(),
+        "block with no depends_on must not be blocked, got: {:?}",
+        derived.blocked
+    );
+    assert!(
+        derived.next.contains(&"AL.1.A".to_string()),
+        "block with the operator dep removed must be ready, got: {:?}",
+        derived.next
+    );
+}
+
 #[test]
 fn derive_focus_empty_tracks_returns_empty() {
     use mev::brain::state::{StateGraph, StateSource, derive_focus};
