@@ -1151,6 +1151,167 @@ fn derive_focus_removing_operator_dep_makes_block_ready_again() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Task 2 — effective-priority propagation through operator/approval edges
+// ---------------------------------------------------------------------------
+//
+// `operator`/`approval` `depends_on` entries are targetless (per
+// `okf_core::state::BlockedBy`'s doc comments): `build_state_graph` never
+// emits a `StateEdge` for them (only `{type:"block"}` entries become
+// edges), so `effective_priorities`' reverse-topological walk — which
+// propagates purely over `StateEdgeKind::BlockedBy` edges — never sees
+// them at all. These tests exist to catch a *future* regression where
+// someone adds special-case handling that excludes a block's own entry
+// from `effective_priorities`' `own` map on the basis of it carrying an
+// operator/approval dep, or that starts emitting edges for these variants
+// and breaks the "targetless" invariant.
+
+#[test]
+fn effective_priorities_operator_gate_on_p0_block_reports_p0() {
+    use mev::brain::state::{build_state_graph, effective_priorities};
+
+    // AL.1.A is priority 0 and carries an operator dep — its own effective
+    // priority must still be 0, unaffected by the targetless operator entry.
+    let (src, file) = make_leaf_pair_in_memory(
+        "alpha",
+        serde_json::json!([{
+            "title": "Phase 1",
+            "blocks": [{
+                "id": "AL.1.A",
+                "title": "Gated by an operator session",
+                "status": "open",
+                "priority": 0,
+                "depends_on": [{
+                    "type": "operator",
+                    "slug": "mac-mini-setup",
+                    "exit": "the mini boots headless",
+                    "start": "ssh mini 'sudo launchctl load ...'"
+                }]
+            }]
+        }]),
+        serde_json::json!({ "now": [], "next": [], "blocked": [] }),
+    );
+    let files = vec![(src, file)];
+    let graph = build_state_graph(&files);
+
+    let effective = effective_priorities(&graph, &files);
+
+    assert_eq!(
+        effective.get("alpha:AL.1.A").copied(),
+        Some(0),
+        "a P0 block's own effective priority must be unaffected by an \
+         operator dep it carries; got {effective:?}"
+    );
+}
+
+#[test]
+fn effective_priorities_approval_gate_inherits_min_of_gated_blocks() {
+    use mev::brain::state::{build_state_graph, effective_priorities};
+
+    // Two blocks, alpha:AL.1.A (P0) and alpha:AL.1.B (P2), both carry an
+    // approval dep on the SAME slug "ship-it" — the shared gate. Neither
+    // block depends on the other, so each block's own effective priority
+    // must equal its own authored priority (no cross-block propagation
+    // happens over a shared targetless slug; that aggregation is the
+    // rendering layer's job, per the ticket's "Shared identity" task).
+    // What this pins is the *input* that rendering will later take a min
+    // over: both blocks resolve to a real effective priority, and the
+    // gate's effective priority — computed here as min(effective(A),
+    // effective(B)), exactly the aggregation task 5's dedup will perform —
+    // is 0, the hottest of the two blocks it gates.
+    let (src, file) = make_leaf_pair_in_memory(
+        "alpha",
+        serde_json::json!([{
+            "title": "Phase 1",
+            "blocks": [
+                {
+                    "id": "AL.1.A",
+                    "title": "Hot block gated on the shared approval",
+                    "status": "open",
+                    "priority": 0,
+                    "depends_on": [{
+                        "type": "approval",
+                        "slug": "ship-it",
+                        "what": "ship the release",
+                        "digest": "sha256:deadbeef"
+                    }]
+                },
+                {
+                    "id": "AL.1.B",
+                    "title": "Cold block gated on the same shared approval",
+                    "status": "open",
+                    "priority": 2,
+                    "depends_on": [{
+                        "type": "approval",
+                        "slug": "ship-it",
+                        "what": "ship the release",
+                        "digest": "sha256:deadbeef"
+                    }]
+                }
+            ]
+        }]),
+        serde_json::json!({ "now": [], "next": [], "blocked": [] }),
+    );
+    let files = vec![(src, file)];
+    let graph = build_state_graph(&files);
+
+    let effective = effective_priorities(&graph, &files);
+
+    let a = effective
+        .get("alpha:AL.1.A")
+        .copied()
+        .expect("AL.1.A must have an effective priority");
+    let b = effective
+        .get("alpha:AL.1.B")
+        .copied()
+        .expect("AL.1.B must have an effective priority");
+    assert_eq!(a, 0, "AL.1.A's own priority must be preserved");
+    assert_eq!(b, 2, "AL.1.B's own priority must be preserved");
+
+    let gate_effective_priority = a.min(b);
+    assert_eq!(
+        gate_effective_priority, 0,
+        "the shared 'ship-it' gate's effective priority — min over every \
+         block it gates — must be the hottest of the two, P0"
+    );
+}
+
+#[test]
+fn effective_priorities_targetless_gate_with_no_gated_blocks_keeps_own_priority() {
+    use mev::brain::state::{build_state_graph, effective_priorities};
+
+    // A block with an operator dep and no other block depending on it must
+    // not panic and must retain its own priority — mirroring
+    // `effective_priorities_block_with_no_hot_dependents_keeps_own_priority`
+    // in src/brain/state.rs, extended to a block that also carries an
+    // operator entry.
+    let (src, file) = make_leaf_pair_in_memory(
+        "solo",
+        serde_json::json!([{
+            "title": "Phase 1",
+            "blocks": [{
+                "id": "S.1",
+                "title": "Solo block with an operator dep, nothing depends on it",
+                "status": "open",
+                "priority": 2,
+                "depends_on": [{
+                    "type": "operator",
+                    "slug": "lonely-gate",
+                    "exit": "n/a",
+                    "start": "n/a"
+                }]
+            }]
+        }]),
+        serde_json::json!({ "now": [], "next": [], "blocked": [] }),
+    );
+    let files = vec![(src, file)];
+    let graph = build_state_graph(&files);
+
+    let effective = effective_priorities(&graph, &files);
+
+    assert_eq!(effective.get("solo:S.1").copied(), Some(2));
+}
+
 #[test]
 fn derive_focus_empty_tracks_returns_empty() {
     use mev::brain::state::{StateGraph, StateSource, derive_focus};
