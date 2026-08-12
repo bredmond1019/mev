@@ -17,6 +17,22 @@ timestamp: "2026-08-10T21:15:00Z"
 
 ---
 
+## [run: 2026-08-12]
+
+`ticket-operator-edge-graph` ran tasks 1–11 and BAILED after task 5. Tasks 1–4 shipped clean (PASS, first attempt each): task 1 widened readiness derivation (`derive_focus`/`ready_order`) to treat `operator`/`approval` `depends_on` entries as unmet-while-present, exactly like `external`, fixing a fleet-wide non-exhaustive `BlockedBy` match break that predated the spec; task 2 pinned that `effective_priorities`' reverse-topo walk is unaffected by operator/approval edges (no production change needed — `okf_core::state::build_state_graph` already treats them as targetless); task 3 added `wontfix` as a terminal block status (readiness-satisfying like `closed`, tallied separately so it never inflates the closed count); task 4 added `E_STATE_OPERATOR_MISSING_EXIT`, `E_STATE_APPROVAL_DIGEST_SHAPE`, and a new `W_STATE_OPERATOR_STALE` staleness check wired through a new `operator_days` field on the existing `[attention]` config surface. Task 5 (dedup rendering of shared operator/approval gates in `render_hq_board`/`render_unified_board` via a new `group_blocked_by_gate`/`BlockedGroup` in `src/brain/emit.rs`) implemented and tested cleanly, but its `tasks.json` `validation_commands` entry — `cargo nextest run brain_emit` — is a malformed nextest invocation: bare positional args filter by test *name*, not binary, so it matches zero tests and exits 4 regardless of correctness. Verified directly against the working tree: `cargo nextest run --test brain_emit` passes all 164 tests in `tests/brain_emit.rs`, confirming task 5's code is correct and the defect is purely in the spec's command syntax. This is a spec-authoring bug, not a code defect, so it needs a human/spec fix to `tasks.json` (`--test brain_emit` or `brain::emit --lib`) rather than a bounded retry; tasks 6–11 were never reached. Amendment logged in the spec's Amendment Log; `planning/status.md` and `state.json` updated accordingly (no block flipped — spec remains open).
+
+Next: fix `tasks.json`'s task 5 `validation_commands` entry, then resume `/sdlc-flow ticket-operator-edge-graph 5` (or `--resume`) to continue through tasks 6–11.
+
+```
+cdb59b8 feat: implement ticket-operator-edge-graph-task5
+b58bc0a feat: implement ticket-operator-edge-graph-task4
+2bc1dda feat: implement ticket-operator-edge-graph-task3
+1b0e0a1 feat: implement ticket-operator-edge-graph-task2
+5c8837d feat: implement ticket-operator-edge-graph-task1
+```
+
+---
+
 ## [run: 2026-08-10]
 
 ### `evaluate_carryover_with_dedup` — skip the O(n²) dedup pass on the HTTP hot path
