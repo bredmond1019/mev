@@ -7758,6 +7758,126 @@ mod attention_board {
             "no distilled files -> empty lane: {hq_doc}"
         );
     }
+
+    /// `MV.ticket.attention-queue-delivery` task 6 — the gate on task 1's
+    /// row/render split: a fixture corpus covering all four carryover triage
+    /// lanes plus backlog / captures / distilled, including an empty
+    /// (`_none_`) lane and both cap-with-hidden-count lines (`CARRYOVER_LANE_CAP`
+    /// for STANDING, `DISTILL_LANE_CAP` for the distilled lane), must render
+    /// BYTE-IDENTICAL markdown to what this repo produced before
+    /// `collect_attention_rows` was split out of
+    /// `render_attention_section_with_distilled`. The row-collection refactor
+    /// must not move a single character of what the fleet's `status.md` files
+    /// carry.
+    #[test]
+    fn render_attention_section_pinned_byte_identical_all_lanes() {
+        let today = day("2026-07-15");
+        let cfg = AttentionThresholds::default();
+
+        // HOT: one fresh P0 (not yet stale, but priority routes it to HOT).
+        let mut hot = carry("urgent", "deferred", "2026-07-14", "mev");
+        hot.priority = Some(0);
+        // AGING: one stale, no-priority entry.
+        let aging = carry("old", "deferred", "2026-07-01", "mev");
+        // STANDING: 25 non-stale, no-priority entries -> caps at
+        // CARRYOVER_LANE_CAP (20), "…and 5 more". BLOCKING is left empty
+        // (_none_) — nothing here sets `blocks[]`.
+        let standing_entries: Vec<Carryover> = (0..25)
+            .map(|i| carry(&format!("standing-{i}"), "deferred", "2026-07-14", "mev"))
+            .collect();
+        let mut carryover: Vec<(String, &Carryover)> =
+            vec![("mev".to_string(), &hot), ("mev".to_string(), &aging)];
+        carryover.extend(standing_entries.iter().map(|c| ("mev".to_string(), c)));
+
+        // Aging backlog: one plain row. Orphaned captures: left empty (_none_).
+        let mut idea = Backlog {
+            slug: "aged-idea".to_string(),
+            title: "Aged idea".to_string(),
+            repo: "mev".to_string(),
+            kind: "research".to_string(),
+            status: "idea".to_string(),
+            created: Some("2026-07-01".to_string()),
+            ..Default::default()
+        };
+        idea.origin = Some(BacklogOrigin {
+            kind: "backlog".to_string(),
+            notes: None,
+        });
+        let backlog = vec![("mev".to_string(), &idea)];
+
+        // Stale distilled knowledge: 13 entries -> caps at DISTILL_LANE_CAP
+        // (10), "…and 3 more".
+        let distilled_entries: Vec<DistilledEntry> = (0..13)
+            .map(|i| distilled_entry(&format!("Claim {i}."), "2026-05-01"))
+            .collect();
+        let distilled: Vec<(String, &str, &DistilledEntry)> = distilled_entries
+            .iter()
+            .map(|e| ("mev".to_string(), "knowledge", e))
+            .collect();
+
+        let (block_priorities, block_status) = no_blocks();
+        let out = render_attention_section_with_distilled(
+            &carryover,
+            &backlog,
+            &distilled,
+            today,
+            &cfg,
+            &block_priorities,
+            &block_status,
+        );
+
+        let expected = "## BLOCKING\n\
+_none_\n\n\
+## HOT\n\
+- [mev] deferred urgent — text for urgent [P0] (Hot) — 1d\n\n\
+## AGING\n\
+- [mev] deferred old — text for old (Aging) — 14d\n\n\
+## STANDING\n\
+- [mev] deferred standing-0 — text for standing-0 (Standing) — 1d\n\
+- [mev] deferred standing-1 — text for standing-1 (Standing) — 1d\n\
+- [mev] deferred standing-10 — text for standing-10 (Standing) — 1d\n\
+- [mev] deferred standing-11 — text for standing-11 (Standing) — 1d\n\
+- [mev] deferred standing-12 — text for standing-12 (Standing) — 1d\n\
+- [mev] deferred standing-13 — text for standing-13 (Standing) — 1d\n\
+- [mev] deferred standing-14 — text for standing-14 (Standing) — 1d\n\
+- [mev] deferred standing-15 — text for standing-15 (Standing) — 1d\n\
+- [mev] deferred standing-16 — text for standing-16 (Standing) — 1d\n\
+- [mev] deferred standing-17 — text for standing-17 (Standing) — 1d\n\
+- [mev] deferred standing-18 — text for standing-18 (Standing) — 1d\n\
+- [mev] deferred standing-19 — text for standing-19 (Standing) — 1d\n\
+- [mev] deferred standing-2 — text for standing-2 (Standing) — 1d\n\
+- [mev] deferred standing-20 — text for standing-20 (Standing) — 1d\n\
+- [mev] deferred standing-21 — text for standing-21 (Standing) — 1d\n\
+- [mev] deferred standing-22 — text for standing-22 (Standing) — 1d\n\
+- [mev] deferred standing-23 — text for standing-23 (Standing) — 1d\n\
+- [mev] deferred standing-24 — text for standing-24 (Standing) — 1d\n\
+- [mev] deferred standing-3 — text for standing-3 (Standing) — 1d\n\
+- [mev] deferred standing-4 — text for standing-4 (Standing) — 1d\n\
+- …and 5 more\n\n\
+## Aging backlog\n\
+- [mev] aged-idea (idea) — Aged idea — 14d\n\n\
+## Orphaned captures\n\
+_none_\n\n\
+## Stale distilled knowledge\n\
+- [mev] knowledge — Claim 0. — 75d\n\
+- [mev] knowledge — Claim 1. — 75d\n\
+- [mev] knowledge — Claim 2. — 75d\n\
+- [mev] knowledge — Claim 3. — 75d\n\
+- [mev] knowledge — Claim 4. — 75d\n\
+- [mev] knowledge — Claim 5. — 75d\n\
+- [mev] knowledge — Claim 6. — 75d\n\
+- [mev] knowledge — Claim 7. — 75d\n\
+- [mev] knowledge — Claim 8. — 75d\n\
+- [mev] knowledge — Claim 9. — 75d\n\
+- …and 3 more";
+
+        assert_eq!(
+            out, expected,
+            "Attention board markdown must be byte-identical to the pre-refactor \
+             (task 1) rendering — the row/render split must not move a single \
+             character of rendered output:\n--- actual ---\n{out}\n--- expected ---\n{expected}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
