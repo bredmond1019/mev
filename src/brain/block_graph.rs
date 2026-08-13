@@ -120,6 +120,19 @@ pub struct BlockGraphNode {
     /// `skip_serializing_if`) so a consumer can distinguish "no run" from "field not
     /// understood".
     pub last_touched: Option<String>,
+    /// Whether this block's most-recent SDLC run artifact (the same winning file
+    /// `last_touched` was derived from — see [`crate::brain::last_touched::LastTouched`])
+    /// ended with run-state `status == "reconcile_failed"`. Per base-template's
+    /// `docs/data-contract.md` (`doc_id: sdlc-run-state-data-contract`, the pinned
+    /// authority for this vocabulary — not re-derived here): such a block must be
+    /// reported as **not closed**, but distinguishable from an ordinary in-progress or
+    /// `"blocked"` run. Three states, not two: `Some(true)` (most recent run ended
+    /// `reconcile_failed`), `Some(false)` (a run was found and it did not), `None` (no
+    /// run found at all — absence means "never worked", same honesty rule as
+    /// `last_touched`). Skipped from the emitted JSON when `None` so a block that has
+    /// never run does not grow a spurious `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconcile_failed: Option<bool>,
 }
 
 /// One directed edge in the exported block graph.
@@ -401,6 +414,9 @@ pub fn build_block_graph_export(
                 .map(|s| s.len() as u32)
                 .unwrap_or(0),
             last_touched: last_touched_map.get(key).map(|lt| lt.updated_at.clone()),
+            reconcile_failed: last_touched_map
+                .get(key)
+                .map(|lt| lt.status.as_deref() == Some("reconcile_failed")),
         });
     }
 

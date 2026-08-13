@@ -30,6 +30,7 @@ use mev::brain::last_touched::derive_last_touched;
 use mev::brain::state::{
     StateFile, StateGraph, StateSource, TierScope, derive_rollup, discover_state_files, load_state,
 };
+use mev::{BlockGraphScope, block_graph_brain};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -635,5 +636,133 @@ fn a_block_with_no_state_file_is_absent_from_the_map_entirely() {
         !map.contains_key("mev:MV.10.C"),
         "a block with no resolvable SDLC run must have no map entry at all — not present \
          with a None status, absent entirely"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 2 (ticket-reconcile-failed-consumer): `BlockGraphNode.reconcile_failed`
+// coverage. Exercised through the public `block_graph_brain` driver (never the
+// internal builder), matching `tests/brain_block_graph.rs`'s convention.
+// ---------------------------------------------------------------------------
+
+/// Unscoped scope — closed included, no boundary, unlimited `max_nodes` — the same
+/// baseline `tests/brain_block_graph.rs::default_scope()` uses.
+fn default_scope() -> BlockGraphScope {
+    BlockGraphScope {
+        tier: TierScope::All,
+        epic: None,
+        repo: None,
+        include_closed: true,
+        include_boundary: false,
+        max_nodes: usize::MAX,
+    }
+}
+
+#[test]
+fn node_is_flagged_when_newest_run_ended_reconcile_failed() {
+    let dir = temp_dir("reconcile-flag-true");
+    write_single_block_fixture(&dir);
+    write_state_artifact_with_status(
+        &dir,
+        "mev/planning/MV.10.C",
+        "sdlc-task-state.json",
+        "2026-07-10T00:00:00Z",
+        "reconcile_failed",
+    );
+
+    let export = block_graph_brain(&dir, &default_scope()).expect("block graph export must build");
+    let node = export
+        .nodes
+        .iter()
+        .find(|n| n.key == "mev:MV.10.C")
+        .expect("block must resolve");
+
+    assert_eq!(
+        node.reconcile_failed,
+        Some(true),
+        "a block whose newest run ended reconcile_failed must be flagged Some(true)"
+    );
+}
+
+#[test]
+fn node_is_not_flagged_when_newest_run_ended_done() {
+    let dir = temp_dir("reconcile-flag-done");
+    write_single_block_fixture(&dir);
+    write_state_artifact_with_status(
+        &dir,
+        "mev/planning/MV.10.C",
+        "sdlc-task-state.json",
+        "2026-07-10T00:00:00Z",
+        "done",
+    );
+
+    let export = block_graph_brain(&dir, &default_scope()).expect("block graph export must build");
+    let node = export
+        .nodes
+        .iter()
+        .find(|n| n.key == "mev:MV.10.C")
+        .expect("block must resolve");
+
+    assert_eq!(
+        node.reconcile_failed,
+        Some(false),
+        "a block whose newest run ended done must be Some(false) — a run was found, just \
+         not a reconcile_failed one"
+    );
+}
+
+#[test]
+fn node_is_none_when_no_state_file_exists() {
+    let dir = temp_dir("reconcile-flag-none");
+    write_single_block_fixture(&dir);
+    // No sdlc/ artifact written at all for MV.10.C.
+
+    let export = block_graph_brain(&dir, &default_scope()).expect("block graph export must build");
+    let node = export
+        .nodes
+        .iter()
+        .find(|n| n.key == "mev:MV.10.C")
+        .expect("block must resolve");
+
+    assert_eq!(
+        node.reconcile_failed, None,
+        "a block with no resolvable SDLC run must be None, never a sentinel false"
+    );
+}
+
+#[test]
+fn older_reconcile_failed_does_not_flag_a_node_whose_newer_run_ended_done() {
+    let dir = temp_dir("reconcile-flag-winner-tracking");
+    write_single_block_fixture(&dir);
+
+    // Older folder: reconcile_failed. Newer folder: done. The NEWER file's status must
+    // win — this is exactly the case Task 1's winner-tracking exists to get right, and
+    // a regression here would mean status got detached from its own updated_at.
+    write_state_artifact_with_status(
+        &dir,
+        "mev/planning/MV.10.C-first-attempt",
+        "sdlc-task-state.json",
+        "2026-06-01T00:00:00Z",
+        "reconcile_failed",
+    );
+    write_state_artifact_with_status(
+        &dir,
+        "mev/planning/MV.10.C-final",
+        "sdlc-task-state.json",
+        "2026-07-10T00:00:00Z",
+        "done",
+    );
+
+    let export = block_graph_brain(&dir, &default_scope()).expect("block graph export must build");
+    let node = export
+        .nodes
+        .iter()
+        .find(|n| n.key == "mev:MV.10.C")
+        .expect("block must resolve");
+
+    assert_eq!(
+        node.reconcile_failed,
+        Some(false),
+        "the newer file's status (done) must win, not the older file's reconcile_failed"
     );
 }
