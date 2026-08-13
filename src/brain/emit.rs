@@ -1412,7 +1412,7 @@ pub(crate) struct AttentionRow {
 }
 
 /// Truncate `text` to a single tidy line of at most `max` chars for a board row.
-fn attention_snippet(text: &str, max: usize) -> String {
+pub(crate) fn attention_snippet(text: &str, max: usize) -> String {
     let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.chars().count() > max {
         let truncated: String = one_line.chars().take(max).collect();

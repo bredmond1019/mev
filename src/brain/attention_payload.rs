@@ -19,6 +19,20 @@ use sha2::{Digest as _, Sha256};
 use crate::brain::carryover::TriageLane;
 use crate::brain::emit::AttentionRow;
 
+/// `engine-core`'s WhatsApp body text limit
+/// (`core/engine-rs/crates/engine-core/src/operator/limits.rs`'s
+/// `WHATSAPP_MAX_BODY_CHARS`, confirmed 2026-08-12) — the ceiling
+/// [`render_summary`] must stay under.
+const MAX_SUMMARY_CHARS: usize = 1024;
+
+/// Truncation width applied to the free-text portion of [`render_summary`],
+/// leaving headroom under [`MAX_SUMMARY_CHARS`] for the repo/lane/kind/
+/// slug/age/priority scaffolding that surrounds it. Reuses the same
+/// truncation helper the board render already uses
+/// (`attention_snippet`, src/brain/emit.rs:1415) rather than adding a
+/// second truncation rule.
+const SUMMARY_TEXT_SNIPPET_CHARS: usize = 400;
+
 /// Maximum response options a single payload may carry — `engine-core`'s
 /// `WHATSAPP_MAX_REPLY_BUTTONS`
 /// (`core/engine-rs/crates/engine-core/src/operator/limits.rs`, confirmed
@@ -88,6 +102,107 @@ impl RowLane {
             RowLane::Backlog
         }
     }
+
+    /// Stable, lowercase machine tag for this lane — part of [`item_id_for`]'s
+    /// identity input. Never changes once assigned; a rename here would
+    /// silently mint new `item_id`s for every existing row in that lane.
+    #[must_use]
+    fn tag(self) -> &'static str {
+        match self {
+            RowLane::Blocking => "blocking",
+            RowLane::Hot => "hot",
+            RowLane::Aging => "aging",
+            RowLane::Standing => "standing",
+            RowLane::Backlog => "backlog",
+            RowLane::Capture => "capture",
+            RowLane::Distilled => "distilled",
+        }
+    }
+
+    /// Operator-visible, uppercase label for this lane, used in
+    /// [`render_summary`] — matches the casing of the board's own `##
+    /// BLOCKING` / `## HOT` / `## AGING` / `## STANDING` headings
+    /// (`render_triage_lane`, src/brain/emit.rs) for the four carryover
+    /// lanes, extended consistently for the other three.
+    #[must_use]
+    fn label(self) -> &'static str {
+        match self {
+            RowLane::Blocking => "BLOCKING",
+            RowLane::Hot => "HOT",
+            RowLane::Aging => "AGING",
+            RowLane::Standing => "STANDING",
+            RowLane::Backlog => "BACKLOG",
+            RowLane::Capture => "CAPTURE",
+            RowLane::Distilled => "DISTILLED",
+        }
+    }
+}
+
+/// Derive a stable identifier for `row` from its IDENTITY fields only —
+/// repo, lane (task 4's "lane kind"), and slug — never from mutable content
+/// (age, text, priority). Re-running on an unchanged corpus reproduces this
+/// exactly; an item whose text/age/priority changed keeps the same
+/// `item_id` and gets a new [`AttentionQueuePayload::digest`] instead — a
+/// re-queue rather than a new item, per `EN.8.A`.
+///
+/// Hashed (rather than a plain delimited string) so that a slug or repo
+/// name containing the delimiter can never collide with a different
+/// repo/lane/slug triple.
+#[must_use]
+pub(crate) fn item_id_for(row: &AttentionRow) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(row.repo.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(RowLane::for_row(row).tag().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(row.slug.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Render a self-contained decision text for `row`: repo, lane, kind, slug,
+/// age, the item's text, and the effective priority where present — an
+/// operator reading only this must be able to decide without opening the
+/// repo (task 4's Acceptance Criteria).
+///
+/// Reuses [`attention_snippet`](crate::brain::emit::attention_snippet) for
+/// the free-text truncation rather than adding a second truncation rule,
+/// and stays within `engine-core`'s [`MAX_SUMMARY_CHARS`] body limit.
+/// Absent data stays absent: a `None` age renders the board's existing `—`
+/// convention (`render_triage_lane`, src/brain/emit.rs), never a fabricated
+/// `0d` — this repo's standing honesty rule (see the same discipline in
+/// `last_touched.rs`).
+#[must_use]
+pub(crate) fn render_summary(row: &AttentionRow) -> String {
+    let lane = RowLane::for_row(row);
+    let age = row
+        .age
+        .map(|a| format!("{a}d"))
+        .unwrap_or_else(|| "—".to_string());
+    let text =
+        crate::brain::emit::attention_snippet(&row.title_or_text, SUMMARY_TEXT_SNIPPET_CHARS);
+
+    let mut summary = format!(
+        "[{}] {} kind={} slug={} age={age} — {text}",
+        row.repo,
+        lane.label(),
+        row.kind,
+        row.slug,
+    );
+
+    match (row.priority, row.effective_priority) {
+        (Some(p), Some(ep)) if p == ep => summary.push_str(&format!(" [P{p}]")),
+        (Some(p), Some(ep)) => summary.push_str(&format!(" [P{p} -> effective P{ep}]")),
+        (Some(p), None) => summary.push_str(&format!(" [P{p}]")),
+        (None, Some(ep)) => summary.push_str(&format!(" [effective P{ep}]")),
+        (None, None) => {}
+    }
+
+    if summary.chars().count() > MAX_SUMMARY_CHARS {
+        let truncated: String = summary.chars().take(MAX_SUMMARY_CHARS - 1).collect();
+        summary = format!("{}…", truncated.trim_end());
+    }
+
+    summary
 }
 
 /// The `session` option every lane's set includes for actions that did not
@@ -482,6 +597,85 @@ mod tests {
         assert_eq!(
             a.digest, b.digest,
             "digest must depend only on rendered summary + options, not gate_id"
+        );
+    }
+
+    #[test]
+    fn item_id_is_stable_across_two_calls() {
+        let row = row_for(RowLane::Blocking);
+        assert_eq!(item_id_for(&row), item_id_for(&row));
+    }
+
+    #[test]
+    fn item_id_unchanged_when_only_text_or_age_differ() {
+        let mut row = row_for(RowLane::Blocking);
+        let base_id = item_id_for(&row);
+
+        row.title_or_text = "a completely different text".to_string();
+        row.age = Some(999);
+        row.priority = Some(3);
+        row.effective_priority = Some(1);
+
+        assert_eq!(
+            item_id_for(&row),
+            base_id,
+            "item_id must depend only on repo/lane/slug, never mutable content"
+        );
+    }
+
+    #[test]
+    fn item_id_differs_when_only_slug_differs() {
+        let mut row_a = row_for(RowLane::Backlog);
+        row_a.slug = "slug-a".to_string();
+        let mut row_b = row_for(RowLane::Backlog);
+        row_b.slug = "slug-b".to_string();
+
+        assert_ne!(item_id_for(&row_a), item_id_for(&row_b));
+    }
+
+    #[test]
+    fn item_id_differs_across_lanes_for_same_repo_and_slug() {
+        let row_hot = row_for(RowLane::Hot);
+        let row_aging = row_for(RowLane::Aging);
+        assert_ne!(item_id_for(&row_hot), item_id_for(&row_aging));
+    }
+
+    #[test]
+    fn render_summary_contains_repo_slug_and_age() {
+        let mut row = row_for(RowLane::Hot);
+        row.slug = "my-slug".to_string();
+        row.age = Some(42);
+
+        let summary = render_summary(&row);
+        assert!(summary.contains("mev"), "summary missing repo: {summary}");
+        assert!(
+            summary.contains("my-slug"),
+            "summary missing slug: {summary}"
+        );
+        assert!(summary.contains("42d"), "summary missing age: {summary}");
+    }
+
+    #[test]
+    fn render_summary_none_age_renders_em_dash() {
+        let mut row = row_for(RowLane::Hot);
+        row.age = None;
+        let summary = render_summary(&row);
+        assert!(
+            summary.contains('—'),
+            "None age must render the `—` convention, never a fabricated 0d: {summary}"
+        );
+        assert!(!summary.contains("0d"), "must not fabricate 0d: {summary}");
+    }
+
+    #[test]
+    fn render_summary_very_long_text_stays_within_body_limit() {
+        let mut row = row_for(RowLane::Hot);
+        row.title_or_text = "x".repeat(5000);
+        let summary = render_summary(&row);
+        assert!(
+            summary.chars().count() <= MAX_SUMMARY_CHARS,
+            "summary exceeds {MAX_SUMMARY_CHARS} chars: {}",
+            summary.chars().count()
         );
     }
 
