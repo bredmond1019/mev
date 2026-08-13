@@ -723,7 +723,8 @@ that endpoint's.
       "external_deps": [],
       "unmet_count": 0,
       "dependent_count": 0,
-      "last_touched": null
+      "last_touched": null,
+      "reconcile_failed": null
     }
   ],
   "edges": [
@@ -759,6 +760,7 @@ Every node carries the full-corpus derivations that back the state-graph views:
 | `unmet_count` | Count of unmet dependencies for a `blocked` node; `0` for every other lane |
 | `dependent_count` | Corpus-wide count of in-corpus blocks whose `BlockedBy` edges point at this node (`CrossRepo` edges excluded). Computed over the **full corpus before scope filtering**, exactly like `layer`, `topo_index`, and `effective_priority` — so it is **identical for a given node across a scoped and an unscoped export**, and reports `0` (never absent, never a sentinel) for a node nothing depends on |
 | `last_touched` | Derived — never authored in any `state.json` — from the block's own on-disk SDLC run artifacts: `<spec-folder>/sdlc/sdlc-{flow,task,run,}-state.json` (all four kinds are read). The **newest** `updated_at` wins across every matched spec folder and every state-file kind, including folders under `planning/archive/`. Computed over the **full corpus before scope filtering**, exactly like `dependent_count` — so it is **identical for a given node across a scoped and an unscoped export**. `null` means the block has **never been worked**, not that it was worked long ago — no sentinel date and no `state.json.updated` fallback is ever substituted for a missing run |
+| `reconcile_failed` | Derived from the **same winning state file** as `last_touched` (never a different file or folder for the same block) — `true` when that file's run-state `status` is `"reconcile_failed"`, `false` when a run was found and its status was something else, and `null`/absent when no run state exists at all for the block (same absence-means-"never worked" honesty rule as `last_touched`; the field is `#[serde(skip_serializing_if)]`, so it does not appear in the JSON for a block with no run). This is the **run-state** `status` field inside `sdlc-task-state.json` (and its `-flow-`/`-run-`/plain sibling kinds) — a completely different vocabulary from the block's own **authored** `status` in `state.json` (`open`/`in_progress`/`deferred`/`closed`/`wontfix`). A `reconcile_failed` run never changes the authored status and never changes `lane` derivation (lane reads only the authored `state.json` status). The terminal run-state vocabulary itself — what `reconcile_failed` and its siblings mean, and what a consumer must not fold them into — is pinned at base-template's `docs/data-contract.md` (`doc_id: sdlc-run-state-data-contract`); this field does not re-derive that vocabulary, only surfaces it. The human-readable sibling of this JSON field is [`render_block_graph_reconcile_failed`](../src/brain/emit.rs), which annotates a `BlockGraphExport`'s per-block text lines with `" (reconcile_failed)"` when this field is `true`, and renders byte-identical output to before the annotation existed when no block has it set |
 
 #### Exit codes
 
