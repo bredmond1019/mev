@@ -28,7 +28,16 @@ const STATE_FILE_NAMES: [&str; 4] = [
     "sdlc-state.json",
 ];
 
-/// Derive a `"{repo_slug}:{block_id}" -> updated_at` map from every loaded repo's
+/// The winning state file's `updated_at` and (if present) `status`, tracked together so
+/// a later consumer can trust that `status` came from the SAME file as `updated_at`,
+/// never from a different state-file kind or folder that merely happened to match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastTouched {
+    pub updated_at: String,
+    pub status: Option<String>,
+}
+
+/// Derive a `"{repo_slug}:{block_id}" -> LastTouched` map from every loaded repo's
 /// on-disk SDLC spec folders.
 ///
 /// For each `(src, file)` pair, the owning planning directory is `src.abs_path`'s
@@ -63,8 +72,8 @@ pub fn derive_last_touched(
     _root: &Path,
     config: &BrainConfig,
     loaded: &[(StateSource, StateFile)],
-) -> HashMap<String, String> {
-    let mut out: HashMap<String, String> = HashMap::new();
+) -> HashMap<String, LastTouched> {
+    let mut out: HashMap<String, LastTouched> = HashMap::new();
 
     for (src, file) in loaded {
         let Some(planning_dir) = src.abs_path.parent() else {
@@ -134,7 +143,7 @@ fn newest_for_block(
     candidate_folders: &[(String, std::path::PathBuf)],
     block_id: &str,
     prefix: Option<&str>,
-) -> Option<String> {
+) -> Option<LastTouched> {
     // Full-ID match takes precedence: try it across all folders first, and only fall
     // back to the prefix-stripped candidate when the full ID matched nothing.
     if let Some(newest) = newest_for_candidate(candidate_folders, block_id) {
@@ -152,18 +161,18 @@ fn newest_for_block(
 fn newest_for_candidate(
     candidate_folders: &[(String, std::path::PathBuf)],
     candidate: &str,
-) -> Option<String> {
-    let mut newest: Option<String> = None;
+) -> Option<LastTouched> {
+    let mut newest: Option<LastTouched> = None;
 
     for (name, path) in candidate_folders {
         if !folder_name_matches(name, candidate) {
             continue;
         }
 
-        for updated_at in read_state_updated_ats(path) {
+        for entry in read_state_updated_ats(path) {
             newest = Some(match newest {
-                Some(current) if current >= updated_at => current,
-                _ => updated_at,
+                Some(current) if current.updated_at >= entry.updated_at => current,
+                _ => entry,
             });
         }
     }
@@ -181,10 +190,13 @@ fn folder_name_matches(folder_name: &str, candidate: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('-'))
 }
 
-/// Read every `updated_at` value present across the four state-file kinds under
-/// `spec_folder/sdlc/`. Unreadable files, invalid JSON, a non-object top level, and a
-/// missing/empty/non-string `updated_at` are silently skipped.
-fn read_state_updated_ats(spec_folder: &Path) -> Vec<String> {
+/// Read every `(updated_at, status)` pair present across the four state-file kinds
+/// under `spec_folder/sdlc/`. Unreadable files, invalid JSON, a non-object top level,
+/// and a missing/empty/non-string `updated_at` are silently skipped. `status` is read
+/// from the SAME file as `updated_at`; when a file has a valid `updated_at` but no
+/// (or a non-string) `status`, that entry's `status` is `None` — never a substituted
+/// default and never a value from a different file.
+fn read_state_updated_ats(spec_folder: &Path) -> Vec<LastTouched> {
     let sdlc_dir = spec_folder.join("sdlc");
     let mut out = Vec::new();
 
@@ -202,7 +214,14 @@ fn read_state_updated_ats(spec_folder: &Path) -> Vec<String> {
         if updated_at.is_empty() {
             continue;
         }
-        out.push(updated_at.to_string());
+        let status = value
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        out.push(LastTouched {
+            updated_at: updated_at.to_string(),
+            status,
+        });
     }
 
     out
@@ -280,7 +299,7 @@ mod tests {
 
         let out = derive_last_touched(&PathBuf::from("."), &config, &loaded);
         assert_eq!(
-            out.get("mev:MV.10.C-slug").map(String::as_str),
+            out.get("mev:MV.10.C-slug").map(|lt| lt.updated_at.as_str()),
             Some("2026-07-01T10:00:00Z")
         );
     }
@@ -300,7 +319,7 @@ mod tests {
 
         let out = derive_last_touched(&PathBuf::from("."), &config, &loaded);
         assert_eq!(
-            out.get("mev:MV.10.C").map(String::as_str),
+            out.get("mev:MV.10.C").map(|lt| lt.updated_at.as_str()),
             Some("2026-07-05T10:00:00Z")
         );
     }
@@ -322,7 +341,7 @@ mod tests {
 
         let out = derive_last_touched(&PathBuf::from("."), &config, &loaded);
         assert_eq!(
-            out.get("mev:MV.10.C").map(String::as_str),
+            out.get("mev:MV.10.C").map(|lt| lt.updated_at.as_str()),
             Some("2026-07-10T10:00:00Z")
         );
     }
@@ -360,7 +379,7 @@ mod tests {
 
         let out = derive_last_touched(&PathBuf::from("."), &config, &loaded);
         assert_eq!(
-            out.get("mev:MV.10.C").map(String::as_str),
+            out.get("mev:MV.10.C").map(|lt| lt.updated_at.as_str()),
             Some("2026-05-01T10:00:00Z")
         );
     }
@@ -378,7 +397,7 @@ mod tests {
 
         let out = derive_last_touched(&PathBuf::from("."), &config, &loaded);
         assert_eq!(
-            out.get("mev:MV.10.C").map(String::as_str),
+            out.get("mev:MV.10.C").map(|lt| lt.updated_at.as_str()),
             Some("2026-07-01T10:00:00Z")
         );
     }
@@ -403,7 +422,7 @@ mod tests {
         let out = derive_last_touched(&PathBuf::from("."), &config, &loaded);
         assert_eq!(
             out.get("engine-rs:EN.7.C-materialize-harvest-gate")
-                .map(String::as_str),
+                .map(|lt| lt.updated_at.as_str()),
             Some("2026-07-20T10:00:00Z"),
             "full-ID match must win over the prefix-stripped folder"
         );

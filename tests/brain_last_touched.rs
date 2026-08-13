@@ -61,6 +61,22 @@ fn write_state_artifact(root: &Path, spec_folder_rel: &str, name: &str, updated_
     );
 }
 
+/// Same as [`write_state_artifact`] but also sets `status`, for the
+/// `LastTouched.status` coverage tests (Task 1 of `ticket-reconcile-failed-consumer`).
+fn write_state_artifact_with_status(
+    root: &Path,
+    spec_folder_rel: &str,
+    name: &str,
+    updated_at: &str,
+    status: &str,
+) {
+    write_json(
+        root,
+        &format!("{spec_folder_rel}/sdlc/{name}"),
+        &serde_json::json!({ "updated_at": updated_at, "status": status }),
+    );
+}
+
 fn write_brain_toml(root: &Path) {
     let toml = r#"[vocab]
 layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
@@ -304,7 +320,7 @@ fn full_id_folder_resolves_to_its_updated_at() {
 
     assert_eq!(
         map.get("engine-rs:EN.7.C-materialize-harvest-gate")
-            .map(String::as_str),
+            .map(|lt| lt.updated_at.as_str()),
         Some("2026-07-10T09:00:00Z")
     );
 }
@@ -319,7 +335,8 @@ fn bare_id_folder_resolves_to_its_updated_at() {
     let map = derive_last_touched(&dir, &config, &loaded);
 
     assert_eq!(
-        map.get("bastion-web:BW.9.A").map(String::as_str),
+        map.get("bastion-web:BW.9.A")
+            .map(|lt| lt.updated_at.as_str()),
         Some("2026-06-15T08:30:00Z")
     );
 }
@@ -334,7 +351,7 @@ fn prefix_stripped_folder_resolves_to_its_updated_at() {
     let map = derive_last_touched(&dir, &config, &loaded);
 
     assert_eq!(
-        map.get("mev:MV.10.C").map(String::as_str),
+        map.get("mev:MV.10.C").map(|lt| lt.updated_at.as_str()),
         Some("2026-07-25T14:00:00Z")
     );
 }
@@ -379,7 +396,8 @@ fn archived_folder_is_counted() {
     let map = derive_last_touched(&dir, &config, &loaded);
 
     assert_eq!(
-        map.get("engine-rs:EN.5.A-closed").map(String::as_str),
+        map.get("engine-rs:EN.5.A-closed")
+            .map(|lt| lt.updated_at.as_str()),
         Some("2026-03-01T12:00:00Z")
     );
 }
@@ -394,7 +412,8 @@ fn newest_wins_across_two_matching_folders() {
     let map = derive_last_touched(&dir, &config, &loaded);
 
     assert_eq!(
-        map.get("bastion-web:BW.2.A").map(String::as_str),
+        map.get("bastion-web:BW.2.A")
+            .map(|lt| lt.updated_at.as_str()),
         Some("2026-07-20T18:00:00Z"),
         "newest updated_at across BW.2.A-attempt1 and BW.2.A-final must win"
     );
@@ -410,7 +429,7 @@ fn newest_wins_across_state_file_kinds() {
     let map = derive_last_touched(&dir, &config, &loaded);
 
     assert_eq!(
-        map.get("mev:MV.3.B-slug").map(String::as_str),
+        map.get("mev:MV.3.B-slug").map(|lt| lt.updated_at.as_str()),
         Some("2026-07-28T23:00:00Z"),
         "newest updated_at across sdlc-flow-state.json and sdlc-task-state.json must win"
     );
@@ -516,4 +535,105 @@ fn rollup_consumption_path_joins_to_the_last_touched_map() {
         "expected at least 6 resolvable blocks to join through the rollup path, got {checked_present}"
     );
     let _ = checked_absent;
+}
+
+// ---------------------------------------------------------------------------
+// Task 1 (ticket-reconcile-failed-consumer): `LastTouched.status` coverage.
+// ---------------------------------------------------------------------------
+
+/// Minimal single-block fixture (not the shared `write_fixture` corpus) purpose-built
+/// for the `status`-threading tests below: one repo, one block.
+fn write_single_block_fixture(root: &Path) {
+    write_brain_toml(root);
+    write_hq_state(root);
+    let state = serde_json::json!({
+        "repo": "mev",
+        "kind": "project",
+        "updated": "2026-08-01",
+        "tracks": [
+            {
+                "title": "Phase 10",
+                "blocks": [ { "id": "MV.10.C", "title": "Status-threading block" } ]
+            }
+        ]
+    });
+    write_json(root, "mev/planning/state.json", &state);
+}
+
+#[test]
+fn winning_files_status_is_returned_when_two_folders_have_different_timestamps() {
+    let dir = temp_dir("status-winner");
+    write_single_block_fixture(&dir);
+
+    // Older folder: status "done". Newer folder: status "reconcile_failed". The
+    // NEWER folder's status must win, tracked alongside its own updated_at — never a
+    // status borrowed from the older (losing) file.
+    write_state_artifact_with_status(
+        &dir,
+        "mev/planning/MV.10.C-first-attempt",
+        "sdlc-task-state.json",
+        "2026-06-01T00:00:00Z",
+        "done",
+    );
+    write_state_artifact_with_status(
+        &dir,
+        "mev/planning/MV.10.C-final",
+        "sdlc-task-state.json",
+        "2026-07-10T00:00:00Z",
+        "reconcile_failed",
+    );
+
+    let config = load_brain_config(&dir.join("brain.toml")).expect("brain.toml must parse");
+    let loaded = discover_and_load(&dir, &config);
+    let map = derive_last_touched(&dir, &config, &loaded);
+
+    let entry = map.get("mev:MV.10.C").expect("block must resolve");
+    assert_eq!(entry.updated_at, "2026-07-10T00:00:00Z");
+    assert_eq!(
+        entry.status.as_deref(),
+        Some("reconcile_failed"),
+        "status must come from the SAME file that won on updated_at, not the older loser"
+    );
+}
+
+#[test]
+fn a_file_with_updated_at_and_no_status_yields_none() {
+    let dir = temp_dir("status-none");
+    write_single_block_fixture(&dir);
+
+    // write_state_artifact (no status field) — the plain helper used everywhere else.
+    write_state_artifact(
+        &dir,
+        "mev/planning/MV.10.C",
+        "sdlc-task-state.json",
+        "2026-07-01T00:00:00Z",
+    );
+
+    let config = load_brain_config(&dir.join("brain.toml")).expect("brain.toml must parse");
+    let loaded = discover_and_load(&dir, &config);
+    let map = derive_last_touched(&dir, &config, &loaded);
+
+    let entry = map.get("mev:MV.10.C").expect("block must resolve");
+    assert_eq!(entry.updated_at, "2026-07-01T00:00:00Z");
+    assert_eq!(
+        entry.status, None,
+        "a state file with no status field must yield status: None, never a substituted default"
+    );
+}
+
+#[test]
+fn a_block_with_no_state_file_is_absent_from_the_map_entirely() {
+    let dir = temp_dir("status-absent");
+    write_single_block_fixture(&dir);
+    // No sdlc/ artifact written at all for MV.10.C.
+
+    let config = load_brain_config(&dir.join("brain.toml")).expect("brain.toml must parse");
+    let loaded = discover_and_load(&dir, &config);
+    let map = derive_last_touched(&dir, &config, &loaded);
+
+    assert!(
+        !map.contains_key("mev:MV.10.C"),
+        "a block with no resolvable SDLC run must have no map entry at all — not present \
+         with a None status, absent entirely"
+    );
 }

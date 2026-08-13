@@ -400,7 +400,7 @@ pub fn build_block_graph_export(
                 .get(key.as_str())
                 .map(|s| s.len() as u32)
                 .unwrap_or(0),
-            last_touched: last_touched_map.get(key).cloned(),
+            last_touched: last_touched_map.get(key).map(|lt| lt.updated_at.clone()),
         });
     }
 
