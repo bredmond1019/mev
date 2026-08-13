@@ -5,9 +5,8 @@
 //! adds the `validate-brain` subcommand. Block J-crawl wires the registry-driven
 //! [`crawl::crawl_corpus`] multi-root walk here, replacing the single-root walk.
 
-// Wired into `mev attention-queue` by MV.ticket.attention-queue-delivery task 5;
-// not yet constructed by any caller in this task.
-#[allow(dead_code)]
+// Wired into `mev attention-queue` (`MV.ticket.attention-queue-delivery` task 5)
+// via `crate::attention_queue` in `src/lib.rs`.
 pub(crate) mod attention_payload;
 pub mod block_graph;
 pub mod blocks;

@@ -1354,6 +1354,238 @@ pub fn emit_state(
     Ok(report)
 }
 
+/// Emit every Attention-board item, across all four lanes (carryover, aging
+/// backlog, orphaned captures, stale distilled knowledge), as a JSON array of
+/// `EN.8.A`-compatible operator payloads (`mev attention-queue`,
+/// `MV.ticket.attention-queue-delivery` task 5).
+///
+/// Reuses the SAME corpus load and [`brain::state::effective_priorities`] /
+/// [`brain::emit::global_status_map`] derivation [`brain::emit::plan_attention_board`]
+/// uses, and unions carryover/backlog/distilled entries the identical way that
+/// function's HQ-root (`TierScope::All`) board does — deliberately, so this
+/// queue can never diverge from what the board itself would show. This is the
+/// only board-derivation path; no second one is introduced here.
+///
+/// READ-ONLY: loads the corpus and returns a JSON string. Never writes
+/// `state.json`, `BA.18.A`'s sink, or opens any notification channel — the
+/// caller (the CLI, in `src/main.rs`) decides whether the returned JSON goes
+/// to stdout or `--out`.
+///
+/// Ordering: hottest first by `effective_priority` (ascending — a lower
+/// number is hotter; an absent priority sorts last), tie-broken by age
+/// descending then `item_id` ascending, so re-running on an unchanged corpus
+/// reproduces byte-identical output — the identical discipline as `item_id`'s
+/// own stability guarantee (task 4).
+///
+/// An empty board returns `"[]"` — never an error.
+pub fn attention_queue(root: &std::path::Path) -> anyhow::Result<String> {
+    use brain::attention_payload::{
+        AttentionQueuePayload, item_id_for, options_for, render_summary,
+    };
+    use brain::config::find_brain_config;
+    use brain::distill::{distill_stale_age, parse_distilled};
+    use brain::emit::{AttentionRow, attention_snippet, collect_attention_rows, global_status_map};
+    use brain::state::{
+        Backlog, Carryover, TierScope, backlog_stale_age, build_state_graph, discover_state_files,
+        effective_priorities, load_state, tier_scope_for,
+    };
+    use std::collections::HashMap;
+
+    let config = find_brain_config(root).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let (sources, _discovery_diags) = discover_state_files(root, &config);
+
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    for src in &sources {
+        // Skip (rather than fail) a state.json that failed to load — same as
+        // `plan_attention_board`'s dry-run posture: this command is read-only
+        // and never refuses to run over a partial corpus the way
+        // `emit_state --write`'s completeness guard does; the board it
+        // mirrors renders best-effort from whatever loaded, too.
+        if let Ok(file) = load_state(&src.abs_path) {
+            loaded.push((src.clone(), file));
+        }
+    }
+
+    let graph = build_state_graph(&loaded);
+    let block_priorities = effective_priorities(&graph, &loaded);
+    let block_status = global_status_map(&loaded);
+    let today = chrono::Local::now().date_naive();
+    let thresholds = &config.attention;
+
+    // Union carryover across the WHOLE corpus — matches `plan_attention_board`'s
+    // `TierScope::All` (HQ root) board, which unions every loaded repo's
+    // carryover unconditionally.
+    let carryover: Vec<(String, &Carryover)> = loaded
+        .iter()
+        .flat_map(|(src, file)| {
+            file.carryover
+                .iter()
+                .map(move |c| (src.repo_slug.clone(), c))
+        })
+        .collect();
+
+    // HQ backlog lives on the single All-scoped brain file, same lookup
+    // `plan_attention_board` performs.
+    let hq_backlog: &[Backlog] = loaded
+        .iter()
+        .find(|(_, f)| f.kind == "brain" && matches!(tier_scope_for(f, &config), TierScope::All))
+        .map(|(_, f)| f.backlog.as_slice())
+        .unwrap_or(&[]);
+    let backlog: Vec<(String, &Backlog)> = hq_backlog.iter().map(|b| (b.repo.clone(), b)).collect();
+
+    // Read each repo's sibling `knowledge.md` / `memory.md` at most once,
+    // same cache-by-repo_slug pattern `plan_attention_board` uses.
+    let mut distilled_cache: HashMap<String, Vec<(&'static str, brain::distill::DistilledEntry)>> =
+        HashMap::new();
+    for (src, _) in &loaded {
+        if distilled_cache.contains_key(&src.repo_slug) {
+            continue;
+        }
+        let Some(planning_dir) = src.abs_path.parent() else {
+            continue;
+        };
+        let mut entries = Vec::new();
+        for stem in ["knowledge", "memory"] {
+            let path = planning_dir.join(format!("{stem}.md"));
+            if let Ok(contents) = std::fs::read_to_string(&path) {
+                entries.extend(parse_distilled(&contents).into_iter().map(|e| (stem, e)));
+            }
+        }
+        distilled_cache.insert(src.repo_slug.clone(), entries);
+    }
+    let distilled: Vec<(String, &str, &brain::distill::DistilledEntry)> = loaded
+        .iter()
+        .filter_map(|(src, _)| {
+            distilled_cache
+                .get(&src.repo_slug)
+                .map(|entries| (src, entries))
+        })
+        .flat_map(|(src, entries)| {
+            entries
+                .iter()
+                .map(move |(stem, entry)| (src.repo_slug.clone(), *stem, entry))
+        })
+        .collect();
+
+    // Gather every row across all four top-level lanes — carryover (which
+    // already spans its own four triage sub-lanes: Blocking/Hot/Aging/
+    // Standing), aging backlog, orphaned captures, and stale distilled
+    // knowledge. Backlog/capture/distilled row construction mirrors
+    // `render_attention_section_with_distilled` exactly (repo/kind/slug/
+    // title_or_text field values), since only `collect_attention_rows` was
+    // factored out as a shared function (task 1) — the other three lanes
+    // have no separate collector to call, so their construction is
+    // replicated here field-for-field rather than re-derived differently.
+    let mut rows: Vec<AttentionRow> = collect_attention_rows(
+        &carryover,
+        today,
+        thresholds,
+        &block_priorities,
+        &block_status,
+    );
+
+    for (repo, item) in &backlog {
+        let Some(age) = backlog_stale_age(item, today, thresholds) else {
+            continue;
+        };
+        let is_capture = item.origin.as_ref().is_some_and(|o| o.kind == "capture");
+        if is_capture {
+            let notes = item
+                .origin
+                .as_ref()
+                .and_then(|o| o.notes.as_deref())
+                .or(item.notes.as_deref())
+                .unwrap_or("(no notes path)");
+            rows.push(AttentionRow {
+                repo: repo.clone(),
+                age: Some(age),
+                kind: String::new(),
+                slug: item.slug.clone(),
+                title_or_text: format!("{} — notes: {}", item.title, notes),
+                priority: None,
+                effective_priority: None,
+                lane: None,
+                clears_when: None,
+            });
+        } else {
+            rows.push(AttentionRow {
+                repo: repo.clone(),
+                age: Some(age),
+                kind: item.status.clone(),
+                slug: item.slug.clone(),
+                title_or_text: item.title.clone(),
+                priority: None,
+                effective_priority: None,
+                lane: None,
+                clears_when: None,
+            });
+        }
+    }
+
+    for (repo, stem, entry) in &distilled {
+        let Some(age) = distill_stale_age(entry, today, thresholds, stem) else {
+            continue;
+        };
+        let claim = if entry.claim.is_empty() {
+            "(no claim text found)".to_string()
+        } else {
+            entry.claim.clone()
+        };
+        rows.push(AttentionRow {
+            repo: repo.clone(),
+            age: Some(age),
+            kind: (*stem).to_string(),
+            slug: String::new(),
+            title_or_text: attention_snippet(&claim, 80),
+            priority: None,
+            effective_priority: None,
+            lane: None,
+            clears_when: None,
+        });
+    }
+
+    // Compute each row's stable `item_id` once, then sort: hottest first by
+    // `effective_priority` (ascending; absent priority sorts last), age
+    // descending, then `item_id` ascending — a deterministic tiebreak so
+    // output is byte-stable run to run.
+    let mut keyed: Vec<(String, AttentionRow)> = rows
+        .into_iter()
+        .map(|row| (item_id_for(&row), row))
+        .collect();
+    keyed.sort_by(|(id_a, a), (id_b, b)| {
+        let pa = a.effective_priority.unwrap_or(u8::MAX);
+        let pb = b.effective_priority.unwrap_or(u8::MAX);
+        pa.cmp(&pb)
+            .then_with(|| b.age.cmp(&a.age))
+            .then_with(|| id_a.cmp(id_b))
+    });
+
+    let payloads: Vec<AttentionQueuePayload> = keyed
+        .into_iter()
+        .map(|(item_id, row)| {
+            let options = options_for(&row);
+            let summary = render_summary(&row);
+            let gate_id = format!("attention:{item_id}");
+            let effective_priority = row.effective_priority;
+            let lane = row.lane;
+            let repo = row.repo.clone();
+            AttentionQueuePayload::new(
+                item_id,
+                gate_id,
+                summary,
+                options,
+                effective_priority,
+                lane,
+                repo,
+                "attention-board",
+            )
+        })
+        .collect();
+
+    Ok(serde_json::to_string_pretty(&payloads)?)
+}
+
 /// Materialize a single generic `BrainDocModel` document from a raw JSON payload
 /// (`mev doc materialize`, `MV.9.A` task 4).
 ///

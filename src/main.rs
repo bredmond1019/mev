@@ -579,6 +579,34 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Emit every Attention-board item, across all four lanes (stale carryover, aging
+    /// backlog, orphaned captures, stale distilled knowledge), as a JSON array of
+    /// `EN.8.A`-compatible operator payloads for `engine-rs`'s operator queue
+    /// (`MV.ticket.attention-queue-delivery` task 5).
+    ///
+    /// Reuses the identical corpus load + `effective_priorities` derivation
+    /// `emit-state`'s attention-board planner uses, so the queue can never diverge
+    /// from what `/attention` itself would show. Ordered hottest-first by
+    /// `effective_priority`, tie-broken by age descending then `item_id`
+    /// ascending — deterministic, so an unchanged corpus reproduces byte-identical
+    /// output run to run.
+    ///
+    /// Two boundaries this command does not cross (see `docs/cli.md`): it derives
+    /// and emits an artifact only — it never enqueues into `engine-core`'s operator
+    /// queue, opens a notification channel, or writes `state.json`; and it emits
+    /// the full ordered set — depth limiting is the queue's job (`EN.8.B`), not
+    /// this command's.
+    ///
+    /// An empty board prints `[]` and exits 0 — an empty queue is not an error.
+    AttentionQueue {
+        /// Path to search from when locating brain.toml (walks up to find it).
+        /// Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Write the JSON array to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Materialize brain documents and manage Opportunity records (Phase 9, Block MV.9.A).
     ///
     /// The generic doc-materializer over okf-core's `BrainDocModel`: `materialize` plans (and,
@@ -2263,6 +2291,32 @@ fn main() -> ExitCode {
             };
             match mev::visualize_brain(&root, out) {
                 Ok(_) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::AttentionQueue { path, out } => {
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match mev::attention_queue(&root) {
+                Ok(json) => {
+                    if let Some(out_path) = out {
+                        if let Err(err) = std::fs::write(&out_path, format!("{json}\n")) {
+                            eprintln!("error: could not write {}: {err:#}", out_path.display());
+                            return ExitCode::FAILURE;
+                        }
+                    } else {
+                        println!("{json}");
+                    }
+                    ExitCode::SUCCESS
+                }
                 Err(err) => {
                     eprintln!("error: {err:#}");
                     ExitCode::FAILURE
