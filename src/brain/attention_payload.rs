@@ -17,6 +17,139 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::brain::carryover::TriageLane;
+use crate::brain::emit::AttentionRow;
+
+/// Maximum response options a single payload may carry — `engine-core`'s
+/// `WHATSAPP_MAX_REPLY_BUTTONS`
+/// (`core/engine-rs/crates/engine-core/src/operator/limits.rs`, confirmed
+/// against Meta's Cloud API docs 2026-08-12). A payload that cannot fit is
+/// rejected rather than falling back to a list message — the gate must
+/// declare the `session` channel instead.
+pub(crate) const MAX_RESPONSE_OPTIONS: usize = 3;
+
+/// Minimum response options a payload must carry — `engine-core`'s
+/// `OPERATOR_MIN_RESPONSE_OPTIONS`
+/// (`core/engine-rs/crates/engine-core/src/operator/limits.rs`, confirmed
+/// 2026-08-12).
+pub(crate) const MIN_RESPONSE_OPTIONS: usize = 2;
+
+/// Maximum characters (not bytes — labels may contain non-ASCII) an
+/// operator-visible option label may carry — `engine-core`'s button
+/// label-length limit
+/// (`core/engine-rs/crates/engine-core/src/operator/limits.rs`, confirmed
+/// 2026-08-12).
+pub(crate) const MAX_LABEL_CHARS: usize = 20;
+
+/// Which board lane an [`AttentionRow`] belongs to, re-derived from its
+/// existing fields (`AttentionRow` carries no lane-category field of its own
+/// for the backlog/capture/distilled lanes — see below).
+///
+/// The four carryover triage lanes are read directly off `row.lane`
+/// (populated whenever a row came from `collect_attention_rows`). The other
+/// three lanes are `None` there and are told apart by the exact field
+/// values `render_attention_section_with_distilled` (src/brain/emit.rs)
+/// constructs them with:
+/// - **Distilled**: `slug` empty, `kind` is `"knowledge"` or `"memory"` (the
+///   distilled-file stem).
+/// - **Capture**: `kind` empty (capture rows never set `kind`).
+/// - **Backlog**: `kind` is the backlog node's `status`, one of `"idea"` /
+///   `"ready"` / `"promoted"` (`VALID_BACKLOG_STATUSES`, src/brain/state.rs)
+///   — never empty and never `"knowledge"`/`"memory"`, so this arm is
+///   reached only for genuine backlog rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowLane {
+    Blocking,
+    Hot,
+    Aging,
+    Standing,
+    Backlog,
+    Capture,
+    Distilled,
+}
+
+impl RowLane {
+    /// Categorize a row per the field-correspondence documented on
+    /// [`RowLane`] itself.
+    #[must_use]
+    pub(crate) fn for_row(row: &AttentionRow) -> Self {
+        if let Some(lane) = row.lane {
+            return match lane {
+                TriageLane::Blocking => RowLane::Blocking,
+                TriageLane::Hot => RowLane::Hot,
+                TriageLane::Aging => RowLane::Aging,
+                TriageLane::Standing => RowLane::Standing,
+            };
+        }
+        if row.slug.is_empty() && (row.kind == "knowledge" || row.kind == "memory") {
+            RowLane::Distilled
+        } else if row.kind.is_empty() {
+            RowLane::Capture
+        } else {
+            RowLane::Backlog
+        }
+    }
+}
+
+/// The `session` option every lane's set includes for actions that did not
+/// fit in the ≤3-option budget — routes the operator to the full triage
+/// surface rather than dropping capability silently.
+fn session_option() -> AttentionResponseOption {
+    AttentionResponseOption::new("session", "Open session")
+}
+
+/// Assign the response option set for one Attention-board row, enforced
+/// against `engine-core`'s 3-button / 20-character cap (task 3 of
+/// `MV.ticket.attention-queue-delivery`).
+///
+/// Per-lane behavior, all required by the ticket's Acceptance Criteria:
+/// - **Distilled**: re-affirm (bumps `freshness:`) + session. Never `snooze`
+///   — HQ `CLAUDE.md`'s Attention rule: the distilled lane is "re-affirmed by
+///   bumping `freshness:`, never snoozed".
+/// - **Standing** (carryover): keep + session only. Never `promote` or
+///   `resolve` — its entries are permanently-true constraints
+///   (`TriageLane::Standing`'s own doc comment).
+/// - **Blocking / Hot / Aging** (carryover): promote, snooze, session.
+/// - **Backlog / Capture**: promote, snooze, session.
+#[must_use]
+pub(crate) fn options_for(row: &AttentionRow) -> Vec<AttentionResponseOption> {
+    let options = match RowLane::for_row(row) {
+        RowLane::Distilled => vec![
+            AttentionResponseOption::new("reaffirm", "Re-affirm"),
+            session_option(),
+        ],
+        RowLane::Standing => vec![
+            AttentionResponseOption::new("keep", "Keep"),
+            session_option(),
+        ],
+        RowLane::Blocking | RowLane::Hot | RowLane::Aging | RowLane::Backlog | RowLane::Capture => {
+            vec![
+                AttentionResponseOption::new("promote", "Promote"),
+                AttentionResponseOption::new("snooze", "Snooze"),
+                session_option(),
+            ]
+        }
+    };
+    assert_valid_options(&options);
+    options
+}
+
+/// Enforce the 2..=3 count and ≤20-character label caps in code, rather than
+/// only by convention — a set outside the bounds is a bug the constructor
+/// rejects rather than emits.
+fn assert_valid_options(options: &[AttentionResponseOption]) {
+    assert!(
+        (MIN_RESPONSE_OPTIONS..=MAX_RESPONSE_OPTIONS).contains(&options.len()),
+        "option set must have {MIN_RESPONSE_OPTIONS}..={MAX_RESPONSE_OPTIONS} options, got {}",
+        options.len()
+    );
+    for opt in options {
+        assert!(
+            opt.label.chars().count() <= MAX_LABEL_CHARS,
+            "option label {:?} exceeds {MAX_LABEL_CHARS} characters",
+            opt.label
+        );
+    }
+}
 
 /// One named response option offered to the operator — e.g. `("promote",
 /// "Promote")`. `key` is the stable machine identifier a response resolves
@@ -152,6 +285,130 @@ impl AttentionQueuePayload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a minimal `AttentionRow` matching the exact field values
+    /// `render_attention_section_with_distilled` constructs for each lane —
+    /// see [`RowLane`]'s doc comment.
+    fn row_for(lane: RowLane) -> AttentionRow {
+        let (row_lane, kind, slug) = match lane {
+            RowLane::Blocking => (
+                Some(TriageLane::Blocking),
+                "carryover".to_string(),
+                "s".to_string(),
+            ),
+            RowLane::Hot => (
+                Some(TriageLane::Hot),
+                "carryover".to_string(),
+                "s".to_string(),
+            ),
+            RowLane::Aging => (
+                Some(TriageLane::Aging),
+                "carryover".to_string(),
+                "s".to_string(),
+            ),
+            RowLane::Standing => (
+                Some(TriageLane::Standing),
+                "carryover".to_string(),
+                "s".to_string(),
+            ),
+            RowLane::Backlog => (None, "idea".to_string(), "s".to_string()),
+            RowLane::Capture => (None, String::new(), "s".to_string()),
+            RowLane::Distilled => (None, "knowledge".to_string(), String::new()),
+        };
+        AttentionRow {
+            repo: "mev".to_string(),
+            age: Some(10),
+            kind,
+            slug,
+            title_or_text: "text".to_string(),
+            priority: None,
+            effective_priority: None,
+            lane: row_lane,
+            clears_when: None,
+        }
+    }
+
+    const ALL_LANES: [RowLane; 7] = [
+        RowLane::Blocking,
+        RowLane::Hot,
+        RowLane::Aging,
+        RowLane::Standing,
+        RowLane::Backlog,
+        RowLane::Capture,
+        RowLane::Distilled,
+    ];
+
+    #[test]
+    fn row_lane_for_row_matches_construction() {
+        for lane in ALL_LANES {
+            assert_eq!(RowLane::for_row(&row_for(lane)), lane);
+        }
+    }
+
+    #[test]
+    fn every_lane_option_set_is_within_bounds_exhaustively() {
+        for lane in ALL_LANES {
+            let options = options_for(&row_for(lane));
+            assert!(
+                (MIN_RESPONSE_OPTIONS..=MAX_RESPONSE_OPTIONS).contains(&options.len()),
+                "lane {lane:?} produced {} options",
+                options.len()
+            );
+            for opt in &options {
+                assert!(
+                    opt.label.chars().count() <= MAX_LABEL_CHARS,
+                    "lane {lane:?} option {:?} exceeds {MAX_LABEL_CHARS} chars",
+                    opt.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn distilled_lane_never_offers_snooze() {
+        let options = options_for(&row_for(RowLane::Distilled));
+        assert!(
+            !options.iter().any(|o| o.key == "snooze"),
+            "distilled lane must never offer snooze (HQ CLAUDE.md)"
+        );
+    }
+
+    #[test]
+    fn distilled_lane_offers_reaffirm() {
+        let options = options_for(&row_for(RowLane::Distilled));
+        assert!(options.iter().any(|o| o.key == "reaffirm"));
+    }
+
+    #[test]
+    fn standing_lane_never_offers_promote_or_resolve() {
+        let options = options_for(&row_for(RowLane::Standing));
+        assert!(
+            !options
+                .iter()
+                .any(|o| o.key == "promote" || o.key == "resolve"),
+            "Standing carryover lane entries are permanent constraints; promote/resolve are meaningless"
+        );
+    }
+
+    #[test]
+    fn backlog_and_capture_lanes_may_offer_promote() {
+        for lane in [RowLane::Backlog, RowLane::Capture] {
+            let options = options_for(&row_for(lane));
+            assert!(
+                options.iter().any(|o| o.key == "promote"),
+                "lane {lane:?} should offer promote"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds")]
+    fn over_long_label_is_rejected() {
+        assert_valid_options(&[
+            AttentionResponseOption::new("a", "This label is definitely way too long"),
+            session_option(),
+        ]);
+    }
 
     fn approve_reject() -> Vec<AttentionResponseOption> {
         vec![
