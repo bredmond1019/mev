@@ -8,12 +8,22 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-10T21:15:00Z"
+timestamp: "2026-08-13T12:42:25-03:00"
 ---
 
 # Log — mev
 
 *Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## [run: 2026-08-13]
+
+### Lane `substrate` run 2 — Attention operator-queue producer + `reconcile_failed` consumer
+
+- **What:** Reopened the `operator-surface` run record (`lifecycle: lane-complete` -> `active`) after `engine-rs:EN.8.B` closed and finished lane substrate §2. Two blocks, both `/sdlc-task` in place, both first-attempt on every task. `MV.ticket.attention-queue-delivery` (8/8, `db70ec4`..`06e4122`) ships `mev attention-queue`, emitting every Attention-board item as an `EN.8.A`-shaped operator payload with a stable `item_id`, a digest byte-compatible with `engine-core`'s `OperatorPayload::digest_of`, and <=3 response options per lane; its spec was authored this session, the block having had none. `MV.ticket.reconcile-failed-consumer` (6/6, `528ce4f`..`c5c7202`) closes base-template's D56 gap: `derive_last_touched` now carries the winning state file's `status` alongside its timestamp and `BlockGraphNode.reconcile_failed` surfaces it as `Option<bool>` — three states, never a bare bool, per the data contract. Suite 1352 -> 1421, 0 failures. Verified by hand rather than from the engines' reports: 179 payloads emitted, 0 outside the 2-3 option cap, 0 labels over 20 chars, byte-identical across two runs, and the digest reimplemented independently in Python matching all 179. Also specced (not started) `ticket-consumer-dependency-parity` and `ticket-consumer-compile-gate`.
+- **Why:** The Attention board is the surface built to catch neglected items and was itself the neglected item — triaging it meant sitting down and running `/attention`, an open-ended task with nobody alongside, which is the work-shape that does not get started here. Delivering it through the operator queue inverts the direction. The second block existed because D56 named mev's block graph as `reconcile_failed`'s consumer and that consumer was never built, so a failed reconcile read exactly like a clean finish. The two new specs exist because this session broke `core/bastion` (`E0308` board.rs:660, `E0063` block_graph.rs:414, fixed in `bastion@1aa5066`) — the **third** time a mev change has broken a downstream repo, and every one was invisible to `cargo build` because the break lived in test code. `/orchestrate` step 9 already prescribes the right command and has never caught anything, because prose that fires only when a human remembers it is not a control.
+- **Refs:** `planning/orchestration-run/operator-surface/` (notes + review, run 2 sections) · `planning/operator-surface/lane-substrate.txt` §2 · D57 · D71
 
 ---
 
