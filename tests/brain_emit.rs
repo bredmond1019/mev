@@ -9223,3 +9223,125 @@ mod task6_rendering {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// render_block_graph_reconcile_failed — task 4 (ticket-reconcile-failed-consumer)
+// ---------------------------------------------------------------------------
+
+mod reconcile_failed_rendering {
+    use mev::brain::block_graph::{
+        BlockGraphEdge, BlockGraphExport, BlockGraphNode, BlockGraphScopeEcho, BlockLane,
+    };
+    use mev::brain::emit::render_block_graph_reconcile_failed;
+
+    /// Build a minimal `BlockGraphNode` with every non-essential field defaulted, varying
+    /// only `key`/`repo`/`id`/`title`/`reconcile_failed` — the fields this render function
+    /// reads.
+    fn make_node(
+        repo: &str,
+        id: &str,
+        title: &str,
+        reconcile_failed: Option<bool>,
+    ) -> BlockGraphNode {
+        BlockGraphNode {
+            key: format!("{repo}:{id}"),
+            repo: repo.to_string(),
+            id: id.to_string(),
+            title: title.to_string(),
+            status: None,
+            lane: BlockLane::Next,
+            track: None,
+            wave: None,
+            priority: None,
+            effective_priority: None,
+            due: None,
+            epics: Vec::new(),
+            layer: 0,
+            topo_index: 0,
+            ready: false,
+            in_cycle: false,
+            in_scope: true,
+            external_deps: Vec::new(),
+            unmet_count: 0,
+            dependent_count: 0,
+            last_touched: None,
+            reconcile_failed,
+        }
+    }
+
+    fn make_export(nodes: Vec<BlockGraphNode>) -> BlockGraphExport {
+        let total_nodes = nodes.len() as u32;
+        BlockGraphExport {
+            version: "1".to_string(),
+            root: "/fake/root".to_string(),
+            scope: BlockGraphScopeEcho {
+                tier: None,
+                epic: None,
+                repo: None,
+                include_closed: true,
+                include_boundary: false,
+            },
+            nodes,
+            edges: Vec::<BlockGraphEdge>::new(),
+            cycles: Vec::new(),
+            total_nodes,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn reconcile_failed_block_renders_the_annotation() {
+        let export = make_export(vec![make_node("mev", "MV.10.C", "Block C", Some(true))]);
+        let rendered = render_block_graph_reconcile_failed(&export);
+        assert_eq!(rendered, "mev:MV.10.C — Block C (reconcile_failed)");
+    }
+
+    #[test]
+    fn done_block_renders_with_no_annotation() {
+        let export = make_export(vec![make_node("mev", "MV.10.C", "Block C", Some(false))]);
+        let rendered = render_block_graph_reconcile_failed(&export);
+        assert_eq!(rendered, "mev:MV.10.C — Block C");
+    }
+
+    #[test]
+    fn never_run_block_renders_with_no_annotation() {
+        let export = make_export(vec![make_node("mev", "MV.10.C", "Block C", None)]);
+        let rendered = render_block_graph_reconcile_failed(&export);
+        assert_eq!(rendered, "mev:MV.10.C — Block C");
+    }
+
+    /// A corpus with no `reconcile_failed` blocks at all must render byte-identical
+    /// output to what this function would have produced before the annotation existed —
+    /// i.e. the plain `"{repo}:{id} — {title}"` lines, joined by `\n`, with no stray
+    /// annotation text anywhere.
+    #[test]
+    fn corpus_with_no_reconcile_failed_blocks_renders_byte_identical_plain_lines() {
+        let export = make_export(vec![
+            make_node("mev", "A.1", "Block A1", Some(false)),
+            make_node("mev", "A.2", "Block A2", None),
+        ]);
+        let rendered = render_block_graph_reconcile_failed(&export);
+        assert_eq!(rendered, "mev:A.1 — Block A1\nmev:A.2 — Block A2");
+    }
+
+    #[test]
+    fn only_the_flagged_block_carries_the_annotation_in_a_mixed_corpus() {
+        let export = make_export(vec![
+            make_node("mev", "A.1", "Block A1", Some(false)),
+            make_node("mev", "A.2", "Block A2", Some(true)),
+            make_node("mev", "A.3", "Block A3", None),
+        ]);
+        let rendered = render_block_graph_reconcile_failed(&export);
+        assert_eq!(
+            rendered,
+            "mev:A.1 — Block A1\nmev:A.2 — Block A2 (reconcile_failed)\nmev:A.3 — Block A3"
+        );
+    }
+
+    #[test]
+    fn empty_export_renders_empty_string() {
+        let export = make_export(Vec::new());
+        let rendered = render_block_graph_reconcile_failed(&export);
+        assert_eq!(rendered, "");
+    }
+}

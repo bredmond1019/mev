@@ -29,8 +29,8 @@ pub use brain::conformance::{
 pub use brain::crawl::{MdFile, crawl_brain};
 pub use brain::emit::{
     EmitAction, EmitError, EmitPlan, apply_plan, plan_master_plan_tables, plan_state_json,
-    plan_status_frontmatter, reconcile_status_scalars, render_wave_table, splice_generated,
-    wave_order, write_atomic,
+    plan_status_frontmatter, reconcile_status_scalars, render_block_graph_reconcile_failed,
+    render_wave_table, splice_generated, wave_order, write_atomic,
 };
 pub use brain::graph::{Graph, build_graph, check_graph};
 pub use brain::graph_emit::{GraphExport, build_graph_export};

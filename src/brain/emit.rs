@@ -6,6 +6,8 @@
 //! - [`EmitError`] — error type for sentinel-related failures.
 //! - [`wave_order`] — all block keys (`"repo:id"`) sorted by `wave` ascending.
 //! - [`render_wave_table`] — Markdown table of a repo's blocks in wave order.
+//! - [`render_block_graph_reconcile_failed`] — per-block `(reconcile_failed)`
+//!   annotation over a `BlockGraphExport`'s nodes.
 //! - [`render_hq_board`] — NOW/NEXT/BLOCKED Operating Board Markdown from a
 //!   brain-derived [`Focus`] + `cross_repo[]` edges.
 //! - [`render_unified_board`] — NOW/NEXT/BLOCKED/DUE-SOON unified priority
@@ -391,6 +393,45 @@ pub fn render_wave_table(
     }
 
     rows.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// render_block_graph_reconcile_failed — human-readable reconcile_failed surfacing
+// ---------------------------------------------------------------------------
+
+/// Render one line per `export.nodes` entry (in the export's existing `topo_index`
+/// order): `"{repo}:{id} — {title}"`, annotated `" (reconcile_failed)"` when
+/// [`crate::brain::block_graph::BlockGraphNode::reconcile_failed`] is `Some(true)`.
+///
+/// This is the human-readable sibling of `BlockGraphNode.reconcile_failed`'s JSON
+/// surfacing (`#[serde(skip_serializing_if)]`, task 2 of `ticket-reconcile-failed-consumer`).
+/// Per base-template's `docs/data-contract.md` (`doc_id: sdlc-run-state-data-contract`,
+/// the pinned authority for the terminal run-state vocabulary — not re-derived here), a
+/// block whose most recent run ended `reconcile_failed` must not silently read the same
+/// as any other open/unclosed block in a surface that displays it. Follows the same
+/// terse `"{repo}:{id} — {title} (annotation)"` convention [`render_hq_board_line`] uses
+/// for `(blocked by ...)` — a per-block annotation, not a new lane or a new section.
+///
+/// A node whose `reconcile_failed` is `Some(false)` or `None` renders with no annotation
+/// at all, so a corpus with no `reconcile_failed` blocks renders byte-identical output to
+/// what this function produced before the annotation existed. Rendered without a
+/// trailing newline, matching the [`render_wave_table`] / [`render_hq_board`] convention;
+/// callers that embed it inside a document own any surrounding blank lines.
+pub fn render_block_graph_reconcile_failed(
+    export: &crate::brain::block_graph::BlockGraphExport,
+) -> String {
+    export
+        .nodes
+        .iter()
+        .map(|node| {
+            let mut line = format!("{} — {}", node.key, node.title);
+            if node.reconcile_failed == Some(true) {
+                line.push_str(" (reconcile_failed)");
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ---------------------------------------------------------------------------
