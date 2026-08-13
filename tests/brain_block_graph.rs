@@ -295,6 +295,17 @@ fn write_sdlc_run(root: &Path, rel_folder: &str, updated_at: &str) {
     write_file(root, &rel, &format!(r#"{{"updated_at": "{updated_at}"}}"#));
 }
 
+/// Same as [`write_sdlc_run`] but also sets `status`, for the lane-independence
+/// regression tests below (Task 3 of `ticket-reconcile-failed-consumer`).
+fn write_sdlc_run_with_status(root: &Path, rel_folder: &str, updated_at: &str, status: &str) {
+    let rel = format!("{rel_folder}/sdlc/sdlc-task-state.json");
+    write_file(
+        root,
+        &rel,
+        &format!(r#"{{"updated_at": "{updated_at}", "status": "{status}"}}"#),
+    );
+}
+
 fn node_keys(export: &mev::BlockGraphExport) -> Vec<String> {
     let mut keys: Vec<String> = export.nodes.iter().map(|n| n.key.clone()).collect();
     keys.sort();
@@ -754,6 +765,101 @@ fn dangling_edge_present_with_none_target() {
     assert!(
         export.nodes.iter().all(|n| n.key != "alpha:GHOST"),
         "no synthetic node for the dangling target"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Task 3 (ticket-reconcile-failed-consumer): lane derivation stays independent of
+// run state. Lane derivation reads only the AUTHORED `state.json` `status`, never the
+// run-state file — these are regression pins, not fixes: if either assertion fails,
+// that is a real defect (run state leaking into lane derivation), not a test to adjust.
+// ---------------------------------------------------------------------------
+
+/// An authored-`open` block (`alpha:A1`) whose newest run ended `reconcile_failed`
+/// must NOT be reported as `lane: Closed`, and its lane must be identical to the same
+/// block with no run-state file at all — a `reconcile_failed` run must not read as any
+/// different flavor of open/unclosed than an ordinary never-run block.
+#[test]
+fn reconcile_failed_open_block_is_not_closed_and_matches_no_run_state_lane() {
+    let baseline_dir = build_fixture("lane-independence-baseline");
+    let baseline = block_graph_brain(&baseline_dir, &default_scope())
+        .expect("baseline block_graph_brain must succeed");
+    let baseline_lane = baseline
+        .nodes
+        .iter()
+        .find(|n| n.key == "alpha:A1")
+        .expect("alpha:A1 must resolve in baseline export")
+        .lane;
+    assert_ne!(
+        baseline_lane,
+        BlockLane::Closed,
+        "sanity: alpha:A1 is authored open, must never be Closed"
+    );
+    let _ = fs::remove_dir_all(&baseline_dir);
+
+    let dir = build_fixture("lane-independence-reconcile-failed");
+    write_sdlc_run_with_status(
+        &dir,
+        "alpha/planning/A1",
+        "2026-07-10T00:00:00Z",
+        "reconcile_failed",
+    );
+    let export = block_graph_brain(&dir, &default_scope()).expect("block_graph_brain must succeed");
+    let node = export
+        .nodes
+        .iter()
+        .find(|n| n.key == "alpha:A1")
+        .expect("alpha:A1 must resolve");
+
+    assert_eq!(
+        node.reconcile_failed,
+        Some(true),
+        "sanity: the run-state artifact must actually be picked up"
+    );
+    assert_ne!(
+        node.lane,
+        BlockLane::Closed,
+        "a reconcile_failed run must not make an open block report as lane: Closed"
+    );
+    assert_eq!(
+        node.lane, baseline_lane,
+        "a reconcile_failed run must not change the lane at all — identical to the \
+         same block with no run-state file"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The converse boundary: an authored-`closed` block (`alpha:A2`) keeps
+/// `lane: Closed` regardless of its run state — a `reconcile_failed` run on an already
+/// closed block must not un-close it.
+#[test]
+fn closed_block_stays_closed_regardless_of_run_state() {
+    let dir = build_fixture("lane-independence-closed-stays-closed");
+    write_sdlc_run_with_status(
+        &dir,
+        "alpha/planning/A2",
+        "2026-07-10T00:00:00Z",
+        "reconcile_failed",
+    );
+    let export = block_graph_brain(&dir, &default_scope()).expect("block_graph_brain must succeed");
+    let node = export
+        .nodes
+        .iter()
+        .find(|n| n.key == "alpha:A2")
+        .expect("alpha:A2 must resolve");
+
+    assert_eq!(
+        node.reconcile_failed,
+        Some(true),
+        "sanity: the run-state artifact must actually be picked up"
+    );
+    assert_eq!(
+        node.lane,
+        BlockLane::Closed,
+        "an authored-closed block must keep lane: Closed regardless of run state"
     );
 
     let _ = fs::remove_dir_all(&dir);
