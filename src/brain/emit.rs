@@ -1387,28 +1387,28 @@ fn has_unmet_dep(block: &TrackBlock, global_status: &HashMap<String, Option<Stri
 /// `clears_when`) at their defaults (`None`), matching yesterday's rendered
 /// output byte-for-byte (see `render_section_lanes_and_snooze_and_capture`
 /// and friends in `tests/brain_emit.rs`).
-struct AttentionRow {
-    repo: String,
+pub(crate) struct AttentionRow {
+    pub(crate) repo: String,
     /// `None` when the entry has no parseable anchor date (or, for
     /// carryover, is currently snoozed) — rendered as `—` rather than a
     /// fabricated `0d`.
-    age: Option<i64>,
-    kind: String,
-    slug: String,
+    pub(crate) age: Option<i64>,
+    pub(crate) kind: String,
+    pub(crate) slug: String,
     /// The free-text portion of the row: a carryover's snippeted `text`, a
     /// backlog node's `title`, a capture's `"{title} — notes: {notes}"`, or
     /// a distilled entry's snippeted claim — already truncated at
     /// construction time by [`attention_snippet`].
-    title_or_text: String,
+    pub(crate) title_or_text: String,
     /// Carryover-only: the authored `priority`, absent for every other lane.
-    priority: Option<u8>,
+    pub(crate) priority: Option<u8>,
     /// Carryover-only: the effective priority after `blocks[]`
     /// min-propagation, absent for every other lane.
-    effective_priority: Option<u8>,
+    pub(crate) effective_priority: Option<u8>,
     /// Carryover-only: which [`TriageLane`] this row landed in.
-    lane: Option<TriageLane>,
+    pub(crate) lane: Option<TriageLane>,
     /// Carryover-only: the display form of `clears_when`, if any.
-    clears_when: Option<String>,
+    pub(crate) clears_when: Option<String>,
 }
 
 /// Truncate `text` to a single tidy line of at most `max` chars for a board row.
@@ -1582,19 +1582,30 @@ pub fn render_attention_section(
 /// `"repo:id"`) are the same maps [`plan_attention_board`] already computes
 /// for the whole corpus ([`effective_priorities`] / [`global_status_map`]) —
 /// passed straight through to [`rank_carryover`], never recomputed here.
-pub fn render_attention_section_with_distilled(
+/// Gather every row across the four carryover triage lanes (BLOCKING / HOT /
+/// AGING / STANDING, `MV.ticket.carryover-triage-ranking`) as a flat,
+/// unrendered `Vec<AttentionRow>` — the gather half of
+/// [`render_attention_section_with_distilled`], split out so a downstream
+/// consumer (e.g. `mev attention-queue`) can build payloads from the same
+/// structured rows the board renders from, instead of re-deriving them or
+/// parsing rendered Markdown.
+///
+/// Every returned row has `lane` populated (`Some(TriageLane::..)`) — callers
+/// split back out by that field, never by which internal `Vec` a row landed
+/// in. This performs no rendering and produces no Markdown; flattening a row
+/// to a display line happens only in [`render_triage_detail`] /
+/// [`render_triage_lane`], at render time.
+pub(crate) fn collect_attention_rows(
     carryover: &[(String, &Carryover)],
-    backlog: &[(String, &Backlog)],
-    distilled: &[(String, &str, &DistilledEntry)],
     today: chrono::NaiveDate,
     thresholds: &crate::brain::config::AttentionThresholds,
     block_priorities: &HashMap<String, u8>,
     block_status: &HashMap<String, Option<String>>,
-) -> String {
+) -> Vec<AttentionRow> {
     // Build a `CarryoverVerdict` per non-snoozed entry — just enough for
     // `rank_carryover` (age/stale/priority/blocks), never re-running the
     // `clears_when` predicate evaluation (`MV.ticket.clears-when-evaluation`'s
-    // job, not this render path's) — `lane` stays `NotEvaluable` and
+    // job, not this gather path's) — `lane` stays `NotEvaluable` and
     // `clears_when_satisfied` is therefore always `false` here; that field is
     // deliberately not surfaced on the board today. A snoozed entry is
     // excluded from every triage lane, same as before this block.
@@ -1633,32 +1644,57 @@ pub fn render_attention_section_with_distilled(
 
     let ranked = rank_carryover(&verdicts, block_priorities, block_status);
 
+    ranked
+        .iter()
+        .map(|r| {
+            let key = format!("{}:{}", r.repo, r.slug);
+            let source = item_by_key.get(&key).copied();
+            let title_or_text = source
+                .map(|item| attention_snippet(&item.text, 80))
+                .unwrap_or_default();
+            let clears_when = source
+                .and_then(|item| item.clears_when.as_ref())
+                .and_then(clears_when_display)
+                .map(|c| attention_snippet(c, 60));
+            AttentionRow {
+                repo: r.repo.clone(),
+                age: r.age_days,
+                kind: r.kind.clone(),
+                slug: r.slug.clone(),
+                title_or_text,
+                priority: r.priority,
+                effective_priority: r.effective_priority,
+                lane: Some(r.lane),
+                clears_when,
+            }
+        })
+        .collect()
+}
+
+pub fn render_attention_section_with_distilled(
+    carryover: &[(String, &Carryover)],
+    backlog: &[(String, &Backlog)],
+    distilled: &[(String, &str, &DistilledEntry)],
+    today: chrono::NaiveDate,
+    thresholds: &crate::brain::config::AttentionThresholds,
+    block_priorities: &HashMap<String, u8>,
+    block_status: &HashMap<String, Option<String>>,
+) -> String {
+    let carryover_rows =
+        collect_attention_rows(carryover, today, thresholds, block_priorities, block_status);
+
     let mut blocking_rows: Vec<AttentionRow> = Vec::new();
     let mut hot_rows: Vec<AttentionRow> = Vec::new();
     let mut aging_rows: Vec<AttentionRow> = Vec::new();
     let mut standing_rows: Vec<AttentionRow> = Vec::new();
-    for r in &ranked {
-        let key = format!("{}:{}", r.repo, r.slug);
-        let source = item_by_key.get(&key).copied();
-        let title_or_text = source
-            .map(|item| attention_snippet(&item.text, 80))
-            .unwrap_or_default();
-        let clears_when = source
-            .and_then(|item| item.clears_when.as_ref())
-            .and_then(clears_when_display)
-            .map(|c| attention_snippet(c, 60));
-        let row = AttentionRow {
-            repo: r.repo.clone(),
-            age: r.age_days,
-            kind: r.kind.clone(),
-            slug: r.slug.clone(),
-            title_or_text,
-            priority: r.priority,
-            effective_priority: r.effective_priority,
-            lane: Some(r.lane),
-            clears_when,
-        };
-        match r.lane {
+    for row in carryover_rows {
+        // Split back out by `row.lane` — real data on the row, never
+        // re-derived from which `Vec` it landed in (see `AttentionRow::lane`'s
+        // doc comment). `collect_attention_rows` always populates `lane`.
+        let lane = row
+            .lane
+            .expect("collect_attention_rows always populates `lane`");
+        match lane {
             TriageLane::Blocking => blocking_rows.push(row),
             TriageLane::Hot => hot_rows.push(row),
             TriageLane::Aging => aging_rows.push(row),
