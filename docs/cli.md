@@ -1647,6 +1647,104 @@ mev carryover --allow-exec
 
 ---
 
+### `attention-queue [--out <path>] [path]`
+
+Emits every Attention-board item — across all four lanes (stale carryover's `Blocking`/`Hot`/
+`Aging`/`Standing` sub-lanes, aging backlog, orphaned captures, and stale distilled knowledge) —
+as a JSON array of `EN.8.A`-compatible operator payloads (`MV.ticket.attention-queue-delivery`).
+This is how the Attention board stops being a surface somebody has to remember to open: instead of
+running `/attention` and triaging the whole list in one sitting, `engine-rs`'s operator queue
+(`EN.8.B`) can deliver one item at a time, in priority order.
+
+`attention-queue` reuses the exact same corpus load and `effective_priorities` derivation that
+`emit-state`'s attention-board planner (`plan_attention_board`) uses internally — the same
+`collect_attention_rows` call, the same carryover union, the same backlog/distilled staleness
+thresholds. There is only one board-derivation path in this codebase; the queue can never show a
+different item, or a different order, than `/attention` itself would show.
+
+| Argument / Flag | Default | Description |
+|---|---|---|
+| `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it). |
+| `--out <path>` | stdout | Write the JSON array to this file instead of printing it. |
+
+#### Payload shape
+
+Each array element is an `AttentionQueuePayload`:
+
+| Field | Description |
+|---|---|
+| `item_id` | Stable identifier hashed from the item's IDENTITY only (repo, lane, slug) — never from mutable content. Re-running on an unchanged corpus reproduces it byte-for-byte; an item whose text/age/priority changed keeps its `item_id` and gets a new `digest` instead — a re-queue, not a new item, per `EN.8.A`. |
+| `gate_id` | `"attention:<item_id>"` — excluded from the digest, per `OperatorPayload`'s own contract. |
+| `rendered_summary` | Self-contained decision text: repo, lane, kind, slug, age, the item's text, and effective priority where present. An operator reading only the notification can decide without opening the repo. |
+| `options` | 2–3 named `{key, label}` response options (see "Per-lane option sets" below). |
+| `digest` | SHA-256 over `rendered_summary` + `options`, byte-identical to what `engine-core`'s `OperatorPayload::digest_of` computes for the same inputs — pinned by a hard-coded expected hex digest in this repo's test suite, so a future drift in either side's algorithm fails loudly instead of producing payloads the queue silently re-queues forever. |
+| `effective_priority` | The post-propagation priority the board ranked this item at, supplied by mev rather than recomputed by the queue — `EN.8.B`'s `OperatorQueueItem::effective_priority` is enqueuer-supplied, never queue-computed. |
+| `lane` | The carryover triage lane (`Blocking`/`Hot`/`Aging`/`Standing`), or absent for backlog/capture/distilled rows. |
+| `repo` | The repo slug this item belongs to. |
+| `source` | Provenance tag; `"attention-board"` for every item this command emits. |
+
+The `gate_id`/`rendered_summary`/`options`/`digest` subset deserializes unchanged into
+`engine-core`'s `OperatorPayload` — `item_id`, `effective_priority`, `lane`, `repo`, and `source`
+ride alongside it as mev-owned fields the queue uses for ordering and provenance.
+
+#### Per-lane option sets
+
+`engine-core`'s `limits.rs` caps a payload at **3 response buttons**, **2 minimum**, and a
+**20-character label limit** (confirmed against Meta's WhatsApp Cloud API docs 2026-08-12) — so
+the board's five triage actions (promote · keep · snooze · resolve · archive) cannot ship as one
+tap set. `attention-queue` resolves this by assigning each lane ≤3 options chosen for what that
+lane can actually do, with every lane's set including a **session channel** option that routes the
+operator to the full triage surface for any action that did not fit:
+
+| Lane | Options | Why |
+|---|---|---|
+| Distilled (`knowledge.md`/`memory.md`) | Re-affirm, Open session | Never offers Snooze — HQ `CLAUDE.md`'s Attention rule: the distilled lane is re-affirmed by bumping `freshness:`, never snoozed. |
+| Standing (carryover) | Keep, Open session | Never offers Promote or Resolve — `Standing` entries are permanently-true constraints, not items that graduate or close. |
+| Blocking / Hot / Aging (carryover), Backlog, Capture | Promote, Snooze, Open session | The three actions that make sense for a genuinely time-bound item. |
+
+A set outside 2..=3 options, or any label over 20 characters (measured in characters, not bytes —
+labels may contain non-ASCII), is rejected in code at construction time rather than silently
+truncated or dropped.
+
+#### Ordering and stability
+
+Items are sorted hottest-first by `effective_priority` (a lower number is hotter; an absent
+priority sorts last), tie-broken by age descending then `item_id` ascending — a fully deterministic
+order, so re-running on an unchanged corpus reproduces byte-identical output and a depth-1 queue
+delivers the hottest item first.
+
+#### Two boundaries this command does not cross
+
+1. **mev derives; it does not project.** This command reads the corpus and emits an artifact —
+   nothing more. It never enqueues into `engine-core`'s operator queue, opens a notification
+   channel, or writes into `BA.18.A`'s sink. `engine-core`'s `queue/item.rs` module header states
+   the crate does not read mev's state or shell out to `mev`; wiring this artifact into the queue
+   (giving `ItemSource` a fourth, attention-sourced variant) is `engine-rs`'s change, made in a
+   separate decision, not mev's.
+2. **Depth limiting belongs to the queue, not mev.** `attention-queue` emits the *full* ordered
+   set every run. `EN.8.B` holds items pending and releases one at a time — emission is not
+   delivery. What mev owes is *correct ordering*; if `effective_priority` were wrong, depth-1
+   delivery would faithfully deliver the wrong item first.
+
+`attention-queue` is **read-only**: it never writes `state.json`, `BA.18.A`'s sink, or any
+notification channel — only stdout, or the file named by `--out`. An empty board prints `[]` and
+exits `0`; an empty queue is not an error.
+
+**Examples:**
+
+```bash
+# JSON array to stdout, sibling brain repo at ..
+mev attention-queue
+
+# Explicit brain root
+mev attention-queue ~/Dev/agentic-portfolio
+
+# Write to a file instead of stdout
+mev attention-queue --out /tmp/attention-queue.json
+```
+
+---
+
 ### `conformance [--check <name>] [--json] [path]`
 
 A **registry of named drift checks** over facts kept in two places. Each registered check

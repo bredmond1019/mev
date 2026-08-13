@@ -14,7 +14,7 @@ related: [mev-readme, cli-reference, architecture, brain-toml-config, okf-schema
 
 | Doc | What it covers |
 |---|---|
-| [CLI reference](cli.md) | Subcommands (including `state-history` list/restore), flags, defaults, exit codes, examples |
+| [CLI reference](cli.md) | Subcommands (including `state-history` list/restore, `attention-queue` operator payload delivery), flags, defaults, exit codes, examples |
 | [Architecture](architecture.md) | Module map, `ContentValidator` trait, core types (`Diagnostic`, `Report`, `JsonReport`) |
 | [brain.toml config](brain-toml.md) | Full `brain.toml` schema — `[vocab]`, `[crawl]`, `[[repos]]` |
 | [OKF schema](okf-schema.md) | OKF frontmatter fields, required vs optional, validation rules |
