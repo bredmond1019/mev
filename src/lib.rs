@@ -1341,6 +1341,25 @@ pub fn emit_state(
     );
     let status_fm_diags = apply_plan(&status_fm_plan, write);
 
+    // 8. Lane-segments derivation (`MV.13.A` Task 5). A cross-repo, corpus-wide
+    //    artifact rather than one repo's scoped surface, so — unlike every planner
+    //    above — it is never passed through `filter_plan_by_scope`; `--scope <repo>`
+    //    does not narrow it. Any generator writing into the corpus must validate its
+    //    own output and roll back on net-new errors (a generator bug here would
+    //    otherwise be a permanent red gate for every repo, not a one-off — this has
+    //    already happened once, on the push gate's first day), so in `--write` mode
+    //    this is applied through [`apply_with_rollback_on_regression`] rather than a
+    //    plain `apply_plan`. Dry-run is unaffected — same `apply_plan(.., false)`
+    //    every other planner's dry-run path uses.
+    let lane_segments_plan = brain::lane_segments::plan_lane_segments(root, &loaded);
+    let lane_segments_diags = if write {
+        apply_with_rollback_on_regression(&lane_segments_plan, || {
+            Ok(validate_brain(root)?.error_count())
+        })?
+    } else {
+        apply_plan(&lane_segments_plan, false)
+    };
+
     report.diagnostics.extend(state_diags);
     report.diagnostics.extend(mp_diags);
     report.diagnostics.extend(project_caches_diags);
@@ -1352,8 +1371,74 @@ pub fn emit_state(
     report.diagnostics.extend(epic_board_diags);
     report.diagnostics.extend(epic_seq_diags);
     report.diagnostics.extend(status_fm_diags);
+    report.diagnostics.extend(lane_segments_diags);
 
     Ok(report)
+}
+
+/// Apply `plan` (via [`apply_plan`] in `write` mode), then roll it back if
+/// `count_errors` — called once before and once after applying — reports strictly
+/// more errors afterward. This is the general "any generator writing into the corpus
+/// must validate its own output and roll back on net-new errors" rule (`MV.13.A` Task
+/// 5), factored out from `emit_state` so the rollback *decision* can be unit-tested
+/// against a fake error-count source rather than a real `validate_brain` corpus scan.
+///
+/// A rollback restores every one of `plan`'s target paths to its pre-write bytes (or
+/// removes it, if the path did not exist before the write) and replaces the
+/// `I_EMIT_WROTE`/`E_EMIT_WRITE_FAILED` diagnostic `apply_plan` would otherwise have
+/// produced with a single `E_EMIT_ROLLBACK` error naming the before/after error
+/// counts. `plan`'s own planning-time diagnostics (e.g. a structural warning raised
+/// while deriving the content, independent of whether the write itself regressed the
+/// corpus) are always kept, rollback or not — they describe a derivation-time finding,
+/// not the write's outcome.
+///
+/// A plan with no actions is applied as-is (nothing to snapshot or roll back) and
+/// never calls `count_errors` — a no-op write cannot regress anything.
+fn apply_with_rollback_on_regression(
+    plan: &brain::emit::EmitPlan,
+    mut count_errors: impl FnMut() -> anyhow::Result<usize>,
+) -> anyhow::Result<Vec<Diagnostic>> {
+    use brain::emit::apply_plan;
+
+    if plan.actions.is_empty() {
+        return Ok(apply_plan(plan, true));
+    }
+
+    // Snapshot every target's prior bytes before anything is written, so a rollback
+    // can restore exactly what was there — `None` means the path did not exist yet.
+    let prior: Vec<(PathBuf, Option<Vec<u8>>)> = plan
+        .actions
+        .iter()
+        .map(|a| (a.path.clone(), std::fs::read(&a.path).ok()))
+        .collect();
+
+    let before = count_errors()?;
+    let mut diags = apply_plan(plan, true);
+    let after = count_errors()?;
+
+    if after > before {
+        for (path, prior_bytes) in &prior {
+            match prior_bytes {
+                Some(bytes) => {
+                    let _ = std::fs::write(path, bytes);
+                }
+                None => {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        diags.retain(|d| d.locator != "I_EMIT_WROTE" && d.locator != "E_EMIT_WRITE_FAILED");
+        diags.push(Diagnostic::error(
+            &plan.actions[0].path,
+            "E_EMIT_ROLLBACK",
+            format!(
+                "write introduced {} net-new corpus error(s) ({before} -> {after}); rolled back to the prior content rather than leaving a permanent red gate",
+                after - before
+            ),
+        ));
+    }
+
+    Ok(diags)
 }
 
 /// Emit every Attention-board item, across all four lanes (carryover, aging
@@ -2108,5 +2193,108 @@ mod entry_point_tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_with_rollback_on_regression — MV.13.A Task 5
+    // -----------------------------------------------------------------------
+
+    fn single_action_plan(path: PathBuf, content: &str) -> brain::emit::EmitPlan {
+        brain::emit::EmitPlan {
+            actions: vec![brain::emit::EmitAction {
+                path,
+                new_content: content.to_string(),
+                note: "test write".to_string(),
+            }],
+            diagnostics: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn rollback_fires_and_restores_prior_content_on_net_new_errors() {
+        let dir = testsupport::unique_temp_dir("mev-rollback-fires-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("artifact.json");
+        std::fs::write(&target, "prior content").unwrap();
+
+        let plan = single_action_plan(target.clone(), "new content");
+        let mut calls = 0u32;
+        let diags = apply_with_rollback_on_regression(&plan, || {
+            calls += 1;
+            // First call (baseline, pre-write) reports 1 error; second call
+            // (post-write) reports 2 — a net-new error, so this must roll back.
+            Ok(if calls == 1 { 1 } else { 2 })
+        })
+        .expect("count_errors never returns Err in this test");
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "prior content",
+            "rollback must restore the file's exact prior bytes"
+        );
+        assert!(
+            diags.iter().any(|d| d.locator == "E_EMIT_ROLLBACK"),
+            "expected E_EMIT_ROLLBACK, got {diags:?}"
+        );
+        assert!(
+            diags.iter().all(|d| d.locator != "I_EMIT_WROTE"),
+            "a rolled-back write must not also claim I_EMIT_WROTE, got {diags:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rollback_removes_brand_new_file_that_did_not_exist_before() {
+        let dir = testsupport::unique_temp_dir("mev-rollback-removes-new-file-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("brand-new-artifact.json");
+        assert!(!target.exists());
+
+        let plan = single_action_plan(target.clone(), "new content");
+        let mut calls = 0u32;
+        let _diags = apply_with_rollback_on_regression(&plan, || {
+            calls += 1;
+            Ok(if calls == 1 { 0 } else { 1 })
+        })
+        .unwrap();
+
+        assert!(
+            !target.exists(),
+            "a rolled-back brand-new file must be removed, not left with its new content"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_rollback_when_error_count_does_not_regress() {
+        let dir = testsupport::unique_temp_dir("mev-no-rollback-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("artifact.json");
+        std::fs::write(&target, "prior content").unwrap();
+
+        let plan = single_action_plan(target.clone(), "new content");
+        let diags = apply_with_rollback_on_regression(&plan, || Ok(3)).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "new content",
+            "an unchanged error count must not roll back the write"
+        );
+        assert!(diags.iter().any(|d| d.locator == "I_EMIT_WROTE"));
+        assert!(diags.iter().all(|d| d.locator != "E_EMIT_ROLLBACK"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_plan_never_calls_count_errors() {
+        let plan = brain::emit::EmitPlan::default();
+        let diags = apply_with_rollback_on_regression(&plan, || {
+            panic!("count_errors must not be called for a plan with no actions")
+        })
+        .unwrap();
+        assert!(diags.is_empty());
     }
 }

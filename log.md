@@ -19,6 +19,24 @@ timestamp: "2026-08-13T12:42:25-03:00"
 
 ## [run: 2026-08-14]
 
+`MV.13.A` (lane files → ordered `(repo, chain)` segments) shipped, full spec, 6/6 tasks, PASS. `mev emit-state` now derives, for every lane file in the corpus, an ordered sequence of `(repo, chain)` segments keyed on block-ID ownership from `state.json`, and attaches `{roadmap, lane, segment, position}` to each block: discovery/parsing across both `planning/roadmaps/<slug>/` and legacy `planning/<slug>/` layouts, following symlinks, excluding `archive/` and `_`-prefixed paths (task 1); ownership-based segmentation — a new segment cuts on every ownership change, non-contiguous repeats stay separate (task 2); a warning diagnostic naming file/line/ID for unresolvable (unknown-to-corpus or ambiguous multi-repo) block IDs, replacing a silent drop (task 3); the `# ORIGIN:` directive attaching to the single next block-ID line and resolving cross-roadmap double-claims — an unannotated or ambiguously-annotated claim is now `E_LANE_DOUBLE_CLAIM`, a resolved one renders once under the executing roadmap carrying `origin_roadmap` (task 4); wired into `emit-state`, writing `planning/lane-segments.json` unconditionally via a new `apply_with_rollback_on_regression` helper that snapshots and restores on a corpus-error-count regression (task 5); full-suite validation clean — `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `cargo nextest run` 1486/1486, `cargo build --release`, `mev check-consumers` no broken consumers (task 6). No genuine spec deviations — all task-level decisions were routine implementation choices within the spec's stated scope; Amendment Log left untouched. Live re-run of `emit-state --write` after this wrap-up surfaced 19 pre-existing `E_LANE_DOUBLE_CLAIM` errors across the real corpus (unannotated cross-roadmap block reuse in `close-the-loop`/`demand-ready`/`operator-in-the-loop`/`operator-surface`/`bastion-ui-brand-and-surfaces` lane files) — this is the new detection working as designed, not a regression; those lane files need `# ORIGIN:` annotations, tracked as follow-up. Next: pull the next item from the master-plan or HQ backlog — `MV.ticket.reference-container-validation` is queued.
+
+```
+b260458 docs: update docs for MV.13.A
+803e8de feat: implement MV.13.A-task5
+2e96e3b feat: implement MV.13.A-task4
+8343d0b feat: implement MV.13.A-task3
+0459dd2 feat: implement MV.13.A-task2
+b8c9901 feat: implement MV.13.A-task1
+```
+
+---
+*Append-only working log. One dated entry per session. Newest entries at the top.*
+
+---
+
+## [run: 2026-08-14]
+
 `ticket-consumer-compile-gate` re-ran tasks 1–7 and closed the spec PASS (the prior same-day run had BAILED only on task 7's environmental failure — no code changes needed this time, just re-running the full validation suite once the concurrent session's `state.json` drift had settled). All seven tasks: a pure `classify(exit_code, stdout, stderr, was_dirty) -> ConsumerOutcome` classifier distinguishing a real compiler break from a stale lockfile via the `"cannot update the lock file"` stderr signature (task 1); `run_consumer`/`run_consumer_with_spawner` — git-dirty short-circuit (asserted via injected spawner), Cargo.lock byte-identity check, and a real `CARGO_TARGET_DIR=<tmp> cargo nextest run --no-run --locked` spawn (task 2); the `mev check-consumers` subcommand wired atop a new, reusable `discover_mev_consumers` in `src/brain/conformance/consumers.rs`, matching path dependencies under both `[dependencies]`/`[dev-dependencies]`/`[build-dependencies]` and `[workspace.dependencies]` (task 3); a live-fleet measurement recording both `bastion` and `engine-rs` as `lockfile-stale` today, lockfiles verified byte-identical across three isolated runs (task 4); the gate wired into HQ's `hooks/pre-push` as an independently-scoped stage 3 (mev-repo-only, fails only on `Broken`, skips gracefully on a stale mev binary or missing `brain.toml`), deliberately not into CI or `harness.json`'s `validation.checks[]` (task 5); `docs/cli.md`/`docs/index.md` documentation of the five outcomes, exit codes, and post-merge wiring rationale (task 6); and task 7's full validation suite — `cargo fmt --check`, `cargo clippy -D warnings`, `NEXTEST_POLICY_OVERRIDE=1 cargo test`, `cargo build --release` — all green, confirming the earlier `fleet_regression::fleet_readiness_is_unchanged_for_blocks_without_a_new_edge` failure was environmental (a concurrent session's uncommitted HQ `state.json` diff), not a regression from this spec's code. `MV.ticket.consumer-compile-gate` flipped `closed` in `state.json`; `mev emit-state --write` regenerated all derived surfaces, 0 errors. Next: pull the next item from the master-plan or HQ backlog — `MV.ticket.consumer-dependency-parity` (the cheap, lockfile-only sibling check) is a natural follow-on.
 
 ```
