@@ -7,12 +7,16 @@
 //! lane file into a derived object another consumer (Task 2's segmentation, `emit-state`)
 //! can act on.
 //!
-//! # Comments are opaque
+//! # Comments are opaque, with one declared exception
 //!
 //! `#` comments are stripped when extracting the block-ID list and are never parsed for
 //! structure — they are prose for the human, not directives for this walker. The single
-//! exception, `# ORIGIN:`, is a declared machine-readable directive and is handled by a
-//! later task (MV.13.A Task 4), not here; this module drops it like any other comment.
+//! exception is `# ORIGIN:` (MV.13.A Task 4, below): a fixed-prefix, declared
+//! machine-readable directive, not prose, and it attaches to exactly the one block-ID
+//! line that immediately follows it — never a run of blocks, however the human-facing
+//! text beside it reads. Any other comment, including one that reads like repo-boundary
+//! prose, changes nothing; see `parse_lane_blocks_repo_boundary_prose_in_comment_is_inert`
+//! below for the pinning test.
 //!
 //! # Both roadmap layouts
 //!
@@ -48,6 +52,10 @@ const NON_ROADMAP_DIR_NAMES: &[&str] = &["archive", "decisions", "artifacts"];
 pub struct LaneBlockRef {
     pub id: String,
     pub line: usize,
+    /// The `# ORIGIN:` directive (Task 4, below) attached to this exact block-ID line,
+    /// if the immediately preceding comment line declared one. `None` for the ordinary
+    /// case — no annotation, not even an implicit "no origin".
+    pub origin: Option<Origin>,
 }
 
 /// One discovered, parsed `lane-*.txt` file.
@@ -241,8 +249,15 @@ fn lane_name_from_file(file_name: &str) -> String {
 /// Parse a lane file's raw content into an ordered block-ID list: `#` comments and blank
 /// lines are stripped, everything else is kept in file order with its 1-based line
 /// number. Never sorts, dedupes, or normalises — file order is execution order.
+///
+/// The one exception to "comments are stripped and ignored": a comment-only line whose
+/// body (after `#` and leading whitespace) starts with the fixed prefix `ORIGIN:` is
+/// parsed as an [`Origin`] directive (Task 4) and attached to the single next block-ID
+/// line. Any other comment — including further prose continuing the same `# ORIGIN:`
+/// annotation, or text that merely *reads* like a directive — is inert.
 pub fn parse_lane_blocks(content: &str) -> Vec<LaneBlockRef> {
     let mut out = Vec::new();
+    let mut pending_origin: Option<Origin> = None;
     for (idx, raw_line) in content.lines().enumerate() {
         let line = idx + 1;
         let before_comment = match raw_line.find('#') {
@@ -251,11 +266,20 @@ pub fn parse_lane_blocks(content: &str) -> Vec<LaneBlockRef> {
         };
         let id = before_comment.trim();
         if id.is_empty() {
+            // Comment-only or blank line. The one thing worth looking at here is the
+            // `# ORIGIN:` directive; everything else is prose and is dropped.
+            if let Some(pos) = raw_line.find('#') {
+                let comment_body = raw_line[pos + 1..].trim_start();
+                if let Some(value) = comment_body.strip_prefix("ORIGIN:") {
+                    pending_origin = Some(Origin::parse(value.trim()));
+                }
+            }
             continue;
         }
         out.push(LaneBlockRef {
             id: id.to_string(),
             line,
+            origin: pending_origin.take(),
         });
     }
     out
@@ -478,6 +502,272 @@ pub fn unresolved_owner_diagnostics(lane_file: &LaneFile, index: &OwnerIndex) ->
         ));
     }
     diags
+}
+
+// ---------------------------------------------------------------------------
+// Double-claim validation and `# ORIGIN:` — MV.13.A Task 4
+// ---------------------------------------------------------------------------
+
+/// The `# ORIGIN:` directive's parsed value — the one comment this module treats as
+/// structure rather than prose. Honoured per base-template D57's two-axis rule: the
+/// block's `roadmap` (Task 2's derivation) is always the *executing* lane — the lane
+/// file the block-ID line physically lives in — and `origin_roadmap` (below) is the
+/// *owning* roadmap this annotation names. The two are never the same field, and a
+/// block is never rendered under both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    /// `# ORIGIN: none` — declared explicitly: this block is not adopted from another
+    /// roadmap (e.g. a standalone chore folded into a lane for scheduling reasons).
+    None,
+    /// `# ORIGIN: <path-or-slug>` — the owning roadmap. The live corpus writes this as
+    /// an absolute path to that roadmap's `roadmap.md`; the slug is the path's parent
+    /// directory name. A bare slug (no `roadmap.md` suffix) is accepted as-is.
+    Roadmap(String),
+}
+
+impl Origin {
+    /// Parse the text after `# ORIGIN:` (already trimmed of the prefix). Only the first
+    /// whitespace-delimited token is machine data — the live corpus continues the
+    /// annotation onto further comment lines of human-facing prose (e.g. "the two
+    /// adopted blocks below — their run-record ledger rows carry..."), which this
+    /// module never reads.
+    fn parse(value: &str) -> Self {
+        let token = value.split_whitespace().next().unwrap_or(value);
+        if token.eq_ignore_ascii_case("none") {
+            Origin::None
+        } else {
+            Origin::Roadmap(roadmap_slug_from_origin_token(token))
+        }
+    }
+}
+
+/// Extract a roadmap slug from an `# ORIGIN:` token. `/path/to/planning/<slug>/roadmap.md`
+/// yields `<slug>`; anything else (already a bare slug, or a differently-shaped path) is
+/// returned trimmed of a trailing `/` and otherwise unchanged — this module does not
+/// require the corpus's one live shape to be the only one it can parse.
+fn roadmap_slug_from_origin_token(token: &str) -> String {
+    let trimmed = token.trim_end_matches('/');
+    let path = Path::new(trimmed);
+    if path.file_name().is_some_and(|f| f == "roadmap.md")
+        && let Some(slug) = path.parent().and_then(|p| p.file_name())
+    {
+        return slug.to_string_lossy().to_string();
+    }
+    trimmed.to_string()
+}
+
+/// One block ID's double-claim resolution: which lane file's claim renders, and the
+/// `origin_roadmap` it carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimResolution {
+    pub id: String,
+    /// The executing claim's roadmap — matches the [`LaneFile::roadmap`] of exactly one
+    /// of the claiming files.
+    pub roadmap: String,
+    pub lane: String,
+    pub line: usize,
+    /// The owning roadmap named by the executing claim's `# ORIGIN:` annotation.
+    /// `None` when the annotation was `# ORIGIN: none`.
+    pub origin_roadmap: Option<String>,
+}
+
+/// Resolve every block ID claimed by more than one **distinct roadmap** across
+/// `lane_files`, honouring `# ORIGIN:` per D57's two-axis rule.
+///
+/// An ID claimed by only one roadmap — however many lane files or lines within that one
+/// roadmap repeat it — is not a double-claim and produces neither a resolution nor a
+/// diagnostic; this function only looks at cross-roadmap claims.
+///
+/// - **Unannotated double-claim** (no claiming instance of this ID carries `# ORIGIN:`):
+///   an `E_LANE_DOUBLE_CLAIM` error diagnostic naming every claiming file, line and
+///   roadmap, and **no** [`ClaimResolution`]. Never resolved first-wins — the roadmap's
+///   Q5 rule renders a block under exactly one executing roadmap, and guessing between
+///   two would silently misstate both lanes' remaining depth.
+/// - **Ambiguous double-claim** (more than one claiming instance carries `# ORIGIN:`):
+///   also an `E_LANE_DOUBLE_CLAIM` error — two "this is where it's adopted"
+///   declarations for one block is the same ambiguity, only authored instead of
+///   implicit, so it gets the same treatment: no resolution, never first-wins.
+/// - **Resolved double-claim** (exactly one claiming instance carries `# ORIGIN:`): one
+///   [`ClaimResolution`] naming that instance as executing, and no diagnostic.
+pub fn resolve_double_claims(lane_files: &[LaneFile]) -> (Vec<ClaimResolution>, Vec<Diagnostic>) {
+    let mut claims: HashMap<&str, Vec<(usize, &LaneBlockRef)>> = HashMap::new();
+    for (fi, lf) in lane_files.iter().enumerate() {
+        for b in &lf.blocks {
+            claims.entry(b.id.as_str()).or_default().push((fi, b));
+        }
+    }
+
+    let mut ids: Vec<&str> = claims.keys().copied().collect();
+    ids.sort_unstable(); // deterministic diagnostic/resolution order
+
+    let mut resolutions = Vec::new();
+    let mut diags = Vec::new();
+
+    for id in ids {
+        let refs = &claims[id];
+        let mut distinct_roadmaps: Vec<&str> = Vec::new();
+        for (fi, _) in refs {
+            let r = lane_files[*fi].roadmap.as_str();
+            if !distinct_roadmaps.contains(&r) {
+                distinct_roadmaps.push(r);
+            }
+        }
+        if distinct_roadmaps.len() <= 1 {
+            continue; // one roadmap owns every claim — not a double-claim.
+        }
+
+        let annotated: Vec<&(usize, &LaneBlockRef)> =
+            refs.iter().filter(|(_, b)| b.origin.is_some()).collect();
+
+        let describe = |claimants: &[&(usize, &LaneBlockRef)]| -> String {
+            claimants
+                .iter()
+                .map(|(fi, b)| {
+                    format!(
+                        "{} (roadmap '{}', line {})",
+                        lane_files[*fi].path.display(),
+                        lane_files[*fi].roadmap,
+                        b.line
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+
+        match annotated.len() {
+            0 => {
+                let all: Vec<&(usize, &LaneBlockRef)> = refs.iter().collect();
+                diags.push(Diagnostic::error(
+                    &lane_files[refs[0].0].path,
+                    "E_LANE_DOUBLE_CLAIM",
+                    format!(
+                        "block '{id}' is claimed by {} different roadmaps with no '# ORIGIN:' \
+                         annotation resolving the ambiguity — never resolved first-wins: {}",
+                        distinct_roadmaps.len(),
+                        describe(&all)
+                    ),
+                ));
+            }
+            1 => {
+                let (fi, b) = *annotated[0];
+                let origin_roadmap = match b.origin.as_ref().expect("filtered on is_some") {
+                    Origin::None => None,
+                    Origin::Roadmap(slug) => Some(slug.clone()),
+                };
+                resolutions.push(ClaimResolution {
+                    id: id.to_string(),
+                    roadmap: lane_files[fi].roadmap.clone(),
+                    lane: lane_files[fi].lane.clone(),
+                    line: b.line,
+                    origin_roadmap,
+                });
+            }
+            _ => {
+                diags.push(Diagnostic::error(
+                    &lane_files[annotated[0].0].path,
+                    "E_LANE_DOUBLE_CLAIM",
+                    format!(
+                        "block '{id}' carries '# ORIGIN:' in more than one claiming lane file \
+                         — ambiguous which is executing, never resolved first-wins: {}",
+                        describe(&annotated)
+                    ),
+                ));
+            }
+        }
+    }
+
+    (resolutions, diags)
+}
+
+/// One block's final derived position, corpus-wide: Task 2's `{roadmap, lane, segment,
+/// position}` plus `origin_roadmap` (`None` unless this block was a resolved
+/// double-claim).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedBlockPosition {
+    pub roadmap: String,
+    pub lane: String,
+    pub repo: String,
+    pub id: String,
+    pub line: usize,
+    pub segment: usize,
+    pub position: usize,
+    pub origin_roadmap: Option<String>,
+}
+
+/// Derive `{roadmap, lane, segment, position}` for every block across `lane_files`,
+/// resolving double-claims (via [`resolve_double_claims`]) before segmenting each file.
+///
+/// A block ID that is an **unresolved** double-claim (unannotated or ambiguously
+/// annotated) is excluded from every claiming file's derivation entirely — Task 3's
+/// "never guess" rule extended to double-claims, since the diagnostic already explains
+/// why and silently picking one anyway would defeat it. A **resolved** double-claim
+/// renders only from its executing `(roadmap, lane)`; every other claiming file skips
+/// it, so it is never rendered — and never counted — twice.
+pub fn derive_lane_positions(
+    lane_files: &[LaneFile],
+    mut resolve_owner: impl FnMut(&str) -> Option<String>,
+) -> (Vec<DerivedBlockPosition>, Vec<Diagnostic>) {
+    let (resolutions, diags) = resolve_double_claims(lane_files);
+
+    // Distinct roadmaps per id across the whole corpus — matches resolve_double_claims'
+    // own computation, so a block excluded here is exactly a block that function saw as
+    // a double-claim.
+    let mut claim_roadmaps: HashMap<&str, Vec<&str>> = HashMap::new();
+    for lf in lane_files {
+        for b in &lf.blocks {
+            let v = claim_roadmaps.entry(b.id.as_str()).or_default();
+            if !v.contains(&lf.roadmap.as_str()) {
+                v.push(lf.roadmap.as_str());
+            }
+        }
+    }
+
+    let resolved_by_id: HashMap<&str, &ClaimResolution> =
+        resolutions.iter().map(|r| (r.id.as_str(), r)).collect();
+
+    let mut out = Vec::new();
+    for lf in lane_files {
+        let allowed: Vec<LaneBlockRef> = lf
+            .blocks
+            .iter()
+            .filter(|b| {
+                let distinct_roadmaps =
+                    claim_roadmaps.get(b.id.as_str()).map(Vec::len).unwrap_or(1);
+                if distinct_roadmaps <= 1 {
+                    return true; // not a double-claim at all
+                }
+                match resolved_by_id.get(b.id.as_str()) {
+                    Some(res) => res.roadmap == lf.roadmap && res.lane == lf.lane,
+                    None => false, // unresolved double-claim: excluded everywhere
+                }
+            })
+            .cloned()
+            .collect();
+
+        let filtered = LaneFile {
+            roadmap: lf.roadmap.clone(),
+            lane: lf.lane.clone(),
+            path: lf.path.clone(),
+            blocks: allowed,
+        };
+        for p in segment_lane_file(&filtered, &mut resolve_owner) {
+            let origin_roadmap = resolved_by_id
+                .get(p.id.as_str())
+                .and_then(|r| r.origin_roadmap.clone());
+            out.push(DerivedBlockPosition {
+                roadmap: p.roadmap,
+                lane: p.lane,
+                repo: p.repo,
+                id: p.id,
+                line: p.line,
+                segment: p.segment,
+                position: p.position,
+                origin_roadmap,
+            });
+        }
+    }
+
+    (out, diags)
 }
 
 #[cfg(test)]
@@ -738,6 +1028,7 @@ OR.ticket.publishable-eval-report
             .map(|(i, id)| LaneBlockRef {
                 id: id.to_string(),
                 line: i + 1,
+                origin: None,
             })
             .collect()
     }
@@ -986,5 +1277,273 @@ OR.ticket.publishable-eval-report
 
         let diags = unresolved_owner_diagnostics(&lane_file, &index);
         assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+    }
+
+    // -- Task 4: double-claim validation error and `# ORIGIN:` -----------------------
+
+    #[test]
+    fn parse_lane_blocks_origin_none_attaches_to_next_block_only() {
+        let content = "\
+HQ.ticket.before
+
+# ORIGIN: none -- standalone chore, track \"Chores\" (wave 462), not a roadmap block.
+#   Adopted into this lane by the operator, sequenced here for scheduling reasons only.
+HQ.chore.adopted
+
+HQ.ticket.after
+";
+        let blocks = parse_lane_blocks(content);
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].id, "HQ.ticket.before");
+        assert_eq!(blocks[0].origin, None);
+        assert_eq!(blocks[1].id, "HQ.chore.adopted");
+        assert_eq!(blocks[1].origin, Some(Origin::None));
+        // The annotation must not leak onto the block after the one it targets.
+        assert_eq!(blocks[2].id, "HQ.ticket.after");
+        assert_eq!(blocks[2].origin, None);
+    }
+
+    #[test]
+    fn parse_lane_blocks_origin_roadmap_path_extracts_slug() {
+        let content = "\
+# ORIGIN: /Users/brandon/Dev/agentic-portfolio/planning/operator-in-the-loop/roadmap.md
+#         (the adopted block below -- its run-record ledger row carries
+#          origin_roadmap: operator-in-the-loop per D57 section 3)
+OK.ticket.operator-edge-types
+
+MV.ticket.operator-edge-graph
+";
+        let blocks = parse_lane_blocks(content);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            blocks[0].origin,
+            Some(Origin::Roadmap("operator-in-the-loop".to_string()))
+        );
+        // Only the single next block gets it, even though the human-facing prose talks
+        // about it as if it could cover more.
+        assert_eq!(blocks[1].origin, None);
+    }
+
+    #[test]
+    fn parse_lane_blocks_repo_boundary_prose_in_comment_is_inert() {
+        // AC 4: no comment other than `# ORIGIN:` is parsed for structure. Prose that
+        // reads exactly like a directive must change nothing.
+        let content = "\
+# repo: fake-owner claims everything below this line
+# ROADMAP-BOUNDARY: treat the rest of this file as belonging to repoX
+MV.ticket.one
+BT.ticket.two
+";
+        let blocks = parse_lane_blocks(content);
+        let ids: Vec<&str> = blocks.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, vec!["MV.ticket.one", "BT.ticket.two"]);
+        assert!(blocks.iter().all(|b| b.origin.is_none()));
+    }
+
+    fn lane_file(roadmap: &str, lane: &str, path: &str, blocks: Vec<LaneBlockRef>) -> LaneFile {
+        LaneFile {
+            roadmap: roadmap.to_string(),
+            lane: lane.to_string(),
+            path: PathBuf::from(path),
+            blocks,
+        }
+    }
+
+    #[test]
+    fn resolve_double_claims_single_roadmap_reuse_is_not_a_double_claim() {
+        // The same ID repeated across two lane files that both belong to ONE roadmap is
+        // ordinary reuse, not a double-claim — resolve_double_claims must ignore it.
+        let files = vec![
+            lane_file(
+                "close-the-loop",
+                "substrate",
+                "lane-substrate.txt",
+                refs(&["MV.ticket.shared"]),
+            ),
+            lane_file(
+                "close-the-loop",
+                "cockpit",
+                "lane-cockpit.txt",
+                refs(&["MV.ticket.shared"]),
+            ),
+        ];
+        let (resolutions, diags) = resolve_double_claims(&files);
+        assert!(
+            resolutions.is_empty(),
+            "expected no resolutions, got {resolutions:?}"
+        );
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+    }
+
+    #[test]
+    fn resolve_double_claims_unannotated_cross_roadmap_claim_is_an_error() {
+        let files = vec![
+            lane_file(
+                "operator-surface",
+                "substrate",
+                "planning/operator-surface/lane-substrate.txt",
+                refs(&["OK.ticket.operator-edge-types"]),
+            ),
+            lane_file(
+                "operator-in-the-loop",
+                "brain",
+                "planning/operator-in-the-loop/lane-brain.txt",
+                refs(&["OK.ticket.operator-edge-types"]),
+            ),
+        ];
+        let (resolutions, diags) = resolve_double_claims(&files);
+        assert!(
+            resolutions.is_empty(),
+            "an unannotated double-claim must never resolve, got {resolutions:?}"
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic, got {diags:?}"
+        );
+        assert_eq!(diags[0].severity, crate::Severity::Error);
+        assert_eq!(diags[0].locator, "E_LANE_DOUBLE_CLAIM");
+        assert!(diags[0].message.contains("OK.ticket.operator-edge-types"));
+        assert!(diags[0].message.contains("operator-surface"));
+        assert!(diags[0].message.contains("operator-in-the-loop"));
+    }
+
+    #[test]
+    fn resolve_double_claims_origin_resolves_to_the_annotated_claim() {
+        let mut annotated = refs(&["OK.ticket.operator-edge-types"]);
+        annotated[0].origin = Some(Origin::Roadmap("operator-in-the-loop".to_string()));
+
+        let files = vec![
+            lane_file(
+                "operator-surface",
+                "substrate",
+                "planning/operator-surface/lane-substrate.txt",
+                annotated,
+            ),
+            lane_file(
+                "operator-in-the-loop",
+                "brain",
+                "planning/operator-in-the-loop/lane-brain.txt",
+                refs(&["OK.ticket.operator-edge-types"]),
+            ),
+        ];
+        let (resolutions, diags) = resolve_double_claims(&files);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        assert_eq!(
+            resolutions.len(),
+            1,
+            "expected one resolution, got {resolutions:?}"
+        );
+        assert_eq!(resolutions[0].id, "OK.ticket.operator-edge-types");
+        // Executes under operator-surface (the annotated claim), not operator-in-the-loop.
+        assert_eq!(resolutions[0].roadmap, "operator-surface");
+        assert_eq!(resolutions[0].lane, "substrate");
+        assert_eq!(
+            resolutions[0].origin_roadmap,
+            Some("operator-in-the-loop".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_double_claims_both_annotated_is_ambiguous_error() {
+        let mut a = refs(&["MV.ticket.shared"]);
+        a[0].origin = Some(Origin::Roadmap("roadmap-b".to_string()));
+        let mut b = refs(&["MV.ticket.shared"]);
+        b[0].origin = Some(Origin::Roadmap("roadmap-a".to_string()));
+
+        let files = vec![
+            lane_file("roadmap-a", "lane-a", "lane-a.txt", a),
+            lane_file("roadmap-b", "lane-b", "lane-b.txt", b),
+        ];
+        let (resolutions, diags) = resolve_double_claims(&files);
+        assert!(
+            resolutions.is_empty(),
+            "two competing ORIGIN annotations must never resolve, got {resolutions:?}"
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].severity, crate::Severity::Error);
+        assert_eq!(diags[0].locator, "E_LANE_DOUBLE_CLAIM");
+    }
+
+    #[test]
+    fn derive_lane_positions_resolved_double_claim_renders_once_with_origin_roadmap() {
+        let mut annotated = refs(&["OK.ticket.operator-edge-types"]);
+        annotated[0].origin = Some(Origin::Roadmap("operator-in-the-loop".to_string()));
+
+        let files = vec![
+            lane_file(
+                "operator-surface",
+                "substrate",
+                "planning/operator-surface/lane-substrate.txt",
+                annotated,
+            ),
+            lane_file(
+                "operator-in-the-loop",
+                "brain",
+                "planning/operator-in-the-loop/lane-brain.txt",
+                refs(&["OK.ticket.operator-edge-types"]),
+            ),
+        ];
+        let (positions, diags) = derive_lane_positions(&files, |_| Some("okf-core".to_string()));
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        assert_eq!(
+            positions.len(),
+            1,
+            "the block must render exactly once, got {positions:?}"
+        );
+        assert_eq!(positions[0].roadmap, "operator-surface");
+        assert_eq!(positions[0].lane, "substrate");
+        assert_eq!(
+            positions[0].origin_roadmap,
+            Some("operator-in-the-loop".to_string())
+        );
+    }
+
+    #[test]
+    fn derive_lane_positions_unannotated_double_claim_renders_nowhere() {
+        let files = vec![
+            lane_file(
+                "operator-surface",
+                "substrate",
+                "planning/operator-surface/lane-substrate.txt",
+                refs(&["OK.ticket.operator-edge-types"]),
+            ),
+            lane_file(
+                "operator-in-the-loop",
+                "brain",
+                "planning/operator-in-the-loop/lane-brain.txt",
+                refs(&["OK.ticket.operator-edge-types"]),
+            ),
+        ];
+        let (positions, diags) = derive_lane_positions(&files, |_| Some("okf-core".to_string()));
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected the double-claim error, got {diags:?}"
+        );
+        assert!(
+            positions.is_empty(),
+            "an unresolved double-claim must render in neither lane, got {positions:?}"
+        );
+    }
+
+    #[test]
+    fn derive_lane_positions_ordinary_blocks_unaffected_by_double_claim_machinery() {
+        let files = vec![lane_file(
+            "close-the-loop",
+            "substrate",
+            "lane-substrate.txt",
+            refs(&["MV.ticket.a", "BT.ticket.b"]),
+        )];
+        let (positions, diags) = derive_lane_positions(&files, |id| {
+            if id.starts_with("MV") {
+                Some("mev".to_string())
+            } else {
+                Some("base-template".to_string())
+            }
+        });
+        assert!(diags.is_empty());
+        assert_eq!(positions.len(), 2);
+        assert!(positions.iter().all(|p| p.origin_roadmap.is_none()));
     }
 }
