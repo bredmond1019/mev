@@ -28,10 +28,11 @@
 //! encoded — nothing in `state.json` mirrors it. The `lane-*.txt` glob must never widen to
 //! catch it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::Diagnostic;
+use crate::brain::state::{StateFile, StateSource};
 
 /// Name of the directory holding roadmaps under the current (non-legacy) layout.
 const ROADMAPS_DIR: &str = "roadmaps";
@@ -258,6 +259,176 @@ pub fn parse_lane_blocks(content: &str) -> Vec<LaneBlockRef> {
         });
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Ownership resolution and segmentation — MV.13.A Task 2
+// ---------------------------------------------------------------------------
+
+/// Corpus-wide index from a literal block-ID string to every repo slug that owns a
+/// block by that exact ID, built from `state.json`'s `tracks[].blocks[]` across every
+/// loaded file. State-graph keys are `repo:id` (see [`crate::brain::block_graph`]), so
+/// this index groups by repo *before* collapsing to a single owner — a bare ID that
+/// happens to be authored under two repos is a legitimate corpus state, not a bug, and
+/// [`resolve_owner`] refuses to guess between them.
+pub type OwnerIndex = HashMap<String, Vec<String>>;
+
+/// Build the corpus-wide [`OwnerIndex`] from every loaded `state.json`.
+///
+/// `files` is the same `(StateSource, StateFile)` pairing [`crate::brain::state::discover_state_files`]
+/// plus `load_state` produce for the whole corpus — this function does no discovery or
+/// I/O of its own.
+pub fn build_owner_index(files: &[(StateSource, StateFile)]) -> OwnerIndex {
+    let mut index: OwnerIndex = HashMap::new();
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let repos = index.entry(block.id.clone()).or_default();
+                if !repos.iter().any(|r| r == &src.repo_slug) {
+                    repos.push(src.repo_slug.clone());
+                }
+            }
+        }
+    }
+    index
+}
+
+/// Resolve a bare lane-file block ID to its single owning repo slug via `index`.
+///
+/// Returns `None` — never a guess — when the ID resolves to **zero** repos (unknown to
+/// the corpus; Task 3 turns this into a diagnostic) or to **more than one** (a bare ID
+/// legitimately reused across repos; resolving that ambiguity would require the actual
+/// `repo:id` graph key, which a lane file's bare ID does not carry). Nearest-neighbour,
+/// "the file's other blocks", or directory-based guessing are explicitly ruled out by
+/// the spec — this function embodies that by returning `None` rather than picking one.
+pub fn resolve_owner<'a>(index: &'a OwnerIndex, id: &str) -> Option<&'a str> {
+    match index.get(id) {
+        Some(repos) if repos.len() == 1 => Some(repos[0].as_str()),
+        _ => None,
+    }
+}
+
+/// One block inside a [`LaneSegment`], carrying its position within that segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneSegmentBlock {
+    pub id: String,
+    /// 1-based source line, carried through from [`LaneBlockRef`].
+    pub line: usize,
+    /// 0-based index of this block within its segment — the second half of the
+    /// `{segment, position}` pair. Chosen zero-based to match [`LaneSegment::segment`]
+    /// and every other zero-based index already in this derivation (`topo_index`,
+    /// vec indices generally); documented once here, not re-chosen per call site.
+    pub position: usize,
+}
+
+/// One contiguous run of a lane's blocks all owned by the same repo — the `(repo,
+/// chain)` segment this task derives. **Derived at emit time; never authored** — a lane
+/// file stays the authoring surface and nothing here is written back into one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneSegment {
+    pub repo: String,
+    /// 0-based index of this segment within its lane.
+    pub segment: usize,
+    /// Ordered, in file order — never sorted, deduped, or normalised.
+    pub blocks: Vec<LaneSegmentBlock>,
+}
+
+impl LaneSegment {
+    /// The segment's first block — the block `MV.13.B`'s (deferred) frontier
+    /// computation will read. Exposed cleanly now rather than foreclosed later;
+    /// `MV.13.A` itself does nothing with it beyond this accessor.
+    pub fn head(&self) -> Option<&LaneSegmentBlock> {
+        self.blocks.first()
+    }
+}
+
+/// Segment an ordered block-ID list into `(repo, chain)` runs by cutting a new segment
+/// at every ownership change, via `resolve` (typically [`resolve_owner`] over a
+/// corpus-wide [`OwnerIndex`]).
+///
+/// Order is preserved exactly, within and across segments — a repo appearing twice
+/// **non-contiguously** (e.g. `A, B, A`) yields **three** segments, never one merged
+/// segment; that non-contiguous case is what separates this from a plain `group_by`.
+///
+/// A block whose owner does not resolve (`resolve` returns `None`) is **omitted** from
+/// every segment — it contributes no cut and appears in no segment's `blocks`. Task 3
+/// turns each such omission into a diagnostic; this function only segments what it can
+/// attribute, and never guesses to keep a block in.
+pub fn segment_lane_blocks(
+    blocks: &[LaneBlockRef],
+    mut resolve: impl FnMut(&str) -> Option<String>,
+) -> Vec<LaneSegment> {
+    let mut segments: Vec<LaneSegment> = Vec::new();
+    for block in blocks {
+        let Some(repo) = resolve(&block.id) else {
+            continue;
+        };
+        let starts_new_segment = match segments.last() {
+            Some(seg) => seg.repo != repo,
+            None => true,
+        };
+        if starts_new_segment {
+            segments.push(LaneSegment {
+                repo,
+                segment: segments.len(),
+                blocks: Vec::new(),
+            });
+        }
+        let seg = segments
+            .last_mut()
+            .expect("just pushed or matched an existing segment above");
+        let position = seg.blocks.len();
+        seg.blocks.push(LaneSegmentBlock {
+            id: block.id.clone(),
+            line: block.line,
+            position,
+        });
+    }
+    segments
+}
+
+/// One block, positioned within its lane after ownership-based segmentation —
+/// `{roadmap, lane, segment, position}`, the per-block derived record this task
+/// produces. Derived at emit time; authored nowhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneBlockPosition {
+    pub roadmap: String,
+    pub lane: String,
+    pub repo: String,
+    pub id: String,
+    pub line: usize,
+    pub segment: usize,
+    pub position: usize,
+}
+
+/// Segment one [`LaneFile`]'s blocks (via [`segment_lane_blocks`]) and flatten the
+/// result into one [`LaneBlockPosition`] per resolvable block, each carrying its
+/// owning lane file's `roadmap`/`lane`.
+pub fn segment_lane_file(
+    lane_file: &LaneFile,
+    resolve: impl FnMut(&str) -> Option<String>,
+) -> Vec<LaneBlockPosition> {
+    segment_lane_blocks(&lane_file.blocks, resolve)
+        .into_iter()
+        .flat_map(|seg| {
+            let LaneSegment {
+                repo,
+                segment,
+                blocks,
+            } = seg;
+            let roadmap = lane_file.roadmap.clone();
+            let lane = lane_file.lane.clone();
+            blocks.into_iter().map(move |b| LaneBlockPosition {
+                roadmap: roadmap.clone(),
+                lane: lane.clone(),
+                repo: repo.clone(),
+                id: b.id,
+                line: b.line,
+                segment,
+                position: b.position,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -508,5 +679,181 @@ OR.ticket.publishable-eval-report
                 "OR.ticket.publishable-eval-report",
             ]
         );
+    }
+
+    // -- Task 2: ownership-based segmentation --------------------------------------
+
+    fn refs(ids: &[&str]) -> Vec<LaneBlockRef> {
+        ids.iter()
+            .enumerate()
+            .map(|(i, id)| LaneBlockRef {
+                id: id.to_string(),
+                line: i + 1,
+            })
+            .collect()
+    }
+
+    /// A resolver closure over a fixed `id -> repo` table, for tests that don't need
+    /// the full corpus-wide [`OwnerIndex`] machinery.
+    fn table_resolver(
+        table: &'static [(&'static str, &'static str)],
+    ) -> impl FnMut(&str) -> Option<String> {
+        move |id: &str| {
+            table
+                .iter()
+                .find(|(k, _)| *k == id)
+                .map(|(_, repo)| repo.to_string())
+        }
+    }
+
+    #[test]
+    fn build_owner_index_groups_by_repo_and_flags_reuse() {
+        let alpha = StateSource {
+            repo_slug: "alpha".to_string(),
+            abs_path: PathBuf::from("alpha/planning/state.json"),
+            expected_kind: "project",
+        };
+        let beta = StateSource {
+            repo_slug: "beta".to_string(),
+            abs_path: PathBuf::from("beta/planning/state.json"),
+            expected_kind: "project",
+        };
+        let alpha_file: StateFile = serde_json::from_str(
+            r#"{"repo":"alpha","kind":"project","updated":"2026-08-14","tracks":[
+                {"title":"t","blocks":[{"id":"A.one","title":"x","status":"open"}]}
+            ]}"#,
+        )
+        .unwrap();
+        let beta_file: StateFile = serde_json::from_str(
+            r#"{"repo":"beta","kind":"project","updated":"2026-08-14","tracks":[
+                {"title":"t","blocks":[
+                    {"id":"B.one","title":"y","status":"open"},
+                    {"id":"SHARED.id","title":"z","status":"open"}
+                ]}
+            ]}"#,
+        )
+        .unwrap();
+        let gamma = StateSource {
+            repo_slug: "gamma".to_string(),
+            abs_path: PathBuf::from("gamma/planning/state.json"),
+            expected_kind: "project",
+        };
+        let gamma_file: StateFile = serde_json::from_str(
+            r#"{"repo":"gamma","kind":"project","updated":"2026-08-14","tracks":[
+                {"title":"t","blocks":[{"id":"SHARED.id","title":"w","status":"open"}]}
+            ]}"#,
+        )
+        .unwrap();
+
+        let files = vec![(alpha, alpha_file), (beta, beta_file), (gamma, gamma_file)];
+        let index = build_owner_index(&files);
+
+        assert_eq!(resolve_owner(&index, "A.one"), Some("alpha"));
+        assert_eq!(resolve_owner(&index, "B.one"), Some("beta"));
+        // Reused across two repos — never guessed, resolves to None.
+        assert_eq!(resolve_owner(&index, "SHARED.id"), None);
+        // Unknown to the corpus entirely — also None (Task 3's diagnostic case).
+        assert_eq!(resolve_owner(&index, "NOPE.id"), None);
+    }
+
+    #[test]
+    fn segment_lane_blocks_cuts_at_every_ownership_change() {
+        let blocks = refs(&["A.1", "A.2", "B.1", "C.1", "C.2", "C.3"]);
+        let segments = segment_lane_blocks(
+            &blocks,
+            table_resolver(&[
+                ("A.1", "repoA"),
+                ("A.2", "repoA"),
+                ("B.1", "repoB"),
+                ("C.1", "repoC"),
+                ("C.2", "repoC"),
+                ("C.3", "repoC"),
+            ]),
+        );
+
+        assert_eq!(segments.len(), 3, "expected 3 segments, got {segments:?}");
+        assert_eq!(segments[0].repo, "repoA");
+        assert_eq!(segments[0].segment, 0);
+        assert_eq!(segments[0].blocks.len(), 2);
+        assert_eq!(segments[0].blocks[0].position, 0);
+        assert_eq!(segments[0].blocks[1].position, 1);
+        assert_eq!(segments[0].head().unwrap().id, "A.1");
+
+        assert_eq!(segments[1].repo, "repoB");
+        assert_eq!(segments[1].segment, 1);
+        assert_eq!(segments[1].blocks.len(), 1);
+
+        assert_eq!(segments[2].repo, "repoC");
+        assert_eq!(segments[2].segment, 2);
+        assert_eq!(segments[2].blocks.len(), 3);
+        assert_eq!(segments[2].blocks[2].position, 2);
+    }
+
+    #[test]
+    fn segment_lane_blocks_non_contiguous_repeat_is_two_segments_not_group_by() {
+        // A, B, A must yield THREE segments — the case that separates this from a
+        // plain group_by, which would merge both `A` runs into one.
+        let blocks = refs(&["A.1", "B.1", "A.2"]);
+        let segments = segment_lane_blocks(
+            &blocks,
+            table_resolver(&[("A.1", "repoA"), ("B.1", "repoB"), ("A.2", "repoA")]),
+        );
+
+        assert_eq!(segments.len(), 3, "expected 3 segments, got {segments:?}");
+        assert_eq!(segments[0].repo, "repoA");
+        assert_eq!(segments[0].blocks[0].id, "A.1");
+        assert_eq!(segments[1].repo, "repoB");
+        assert_eq!(segments[1].blocks[0].id, "B.1");
+        assert_eq!(segments[2].repo, "repoA");
+        assert_eq!(segments[2].blocks[0].id, "A.2");
+        // The two `repoA` segments are NOT merged: each keeps its own 0-based
+        // position, and there are two separate segment indices for the same repo.
+        assert_eq!(segments[0].segment, 0);
+        assert_eq!(segments[2].segment, 2);
+    }
+
+    #[test]
+    fn segment_lane_blocks_omits_unresolvable_ids_without_aborting() {
+        let blocks = refs(&["A.1", "GHOST.id", "A.2"]);
+        let segments = segment_lane_blocks(
+            &blocks,
+            table_resolver(&[("A.1", "repoA"), ("A.2", "repoA")]),
+        );
+
+        // The unresolvable block contributes no cut and appears in no segment; the
+        // two resolvable blocks still land in one contiguous repoA segment.
+        assert_eq!(segments.len(), 1, "expected 1 segment, got {segments:?}");
+        assert_eq!(segments[0].blocks.len(), 2);
+        let ids: Vec<&str> = segments[0].blocks.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, vec!["A.1", "A.2"]);
+    }
+
+    #[test]
+    fn segment_lane_file_attaches_roadmap_and_lane_to_every_position() {
+        let lane_file = LaneFile {
+            roadmap: "close-the-loop".to_string(),
+            lane: "substrate".to_string(),
+            path: PathBuf::from("planning/close-the-loop/lane-substrate.txt"),
+            blocks: refs(&["A.1", "B.1", "B.2"]),
+        };
+        let positions = segment_lane_file(
+            &lane_file,
+            table_resolver(&[("A.1", "repoA"), ("B.1", "repoB"), ("B.2", "repoB")]),
+        );
+
+        assert_eq!(positions.len(), 3);
+        for p in &positions {
+            assert_eq!(p.roadmap, "close-the-loop");
+            assert_eq!(p.lane, "substrate");
+        }
+        assert_eq!(positions[0].repo, "repoA");
+        assert_eq!(positions[0].segment, 0);
+        assert_eq!(positions[0].position, 0);
+        assert_eq!(positions[1].repo, "repoB");
+        assert_eq!(positions[1].segment, 1);
+        assert_eq!(positions[1].position, 0);
+        assert_eq!(positions[2].repo, "repoB");
+        assert_eq!(positions[2].segment, 1);
+        assert_eq!(positions[2].position, 1);
     }
 }
