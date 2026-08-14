@@ -13,6 +13,7 @@
 //! set-parity check reuses, and the [`run_checks`] driver.
 
 mod backlog;
+pub(crate) mod consumers;
 mod epics_index;
 mod project_cache;
 mod sibling;

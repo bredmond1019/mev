@@ -735,6 +735,49 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Compile every path-dependent consumer's test targets against the working mev and
+    /// report the true outcome per consumer (`ticket-consumer-compile-gate`).
+    ///
+    /// Discovers consumers the same way `mev conformance`'s `consumer-dependency-parity`
+    /// check does (`brain::conformance::consumers::discover_mev_consumers` — never a second
+    /// discovery implementation), then for each one spawns exactly
+    /// `CARGO_TARGET_DIR=<fresh temp dir> cargo nextest run --no-run --locked --manifest-path
+    /// <consumer>/Cargo.toml` and classifies the result. Every flag on that command is
+    /// load-bearing: `--no-run` compiles test targets without executing them (the break class
+    /// this exists for lives only in test fixtures, invisible to `cargo build`); `--locked`
+    /// refuses to silently rewrite a `Cargo.lock` this repo does not own; the fresh
+    /// `CARGO_TARGET_DIR` avoids contending with that consumer's own build lane.
+    ///
+    /// Four outcomes, each with a distinct operator action:
+    ///   pass           — the consumer compiles clean against this mev; nothing to do.
+    ///   broken         — a genuine type/API break; fix the named sites in that consumer repo.
+    ///                    This is the only outcome that fails the run.
+    ///   lockfile-stale — the consumer's Cargo.lock is stale, not a code break; refresh that
+    ///                    consumer's lockfile. Reported prominently but does NOT fail the run.
+    ///   skipped-dirty  — the consumer has uncommitted changes, so its result is not evidence
+    ///                    about mev's change either way; commit or stash there and re-run.
+    ///                    Does NOT fail the run.
+    ///   not-evaluable  — the failure did not match a known signature (or the run's inputs
+    ///                    could not be gathered at all, e.g. Cargo.lock moved despite
+    ///                    --locked); reported with a reason, never guessed as broken. Does NOT
+    ///                    fail the run.
+    ///
+    /// Exit codes:
+    ///   0 — every consumer reported pass, lockfile-stale, skipped-dirty, or not-evaluable
+    ///   1 — at least one consumer reported broken, brain.toml not found/unreadable, or
+    ///       --consumer named a slug that is not a discovered consumer
+    CheckConsumers {
+        /// Path to search from when locating brain.toml (walks up to find it).
+        /// Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Run exactly one discovered consumer by slug instead of every consumer.
+        #[arg(long)]
+        consumer: Option<String>,
+        /// Emit the per-consumer results as compact JSON instead of a human summary.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1407,6 +1450,50 @@ fn print_carryover_report(report: &mev::CarryoverReport) {
             "  note: a finding_id used in only one repo is usually a typo that silently failed \
              to group with its intended cross-repo match."
         );
+    }
+}
+
+/// Human-readable, one-block-per-consumer summary for `mev check-consumers`'s default
+/// (non-`--json`) output. Names the outcome AND the operator's next action for it — the
+/// distinction the whole ticket exists to keep loud (`Broken` vs `LockfileStale` vs
+/// `SkippedDirty` are not interchangeable "it's red" states).
+fn print_check_consumers_report(results: &[mev::consumers::ConsumerResult]) {
+    use mev::consumers::ConsumerOutcome;
+
+    for result in results {
+        match &result.outcome {
+            ConsumerOutcome::Pass => {
+                println!("\n{} [PASS]", result.slug);
+            }
+            ConsumerOutcome::Broken { errors } => {
+                println!("\n{} [BROKEN]", result.slug);
+                for e in errors {
+                    println!("    {e}");
+                }
+                println!(
+                    "    next: fix the named sites above in the {} repo",
+                    result.slug
+                );
+            }
+            ConsumerOutcome::LockfileStale => {
+                println!("\n{} [LOCKFILE-STALE]", result.slug);
+                println!(
+                    "    next: refresh {}'s Cargo.lock (bookkeeping, not a code break)",
+                    result.slug
+                );
+            }
+            ConsumerOutcome::SkippedDirty => {
+                println!("\n{} [SKIPPED-DIRTY]", result.slug);
+                println!(
+                    "    next: commit or stash uncommitted work in {} and re-run",
+                    result.slug
+                );
+            }
+            ConsumerOutcome::NotEvaluable { reason } => {
+                println!("\n{} [NOT-EVALUABLE]", result.slug);
+                println!("    reason: {reason}");
+            }
+        }
     }
 }
 
@@ -2270,6 +2357,46 @@ fn main() -> ExitCode {
                         print_conformance_report(&report);
                     }
                     if drift {
+                        ExitCode::FAILURE
+                    } else {
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::CheckConsumers {
+            path,
+            consumer,
+            json,
+        } => {
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match mev::check_consumers(&root, consumer.as_deref()) {
+                Ok(results) => {
+                    let broken = results.iter().any(|r| {
+                        matches!(r.outcome, mev::consumers::ConsumerOutcome::Broken { .. })
+                    });
+                    if json || cli.json {
+                        match serde_json::to_string(&results) {
+                            Ok(s) => println!("{s}"),
+                            Err(err) => {
+                                eprintln!("error serializing check-consumers results: {err:#}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    } else {
+                        print_check_consumers_report(&results);
+                    }
+                    if broken {
                         ExitCode::FAILURE
                     } else {
                         ExitCode::SUCCESS

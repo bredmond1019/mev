@@ -1965,6 +1965,60 @@ pub fn conformance(
     run_checks(&ctx, only)
 }
 
+/// `mev check-consumers` driver — compiles each discovered consumer's test targets against
+/// the working mev and reports the true, classified outcome per consumer
+/// (`MV.ticket.consumer-compile-gate`).
+///
+/// Discovery is never reimplemented here: it delegates to
+/// [`brain::conformance::consumers::discover_mev_consumers`], the same function
+/// `ticket-consumer-dependency-parity` reuses, so the two checks can never disagree about what
+/// a consumer is. Each discovered consumer is then run through
+/// [`consumers::run_consumer`] — the dirty-tree short-circuit, the `Cargo.lock`
+/// byte-identity guard, and the `Broken` / `LockfileStale` / `SkippedDirty` / `NotEvaluable`
+/// classification all live there.
+///
+/// `only_slug` narrows the run to one consumer (`--consumer <slug>`); an unknown slug is a
+/// hard error naming every valid slug rather than silently running nothing.
+///
+/// Returns an [`anyhow::Error`] only for a hard configuration error (`brain.toml` not
+/// found/unreadable, or an unknown `--consumer` slug) — a single consumer's compile failure is
+/// reported as a `Broken` result, never a driver-level error.
+pub fn check_consumers(
+    root: &std::path::Path,
+    only_slug: Option<&str>,
+) -> anyhow::Result<Vec<consumers::ConsumerResult>> {
+    use brain::config::find_brain_config;
+
+    let config = find_brain_config(root)
+        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
+
+    let discovered = brain::conformance::consumers::discover_mev_consumers(root, &config);
+
+    let selected: Vec<_> = match only_slug {
+        None => discovered.iter().collect(),
+        Some(slug) => {
+            let matched: Vec<_> = discovered.iter().filter(|c| c.slug == slug).collect();
+            if matched.is_empty() {
+                let valid: Vec<&str> = discovered.iter().map(|c| c.slug.as_str()).collect();
+                let valid_list = if valid.is_empty() {
+                    "(no consumers discovered)".to_string()
+                } else {
+                    valid.join(", ")
+                };
+                return Err(anyhow::anyhow!(
+                    "unknown consumer '{slug}'; valid consumers: {valid_list}"
+                ));
+            }
+            matched
+        }
+    };
+
+    Ok(selected
+        .into_iter()
+        .map(|c| consumers::run_consumer(&c.slug, &c.repo_path))
+        .collect())
+}
+
 /// Machine-readable envelope emitted by the `--json` flag for any `mev` subcommand.
 ///
 /// Consumed by the Brain RAG indexer as a pre-`--rebuild` gate.
