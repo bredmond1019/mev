@@ -34,7 +34,7 @@
 //! dry-run/`--write` shaped like its epic/block siblings, it is verified-or-refused —
 //! the CLI driver in `close_operator_gate` reports it as a hard failure.
 
-use okf_core::{BlockedBy, StateFile};
+use okf_core::{ApprovalDep, BlockedBy, OperatorDep, StateFile};
 
 use crate::Diagnostic;
 use crate::brain::config::BrainConfig;
@@ -76,8 +76,7 @@ pub fn plan_close_operator_gate(
     let mut plan = EmitPlan::default();
     let here = std::path::Path::new(".");
 
-    let is_match =
-        |dep: &BlockedBy| matches!(dep, BlockedBy::Operator { slug: s, .. } if s == slug);
+    let is_match = |dep: &BlockedBy| matches!(dep, BlockedBy::Operator(OperatorDep { slug: s, .. }) if s == slug);
 
     // Work on a copy so a caller that never applies the plan cannot mutate its own
     // corpus, exactly like the block/epic planners.
@@ -150,8 +149,7 @@ pub fn plan_approve(
     let mut plan = EmitPlan::default();
     let here = std::path::Path::new(".");
 
-    let is_match =
-        |dep: &BlockedBy| matches!(dep, BlockedBy::Approval { slug: s, .. } if s == slug);
+    let is_match = |dep: &BlockedBy| matches!(dep, BlockedBy::Approval(ApprovalDep { slug: s, .. }) if s == slug);
 
     let mut work: Vec<(StateSource, StateFile)> = files.to_vec();
     let mut touched: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
@@ -166,7 +164,7 @@ pub fn plan_approve(
                         continue;
                     }
                     found = true;
-                    if let BlockedBy::Approval { digest: stored, .. } = dep
+                    if let BlockedBy::Approval(ApprovalDep { digest: stored, .. }) = dep
                         && stored != digest
                     {
                         mismatched_digest = Some(stored.clone());
@@ -252,8 +250,7 @@ pub fn plan_reject(
     let mut plan = EmitPlan::default();
     let here = std::path::Path::new(".");
 
-    let is_match =
-        |dep: &BlockedBy| matches!(dep, BlockedBy::Approval { slug: s, .. } if s == slug);
+    let is_match = |dep: &BlockedBy| matches!(dep, BlockedBy::Approval(ApprovalDep { slug: s, .. }) if s == slug);
 
     let mut work: Vec<(StateSource, StateFile)> = files.to_vec();
     let mut touched: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();

@@ -9,7 +9,7 @@
 //!   5. STANDING is always last.
 
 use mev::brain::carryover::{CarryoverLane, CarryoverVerdict, TriageLane};
-use mev::brain::state::BlockedBy;
+use mev::brain::state::{BlockDep, BlockedBy};
 use mev::rank_carryover;
 use std::collections::HashMap;
 
@@ -43,11 +43,11 @@ fn verdict(
 }
 
 fn block_edge(repo: &str, id: &str) -> BlockedBy {
-    BlockedBy::Block {
+    BlockedBy::Block(BlockDep {
         repo: repo.to_string(),
         id: id.to_string(),
         what: None,
-    }
+    })
 }
 
 fn find<'a>(

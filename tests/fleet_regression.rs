@@ -37,15 +37,16 @@ use std::path::PathBuf;
 
 use mev::brain::config::{find_brain_root, load_brain_config};
 use mev::brain::state::{
-    Block, BlockedBy, StateFile, StateSource, build_state_graph, derive_brain_focus, derive_focus,
-    discover_state_files, load_state, tier_scope_for,
+    ApprovalDep, Block, BlockDep, BlockedBy, ExternalDep, OperatorDep, StateFile, StateSource,
+    build_state_graph, derive_brain_focus, derive_focus, discover_state_files, load_state,
+    tier_scope_for,
 };
 
 /// True if this `TrackBlock`'s own `depends_on` carries an `operator` or `approval`
 /// entry — the "new edge" the ticket adds meaning to.
 fn carries_new_edge(deps: &[BlockedBy]) -> bool {
     deps.iter()
-        .any(|d| matches!(d, BlockedBy::Operator { .. } | BlockedBy::Approval { .. }))
+        .any(|d| matches!(d, BlockedBy::Operator(_) | BlockedBy::Approval(_)))
 }
 
 /// `"repo:id"` block ids (fleet-wide) whose own `depends_on` carries a new edge type,
@@ -209,26 +210,26 @@ fn sorted(set: &HashSet<String>) -> Vec<String> {
 /// predicate the fleet-wide test above relies on to scope its comparison correctly.
 #[test]
 fn carries_new_edge_identifies_operator_and_approval_only() {
-    let block_only = vec![BlockedBy::Block {
+    let block_only = vec![BlockedBy::Block(BlockDep {
         repo: "alpha".to_string(),
         id: "A.1".to_string(),
         what: None,
-    }];
-    let external_only = vec![BlockedBy::External {
+    })];
+    let external_only = vec![BlockedBy::External(ExternalDep {
         what: "waiting on a vendor".to_string(),
-    }];
+    })];
     let none: Vec<BlockedBy> = vec![];
-    let with_operator = vec![BlockedBy::Operator {
+    let with_operator = vec![BlockedBy::Operator(OperatorDep {
         slug: "op-1".to_string(),
         exit: "artifact exists".to_string(),
         start: "mev close-operator-gate op-1 --exit-verified".to_string(),
         what: Some("gate".to_string()),
-    }];
-    let with_approval = vec![BlockedBy::Approval {
+    })];
+    let with_approval = vec![BlockedBy::Approval(ApprovalDep {
         slug: "ap-1".to_string(),
         what: "ship it".to_string(),
         digest: "sha256:deadbeef".to_string(),
-    }];
+    })];
 
     assert!(!carries_new_edge(&block_only));
     assert!(!carries_new_edge(&external_only));

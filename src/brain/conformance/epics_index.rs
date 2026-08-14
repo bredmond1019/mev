@@ -255,6 +255,7 @@ mod tests {
             note: None,
             backlog: Vec::new(),
             carryover: Vec::new(),
+            reference: Vec::new(),
             extra: serde_json::Map::new(),
         }
     }

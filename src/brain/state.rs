@@ -82,10 +82,11 @@ use crate::brain::config::BrainConfig;
 /// `BrainConfig`/`Diagnostic` types and stays here — it consumes these shared
 /// types instead of duplicating them.
 pub use okf_core::{
-    Backlog, BacklogOrigin, Block, BlockedBy, Carryover, CarryoverScope, ClearsWhen,
-    ClearsWhenPredicate, CrossRepoEdge, Endpoint, Epic, Focus, Origin, RepoRollup, StateEdge,
-    StateEdgeKind, StateFile, StateGraph, StateLoadError, StateNode, StateSource, TierEntry, Track,
-    TrackBlock, build_state_graph, load_state,
+    ApprovalDep, Backlog, BacklogOrigin, Block, BlockDep, BlockedBy, Carryover, CarryoverScope,
+    ClearsWhen, ClearsWhenPredicate, CrossRepoEdge, Endpoint, Epic, ExternalDep, Focus,
+    OperatorDep, Origin, RepoRollup, StateEdge, StateEdgeKind, StateFile, StateGraph,
+    StateLoadError, StateNode, StateSource, TierEntry, Track, TrackBlock, build_state_graph,
+    load_state,
 };
 
 // ---------------------------------------------------------------------------
@@ -554,7 +555,7 @@ pub fn check_operator_staleness(
     for track in &file.tracks {
         for block in &track.blocks {
             for dep in &block.depends_on {
-                if let BlockedBy::Operator { slug, .. } = dep {
+                if let BlockedBy::Operator(OperatorDep { slug, .. }) = dep {
                     diags.push(Diagnostic::warning(
                         path,
                         "W_STATE_OPERATOR_STALE",
@@ -667,7 +668,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
 
         // blocked_by well-formedness
         for bb in &block.blocked_by {
-            if let BlockedBy::Block { repo, id, .. } = bb {
+            if let BlockedBy::Block(BlockDep { repo, id, .. }) = bb {
                 let repo_empty = repo.trim().is_empty();
                 let id_empty = id.trim().is_empty();
                 if repo_empty || id_empty {
@@ -751,7 +752,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
             // entries must carry a well-formed 'digest'.
             for dep in &block.depends_on {
                 match dep {
-                    BlockedBy::Block { repo, id, .. } => {
+                    BlockedBy::Block(BlockDep { repo, id, .. }) => {
                         let repo_empty = repo.trim().is_empty();
                         let id_empty = id.trim().is_empty();
                         if repo_empty || id_empty {
@@ -771,7 +772,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                             ));
                         }
                     }
-                    BlockedBy::Operator { slug, exit, .. } => {
+                    BlockedBy::Operator(OperatorDep { slug, exit, .. }) => {
                         if exit.trim().is_empty() {
                             diags.push(Diagnostic::error(
                                 path,
@@ -785,7 +786,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                             ));
                         }
                     }
-                    BlockedBy::Approval { slug, digest, .. } => {
+                    BlockedBy::Approval(ApprovalDep { slug, digest, .. }) => {
                         if !is_well_formed_digest(digest) {
                             diags.push(Diagnostic::error(
                                 path,
@@ -799,7 +800,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                             ));
                         }
                     }
-                    BlockedBy::External { .. } => {}
+                    BlockedBy::External(_) => {}
                 }
             }
         }
@@ -870,7 +871,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
         }
 
         for dep in &item.related {
-            if let BlockedBy::Block { repo, id, .. } = dep {
+            if let BlockedBy::Block(BlockDep { repo, id, .. }) = dep {
                 let repo_empty = repo.trim().is_empty();
                 let id_empty = id.trim().is_empty();
                 if repo_empty || id_empty {
@@ -914,7 +915,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
 
         for dep in &item.blocks {
             match dep {
-                BlockedBy::Block { repo, id, .. } => {
+                BlockedBy::Block(BlockDep { repo, id, .. }) => {
                     let repo_empty = repo.trim().is_empty();
                     let id_empty = id.trim().is_empty();
                     if repo_empty || id_empty {
@@ -934,7 +935,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                         ));
                     }
                 }
-                BlockedBy::External { what } => {
+                BlockedBy::External(ExternalDep { what }) => {
                     if what.trim().is_empty() {
                         diags.push(Diagnostic::error(
                             path,
@@ -951,7 +952,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                 // of scope for this check — depends_on's own operator/approval schema
                 // validation (E_STATE_OPERATOR_MISSING_EXIT, E_STATE_APPROVAL_DIGEST_SHAPE)
                 // is added separately.
-                BlockedBy::Operator { .. } | BlockedBy::Approval { .. } => {}
+                BlockedBy::Operator(_) | BlockedBy::Approval(_) => {}
             }
         }
 
@@ -1399,7 +1400,7 @@ pub fn check_epics(config: &BrainConfig, files: &[(StateSource, StateFile)]) -> 
                     continue;
                 }
                 for dep in &block.depends_on {
-                    let BlockedBy::Block { repo, id, .. } = dep else {
+                    let BlockedBy::Block(BlockDep { repo, id, .. }) = dep else {
                         continue; // external deps have no target node
                     };
                     // A dangling target is reported by check_state_graph; skip it
@@ -1609,7 +1610,7 @@ pub fn check_state_graph(
         let path = &src.abs_path;
         for item in &file.carryover {
             for dep in &item.blocks {
-                let BlockedBy::Block { repo, id, .. } = dep else {
+                let BlockedBy::Block(BlockDep { repo, id, .. }) = dep else {
                     continue; // External has no target node.
                 };
                 if repo.trim().is_empty() {
@@ -1690,7 +1691,7 @@ pub fn check_status_consistency(files: &[(StateSource, StateFile)]) -> Vec<Diagn
                 let from_key = format!("{}:{}", src.repo_slug, block.id);
 
                 for dep in &block.depends_on {
-                    if let BlockedBy::Block { repo, id, .. } = dep {
+                    if let BlockedBy::Block(BlockDep { repo, id, .. }) = dep {
                         let dep_key = format!("{repo}:{id}");
                         // If the dep target is not in any loaded file, skip — it will
                         // be reported as E_STATE_DANGLING_BLOCKED_BY by check_state_graph.
@@ -1756,7 +1757,7 @@ pub fn check_backlog_integrity(
         for backlog_node in &file.backlog {
             // --- 1. Dangling depends_on ---
             for dep in &backlog_node.depends_on {
-                if let BlockedBy::Block { repo, id, .. } = dep {
+                if let BlockedBy::Block(BlockDep { repo, id, .. }) = dep {
                     let dep_key = format!("{repo}:{id}");
                     if !node_set.contains(dep_key.as_str()) {
                         diags.push(Diagnostic::error(
@@ -2235,9 +2236,7 @@ pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> V
                 let has_unmet_targetless = block.depends_on.iter().any(|d| {
                     matches!(
                         d,
-                        BlockedBy::External { .. }
-                            | BlockedBy::Operator { .. }
-                            | BlockedBy::Approval { .. }
+                        BlockedBy::External(_) | BlockedBy::Operator(_) | BlockedBy::Approval(_)
                     )
                 });
                 if has_unmet_targetless {
@@ -2246,7 +2245,7 @@ pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> V
 
                 // All block deps must be closed.
                 let all_block_deps_closed = block.depends_on.iter().all(|d| {
-                    if let BlockedBy::Block { repo, id, .. } = d {
+                    if let BlockedBy::Block(BlockDep { repo, id, .. }) = d {
                         let dep_key = format!("{repo}:{id}");
                         let dep_status = status_map.get(&dep_key).and_then(|s| s.as_deref());
                         is_terminal_block_status(dep_status)
@@ -2367,10 +2366,10 @@ pub fn derive_focus(
                         .filter(|d| match d {
                             // External/Operator/Approval are targetless and unmet for as
                             // long as they are present — exactly like `external`.
-                            BlockedBy::External { .. }
-                            | BlockedBy::Operator { .. }
-                            | BlockedBy::Approval { .. } => true,
-                            BlockedBy::Block { repo, id, .. } => {
+                            BlockedBy::External(_)
+                            | BlockedBy::Operator(_)
+                            | BlockedBy::Approval(_) => true,
+                            BlockedBy::Block(BlockDep { repo, id, .. }) => {
                                 let dep_key = format!("{repo}:{id}");
                                 let dep_status =
                                     status_map.get(&dep_key).and_then(|s| s.as_deref());
@@ -2532,7 +2531,7 @@ pub fn derive_cross_repo(files: &[(StateSource, StateFile)]) -> Vec<CrossRepoEdg
         for track in &file.tracks {
             for block in &track.blocks {
                 for dep in &block.depends_on {
-                    if let BlockedBy::Block { repo, id, what } = dep
+                    if let BlockedBy::Block(BlockDep { repo, id, what }) = dep
                         && repo != &src.repo_slug
                     {
                         edges.push(CrossRepoEdge {
@@ -2649,7 +2648,7 @@ pub fn derive_epic_edges(files: &[(StateSource, StateFile)], slug: &str) -> Epic
             for block in &track.blocks {
                 let from_key = format!("{}:{}", src.repo_slug, block.id);
                 for dep in &block.depends_on {
-                    let BlockedBy::Block { repo, id, .. } = dep else {
+                    let BlockedBy::Block(BlockDep { repo, id, .. }) = dep else {
                         continue;
                     };
                     let to_key = format!("{repo}:{id}");
@@ -3314,7 +3313,7 @@ mod tests {
             r#"{ "type": "block", "repo": "bastion", "id": "BA.11.C", "what": "needs WS hub" }"#;
         let bb: BlockedBy = serde_json::from_str(json).expect("block type should deserialize");
         match bb {
-            BlockedBy::Block { repo, id, what } => {
+            BlockedBy::Block(BlockDep { repo, id, what }) => {
                 assert_eq!(repo, "bastion");
                 assert_eq!(id, "BA.11.C");
                 assert_eq!(what.as_deref(), Some("needs WS hub"));
@@ -3328,7 +3327,7 @@ mod tests {
         let json = r#"{ "type": "external", "what": "At-home Mac Mini session" }"#;
         let bb: BlockedBy = serde_json::from_str(json).expect("external type should deserialize");
         match bb {
-            BlockedBy::External { what } => {
+            BlockedBy::External(ExternalDep { what }) => {
                 assert_eq!(what, "At-home Mac Mini session");
             }
             _ => panic!("expected BlockedBy::External"),
@@ -5641,14 +5640,14 @@ mod tests {
                     Some("deferred"),
                     None,
                     vec![
-                        BlockedBy::External {
+                        BlockedBy::External(ExternalDep {
                             what: "waiting on vendor".to_string(),
-                        },
-                        BlockedBy::Block {
+                        }),
+                        BlockedBy::Block(BlockDep {
                             repo: "alpha".to_string(),
                             id: "AL.1.B".to_string(),
                             what: None,
-                        },
+                        }),
                     ],
                 ),
                 ("AL.1.B", Some("open"), None, vec![]),
@@ -5683,11 +5682,11 @@ mod tests {
                     "AL.1.B",
                     Some("open"),
                     None,
-                    vec![BlockedBy::Block {
+                    vec![BlockedBy::Block(BlockDep {
                         repo: "alpha".to_string(),
                         id: "AL.1.A".to_string(),
                         what: None,
-                    }],
+                    })],
                 ),
             ],
         );
@@ -5728,11 +5727,11 @@ mod tests {
                     "AL.1.B",
                     Some("open"),
                     None,
-                    vec![BlockedBy::Block {
+                    vec![BlockedBy::Block(BlockDep {
                         repo: "alpha".to_string(),
                         id: "AL.1.A".to_string(),
                         what: None,
-                    }],
+                    })],
                 ),
             ],
         );
@@ -5841,9 +5840,9 @@ mod tests {
     #[test]
     fn ready_order_block_with_external_dep_excluded() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let ext_dep = BlockedBy::External {
+        let ext_dep = BlockedBy::External(ExternalDep {
             what: "Mac Mini delivery".to_string(),
-        };
+        });
         let pair = make_ready_pair(
             dir.path(),
             "alpha",
@@ -5863,11 +5862,11 @@ mod tests {
     fn ready_order_block_with_unclosed_block_dep_excluded() {
         let dir = tempfile::tempdir().expect("tempdir");
         // alpha:AL.1.A depends_on beta:BE.1.A which is open (not closed).
-        let block_dep = BlockedBy::Block {
+        let block_dep = BlockedBy::Block(BlockDep {
             repo: "beta".to_string(),
             id: "BE.1.A".to_string(),
             what: None,
-        };
+        });
         let pair_a = make_ready_pair(
             dir.path(),
             "alpha",
@@ -5899,11 +5898,11 @@ mod tests {
     fn ready_order_block_with_closed_dep_is_ready() {
         let dir = tempfile::tempdir().expect("tempdir");
         // alpha:AL.1.A depends_on beta:BE.1.A which is closed → AL.1.A is ready.
-        let block_dep = BlockedBy::Block {
+        let block_dep = BlockedBy::Block(BlockDep {
             repo: "beta".to_string(),
             id: "BE.1.A".to_string(),
             what: None,
-        };
+        });
         let pair_a = make_ready_pair(
             dir.path(),
             "alpha",
@@ -5930,11 +5929,11 @@ mod tests {
         // dependency target is "wontfix" instead of "closed" — terminal for
         // readiness purposes exactly like closed.
         let dir = tempfile::tempdir().expect("tempdir");
-        let block_dep = BlockedBy::Block {
+        let block_dep = BlockedBy::Block(BlockDep {
             repo: "beta".to_string(),
             id: "BE.1.A".to_string(),
             what: None,
-        };
+        });
         let pair_a = make_ready_pair(
             dir.path(),
             "alpha",
@@ -6107,11 +6106,11 @@ mod tests {
     fn check_status_consistency_closed_depends_on_open_emits_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         // alpha has two blocks: AL.1.A (open) and AL.1.B (closed, depends on AL.1.A).
-        let dep = BlockedBy::Block {
+        let dep = BlockedBy::Block(BlockDep {
             repo: "alpha".to_string(),
             id: "AL.1.A".to_string(),
             what: None,
-        };
+        });
         let pair = make_consistency_pair(
             dir.path(),
             "alpha",
@@ -6139,11 +6138,11 @@ mod tests {
     fn check_status_consistency_closed_depends_on_closed_passes() {
         let dir = tempfile::tempdir().expect("tempdir");
         // Both blocks are closed — no inconsistency.
-        let dep = BlockedBy::Block {
+        let dep = BlockedBy::Block(BlockDep {
             repo: "alpha".to_string(),
             id: "AL.1.A".to_string(),
             what: None,
-        };
+        });
         let pair = make_consistency_pair(
             dir.path(),
             "alpha",
@@ -6168,11 +6167,11 @@ mod tests {
     #[test]
     fn check_status_consistency_closed_depends_on_in_progress_emits_error() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let dep = BlockedBy::Block {
+        let dep = BlockedBy::Block(BlockDep {
             repo: "alpha".to_string(),
             id: "AL.1.A".to_string(),
             what: None,
-        };
+        });
         let pair = make_consistency_pair(
             dir.path(),
             "alpha",
@@ -6201,11 +6200,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         // AL.1.B is closed but depends on "alpha:AL.1.GHOST" which is not in any file.
         // Should NOT emit E_STATE_STATUS_INCONSISTENT (that's E_STATE_DANGLING_BLOCKED_BY's job).
-        let dep = BlockedBy::Block {
+        let dep = BlockedBy::Block(BlockDep {
             repo: "alpha".to_string(),
             id: "AL.1.GHOST".to_string(),
             what: None,
-        };
+        });
         let pair = make_consistency_pair(
             dir.path(),
             "alpha",
@@ -6316,11 +6315,11 @@ mod tests {
             repo: "mev".to_string(),
             kind: "feature".to_string(),
             status: "idea".to_string(),
-            depends_on: vec![BlockedBy::Block {
+            depends_on: vec![BlockedBy::Block(BlockDep {
                 repo: "mev".to_string(),
                 id: "MV.3.GHOST".to_string(),
                 what: None,
-            }],
+            })],
             block: None,
             notes: None,
             ..Default::default()
@@ -6951,9 +6950,9 @@ mod tests {
             &[(
                 "AL.1.A",
                 Some("open"),
-                vec![BlockedBy::External {
+                vec![BlockedBy::External(ExternalDep {
                     what: "upstream dep".to_string(),
-                }],
+                })],
             )],
             &[], // stored now
             &[], // stored next
@@ -7057,11 +7056,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         // Block B is open but dep A is in_progress (not closed) → B goes in blocked.
         // Stored focus.blocked is empty → drift.
-        let dep_a = BlockedBy::Block {
+        let dep_a = BlockedBy::Block(BlockDep {
             repo: "alpha".to_string(),
             id: "AL.1.A".to_string(),
             what: None,
-        };
+        });
         let pair = make_drift_pair(
             dir.path(),
             "alpha",
@@ -7094,11 +7093,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         // Block B is open; dep A is closed → B is ready (goes in next).
         // Stored focus matches exactly → no drift.
-        let dep_a = BlockedBy::Block {
+        let dep_a = BlockedBy::Block(BlockDep {
             repo: "alpha".to_string(),
             id: "AL.1.A".to_string(),
             what: None,
-        };
+        });
         let pair = make_drift_pair(
             dir.path(),
             "alpha",
@@ -7206,9 +7205,9 @@ mod tests {
                         id: "CO.1.B".to_string(),
                         title: "Own blocked work".to_string(),
                         status: Some("open".to_string()),
-                        depends_on: vec![BlockedBy::External {
+                        depends_on: vec![BlockedBy::External(ExternalDep {
                             what: "upstream dep".to_string(),
-                        }],
+                        })],
                         wave: None,
                         origin: None,
                         note: None,

@@ -31,11 +31,11 @@ use crate::brain::carryover::{
 use crate::brain::config::BrainConfig;
 use crate::brain::distill::{DistilledEntry, distill_stale_age, parse_distilled};
 use crate::brain::state::{
-    Backlog, Block, BlockedBy, Carryover, CrossRepoEdge, Epic, EpicEdge, EpicEdges, Focus,
-    RepoRollup, StateFile, StateGraph, StateSource, TierScope, TrackBlock, backlog_stale_age,
-    carryover_stale_age, derive_brain_focus, derive_cross_repo, derive_epic_edges,
-    derive_epic_focus, derive_focus, derive_rollup, effective_priorities, is_snoozed,
-    staleness_anchor, tier_scope_for,
+    ApprovalDep, Backlog, Block, BlockDep, BlockedBy, Carryover, CrossRepoEdge, Epic, EpicEdge,
+    EpicEdges, ExternalDep, Focus, OperatorDep, RepoRollup, StateFile, StateGraph, StateSource,
+    TierScope, TrackBlock, backlog_stale_age, carryover_stale_age, derive_brain_focus,
+    derive_cross_repo, derive_epic_edges, derive_epic_focus, derive_focus, derive_rollup,
+    effective_priorities, is_snoozed, staleness_anchor, tier_scope_for,
 };
 
 // ---------------------------------------------------------------------------
@@ -176,13 +176,11 @@ pub fn topo_order(graph: &StateGraph, files: &[(StateSource, StateFile)]) -> Vec
             .depends_on
             .iter()
             .filter_map(|dep| match dep {
-                BlockedBy::Block { repo, id, .. } => {
+                BlockedBy::Block(BlockDep { repo, id, .. }) => {
                     let dep_key = format!("{repo}:{id}");
                     by_key.contains_key(&dep_key).then_some(dep_key)
                 }
-                BlockedBy::External { .. }
-                | BlockedBy::Operator { .. }
-                | BlockedBy::Approval { .. } => None,
+                BlockedBy::External(_) | BlockedBy::Operator(_) | BlockedBy::Approval(_) => None,
             })
             .collect();
         deps.insert(key.as_str(), ds);
@@ -348,10 +346,8 @@ pub fn render_wave_table(
             // Check for unmet deps — conservative: external deps always unmet;
             // block deps only resolved for same-repo.
             let has_unmet = block.depends_on.iter().any(|dep| match dep {
-                BlockedBy::External { .. }
-                | BlockedBy::Operator { .. }
-                | BlockedBy::Approval { .. } => true,
-                BlockedBy::Block { repo, id, .. } => {
+                BlockedBy::External(_) | BlockedBy::Operator(_) | BlockedBy::Approval(_) => true,
+                BlockedBy::Block(BlockDep { repo, id, .. }) => {
                     if repo == repo_slug {
                         // Same-repo: check authored status.
                         all_status.get(id.as_str()).and_then(|s| s.as_deref()) != Some("closed")
@@ -377,10 +373,10 @@ pub fn render_wave_table(
                 .depends_on
                 .iter()
                 .map(|dep| match dep {
-                    BlockedBy::Block { repo, id, .. } => format!("{repo}:{id}"),
-                    BlockedBy::External { what } => format!("external:{what}"),
-                    BlockedBy::Operator { slug, .. } => format!("operator:{slug}"),
-                    BlockedBy::Approval { slug, .. } => format!("approval:{slug}"),
+                    BlockedBy::Block(BlockDep { repo, id, .. }) => format!("{repo}:{id}"),
+                    BlockedBy::External(ExternalDep { what }) => format!("external:{what}"),
+                    BlockedBy::Operator(OperatorDep { slug, .. }) => format!("operator:{slug}"),
+                    BlockedBy::Approval(ApprovalDep { slug, .. }) => format!("approval:{slug}"),
                 })
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -513,9 +509,9 @@ impl<'a> BlockedGroup<'a> {
 /// wins deterministically). `None` when `blocked_by` carries no such entry.
 fn gate_key(block: &Block) -> Option<(&'static str, &str)> {
     block.blocked_by.iter().find_map(|dep| match dep {
-        BlockedBy::Operator { slug, .. } => Some(("operator", slug.as_str())),
-        BlockedBy::Approval { slug, .. } => Some(("approval", slug.as_str())),
-        BlockedBy::Block { .. } | BlockedBy::External { .. } => None,
+        BlockedBy::Operator(OperatorDep { slug, .. }) => Some(("operator", slug.as_str())),
+        BlockedBy::Approval(ApprovalDep { slug, .. }) => Some(("approval", slug.as_str())),
+        BlockedBy::Block(_) | BlockedBy::External(_) => None,
     })
 }
 
@@ -543,9 +539,9 @@ pub fn group_blocked_by_gate(blocks: &[Block]) -> Vec<BlockedGroup<'_>> {
                     groups[idx].blocks.push(block);
                 } else {
                     let gate = block.blocked_by.iter().find(|dep| match dep {
-                        BlockedBy::Operator { slug: s, .. } => s == slug,
-                        BlockedBy::Approval { slug: s, .. } => s == slug,
-                        BlockedBy::Block { .. } | BlockedBy::External { .. } => false,
+                        BlockedBy::Operator(OperatorDep { slug: s, .. }) => s == slug,
+                        BlockedBy::Approval(ApprovalDep { slug: s, .. }) => s == slug,
+                        BlockedBy::Block(_) | BlockedBy::External(_) => false,
                     });
                     index_by_key.insert(key, groups.len());
                     groups.push(BlockedGroup {
@@ -693,18 +689,18 @@ fn render_hq_board_blocker(
     edges: &[CrossRepoEdge],
 ) -> String {
     match dep {
-        BlockedBy::External { what } => format!("external:{what}"),
-        BlockedBy::Operator {
+        BlockedBy::External(ExternalDep { what }) => format!("external:{what}"),
+        BlockedBy::Operator(OperatorDep {
             slug, exit, start, ..
-        } => format!("operator:{slug} — exit: {exit}; start: `{start}`"),
-        BlockedBy::Approval { slug, what, .. } => {
+        }) => format!("operator:{slug} — exit: {exit}; start: `{start}`"),
+        BlockedBy::Approval(ApprovalDep { slug, what, .. }) => {
             format!("approval:{slug} — decision: {what}")
         }
-        BlockedBy::Block {
+        BlockedBy::Block(BlockDep {
             repo: dep_repo,
             id: dep_id,
             what,
-        } => {
+        }) => {
             let target = format!("{dep_repo}:{dep_id}");
 
             // Prefer the matching cross_repo[] edge's note (the resolved,
@@ -1357,15 +1353,15 @@ pub fn render_epic_sequence_table(
             .depends_on
             .iter()
             .map(|dep| match dep {
-                BlockedBy::Block { repo, id, .. } => format!("{repo}:{id}"),
-                BlockedBy::External { what } => format!("external:{what}"),
+                BlockedBy::Block(BlockDep { repo, id, .. }) => format!("{repo}:{id}"),
+                BlockedBy::External(ExternalDep { what }) => format!("external:{what}"),
                 // Full exit/start/decision rendering (Task 6, `ticket-operator-edge-graph`) —
                 // matches render_hq_board_blocker's annotation form so the epic sequence
                 // table and the NOW/NEXT/BLOCKED boards read consistently.
-                BlockedBy::Operator {
+                BlockedBy::Operator(OperatorDep {
                     slug, exit, start, ..
-                } => format!("operator:{slug} — exit: {exit}; start: `{start}`"),
-                BlockedBy::Approval { slug, what, .. } => {
+                }) => format!("operator:{slug} — exit: {exit}; start: `{start}`"),
+                BlockedBy::Approval(ApprovalDep { slug, what, .. }) => {
                     format!("approval:{slug} — decision: {what}")
                 }
             })
@@ -1398,10 +1394,8 @@ pub fn render_epic_sequence_table(
 /// in `global_status` is not `closed` (an unresolvable target counts as unmet).
 fn has_unmet_dep(block: &TrackBlock, global_status: &HashMap<String, Option<String>>) -> bool {
     block.depends_on.iter().any(|dep| match dep {
-        BlockedBy::External { .. } | BlockedBy::Operator { .. } | BlockedBy::Approval { .. } => {
-            true
-        }
-        BlockedBy::Block { repo, id, .. } => {
+        BlockedBy::External(_) | BlockedBy::Operator(_) | BlockedBy::Approval(_) => true,
+        BlockedBy::Block(BlockDep { repo, id, .. }) => {
             global_status
                 .get(&format!("{repo}:{id}"))
                 .and_then(|s| s.as_deref())
