@@ -8746,9 +8746,13 @@ mod epic_emit {
     }
 
     #[test]
-    fn epic_members_resolved_program_kind_with_no_lane_files_is_empty_not_authored() {
-        // BA.6/BA.7 are authored to "bastion-os", but no lane file exists for it.
-        // A program epic never falls back to the authored tags it just ignored.
+    fn epic_members_resolved_program_kind_with_no_lane_files_falls_back_to_authored() {
+        // BA.6/BA.7 are authored to "bastion-os", and no lane file exists for it —
+        // a program that finished before lane tooling existed. Amended MV.13.D
+        // rule: derived wins *where derivable*; with nothing derivable, the
+        // program falls back to its authored `block.epics` instead of
+        // rendering an empty table (was: `..._is_empty_not_authored`, pinning
+        // the pre-amendment behaviour this test now inverts).
         let tmp = tempfile::tempdir().unwrap();
         let files = corpus(tmp.path());
         let graph = build_state_graph(&files);
@@ -8760,7 +8764,12 @@ mod epic_emit {
         );
         let resolved =
             mev::brain::emit::epic_members_resolved(tmp.path(), &graph, &files, &program);
-        assert!(resolved.is_empty(), "got: {resolved:?}");
+        let ids: Vec<&str> = resolved.iter().map(|(_, b)| b.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["BA.6", "BA.7"],
+            "no derivable lane membership must fall back to authored block.epics; got {ids:?}"
+        );
     }
 
     #[test]

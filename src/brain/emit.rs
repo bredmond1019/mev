@@ -267,25 +267,44 @@ pub fn epic_members<'a>(
 ///
 /// | `epic.kind` | Membership source | Why |
 /// |---|---|---|
-/// | `program` | **Derived lane membership wins** ([`crate::brain::lane_segments::derive_program_membership`]); authored `block.epics` is advisory and adds no members. | A program's membership *is* its lane chain — that is the thing that executes. |
+/// | `program` | **Derived lane membership wins where derivable** ([`crate::brain::lane_segments::derive_program_membership`]); authored `block.epics` is advisory and adds no members — *unless* derived membership is empty, in which case authored `block.epics` is used as a fallback. | A program's membership *is* its lane chain — that is the thing that executes. But a program that finished before lane tooling existed has no lane files to derive from, and rendering it as "no member blocks" misrepresents completed work; falling back to what was actually authored recovers that history without reintroducing ambiguity for live programs (see below). |
 /// | `area` (or unset) | **Authored `block.epics` is the only source** — falls straight through to [`epic_members`]. | An area has no lanes to derive from; a `kind`-less epic gets today's behaviour unchanged. |
 ///
 /// **Union was considered and rejected.** A block authored to epic X and also derived
 /// into roadmap Y's lane would then render under both — exactly the double-counting
 /// D57's two-axis rule (and `MV.13.A`'s `E_LANE_DOUBLE_CLAIM`) exists to prevent, and it
 /// would misstate the remaining depth of both initiatives. So for `kind: program` the
-/// derived set is used exclusively, never unioned with authored tags.
+/// derived set is used exclusively, never unioned with authored tags — the fallback below
+/// does not change this: it only ever substitutes authored for derived, never adds to it.
 ///
 /// For `kind: program`, the epic's `plan` document names the executing roadmap slug
 /// (via [`crate::brain::lane_segments::roadmap_slug_from_plan_path`]); derived
 /// positions are matched back to real [`TrackBlock`]s in `files` and returned in the
-/// order [`crate::brain::lane_segments::derive_program_membership`] preserves. A
-/// program epic whose `plan` does not resolve to a roadmap slug, or that roadmap has no
-/// derived positions, returns an empty sequence rather than falling back to authored
-/// tags — a program is definitionally lane-derived, and falling back would reintroduce
-/// the two-sources ambiguity this rule exists to remove. `origin_roadmap`-adopted
-/// blocks are already folded into the correct (executing) roadmap's derived set by
-/// `derive_program_membership`, so they render here exactly once.
+/// order [`crate::brain::lane_segments::derive_program_membership`] preserves.
+///
+/// **Amendment (chore `mev-chore-epic-membership-derived-fallback`): derived wins where
+/// derivable, not unconditionally.** `MV.13.D`'s original rule made a program epic with no
+/// lane files render an empty table even when it had genuine authored membership — correct
+/// for `epic_members_resolved_program_kind_prefers_derived_lane_membership_over_authored_tags`'s
+/// live-conflict shape, but wrong for a program like `bullet-proof-software` that completed
+/// and was archived before lane files existed (31 rows → 0) or one like `demand-ready` where
+/// only part of its membership ever got a lane file (44 rows → 29). So: whenever the derived
+/// set for this program ends up empty *once a roadmap slug is known* — no lane files exist
+/// for that roadmap, or lane files exist but derived no positions that matched a real
+/// block — this falls back to authored `block.epics` via [`epic_members`] instead of
+/// returning empty. **The fallback keys on "derived membership is empty," not on "no lane
+/// files exist on disk."** Those two conditions produce the same observable set today, but
+/// checking emptiness is one fewer thing to keep in sync with the filesystem and treats
+/// "lane files that happen to derive nothing" the same as "no lane files at all" — both are
+/// cases where derived membership has no signal to contribute, so authored is the better
+/// answer either way. This does **not** extend to the case where `plan` never resolves to a
+/// roadmap slug at all (a mis-tagged program epic) — that stays empty, since there is no
+/// roadmap to have failed to derive from; see the comment at that check below. This cannot
+/// reintroduce double-counting: the fallback only fires when the derived set is empty, so a
+/// program table is built from derived rows exclusively or authored rows exclusively, never
+/// both. `origin_roadmap`-adopted blocks are already folded into the correct (executing)
+/// roadmap's derived set by `derive_program_membership`, so when derived is non-empty they
+/// still render here exactly once.
 pub fn epic_members_resolved<'a>(
     root: &Path,
     graph: &StateGraph,
@@ -299,6 +318,12 @@ pub fn epic_members_resolved<'a>(
         return epic_members(graph, files, &epic.slug);
     }
 
+    // A `plan` doc that does not resolve to a roadmap slug (e.g. a mis-tagged
+    // `kind: program` epic pointing at an area's `.../epics/<slug>.md`) is not
+    // "derived membership is empty" — it is "this epic is not actually lane-
+    // derivable at all". That stays empty rather than falling back to
+    // authored tags, which would silently paper over the mis-tagging instead
+    // of surfacing it.
     let Some(roadmap_slug) = epic
         .plan
         .as_deref()
@@ -309,7 +334,8 @@ pub fn epic_members_resolved<'a>(
 
     let by_roadmap = crate::brain::lane_segments::derive_program_membership(root, files);
     let Some(positions) = by_roadmap.get(&roadmap_slug) else {
-        return Vec::new();
+        // No lane files derived anything for this roadmap — fall back.
+        return epic_members(graph, files, &epic.slug);
     };
 
     let mut by_key: HashMap<String, (String, &TrackBlock)> = HashMap::new();
@@ -325,11 +351,20 @@ pub fn epic_members_resolved<'a>(
     }
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    positions
+    let derived: Vec<(String, &TrackBlock)> = positions
         .iter()
         .filter_map(|p| by_key.get(&format!("{}:{}", p.repo, p.id)).cloned())
         .filter(|(_, block)| seen.insert(block.id.clone()))
-        .collect()
+        .collect();
+
+    if derived.is_empty() {
+        // Lane files exist for this roadmap but derived no positions (or none
+        // matched a real block) — same "derived has no signal" case as the
+        // branches above, so fall back rather than render an empty table.
+        return epic_members(graph, files, &epic.slug);
+    }
+
+    derived
 }
 
 // ---------------------------------------------------------------------------
