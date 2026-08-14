@@ -33,9 +33,9 @@ use crate::brain::distill::{DistilledEntry, distill_stale_age, parse_distilled};
 use crate::brain::state::{
     ApprovalDep, Backlog, Block, BlockDep, BlockedBy, Carryover, CrossRepoEdge, Epic, EpicEdge,
     EpicEdges, ExternalDep, Focus, OperatorDep, RepoRollup, StateFile, StateGraph, StateSource,
-    TierScope, TrackBlock, backlog_stale_age, carryover_stale_age, derive_brain_focus,
-    derive_cross_repo, derive_epic_edges, derive_epic_focus, derive_focus, derive_rollup,
-    effective_priorities, is_snoozed, staleness_anchor, tier_scope_for,
+    TierScope, TrackBlock, backlog_stale_age, carryover_kind_str, carryover_stale_age,
+    derive_brain_focus, derive_cross_repo, derive_epic_edges, derive_epic_focus, derive_focus,
+    derive_rollup, effective_priorities, is_snoozed, staleness_anchor, tier_scope_for,
 };
 
 // ---------------------------------------------------------------------------
@@ -1657,7 +1657,7 @@ pub(crate) fn collect_attention_rows(
         verdicts.push(CarryoverVerdict {
             repo: repo.clone(),
             slug: item.slug.clone(),
-            kind: item.kind.clone(),
+            kind: carryover_kind_str(&item.kind).into_owned(),
             text: item.text.clone(),
             clears_when: item
                 .clears_when

@@ -338,6 +338,39 @@ const VALID_BACKLOG_STATUSES: &[&str] = &["idea", "ready", "promoted"];
 /// Valid `kind` values for `carryover[]` entries.
 const VALID_CARRYOVER_KINDS: &[&str] = &["constraint", "known_issue", "env", "deferred"];
 
+/// The plain string form of a [`okf_core::CarryoverKind`], matching exactly
+/// what mev used before okf-core retyped `Carryover.kind` from `String` to
+/// this enum: known kinds render in their `snake_case` name, unknown kinds
+/// (the legacy `constraint` / `known_issue` values, or anything else) round
+/// trip verbatim. Local to mev — okf-core defines the shape only and does not
+/// provide a `Display`/`as_str` accessor of its own (AGENT.md rule 3).
+pub fn carryover_kind_str(kind: &okf_core::CarryoverKind) -> std::borrow::Cow<'_, str> {
+    match kind {
+        okf_core::CarryoverKind::Known(k) => std::borrow::Cow::Borrowed(match k {
+            okf_core::KnownCarryoverKind::Defect => "defect",
+            okf_core::KnownCarryoverKind::Deferred => "deferred",
+            okf_core::KnownCarryoverKind::Drift => "drift",
+            okf_core::KnownCarryoverKind::Env => "env",
+        }),
+        okf_core::CarryoverKind::Unknown(s) => std::borrow::Cow::Borrowed(s.as_str()),
+    }
+}
+
+/// The inverse of [`carryover_kind_str`]: parse a plain string into a
+/// [`okf_core::CarryoverKind`], recognising the fixed known vocabulary and
+/// falling back to `Unknown(s)` — preserved verbatim, never coerced or
+/// rejected — for everything else (including the legacy `constraint` /
+/// `known_issue` values). Test-fixture and adaptation helper only.
+pub fn carryover_kind_from_str(kind: &str) -> okf_core::CarryoverKind {
+    match kind {
+        "defect" => okf_core::CarryoverKind::Known(okf_core::KnownCarryoverKind::Defect),
+        "deferred" => okf_core::CarryoverKind::Known(okf_core::KnownCarryoverKind::Deferred),
+        "drift" => okf_core::CarryoverKind::Known(okf_core::KnownCarryoverKind::Drift),
+        "env" => okf_core::CarryoverKind::Known(okf_core::KnownCarryoverKind::Env),
+        other => okf_core::CarryoverKind::Unknown(other.to_string()),
+    }
+}
+
 /// Parse an authored state-graph date that may be either bare `YYYY-MM-DD` or a
 /// full RFC3339 timestamp (some `carryover[].created` values were stamped with a
 /// time+offset). Returns the calendar date, or `None` if neither form parses.
@@ -396,7 +429,7 @@ pub fn carryover_stale_age(
     }
     let anchor = staleness_anchor(Some(&item.created), item.reviewed.as_deref())?;
     let age = (today - anchor).num_days();
-    (age > thresholds.carryover_threshold(&item.kind)).then_some(age)
+    (age > thresholds.carryover_threshold(carryover_kind_str(&item.kind).as_ref())).then_some(age)
 }
 
 /// The staleness verdict for a `backlog[]` node: `Some(age_days)` when the node
@@ -434,7 +467,7 @@ pub fn check_carryover_staleness(
 
     for item in &file.carryover {
         if let Some(age) = carryover_stale_age(item, today, thresholds) {
-            let threshold = thresholds.carryover_threshold(&item.kind);
+            let threshold = thresholds.carryover_threshold(carryover_kind_str(&item.kind).as_ref());
             let clears = item
                 .clears_when
                 .as_ref()
@@ -448,7 +481,8 @@ pub fn check_carryover_staleness(
                     "carryover '{}' (kind '{}') is {age}d old (threshold {threshold}d){clears} — \
                      promote it into a block/backlog node, resolve its clears_when, re-affirm it \
                      (bump 'reviewed'), or /snooze it",
-                    item.slug, item.kind
+                    item.slug,
+                    carryover_kind_str(&item.kind)
                 ),
             ));
         }
@@ -842,14 +876,14 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
 
     // --- 9. carryover[] validation ---
     for item in &file.carryover {
-        if !VALID_CARRYOVER_KINDS.contains(&item.kind.as_str()) {
+        if !VALID_CARRYOVER_KINDS.contains(&carryover_kind_str(&item.kind).as_ref()) {
             diags.push(Diagnostic::error(
                 path,
                 "E_STATE_SCHEMA_BAD_KIND",
                 format!(
                     "carryover item '{}' has invalid kind '{}'; expected one of: {}",
                     item.slug,
-                    item.kind,
+                    carryover_kind_str(&item.kind),
                     VALID_CARRYOVER_KINDS.join(", ")
                 ),
             ));
@@ -8402,7 +8436,10 @@ fn carryover_array_deserializes() {
     assert_eq!(file.carryover[0].slug, "some-caveat");
     assert_eq!(file.carryover[0].scope.repo.as_deref(), Some("bastion"));
     assert!(file.carryover[0].scope.tier.is_none());
-    assert_eq!(file.carryover[0].kind, "constraint");
+    assert_eq!(
+        file.carryover[0].kind,
+        okf_core::CarryoverKind::Unknown("constraint".to_string())
+    );
 }
 
 #[test]
@@ -9220,7 +9257,7 @@ mod check_field_policy_tests {
     fn base_carryover() -> okf_core::Carryover {
         okf_core::Carryover {
             slug: "some-caveat".to_string(),
-            kind: "constraint".to_string(),
+            kind: okf_core::CarryoverKind::Unknown("constraint".to_string()),
             text: "A durable caveat.".to_string(),
             priority: None,
             ..Default::default()

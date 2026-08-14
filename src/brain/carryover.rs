@@ -65,7 +65,7 @@ use okf_core::{
 };
 
 use crate::brain::config::AttentionThresholds;
-use crate::brain::state::{carryover_stale_age, is_snoozed, staleness_anchor};
+use crate::brain::state::{carryover_kind_str, carryover_stale_age, is_snoozed, staleness_anchor};
 
 // ---------------------------------------------------------------------------
 // Report model
@@ -975,7 +975,7 @@ pub fn evaluate_carryover_with_dedup(
             entries.push(CarryoverVerdict {
                 repo: src.repo_slug.clone(),
                 slug: item.slug.clone(),
-                kind: item.kind.clone(),
+                kind: carryover_kind_str(&item.kind).into_owned(),
                 text: item.text.clone(),
                 clears_when: item
                     .clears_when
@@ -1770,6 +1770,7 @@ pub fn rank_carryover(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::brain::state::carryover_kind_from_str;
     use okf_core::CarryoverScope;
 
     fn scope(repo: Option<&str>) -> CarryoverScope {
@@ -1784,7 +1785,7 @@ mod tests {
         Carryover {
             slug: "test-slug".to_string(),
             scope: scope(own_repo),
-            kind: "deferred".to_string(),
+            kind: okf_core::CarryoverKind::Known(okf_core::KnownCarryoverKind::Deferred),
             text: "some text".to_string(),
             related,
             clears_when: None,
@@ -2133,7 +2134,7 @@ mod tests {
                 tier: None,
                 cross_repo: None,
             },
-            kind: kind.to_string(),
+            kind: carryover_kind_from_str(kind),
             text: "some carryover text".to_string(),
             related,
             clears_when: clears_when.map(|s| ClearsWhen::Prose(s.to_string())),

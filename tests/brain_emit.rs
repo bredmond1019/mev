@@ -7036,7 +7036,7 @@ mod attention_board {
     };
     use mev::brain::state::{
         Backlog, BacklogOrigin, Carryover, CarryoverScope, StateFile, StateSource,
-        build_state_graph,
+        build_state_graph, carryover_kind_from_str,
     };
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -7062,7 +7062,7 @@ mod attention_board {
                 tier: None,
                 cross_repo: None,
             },
-            kind: kind.to_string(),
+            kind: carryover_kind_from_str(kind),
             text: format!("text for {slug}"),
             related: vec![],
             clears_when: None,
