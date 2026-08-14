@@ -3174,6 +3174,51 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
+    // CarryoverKind::Unknown round-trip (AC 5) — an unrecognised kind must
+    // survive `carryover_kind_from_str` -> `carryover_kind_str` byte-identically:
+    // never coerced, never lowercased, never replaced with a placeholder.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn carryover_kind_unknown_round_trips_verbatim() {
+        for legacy in [
+            "constraint",
+            "known_issue",
+            "MiXeD_Case",
+            "totally-novel-kind",
+        ] {
+            let parsed = carryover_kind_from_str(legacy);
+            assert_eq!(
+                parsed,
+                okf_core::CarryoverKind::Unknown(legacy.to_string()),
+                "expected {legacy:?} to parse as Unknown(verbatim)"
+            );
+            assert_eq!(
+                carryover_kind_str(&parsed),
+                legacy,
+                "expected {legacy:?} to round-trip byte-identically through carryover_kind_str"
+            );
+        }
+    }
+
+    #[test]
+    fn carryover_kind_known_round_trips_to_snake_case() {
+        for (s, expected) in [
+            ("defect", "defect"),
+            ("deferred", "deferred"),
+            ("drift", "drift"),
+            ("env", "env"),
+        ] {
+            let parsed = carryover_kind_from_str(s);
+            assert!(
+                matches!(parsed, okf_core::CarryoverKind::Known(_)),
+                "expected {s:?} to parse as Known"
+            );
+            assert_eq!(carryover_kind_str(&parsed), expected);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Minimal fixture strings (representative of the five live state.json files)
     // -----------------------------------------------------------------------
 
