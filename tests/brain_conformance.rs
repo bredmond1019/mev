@@ -220,31 +220,54 @@ fn conformance_errors_when_brain_toml_is_missing() {
 // Full corpus fixture — clean fixture, seeded drift, single-check filter, tallies.
 // ---------------------------------------------------------------------------
 
+/// Names of every registered check whose `reads_live_checkout` property is set — i.e. it
+/// compares against the *running checkout's own source tree* (a `build.rs`-stamped path)
+/// rather than purely against the fixture passed in, and so can legitimately report
+/// `Drift` for reasons that have nothing to do with the fixture under test (an
+/// uncommitted worktree, a checkout path the CI runner stamped differently, etc). Derived
+/// from the registry's own `reads_live_checkout` field — never a hard-coded name list —
+/// so the next check with this property is excluded automatically instead of failing
+/// these fixture assertions the day it lands.
+fn live_checkout_check_names() -> std::collections::HashSet<&'static str> {
+    mev::all_checks()
+        .into_iter()
+        .filter(|c| c.reads_live_checkout)
+        .map(|c| c.name)
+        .collect()
+}
+
 /// An all-clean full corpus fixture (matching `backlog[]`/`backlog.md` and
 /// `epics[]`/index.md sides) reports zero drift. `project-cache-watermark` has no
 /// matching inputs in this fixture and is expected to be `not-evaluable`, never `drift`.
 ///
-/// `toolchain-freshness` is excluded from this assertion: it doesn't read the fixture at
-/// all — it compares the *running test binary's* compiled-in build stamp against the
-/// live state of the real `core/mev` source tree (see `src/brain/conformance/toolchain.rs`),
-/// so it legitimately reports `Drift` whenever `cargo test` runs from an uncommitted mev
-/// worktree. That's a property of the checkout running the test, not of this fixture.
+/// Checks with `reads_live_checkout: true` (currently `toolchain-freshness` and
+/// `sibling-rule-coverage`) are excluded from this assertion: they don't read the fixture
+/// at all — they compare the *running test binary's* compiled-in build stamp / source
+/// text against the live state of the real `core/mev` source tree (see
+/// `src/brain/conformance/toolchain.rs` and `sibling.rs`), so they legitimately report
+/// `Drift` whenever `cargo test` runs from an uncommitted mev worktree or a checkout the
+/// runner stamped at a different path. That's a property of the checkout running the
+/// test, not of this fixture — see `ConformanceCheck::reads_live_checkout`'s doc comment.
 #[test]
 fn full_fixture_reports_zero_drift() {
     let dir = temp_dir("full-clean");
     write_full_clean_fixture(&dir);
 
     let report = mev::conformance(&dir, None).expect("conformance should not error");
+    let live_checkout_checks = live_checkout_check_names();
 
-    let non_toolchain_drift = report
+    let non_live_checkout_drift = report
         .results
         .iter()
-        .filter(|r| r.name != "toolchain-freshness" && r.outcome.status == mev::CheckStatus::Drift)
+        .filter(|r| {
+            !live_checkout_checks.contains(r.name.as_str())
+                && r.outcome.status == mev::CheckStatus::Drift
+        })
         .count();
 
     assert_eq!(
-        non_toolchain_drift, 0,
-        "clean full corpus fixture should report zero drift outside toolchain-freshness, got: {:#?}",
+        non_live_checkout_drift, 0,
+        "clean full corpus fixture should report zero drift outside live-checkout checks, got: {:#?}",
         report.results
     );
 
@@ -268,15 +291,20 @@ fn seeded_backlog_title_drift_is_detected_and_named() {
     );
 
     let report = mev::conformance(&dir, None).expect("conformance should not error");
+    let live_checkout_checks = live_checkout_check_names();
 
-    // `toolchain-freshness` is excluded here for the same reason as in
-    // `full_fixture_reports_zero_drift`: it reflects the real mev checkout's build
-    // provenance, not this fixture, and can independently report `Drift` when `cargo
-    // test` runs from an uncommitted mev worktree.
+    // Checks with `reads_live_checkout: true` are excluded here for the same reason as in
+    // `full_fixture_reports_zero_drift`: they reflect the real mev checkout's build
+    // provenance / source tree, not this fixture, and can independently report `Drift`
+    // when `cargo test` runs from an uncommitted mev worktree or a differently-stamped
+    // checkout.
     let drifting: Vec<_> = report
         .results
         .iter()
-        .filter(|r| r.name != "toolchain-freshness" && r.outcome.status == mev::CheckStatus::Drift)
+        .filter(|r| {
+            !live_checkout_checks.contains(r.name.as_str())
+                && r.outcome.status == mev::CheckStatus::Drift
+        })
         .collect();
 
     assert_eq!(
