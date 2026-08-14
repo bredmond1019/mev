@@ -6,6 +6,7 @@
 //! `planning/master-plan.md`).
 
 pub mod brain;
+pub mod consumers;
 pub mod doc;
 mod learn_ai;
 mod shared;
@@ -44,6 +45,7 @@ pub use brain::links::{
 pub use brain::manifest::{Manifest, ManifestEntry, build_manifest};
 pub use brain::okf::{OkfFrontmatter, validate_md_file};
 pub use brain::visualize::generate_graph_visual;
+pub use consumers::{ConsumerOutcome, ConsumerResult, classify as classify_consumer_outcome};
 pub use doc::{
     OpportunityKind, plan_add_action, plan_document, plan_index_reconcile, plan_ingest,
     plan_merge_contacts, plan_set_stage,
