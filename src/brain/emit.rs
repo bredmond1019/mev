@@ -259,6 +259,79 @@ pub fn epic_members<'a>(
         .collect()
 }
 
+/// Resolve one epic's cross-repo sequence — [`epic_members`], but implementing
+/// `MV.13.D` Task 3's authored-vs-derived precedence rule instead of always reading
+/// authored `block.epics`.
+///
+/// # The precedence rule (settled in `planning/MV.13.D/tasks.md`; not re-litigated here)
+///
+/// | `epic.kind` | Membership source | Why |
+/// |---|---|---|
+/// | `program` | **Derived lane membership wins** ([`crate::brain::lane_segments::derive_program_membership`]); authored `block.epics` is advisory and adds no members. | A program's membership *is* its lane chain — that is the thing that executes. |
+/// | `area` (or unset) | **Authored `block.epics` is the only source** — falls straight through to [`epic_members`]. | An area has no lanes to derive from; a `kind`-less epic gets today's behaviour unchanged. |
+///
+/// **Union was considered and rejected.** A block authored to epic X and also derived
+/// into roadmap Y's lane would then render under both — exactly the double-counting
+/// D57's two-axis rule (and `MV.13.A`'s `E_LANE_DOUBLE_CLAIM`) exists to prevent, and it
+/// would misstate the remaining depth of both initiatives. So for `kind: program` the
+/// derived set is used exclusively, never unioned with authored tags.
+///
+/// For `kind: program`, the epic's `plan` document names the executing roadmap slug
+/// (via [`crate::brain::lane_segments::roadmap_slug_from_plan_path`]); derived
+/// positions are matched back to real [`TrackBlock`]s in `files` and returned in the
+/// order [`crate::brain::lane_segments::derive_program_membership`] preserves. A
+/// program epic whose `plan` does not resolve to a roadmap slug, or that roadmap has no
+/// derived positions, returns an empty sequence rather than falling back to authored
+/// tags — a program is definitionally lane-derived, and falling back would reintroduce
+/// the two-sources ambiguity this rule exists to remove. `origin_roadmap`-adopted
+/// blocks are already folded into the correct (executing) roadmap's derived set by
+/// `derive_program_membership`, so they render here exactly once.
+pub fn epic_members_resolved<'a>(
+    root: &Path,
+    graph: &StateGraph,
+    files: &'a [(StateSource, StateFile)],
+    epic: &Epic,
+) -> Vec<(String, &'a TrackBlock)> {
+    let is_program = crate::brain::state::epic_kind_raw(epic)
+        .and_then(|v| v.as_str())
+        .is_some_and(|k| k == "program");
+    if !is_program {
+        return epic_members(graph, files, &epic.slug);
+    }
+
+    let Some(roadmap_slug) = epic
+        .plan
+        .as_deref()
+        .and_then(crate::brain::lane_segments::roadmap_slug_from_plan_path)
+    else {
+        return Vec::new();
+    };
+
+    let by_roadmap = crate::brain::lane_segments::derive_program_membership(root, files);
+    let Some(positions) = by_roadmap.get(&roadmap_slug) else {
+        return Vec::new();
+    };
+
+    let mut by_key: HashMap<String, (String, &TrackBlock)> = HashMap::new();
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                by_key.insert(
+                    format!("{}:{}", src.repo_slug, block.id),
+                    (src.repo_slug.clone(), block),
+                );
+            }
+        }
+    }
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    positions
+        .iter()
+        .filter_map(|p| by_key.get(&format!("{}:{}", p.repo, p.id)).cloned())
+        .filter(|(_, block)| seen.insert(block.id.clone()))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // render_wave_table — Markdown table for one repo's blocks
 // ---------------------------------------------------------------------------
@@ -2951,6 +3024,7 @@ fn tier_of_repo<'a>(slug: &str, config: &'a BrainConfig) -> Option<&'a str> {
 /// A missing `status.md`, or one lacking the sentinels, yields
 /// `W_EMIT_NO_SENTINEL` and no write — sentinels are never invented.
 pub fn plan_epic_boards(
+    root: &Path,
     files: &[(StateSource, StateFile)],
     graph: &StateGraph,
     config: &BrainConfig,
@@ -2978,7 +3052,7 @@ pub fn plan_epic_boards(
         .iter()
         .map(|epic| EpicBoardInput {
             epic,
-            members: epic_members(graph, files, &epic.slug),
+            members: epic_members_resolved(root, graph, files, epic),
             edges: derive_epic_edges(files, &epic.slug),
         })
         .collect();
@@ -3128,8 +3202,10 @@ pub fn plan_epic_sequences(
             }
         };
 
-        let table =
-            render_epic_sequence_table(&epic_members(graph, files, &epic.slug), &global_status);
+        let table = render_epic_sequence_table(
+            &epic_members_resolved(root, graph, files, epic),
+            &global_status,
+        );
 
         match splice_generated(&original, markers::EPIC_SEQUENCE, &table) {
             Ok(new_content) => {

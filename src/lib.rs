@@ -1323,8 +1323,11 @@ pub fn emit_state(
     //    `plan_epic_sequences` targets its own `epics/<slug>.md` docs, which
     //    nothing above touches. The two are still planned together and applied
     //    together (not interleaved) — safe, since they target disjoint files.
-    let epic_board_plan =
-        filter_plan_by_scope(plan_epic_boards(&loaded, &graph, &config), root, scope);
+    let epic_board_plan = filter_plan_by_scope(
+        plan_epic_boards(root, &loaded, &graph, &config),
+        root,
+        scope,
+    );
     let epic_seq_plan = filter_plan_by_scope(
         plan_epic_sequences(root, &loaded, &graph, &config),
         root,
