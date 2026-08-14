@@ -21,6 +21,10 @@
 //! Exit code alone cannot separate them (both used 101 on different days), so classification
 //! reads the **stderr signature**, not the exit code.
 
+use std::io;
+use std::path::Path;
+use std::process::Command;
+
 use serde::Serialize;
 
 /// The verdict for one consumer's compile-gate run.
@@ -128,6 +132,170 @@ fn extract_compiler_errors(stderr: &str) -> Vec<String> {
     }
 
     errors
+}
+
+// ---------------------------------------------------------------------------
+// The single-consumer runner — does the I/O, hands off to `classify` for judgement.
+// ---------------------------------------------------------------------------
+
+/// The reduced result of spawning the compile-gate cargo invocation for one consumer — exactly
+/// the inputs [`classify`] needs. Kept separate from [`std::process::Output`] so tests can
+/// construct it directly instead of spawning a real process.
+#[derive(Debug, Clone)]
+pub struct SpawnOutcome {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Check `git -C <consumer_path> status --porcelain`. `Ok(true)` means the tree is dirty.
+/// Errors (git unavailable, not a repo, etc.) are surfaced rather than silently treated as
+/// clean — a consumer we cannot ask about is not evidence either way.
+fn git_is_dirty(consumer_path: &Path) -> io::Result<bool> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(consumer_path)
+        .args(["status", "--porcelain"])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "git status --porcelain exited {:?} for {}",
+            output.status.code(),
+            consumer_path.display()
+        )));
+    }
+    Ok(!output.stdout.is_empty())
+}
+
+/// Hash a consumer's `Cargo.lock` (`None` if it does not exist), for the before/after
+/// byte-identity check that `--locked` is supposed to guarantee.
+fn hash_lockfile(consumer_path: &Path) -> io::Result<Option<[u8; 32]>> {
+    use sha2::{Digest, Sha256};
+    let lock_path = consumer_path.join("Cargo.lock");
+    if !lock_path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&lock_path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(Some(hasher.finalize().into()))
+}
+
+/// First 8 hex chars of a lockfile hash, or `"missing"` — for a short, loud reason string, not
+/// for cryptographic comparison (the `Option<[u8; 32]>` equality check does that).
+fn digest_summary(hash: Option<[u8; 32]>) -> String {
+    match hash {
+        Some(bytes) => bytes.iter().take(4).map(|b| format!("{b:02x}")).collect(),
+        None => "missing".to_string(),
+    }
+}
+
+/// Spawn the real compile-gate command against `manifest_path`, in the fresh `target_dir` so it
+/// never contends with that repo's own build lane. Every flag here is load-bearing (see the
+/// module docs and the ticket) — do not simplify:
+/// - `--no-run` compiles test targets without executing them; the break class this ticket
+///   exists for lives only in test code, which `cargo build` cannot see.
+/// - `--locked` refuses to rewrite a `Cargo.lock` we do not own, turning a silent mutation of
+///   another repo into a loud error instead.
+/// - a fresh `CARGO_TARGET_DIR` avoids `target/` lock contention with that consumer's own lane.
+fn spawn_real(manifest_path: &Path, target_dir: &Path) -> io::Result<SpawnOutcome> {
+    let output = Command::new("cargo")
+        .env("CARGO_TARGET_DIR", target_dir)
+        .args(["nextest", "run", "--no-run", "--locked", "--manifest-path"])
+        .arg(manifest_path)
+        .output()?;
+    Ok(SpawnOutcome {
+        exit_code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
+/// Run the compile gate against one consumer at `consumer_path`, identified by `slug`. Spawns
+/// the real `cargo nextest run --no-run --locked` command — see [`run_consumer_with_spawner`]
+/// for the testable, dependency-injected version.
+pub fn run_consumer(slug: &str, consumer_path: &Path) -> ConsumerResult {
+    run_consumer_with_spawner(slug, consumer_path, spawn_real)
+}
+
+/// Same as [`run_consumer`] but with the cargo spawn injected, so tests can assert whether it
+/// was called at all — the dirty short-circuit's whole point — without spawning a real process.
+///
+/// Order of operations: check `git status --porcelain` FIRST and short-circuit to
+/// `SkippedDirty` without ever calling `spawner` if the tree is dirty (a dirty consumer's
+/// result is not evidence about mev's change either way); otherwise hash `Cargo.lock`, run the
+/// spawner, re-hash `Cargo.lock`, and return `NotEvaluable` — never a guessed verdict — if the
+/// hash moved, since that means `--locked` was dropped or defeated.
+pub fn run_consumer_with_spawner<F>(slug: &str, consumer_path: &Path, spawner: F) -> ConsumerResult
+where
+    F: FnOnce(&Path, &Path) -> io::Result<SpawnOutcome>,
+{
+    let outcome = match git_is_dirty(consumer_path) {
+        Ok(true) => ConsumerOutcome::SkippedDirty,
+        Ok(false) => run_and_classify(consumer_path, spawner),
+        Err(err) => ConsumerOutcome::NotEvaluable {
+            reason: format!("could not determine git status for {slug}: {err}"),
+        },
+    };
+    ConsumerResult {
+        slug: slug.to_string(),
+        outcome,
+    }
+}
+
+fn run_and_classify<F>(consumer_path: &Path, spawner: F) -> ConsumerOutcome
+where
+    F: FnOnce(&Path, &Path) -> io::Result<SpawnOutcome>,
+{
+    let before = match hash_lockfile(consumer_path) {
+        Ok(hash) => hash,
+        Err(err) => {
+            return ConsumerOutcome::NotEvaluable {
+                reason: format!("could not read Cargo.lock before the run: {err}"),
+            };
+        }
+    };
+
+    let manifest_path = consumer_path.join("Cargo.toml");
+    let target_dir = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(err) => {
+            return ConsumerOutcome::NotEvaluable {
+                reason: format!("could not create a fresh CARGO_TARGET_DIR: {err}"),
+            };
+        }
+    };
+
+    let spawned = match spawner(&manifest_path, target_dir.path()) {
+        Ok(spawned) => spawned,
+        Err(err) => {
+            return ConsumerOutcome::NotEvaluable {
+                reason: format!("could not spawn `cargo nextest run --no-run --locked`: {err}"),
+            };
+        }
+    };
+
+    let after = match hash_lockfile(consumer_path) {
+        Ok(hash) => hash,
+        Err(err) => {
+            return ConsumerOutcome::NotEvaluable {
+                reason: format!("could not read Cargo.lock after the run: {err}"),
+            };
+        }
+    };
+
+    if before != after {
+        return ConsumerOutcome::NotEvaluable {
+            reason: format!(
+                "Cargo.lock changed during the run despite --locked ({} -> {}); this should \
+                 never happen and means --locked was dropped or defeated",
+                digest_summary(before),
+                digest_summary(after),
+            ),
+        };
+    }
+
+    classify(spawned.exit_code, &spawned.stdout, &spawned.stderr, false)
 }
 
 #[cfg(test)]
@@ -263,5 +431,139 @@ Caused by:
         // Same function, called directly: proves it needs nothing but a string.
         let errors = extract_compiler_errors(BASTION_BROKEN_STDERR);
         assert_eq!(errors.len(), 2);
+    }
+
+    // -----------------------------------------------------------------
+    // The runner: `run_consumer_with_spawner` — real git, injected cargo.
+    // -----------------------------------------------------------------
+
+    fn run_git(path: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .status()
+            .expect("git must be on PATH for this test");
+        assert!(status.success(), "git {args:?} failed in {path:?}");
+    }
+
+    /// A fresh, committed (clean) fixture consumer with a `Cargo.toml` and `Cargo.lock`.
+    fn clean_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        run_git(dir.path(), &["init"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write Cargo.toml");
+        std::fs::write(dir.path().join("Cargo.lock"), "# fixture lockfile\n")
+            .expect("write Cargo.lock");
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "init"]);
+        dir
+    }
+
+    #[test]
+    fn dirty_consumer_short_circuits_without_spawning_cargo() {
+        let dir = clean_fixture();
+        // Make it dirty: an untracked file after the commit above.
+        std::fs::write(dir.path().join("untracked.txt"), "oops").expect("write untracked");
+
+        let spawned = std::rc::Rc::new(std::cell::Cell::new(false));
+        let spawned_flag = spawned.clone();
+        let result = run_consumer_with_spawner("fixture", dir.path(), move |_manifest, _target| {
+            spawned_flag.set(true);
+            Ok(SpawnOutcome {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        });
+
+        assert_eq!(result.slug, "fixture");
+        assert_eq!(result.outcome, ConsumerOutcome::SkippedDirty);
+        assert!(
+            !spawned.get(),
+            "cargo must never be spawned for a dirty consumer — skipping the spawn is the point"
+        );
+    }
+
+    #[test]
+    fn clean_consumer_runs_and_classifies_via_injected_spawner() {
+        let dir = clean_fixture();
+
+        let result = run_consumer_with_spawner("fixture", dir.path(), |_manifest, _target| {
+            Ok(SpawnOutcome {
+                exit_code: 0,
+                stdout: "test result: ok".to_string(),
+                stderr: String::new(),
+            })
+        });
+
+        assert_eq!(result.slug, "fixture");
+        assert_eq!(result.outcome, ConsumerOutcome::Pass);
+    }
+
+    #[test]
+    fn clean_consumer_broken_stderr_classifies_as_broken() {
+        let dir = clean_fixture();
+
+        let result = run_consumer_with_spawner("fixture", dir.path(), |_manifest, _target| {
+            Ok(SpawnOutcome {
+                exit_code: 101,
+                stdout: String::new(),
+                stderr: BASTION_BROKEN_STDERR.to_string(),
+            })
+        });
+
+        match result.outcome {
+            ConsumerOutcome::Broken { errors } => assert_eq!(errors.len(), 2),
+            other => panic!("expected Broken, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lockfile_mutation_during_run_is_not_evaluable_not_broken() {
+        let dir = clean_fixture();
+        let consumer_path = dir.path().to_path_buf();
+        let mutate_path = consumer_path.clone();
+
+        let result =
+            run_consumer_with_spawner("fixture", &consumer_path, move |_manifest, _target| {
+                // Simulate `--locked` being defeated: mutate Cargo.lock as a side effect of
+                // the "cargo run", exactly what the before/after hash check exists to catch.
+                std::fs::write(mutate_path.join("Cargo.lock"), "# mutated\n")
+                    .expect("write mutated Cargo.lock");
+                Ok(SpawnOutcome {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            });
+
+        match result.outcome {
+            ConsumerOutcome::NotEvaluable { reason } => {
+                assert!(
+                    reason.contains("Cargo.lock changed"),
+                    "reason should name the lockfile mutation, got: {reason}"
+                );
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_consumer_wires_the_real_spawner() {
+        // Not exercised against a real cargo project here (that belongs to task 4's live-fleet
+        // verification) — just proves `run_consumer` composes with `spawn_real` and that a
+        // dirty tree still short-circuits through the public, non-injected entry point.
+        let dir = clean_fixture();
+        std::fs::write(dir.path().join("untracked.txt"), "oops").expect("write untracked");
+
+        let result = run_consumer("fixture", dir.path());
+
+        assert_eq!(result.outcome, ConsumerOutcome::SkippedDirty);
     }
 }
