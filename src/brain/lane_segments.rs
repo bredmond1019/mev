@@ -431,6 +431,55 @@ pub fn segment_lane_file(
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Unresolvable IDs are a diagnostic, never a guess — MV.13.A Task 3
+// ---------------------------------------------------------------------------
+
+/// Emit a diagnostic for every block in `lane_file` whose owner does not resolve via
+/// `index`, naming the file, the 1-based line, and the ID.
+///
+/// Two distinct resolution failures both count here, and both get a diagnostic rather
+/// than a silent omission from every segment:
+/// - **unknown** — the ID matches zero repos in the corpus. A lane file may legitimately
+///   reference a block filed later than the lane file itself, so this is expected to
+///   happen in the ordinary course of authoring, not just on a typo.
+/// - **ambiguous** — the bare ID matches more than one repo (graph keys are `repo:id`;
+///   see [`build_owner_index`]). [`resolve_owner`] refuses to pick one, so this is
+///   surfaced too rather than resolved first-wins.
+///
+/// **Warning, never error, and never aborts derivation.** A hard error here would
+/// red-gate the whole corpus for every concurrent lane over an authoring-order detail —
+/// segmentation ([`segment_lane_blocks`]) already proceeds over whatever *did* resolve,
+/// omitting the rest; this function only reports what got left out and why. Never
+/// guesses an owner — not by nearest neighbour, not by the file's other blocks, not by
+/// the containing directory.
+pub fn unresolved_owner_diagnostics(lane_file: &LaneFile, index: &OwnerIndex) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    for block in &lane_file.blocks {
+        let repos: &[String] = index.get(&block.id).map(|v| v.as_slice()).unwrap_or(&[]);
+        let reason = match repos.len() {
+            0 => {
+                Some("unknown to the corpus — no repo's state.json owns this block ID".to_string())
+            }
+            1 => None,
+            n => Some(format!(
+                "ambiguous — owned by {n} repos ({}), a bare ID cannot resolve to a single owner",
+                repos.join(", ")
+            )),
+        };
+        let Some(reason) = reason else { continue };
+        diags.push(Diagnostic::warning(
+            &lane_file.path,
+            block.line.to_string(),
+            format!(
+                "lane block '{}' could not resolve an owner: {reason}",
+                block.id
+            ),
+        ));
+    }
+    diags
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -855,5 +904,87 @@ OR.ticket.publishable-eval-report
         assert_eq!(positions[2].repo, "repoB");
         assert_eq!(positions[2].segment, 1);
         assert_eq!(positions[2].position, 1);
+    }
+
+    // -- Task 3: unresolvable IDs are a diagnostic, never a guess --------------------
+
+    fn owner_index_from(pairs: &[(&str, &[&str])]) -> OwnerIndex {
+        let mut index: OwnerIndex = HashMap::new();
+        for (id, repos) in pairs {
+            index.insert(
+                id.to_string(),
+                repos.iter().map(|r| r.to_string()).collect(),
+            );
+        }
+        index
+    }
+
+    #[test]
+    fn unresolved_owner_diagnostics_fires_on_unknown_id_and_does_not_abort() {
+        let lane_file = LaneFile {
+            roadmap: "close-the-loop".to_string(),
+            lane: "substrate".to_string(),
+            path: PathBuf::from("planning/close-the-loop/lane-substrate.txt"),
+            blocks: refs(&["A.1", "GHOST.id", "A.2"]),
+        };
+        let index = owner_index_from(&[("A.1", &["repoA"]), ("A.2", &["repoA"])]);
+
+        let diags = unresolved_owner_diagnostics(&lane_file, &index);
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic, got {diags:?}"
+        );
+        assert_eq!(diags[0].severity, crate::Severity::Warning);
+        assert_eq!(diags[0].file, lane_file.path);
+        assert_eq!(diags[0].locator, "2"); // GHOST.id is the second block, line 2
+        assert!(diags[0].message.contains("GHOST.id"));
+        assert!(diags[0].message.contains("unknown to the corpus"));
+
+        // Segmentation over the same data still proceeds, omitting the unresolvable
+        // block rather than aborting — the diagnostic and the derivation are separate
+        // concerns.
+        let positions = segment_lane_file(&lane_file, |id| {
+            index.get(id).filter(|r| r.len() == 1).map(|r| r[0].clone())
+        });
+        let ids: Vec<&str> = positions.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["A.1", "A.2"]);
+    }
+
+    #[test]
+    fn unresolved_owner_diagnostics_fires_on_ambiguous_multi_repo_id() {
+        let lane_file = LaneFile {
+            roadmap: "close-the-loop".to_string(),
+            lane: "substrate".to_string(),
+            path: PathBuf::from("planning/close-the-loop/lane-substrate.txt"),
+            blocks: refs(&["SHARED.id"]),
+        };
+        let index = owner_index_from(&[("SHARED.id", &["alpha", "beta"])]);
+
+        let diags = unresolved_owner_diagnostics(&lane_file, &index);
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic, got {diags:?}"
+        );
+        assert_eq!(diags[0].severity, crate::Severity::Warning);
+        assert!(diags[0].message.contains("SHARED.id"));
+        assert!(diags[0].message.contains("ambiguous"));
+        assert!(diags[0].message.contains("alpha"));
+        assert!(diags[0].message.contains("beta"));
+    }
+
+    #[test]
+    fn unresolved_owner_diagnostics_empty_when_everything_resolves() {
+        let lane_file = LaneFile {
+            roadmap: "close-the-loop".to_string(),
+            lane: "substrate".to_string(),
+            path: PathBuf::from("planning/close-the-loop/lane-substrate.txt"),
+            blocks: refs(&["A.1", "B.1"]),
+        };
+        let index = owner_index_from(&[("A.1", &["repoA"]), ("B.1", &["repoB"])]);
+
+        let diags = unresolved_owner_diagnostics(&lane_file, &index);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
     }
 }
