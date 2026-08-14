@@ -682,7 +682,7 @@ pub fn resolve_double_claims(lane_files: &[LaneFile]) -> (Vec<ClaimResolution>, 
 /// One block's final derived position, corpus-wide: Task 2's `{roadmap, lane, segment,
 /// position}` plus `origin_roadmap` (`None` unless this block was a resolved
 /// double-claim).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DerivedBlockPosition {
     pub roadmap: String,
     pub lane: String,
@@ -768,6 +768,98 @@ pub fn derive_lane_positions(
     }
 
     (out, diags)
+}
+
+// ---------------------------------------------------------------------------
+// Wired into `emit-state` — MV.13.A Task 5
+// ---------------------------------------------------------------------------
+
+/// Relative path (from the brain root) of the derived lane-segments artifact this
+/// module's planner writes. A cross-repo, corpus-wide derivation — not one repo's
+/// surface — so it is written unconditionally by [`plan_lane_segments`] rather than
+/// being one of the four scoped targets [`crate::brain::config::ScopeDependencySet`]
+/// recognises; `emit_state`'s `--scope <repo>` narrowing does not apply to it.
+pub const LANE_SEGMENTS_ARTIFACT: &str = "planning/lane-segments.json";
+
+/// The full corpus-wide derivation this module produces, serialized as-is —
+/// `mev emit-state`'s JSON artifact at [`LANE_SEGMENTS_ARTIFACT`].
+#[derive(Debug, Clone, serde::Serialize)]
+struct LaneSegmentsArtifact {
+    /// Every lane file's derived block positions, corpus-wide, in the same order
+    /// [`derive_lane_positions`] returns them — lane-file discovery order, then file
+    /// order within each lane. Never re-sorted here.
+    blocks: Vec<DerivedBlockPosition>,
+}
+
+/// Plan the [`LANE_SEGMENTS_ARTIFACT`] write: discover every live lane file under
+/// `root`, resolve ownership from `loaded`'s corpus-wide `state.json` graph keys, and
+/// derive `{roadmap, lane, segment, position}` (plus double-claim resolution) for
+/// every block that resolves — Tasks 1 through 4, assembled into one [`EmitPlan`] for
+/// `emit_state` to apply alongside its other planners.
+///
+/// Diagnostics carried on the returned plan are the union of:
+/// - [`discover_lane_files`]'s structural diagnostics (e.g. a slug claimed by both
+///   roadmap layouts at once);
+/// - [`unresolved_owner_diagnostics`] for every block in every lane file, run before
+///   double-claim exclusion so an ID that is both unresolvable *and* would have been a
+///   double-claim still gets the "unknown to the corpus" warning it deserves;
+/// - [`derive_lane_positions`]'s own `E_LANE_DOUBLE_CLAIM` errors.
+///
+/// No `EmitAction` is planned when zero lane files are discovered (an empty corpus, or
+/// `root` has no `planning/` at all) — nothing to derive, nothing to write.
+pub fn plan_lane_segments(
+    root: &Path,
+    loaded: &[(StateSource, StateFile)],
+) -> crate::brain::emit::EmitPlan {
+    use crate::brain::emit::{EmitAction, EmitPlan};
+
+    let mut plan = EmitPlan::default();
+
+    let (lane_files, discover_diags) = discover_lane_files(root);
+    plan.diagnostics.extend(discover_diags);
+
+    if lane_files.is_empty() {
+        return plan;
+    }
+
+    let owner_index = build_owner_index(loaded);
+    for lf in &lane_files {
+        plan.diagnostics
+            .extend(unresolved_owner_diagnostics(lf, &owner_index));
+    }
+
+    let (blocks, double_claim_diags) = derive_lane_positions(&lane_files, |id| {
+        resolve_owner(&owner_index, id).map(str::to_string)
+    });
+    plan.diagnostics.extend(double_claim_diags);
+
+    let block_count = blocks.len();
+    let artifact = LaneSegmentsArtifact { blocks };
+    let new_content = match serde_json::to_string_pretty(&artifact) {
+        Ok(mut s) => {
+            s.push('\n');
+            s
+        }
+        Err(e) => {
+            plan.diagnostics.push(Diagnostic::error(
+                root,
+                "E_EMIT_LANE_SEGMENTS_SERIALIZE",
+                format!("failed to serialize lane-segments artifact: {e}"),
+            ));
+            return plan;
+        }
+    };
+
+    plan.actions.push(EmitAction {
+        path: root.join(LANE_SEGMENTS_ARTIFACT),
+        new_content,
+        note: format!(
+            "derived lane segments for {block_count} block(s) across {} lane file(s)",
+            lane_files.len()
+        ),
+    });
+
+    plan
 }
 
 #[cfg(test)]
@@ -1545,5 +1637,102 @@ BT.ticket.two
         assert!(diags.is_empty());
         assert_eq!(positions.len(), 2);
         assert!(positions.iter().all(|p| p.origin_roadmap.is_none()));
+    }
+
+    // -----------------------------------------------------------------------
+    // plan_lane_segments — MV.13.A Task 5
+    // -----------------------------------------------------------------------
+
+    fn state_file_fixture(repo: &str, id: &str) -> (StateSource, StateFile) {
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: PathBuf::from(format!("{repo}/planning/state.json")),
+            expected_kind: "project",
+        };
+        let file: StateFile = serde_json::from_str(&format!(
+            r#"{{"repo":"{repo}","kind":"project","updated":"2026-08-14","tracks":[
+                {{"title":"t","blocks":[{{"id":"{id}","title":"x","status":"open"}}]}}
+            ]}}"#
+        ))
+        .unwrap();
+        (src, file)
+    }
+
+    #[test]
+    fn plan_lane_segments_writes_artifact_with_derived_positions() {
+        let dir = crate::testsupport::unique_temp_dir("mev-plan-lane-segments-basic");
+        write(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.txt",
+            "MV.ticket.a\nBT.ticket.b\n",
+        );
+        let loaded = vec![
+            state_file_fixture("mev", "MV.ticket.a"),
+            state_file_fixture("base-template", "BT.ticket.b"),
+        ];
+
+        let plan = plan_lane_segments(&dir, &loaded);
+        assert!(
+            plan.diagnostics.is_empty(),
+            "expected no diagnostics, got {:?}",
+            plan.diagnostics
+        );
+        assert_eq!(plan.actions.len(), 1, "expected exactly one write action");
+
+        let action = &plan.actions[0];
+        assert_eq!(action.path, dir.join(LANE_SEGMENTS_ARTIFACT));
+
+        let artifact: serde_json::Value =
+            serde_json::from_str(&action.new_content).expect("artifact must be valid JSON");
+        let blocks = artifact["blocks"].as_array().expect("blocks array");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["roadmap"], "alpha");
+        assert_eq!(blocks[0]["lane"], "substrate");
+        assert_eq!(blocks[0]["repo"], "mev");
+        assert_eq!(blocks[0]["segment"], 0);
+        assert_eq!(blocks[0]["position"], 0);
+        assert_eq!(blocks[1]["repo"], "base-template");
+        assert_eq!(blocks[1]["segment"], 1);
+        assert_eq!(blocks[1]["position"], 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_lane_segments_no_lane_files_plans_nothing() {
+        let dir = crate::testsupport::unique_temp_dir("mev-plan-lane-segments-empty");
+        std::fs::create_dir_all(dir.join("planning")).unwrap();
+
+        let plan = plan_lane_segments(&dir, &[]);
+        assert!(plan.actions.is_empty());
+        assert!(plan.diagnostics.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_lane_segments_unresolved_id_surfaces_a_diagnostic() {
+        let dir = crate::testsupport::unique_temp_dir("mev-plan-lane-segments-unresolved");
+        write(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.txt",
+            "MV.ticket.unknown\n",
+        );
+
+        let plan = plan_lane_segments(&dir, &[]);
+        assert!(
+            plan.diagnostics
+                .iter()
+                .any(|d| d.message.contains("could not resolve an owner")),
+            "expected an unresolved-owner diagnostic, got {:?}",
+            plan.diagnostics
+        );
+        // Still writes the artifact — a diagnostic is not an abort.
+        assert_eq!(plan.actions.len(), 1);
+        let artifact: serde_json::Value =
+            serde_json::from_str(&plan.actions[0].new_content).unwrap();
+        assert!(artifact["blocks"].as_array().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
