@@ -59,10 +59,13 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use okf_core::{BlockedBy, Carryover, ClearsWhen, ClearsWhenPredicate, StateFile, StateSource};
+use okf_core::{
+    ApprovalDep, BlockDep, BlockedBy, Carryover, ClearsWhen, ClearsWhenPredicate, ExternalDep,
+    OperatorDep, StateFile, StateSource,
+};
 
 use crate::brain::config::AttentionThresholds;
-use crate::brain::state::{carryover_stale_age, is_snoozed, staleness_anchor};
+use crate::brain::state::{carryover_kind_str, carryover_stale_age, is_snoozed, staleness_anchor};
 
 // ---------------------------------------------------------------------------
 // Report model
@@ -246,7 +249,7 @@ pub fn block_refs_from_related(item: &Carryover) -> Vec<String> {
     item.related
         .iter()
         .filter_map(|edge| match edge {
-            BlockedBy::Block { repo, id, .. } => {
+            BlockedBy::Block(BlockDep { repo, id, .. }) => {
                 let repo = if repo.is_empty() {
                     item.scope.repo.clone()?
                 } else {
@@ -254,9 +257,7 @@ pub fn block_refs_from_related(item: &Carryover) -> Vec<String> {
                 };
                 Some(format!("{repo}:{id}"))
             }
-            BlockedBy::External { .. }
-            | BlockedBy::Operator { .. }
-            | BlockedBy::Approval { .. } => None,
+            BlockedBy::External(_) | BlockedBy::Operator(_) | BlockedBy::Approval(_) => None,
         })
         .collect()
 }
@@ -974,7 +975,7 @@ pub fn evaluate_carryover_with_dedup(
             entries.push(CarryoverVerdict {
                 repo: src.repo_slug.clone(),
                 slug: item.slug.clone(),
-                kind: item.kind.clone(),
+                kind: carryover_kind_str(&item.kind).into_owned(),
                 text: item.text.clone(),
                 clears_when: item
                     .clears_when
@@ -1496,7 +1497,7 @@ pub fn assign_triage_lane(v: &CarryoverVerdict, unmet_blocks: &[String]) -> Tria
 /// block target is always treated as terminal.
 ///
 /// A `blocks[]` edge is resolved in this order:
-/// 1. `BlockedBy::Block { repo, id, .. }` — empty `repo` falls back to the
+/// 1. `BlockedBy::Block(BlockDep { repo, id, .. })` — empty `repo` falls back to the
 ///    carryover's own `repo` field (mirroring [`block_refs_from_related`]'s
 ///    fallback). The resolved `"{repo}:{id}"` key is looked up first in
 ///    `block_priorities` (a block target — terminal); if absent there but
@@ -1504,7 +1505,7 @@ pub fn assign_triage_lane(v: &CarryoverVerdict, unmet_blocks: &[String]) -> Tria
 ///    it is treated as a carryover target and its effective priority is
 ///    computed recursively. An unresolvable key in neither map contributes
 ///    nothing.
-/// 2. `BlockedBy::External { .. }` — has no node target and contributes no
+/// 2. `BlockedBy::External(_)` — has no node target and contributes no
 ///    priority. It still counts as an unmet `blocks[]` edge for
 ///    [`assign_triage_lane`]'s BLOCKING membership, but that is a distinct
 ///    question this function does not answer.
@@ -1562,7 +1563,7 @@ pub fn carryover_effective_priorities(
         if let Some(entry) = by_key.get(key) {
             for edge in &entry.blocks {
                 match edge {
-                    BlockedBy::Block { repo, id, .. } => {
+                    BlockedBy::Block(BlockDep { repo, id, .. }) => {
                         let target_repo = if repo.is_empty() {
                             entry.repo.as_str()
                         } else {
@@ -1586,9 +1587,7 @@ pub fn carryover_effective_priorities(
                     }
                     // No node target, so no priority to propagate — see
                     // this function's doc comment.
-                    BlockedBy::External { .. }
-                    | BlockedBy::Operator { .. }
-                    | BlockedBy::Approval { .. } => {}
+                    BlockedBy::External(_) | BlockedBy::Operator(_) | BlockedBy::Approval(_) => {}
                 }
             }
         }
@@ -1642,10 +1641,10 @@ fn unmet_carryover_block_keys(
         .blocks
         .iter()
         .filter_map(|edge| match edge {
-            BlockedBy::External { what } => Some(format!("external:{what}")),
-            BlockedBy::Operator { slug, .. } => Some(format!("operator:{slug}")),
-            BlockedBy::Approval { slug, .. } => Some(format!("approval:{slug}")),
-            BlockedBy::Block { repo, id, .. } => {
+            BlockedBy::External(ExternalDep { what }) => Some(format!("external:{what}")),
+            BlockedBy::Operator(OperatorDep { slug, .. }) => Some(format!("operator:{slug}")),
+            BlockedBy::Approval(ApprovalDep { slug, .. }) => Some(format!("approval:{slug}")),
+            BlockedBy::Block(BlockDep { repo, id, .. }) => {
                 let target_repo = if repo.is_empty() {
                     entry.repo.as_str()
                 } else {
@@ -1771,6 +1770,7 @@ pub fn rank_carryover(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::brain::state::carryover_kind_from_str;
     use okf_core::CarryoverScope;
 
     fn scope(repo: Option<&str>) -> CarryoverScope {
@@ -1785,7 +1785,7 @@ mod tests {
         Carryover {
             slug: "test-slug".to_string(),
             scope: scope(own_repo),
-            kind: "deferred".to_string(),
+            kind: okf_core::CarryoverKind::Known(okf_core::KnownCarryoverKind::Deferred),
             text: "some text".to_string(),
             related,
             clears_when: None,
@@ -1801,11 +1801,11 @@ mod tests {
     #[test]
     fn block_refs_from_related_keys_block_edges_repo_and_id() {
         let item = carryover(
-            vec![BlockedBy::Block {
+            vec![BlockedBy::Block(BlockDep {
                 repo: "engine-rs".to_string(),
                 id: "EN.5.B1".to_string(),
                 what: None,
-            }],
+            })],
             None,
         );
         assert_eq!(block_refs_from_related(&item), vec!["engine-rs:EN.5.B1"]);
@@ -1814,9 +1814,9 @@ mod tests {
     #[test]
     fn block_refs_from_related_skips_external_edges() {
         let item = carryover(
-            vec![BlockedBy::External {
+            vec![BlockedBy::External(ExternalDep {
                 what: "waiting on vendor API".to_string(),
-            }],
+            })],
             None,
         );
         assert!(block_refs_from_related(&item).is_empty());
@@ -1825,11 +1825,11 @@ mod tests {
     #[test]
     fn block_refs_from_related_falls_back_to_own_scope_repo() {
         let item = carryover(
-            vec![BlockedBy::Block {
+            vec![BlockedBy::Block(BlockDep {
                 repo: String::new(),
                 id: "MV.3.A".to_string(),
                 what: None,
-            }],
+            })],
             Some("mev"),
         );
         assert_eq!(block_refs_from_related(&item), vec!["mev:MV.3.A"]);
@@ -1838,11 +1838,11 @@ mod tests {
     #[test]
     fn block_refs_from_related_skips_edge_with_no_repo_anywhere() {
         let item = carryover(
-            vec![BlockedBy::Block {
+            vec![BlockedBy::Block(BlockDep {
                 repo: String::new(),
                 id: "MV.3.A".to_string(),
                 what: None,
-            }],
+            })],
             None,
         );
         assert!(block_refs_from_related(&item).is_empty());
@@ -2134,7 +2134,7 @@ mod tests {
                 tier: None,
                 cross_repo: None,
             },
-            kind: kind.to_string(),
+            kind: carryover_kind_from_str(kind),
             text: "some carryover text".to_string(),
             related,
             clears_when: clears_when.map(|s| ClearsWhen::Prose(s.to_string())),
@@ -2354,11 +2354,11 @@ mod tests {
                         "structured-only",
                         "deferred",
                         Some("the upstream fix ships"),
-                        vec![BlockedBy::Block {
+                        vec![BlockedBy::Block(BlockDep {
                             repo: "bastion".to_string(),
                             id: "BE.2.A".to_string(),
                             what: None,
-                        }],
+                        })],
                         "2020-01-01",
                         None,
                         None,
@@ -4459,11 +4459,11 @@ mod tests {
     }
 
     fn block_edge(repo: &str, id: &str) -> BlockedBy {
-        BlockedBy::Block {
+        BlockedBy::Block(BlockDep {
             repo: repo.to_string(),
             id: id.to_string(),
             what: None,
-        }
+        })
     }
 
     #[test]
@@ -4514,9 +4514,9 @@ mod tests {
             "mev",
             "external-only",
             Some(3),
-            vec![BlockedBy::External {
+            vec![BlockedBy::External(ExternalDep {
                 what: "nightly cron".to_string(),
-            }],
+            })],
         )];
         let effective = carryover_effective_priorities(&entries, &HashMap::new());
         assert_eq!(effective.get("mev:external-only"), Some(&3));
@@ -4528,11 +4528,11 @@ mod tests {
             "mev",
             "own-repo-target",
             Some(3),
-            vec![BlockedBy::Block {
+            vec![BlockedBy::Block(BlockDep {
                 repo: String::new(),
                 id: "MV.1.A".to_string(),
                 what: None,
-            }],
+            })],
         )];
         let block_priorities = HashMap::from([("mev:MV.1.A".to_string(), 1u8)]);
         let effective = carryover_effective_priorities(&entries, &block_priorities);

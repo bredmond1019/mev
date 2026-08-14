@@ -968,7 +968,7 @@ fn derive_focus_regression_check_focus_drift_still_passes_existing_fixtures() {
 fn derive_focus_blocked_carries_unmet_subset() {
     // An open block with an unmet Block dep appears in blocked, and the unmet
     // dep is included in the returned Vec<BlockedBy>.
-    use mev::brain::state::{BlockedBy, build_state_graph, derive_focus};
+    use mev::brain::state::{BlockDep, BlockedBy, build_state_graph, derive_focus};
 
     // alpha block B depends on alpha block A, which is still "open" (not closed).
     let (src, file) = make_leaf_pair_in_memory(
@@ -999,7 +999,7 @@ fn derive_focus_blocked_carries_unmet_subset() {
     assert_eq!(blocked_id, "AL.1.B");
     assert_eq!(unmet.len(), 1, "exactly one unmet dep");
     match &unmet[0] {
-        BlockedBy::Block { repo, id, .. } => {
+        BlockedBy::Block(BlockDep { repo, id, .. }) => {
             assert_eq!(repo, "alpha");
             assert_eq!(id, "AL.1.A");
         }
@@ -1072,7 +1072,7 @@ fn load_fixture(name: &str) -> (mev::brain::state::StateSource, mev::brain::stat
 
 #[test]
 fn derive_focus_operator_dep_goes_to_blocked() {
-    use mev::brain::state::{BlockedBy, build_state_graph, derive_focus};
+    use mev::brain::state::{BlockedBy, OperatorDep, build_state_graph, derive_focus};
 
     let (src, file) = load_fixture("state-operator-dep.json");
     let files = vec![(src.clone(), file.clone())];
@@ -1083,7 +1083,7 @@ fn derive_focus_operator_dep_goes_to_blocked() {
     assert_eq!(derived.blocked.len(), 1);
     assert_eq!(derived.blocked[0].0, "AL.1.A");
     match &derived.blocked[0].1[0] {
-        BlockedBy::Operator { slug, .. } => assert_eq!(slug, "mac-mini-setup"),
+        BlockedBy::Operator(OperatorDep { slug, .. }) => assert_eq!(slug, "mac-mini-setup"),
         other => panic!("expected BlockedBy::Operator, got {other:?}"),
     }
     assert!(
@@ -1094,7 +1094,7 @@ fn derive_focus_operator_dep_goes_to_blocked() {
 
 #[test]
 fn derive_focus_approval_dep_goes_to_blocked() {
-    use mev::brain::state::{BlockedBy, build_state_graph, derive_focus};
+    use mev::brain::state::{ApprovalDep, BlockedBy, build_state_graph, derive_focus};
 
     let (src, file) = load_fixture("state-approval-dep.json");
     let files = vec![(src.clone(), file.clone())];
@@ -1105,7 +1105,7 @@ fn derive_focus_approval_dep_goes_to_blocked() {
     assert_eq!(derived.blocked.len(), 1);
     assert_eq!(derived.blocked[0].0, "AL.1.A");
     match &derived.blocked[0].1[0] {
-        BlockedBy::Approval { slug, .. } => assert_eq!(slug, "ship-it"),
+        BlockedBy::Approval(ApprovalDep { slug, .. }) => assert_eq!(slug, "ship-it"),
         other => panic!("expected BlockedBy::Approval, got {other:?}"),
     }
     assert!(

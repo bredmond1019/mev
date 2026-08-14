@@ -82,10 +82,11 @@ use crate::brain::config::BrainConfig;
 /// `BrainConfig`/`Diagnostic` types and stays here — it consumes these shared
 /// types instead of duplicating them.
 pub use okf_core::{
-    Backlog, BacklogOrigin, Block, BlockedBy, Carryover, CarryoverScope, ClearsWhen,
-    ClearsWhenPredicate, CrossRepoEdge, Endpoint, Epic, Focus, Origin, RepoRollup, StateEdge,
-    StateEdgeKind, StateFile, StateGraph, StateLoadError, StateNode, StateSource, TierEntry, Track,
-    TrackBlock, build_state_graph, load_state,
+    ApprovalDep, Backlog, BacklogOrigin, Block, BlockDep, BlockedBy, Carryover, CarryoverScope,
+    ClearsWhen, ClearsWhenPredicate, CrossRepoEdge, Endpoint, Epic, ExternalDep, Focus,
+    OperatorDep, Origin, RepoRollup, StateEdge, StateEdgeKind, StateFile, StateGraph,
+    StateLoadError, StateNode, StateSource, TierEntry, Track, TrackBlock, build_state_graph,
+    load_state,
 };
 
 // ---------------------------------------------------------------------------
@@ -337,6 +338,39 @@ const VALID_BACKLOG_STATUSES: &[&str] = &["idea", "ready", "promoted"];
 /// Valid `kind` values for `carryover[]` entries.
 const VALID_CARRYOVER_KINDS: &[&str] = &["constraint", "known_issue", "env", "deferred"];
 
+/// The plain string form of a [`okf_core::CarryoverKind`], matching exactly
+/// what mev used before okf-core retyped `Carryover.kind` from `String` to
+/// this enum: known kinds render in their `snake_case` name, unknown kinds
+/// (the legacy `constraint` / `known_issue` values, or anything else) round
+/// trip verbatim. Local to mev — okf-core defines the shape only and does not
+/// provide a `Display`/`as_str` accessor of its own (AGENT.md rule 3).
+pub fn carryover_kind_str(kind: &okf_core::CarryoverKind) -> std::borrow::Cow<'_, str> {
+    match kind {
+        okf_core::CarryoverKind::Known(k) => std::borrow::Cow::Borrowed(match k {
+            okf_core::KnownCarryoverKind::Defect => "defect",
+            okf_core::KnownCarryoverKind::Deferred => "deferred",
+            okf_core::KnownCarryoverKind::Drift => "drift",
+            okf_core::KnownCarryoverKind::Env => "env",
+        }),
+        okf_core::CarryoverKind::Unknown(s) => std::borrow::Cow::Borrowed(s.as_str()),
+    }
+}
+
+/// The inverse of [`carryover_kind_str`]: parse a plain string into a
+/// [`okf_core::CarryoverKind`], recognising the fixed known vocabulary and
+/// falling back to `Unknown(s)` — preserved verbatim, never coerced or
+/// rejected — for everything else (including the legacy `constraint` /
+/// `known_issue` values). Test-fixture and adaptation helper only.
+pub fn carryover_kind_from_str(kind: &str) -> okf_core::CarryoverKind {
+    match kind {
+        "defect" => okf_core::CarryoverKind::Known(okf_core::KnownCarryoverKind::Defect),
+        "deferred" => okf_core::CarryoverKind::Known(okf_core::KnownCarryoverKind::Deferred),
+        "drift" => okf_core::CarryoverKind::Known(okf_core::KnownCarryoverKind::Drift),
+        "env" => okf_core::CarryoverKind::Known(okf_core::KnownCarryoverKind::Env),
+        other => okf_core::CarryoverKind::Unknown(other.to_string()),
+    }
+}
+
 /// Parse an authored state-graph date that may be either bare `YYYY-MM-DD` or a
 /// full RFC3339 timestamp (some `carryover[].created` values were stamped with a
 /// time+offset). Returns the calendar date, or `None` if neither form parses.
@@ -395,7 +429,7 @@ pub fn carryover_stale_age(
     }
     let anchor = staleness_anchor(Some(&item.created), item.reviewed.as_deref())?;
     let age = (today - anchor).num_days();
-    (age > thresholds.carryover_threshold(&item.kind)).then_some(age)
+    (age > thresholds.carryover_threshold(carryover_kind_str(&item.kind).as_ref())).then_some(age)
 }
 
 /// The staleness verdict for a `backlog[]` node: `Some(age_days)` when the node
@@ -433,7 +467,7 @@ pub fn check_carryover_staleness(
 
     for item in &file.carryover {
         if let Some(age) = carryover_stale_age(item, today, thresholds) {
-            let threshold = thresholds.carryover_threshold(&item.kind);
+            let threshold = thresholds.carryover_threshold(carryover_kind_str(&item.kind).as_ref());
             let clears = item
                 .clears_when
                 .as_ref()
@@ -447,7 +481,8 @@ pub fn check_carryover_staleness(
                     "carryover '{}' (kind '{}') is {age}d old (threshold {threshold}d){clears} — \
                      promote it into a block/backlog node, resolve its clears_when, re-affirm it \
                      (bump 'reviewed'), or /snooze it",
-                    item.slug, item.kind
+                    item.slug,
+                    carryover_kind_str(&item.kind)
                 ),
             ));
         }
@@ -554,7 +589,7 @@ pub fn check_operator_staleness(
     for track in &file.tracks {
         for block in &track.blocks {
             for dep in &block.depends_on {
-                if let BlockedBy::Operator { slug, .. } = dep {
+                if let BlockedBy::Operator(OperatorDep { slug, .. }) = dep {
                     diags.push(Diagnostic::warning(
                         path,
                         "W_STATE_OPERATOR_STALE",
@@ -667,7 +702,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
 
         // blocked_by well-formedness
         for bb in &block.blocked_by {
-            if let BlockedBy::Block { repo, id, .. } = bb {
+            if let BlockedBy::Block(BlockDep { repo, id, .. }) = bb {
                 let repo_empty = repo.trim().is_empty();
                 let id_empty = id.trim().is_empty();
                 if repo_empty || id_empty {
@@ -751,7 +786,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
             // entries must carry a well-formed 'digest'.
             for dep in &block.depends_on {
                 match dep {
-                    BlockedBy::Block { repo, id, .. } => {
+                    BlockedBy::Block(BlockDep { repo, id, .. }) => {
                         let repo_empty = repo.trim().is_empty();
                         let id_empty = id.trim().is_empty();
                         if repo_empty || id_empty {
@@ -771,7 +806,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                             ));
                         }
                     }
-                    BlockedBy::Operator { slug, exit, .. } => {
+                    BlockedBy::Operator(OperatorDep { slug, exit, .. }) => {
                         if exit.trim().is_empty() {
                             diags.push(Diagnostic::error(
                                 path,
@@ -785,7 +820,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                             ));
                         }
                     }
-                    BlockedBy::Approval { slug, digest, .. } => {
+                    BlockedBy::Approval(ApprovalDep { slug, digest, .. }) => {
                         if !is_well_formed_digest(digest) {
                             diags.push(Diagnostic::error(
                                 path,
@@ -799,7 +834,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                             ));
                         }
                     }
-                    BlockedBy::External { .. } => {}
+                    BlockedBy::External(_) => {}
                 }
             }
         }
@@ -841,14 +876,14 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
 
     // --- 9. carryover[] validation ---
     for item in &file.carryover {
-        if !VALID_CARRYOVER_KINDS.contains(&item.kind.as_str()) {
+        if !VALID_CARRYOVER_KINDS.contains(&carryover_kind_str(&item.kind).as_ref()) {
             diags.push(Diagnostic::error(
                 path,
                 "E_STATE_SCHEMA_BAD_KIND",
                 format!(
                     "carryover item '{}' has invalid kind '{}'; expected one of: {}",
                     item.slug,
-                    item.kind,
+                    carryover_kind_str(&item.kind),
                     VALID_CARRYOVER_KINDS.join(", ")
                 ),
             ));
@@ -870,7 +905,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
         }
 
         for dep in &item.related {
-            if let BlockedBy::Block { repo, id, .. } = dep {
+            if let BlockedBy::Block(BlockDep { repo, id, .. }) = dep {
                 let repo_empty = repo.trim().is_empty();
                 let id_empty = id.trim().is_empty();
                 if repo_empty || id_empty {
@@ -914,7 +949,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
 
         for dep in &item.blocks {
             match dep {
-                BlockedBy::Block { repo, id, .. } => {
+                BlockedBy::Block(BlockDep { repo, id, .. }) => {
                     let repo_empty = repo.trim().is_empty();
                     let id_empty = id.trim().is_empty();
                     if repo_empty || id_empty {
@@ -934,7 +969,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                         ));
                     }
                 }
-                BlockedBy::External { what } => {
+                BlockedBy::External(ExternalDep { what }) => {
                     if what.trim().is_empty() {
                         diags.push(Diagnostic::error(
                             path,
@@ -951,7 +986,7 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                 // of scope for this check — depends_on's own operator/approval schema
                 // validation (E_STATE_OPERATOR_MISSING_EXIT, E_STATE_APPROVAL_DIGEST_SHAPE)
                 // is added separately.
-                BlockedBy::Operator { .. } | BlockedBy::Approval { .. } => {}
+                BlockedBy::Operator(_) | BlockedBy::Approval(_) => {}
             }
         }
 
@@ -1399,7 +1434,7 @@ pub fn check_epics(config: &BrainConfig, files: &[(StateSource, StateFile)]) -> 
                     continue;
                 }
                 for dep in &block.depends_on {
-                    let BlockedBy::Block { repo, id, .. } = dep else {
+                    let BlockedBy::Block(BlockDep { repo, id, .. }) = dep else {
                         continue; // external deps have no target node
                     };
                     // A dangling target is reported by check_state_graph; skip it
@@ -1609,7 +1644,7 @@ pub fn check_state_graph(
         let path = &src.abs_path;
         for item in &file.carryover {
             for dep in &item.blocks {
-                let BlockedBy::Block { repo, id, .. } = dep else {
+                let BlockedBy::Block(BlockDep { repo, id, .. }) = dep else {
                     continue; // External has no target node.
                 };
                 if repo.trim().is_empty() {
@@ -1690,7 +1725,7 @@ pub fn check_status_consistency(files: &[(StateSource, StateFile)]) -> Vec<Diagn
                 let from_key = format!("{}:{}", src.repo_slug, block.id);
 
                 for dep in &block.depends_on {
-                    if let BlockedBy::Block { repo, id, .. } = dep {
+                    if let BlockedBy::Block(BlockDep { repo, id, .. }) = dep {
                         let dep_key = format!("{repo}:{id}");
                         // If the dep target is not in any loaded file, skip — it will
                         // be reported as E_STATE_DANGLING_BLOCKED_BY by check_state_graph.
@@ -1756,7 +1791,7 @@ pub fn check_backlog_integrity(
         for backlog_node in &file.backlog {
             // --- 1. Dangling depends_on ---
             for dep in &backlog_node.depends_on {
-                if let BlockedBy::Block { repo, id, .. } = dep {
+                if let BlockedBy::Block(BlockDep { repo, id, .. }) = dep {
                     let dep_key = format!("{repo}:{id}");
                     if !node_set.contains(dep_key.as_str()) {
                         diags.push(Diagnostic::error(
@@ -2235,9 +2270,7 @@ pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> V
                 let has_unmet_targetless = block.depends_on.iter().any(|d| {
                     matches!(
                         d,
-                        BlockedBy::External { .. }
-                            | BlockedBy::Operator { .. }
-                            | BlockedBy::Approval { .. }
+                        BlockedBy::External(_) | BlockedBy::Operator(_) | BlockedBy::Approval(_)
                     )
                 });
                 if has_unmet_targetless {
@@ -2246,7 +2279,7 @@ pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> V
 
                 // All block deps must be closed.
                 let all_block_deps_closed = block.depends_on.iter().all(|d| {
-                    if let BlockedBy::Block { repo, id, .. } = d {
+                    if let BlockedBy::Block(BlockDep { repo, id, .. }) = d {
                         let dep_key = format!("{repo}:{id}");
                         let dep_status = status_map.get(&dep_key).and_then(|s| s.as_deref());
                         is_terminal_block_status(dep_status)
@@ -2367,10 +2400,10 @@ pub fn derive_focus(
                         .filter(|d| match d {
                             // External/Operator/Approval are targetless and unmet for as
                             // long as they are present — exactly like `external`.
-                            BlockedBy::External { .. }
-                            | BlockedBy::Operator { .. }
-                            | BlockedBy::Approval { .. } => true,
-                            BlockedBy::Block { repo, id, .. } => {
+                            BlockedBy::External(_)
+                            | BlockedBy::Operator(_)
+                            | BlockedBy::Approval(_) => true,
+                            BlockedBy::Block(BlockDep { repo, id, .. }) => {
                                 let dep_key = format!("{repo}:{id}");
                                 let dep_status =
                                     status_map.get(&dep_key).and_then(|s| s.as_deref());
@@ -2532,7 +2565,7 @@ pub fn derive_cross_repo(files: &[(StateSource, StateFile)]) -> Vec<CrossRepoEdg
         for track in &file.tracks {
             for block in &track.blocks {
                 for dep in &block.depends_on {
-                    if let BlockedBy::Block { repo, id, what } = dep
+                    if let BlockedBy::Block(BlockDep { repo, id, what }) = dep
                         && repo != &src.repo_slug
                     {
                         edges.push(CrossRepoEdge {
@@ -2649,7 +2682,7 @@ pub fn derive_epic_edges(files: &[(StateSource, StateFile)], slug: &str) -> Epic
             for block in &track.blocks {
                 let from_key = format!("{}:{}", src.repo_slug, block.id);
                 for dep in &block.depends_on {
-                    let BlockedBy::Block { repo, id, .. } = dep else {
+                    let BlockedBy::Block(BlockDep { repo, id, .. }) = dep else {
                         continue;
                     };
                     let to_key = format!("{repo}:{id}");
@@ -3141,6 +3174,51 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
+    // CarryoverKind::Unknown round-trip (AC 5) — an unrecognised kind must
+    // survive `carryover_kind_from_str` -> `carryover_kind_str` byte-identically:
+    // never coerced, never lowercased, never replaced with a placeholder.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn carryover_kind_unknown_round_trips_verbatim() {
+        for legacy in [
+            "constraint",
+            "known_issue",
+            "MiXeD_Case",
+            "totally-novel-kind",
+        ] {
+            let parsed = carryover_kind_from_str(legacy);
+            assert_eq!(
+                parsed,
+                okf_core::CarryoverKind::Unknown(legacy.to_string()),
+                "expected {legacy:?} to parse as Unknown(verbatim)"
+            );
+            assert_eq!(
+                carryover_kind_str(&parsed),
+                legacy,
+                "expected {legacy:?} to round-trip byte-identically through carryover_kind_str"
+            );
+        }
+    }
+
+    #[test]
+    fn carryover_kind_known_round_trips_to_snake_case() {
+        for (s, expected) in [
+            ("defect", "defect"),
+            ("deferred", "deferred"),
+            ("drift", "drift"),
+            ("env", "env"),
+        ] {
+            let parsed = carryover_kind_from_str(s);
+            assert!(
+                matches!(parsed, okf_core::CarryoverKind::Known(_)),
+                "expected {s:?} to parse as Known"
+            );
+            assert_eq!(carryover_kind_str(&parsed), expected);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Minimal fixture strings (representative of the five live state.json files)
     // -----------------------------------------------------------------------
 
@@ -3314,7 +3392,7 @@ mod tests {
             r#"{ "type": "block", "repo": "bastion", "id": "BA.11.C", "what": "needs WS hub" }"#;
         let bb: BlockedBy = serde_json::from_str(json).expect("block type should deserialize");
         match bb {
-            BlockedBy::Block { repo, id, what } => {
+            BlockedBy::Block(BlockDep { repo, id, what }) => {
                 assert_eq!(repo, "bastion");
                 assert_eq!(id, "BA.11.C");
                 assert_eq!(what.as_deref(), Some("needs WS hub"));
@@ -3328,7 +3406,7 @@ mod tests {
         let json = r#"{ "type": "external", "what": "At-home Mac Mini session" }"#;
         let bb: BlockedBy = serde_json::from_str(json).expect("external type should deserialize");
         match bb {
-            BlockedBy::External { what } => {
+            BlockedBy::External(ExternalDep { what }) => {
                 assert_eq!(what, "At-home Mac Mini session");
             }
             _ => panic!("expected BlockedBy::External"),
@@ -5641,14 +5719,14 @@ mod tests {
                     Some("deferred"),
                     None,
                     vec![
-                        BlockedBy::External {
+                        BlockedBy::External(ExternalDep {
                             what: "waiting on vendor".to_string(),
-                        },
-                        BlockedBy::Block {
+                        }),
+                        BlockedBy::Block(BlockDep {
                             repo: "alpha".to_string(),
                             id: "AL.1.B".to_string(),
                             what: None,
-                        },
+                        }),
                     ],
                 ),
                 ("AL.1.B", Some("open"), None, vec![]),
@@ -5683,11 +5761,11 @@ mod tests {
                     "AL.1.B",
                     Some("open"),
                     None,
-                    vec![BlockedBy::Block {
+                    vec![BlockedBy::Block(BlockDep {
                         repo: "alpha".to_string(),
                         id: "AL.1.A".to_string(),
                         what: None,
-                    }],
+                    })],
                 ),
             ],
         );
@@ -5728,11 +5806,11 @@ mod tests {
                     "AL.1.B",
                     Some("open"),
                     None,
-                    vec![BlockedBy::Block {
+                    vec![BlockedBy::Block(BlockDep {
                         repo: "alpha".to_string(),
                         id: "AL.1.A".to_string(),
                         what: None,
-                    }],
+                    })],
                 ),
             ],
         );
@@ -5841,9 +5919,9 @@ mod tests {
     #[test]
     fn ready_order_block_with_external_dep_excluded() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let ext_dep = BlockedBy::External {
+        let ext_dep = BlockedBy::External(ExternalDep {
             what: "Mac Mini delivery".to_string(),
-        };
+        });
         let pair = make_ready_pair(
             dir.path(),
             "alpha",
@@ -5863,11 +5941,11 @@ mod tests {
     fn ready_order_block_with_unclosed_block_dep_excluded() {
         let dir = tempfile::tempdir().expect("tempdir");
         // alpha:AL.1.A depends_on beta:BE.1.A which is open (not closed).
-        let block_dep = BlockedBy::Block {
+        let block_dep = BlockedBy::Block(BlockDep {
             repo: "beta".to_string(),
             id: "BE.1.A".to_string(),
             what: None,
-        };
+        });
         let pair_a = make_ready_pair(
             dir.path(),
             "alpha",
@@ -5899,11 +5977,11 @@ mod tests {
     fn ready_order_block_with_closed_dep_is_ready() {
         let dir = tempfile::tempdir().expect("tempdir");
         // alpha:AL.1.A depends_on beta:BE.1.A which is closed → AL.1.A is ready.
-        let block_dep = BlockedBy::Block {
+        let block_dep = BlockedBy::Block(BlockDep {
             repo: "beta".to_string(),
             id: "BE.1.A".to_string(),
             what: None,
-        };
+        });
         let pair_a = make_ready_pair(
             dir.path(),
             "alpha",
@@ -5930,11 +6008,11 @@ mod tests {
         // dependency target is "wontfix" instead of "closed" — terminal for
         // readiness purposes exactly like closed.
         let dir = tempfile::tempdir().expect("tempdir");
-        let block_dep = BlockedBy::Block {
+        let block_dep = BlockedBy::Block(BlockDep {
             repo: "beta".to_string(),
             id: "BE.1.A".to_string(),
             what: None,
-        };
+        });
         let pair_a = make_ready_pair(
             dir.path(),
             "alpha",
@@ -6107,11 +6185,11 @@ mod tests {
     fn check_status_consistency_closed_depends_on_open_emits_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         // alpha has two blocks: AL.1.A (open) and AL.1.B (closed, depends on AL.1.A).
-        let dep = BlockedBy::Block {
+        let dep = BlockedBy::Block(BlockDep {
             repo: "alpha".to_string(),
             id: "AL.1.A".to_string(),
             what: None,
-        };
+        });
         let pair = make_consistency_pair(
             dir.path(),
             "alpha",
@@ -6139,11 +6217,11 @@ mod tests {
     fn check_status_consistency_closed_depends_on_closed_passes() {
         let dir = tempfile::tempdir().expect("tempdir");
         // Both blocks are closed — no inconsistency.
-        let dep = BlockedBy::Block {
+        let dep = BlockedBy::Block(BlockDep {
             repo: "alpha".to_string(),
             id: "AL.1.A".to_string(),
             what: None,
-        };
+        });
         let pair = make_consistency_pair(
             dir.path(),
             "alpha",
@@ -6168,11 +6246,11 @@ mod tests {
     #[test]
     fn check_status_consistency_closed_depends_on_in_progress_emits_error() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let dep = BlockedBy::Block {
+        let dep = BlockedBy::Block(BlockDep {
             repo: "alpha".to_string(),
             id: "AL.1.A".to_string(),
             what: None,
-        };
+        });
         let pair = make_consistency_pair(
             dir.path(),
             "alpha",
@@ -6201,11 +6279,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         // AL.1.B is closed but depends on "alpha:AL.1.GHOST" which is not in any file.
         // Should NOT emit E_STATE_STATUS_INCONSISTENT (that's E_STATE_DANGLING_BLOCKED_BY's job).
-        let dep = BlockedBy::Block {
+        let dep = BlockedBy::Block(BlockDep {
             repo: "alpha".to_string(),
             id: "AL.1.GHOST".to_string(),
             what: None,
-        };
+        });
         let pair = make_consistency_pair(
             dir.path(),
             "alpha",
@@ -6316,11 +6394,11 @@ mod tests {
             repo: "mev".to_string(),
             kind: "feature".to_string(),
             status: "idea".to_string(),
-            depends_on: vec![BlockedBy::Block {
+            depends_on: vec![BlockedBy::Block(BlockDep {
                 repo: "mev".to_string(),
                 id: "MV.3.GHOST".to_string(),
                 what: None,
-            }],
+            })],
             block: None,
             notes: None,
             ..Default::default()
@@ -6951,9 +7029,9 @@ mod tests {
             &[(
                 "AL.1.A",
                 Some("open"),
-                vec![BlockedBy::External {
+                vec![BlockedBy::External(ExternalDep {
                     what: "upstream dep".to_string(),
-                }],
+                })],
             )],
             &[], // stored now
             &[], // stored next
@@ -7057,11 +7135,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         // Block B is open but dep A is in_progress (not closed) → B goes in blocked.
         // Stored focus.blocked is empty → drift.
-        let dep_a = BlockedBy::Block {
+        let dep_a = BlockedBy::Block(BlockDep {
             repo: "alpha".to_string(),
             id: "AL.1.A".to_string(),
             what: None,
-        };
+        });
         let pair = make_drift_pair(
             dir.path(),
             "alpha",
@@ -7094,11 +7172,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         // Block B is open; dep A is closed → B is ready (goes in next).
         // Stored focus matches exactly → no drift.
-        let dep_a = BlockedBy::Block {
+        let dep_a = BlockedBy::Block(BlockDep {
             repo: "alpha".to_string(),
             id: "AL.1.A".to_string(),
             what: None,
-        };
+        });
         let pair = make_drift_pair(
             dir.path(),
             "alpha",
@@ -7206,9 +7284,9 @@ mod tests {
                         id: "CO.1.B".to_string(),
                         title: "Own blocked work".to_string(),
                         status: Some("open".to_string()),
-                        depends_on: vec![BlockedBy::External {
+                        depends_on: vec![BlockedBy::External(ExternalDep {
                             what: "upstream dep".to_string(),
-                        }],
+                        })],
                         wave: None,
                         origin: None,
                         note: None,
@@ -8403,7 +8481,10 @@ fn carryover_array_deserializes() {
     assert_eq!(file.carryover[0].slug, "some-caveat");
     assert_eq!(file.carryover[0].scope.repo.as_deref(), Some("bastion"));
     assert!(file.carryover[0].scope.tier.is_none());
-    assert_eq!(file.carryover[0].kind, "constraint");
+    assert_eq!(
+        file.carryover[0].kind,
+        okf_core::CarryoverKind::Unknown("constraint".to_string())
+    );
 }
 
 #[test]
@@ -9221,7 +9302,7 @@ mod check_field_policy_tests {
     fn base_carryover() -> okf_core::Carryover {
         okf_core::Carryover {
             slug: "some-caveat".to_string(),
-            kind: "constraint".to_string(),
+            kind: okf_core::CarryoverKind::Unknown("constraint".to_string()),
             text: "A durable caveat.".to_string(),
             priority: None,
             ..Default::default()

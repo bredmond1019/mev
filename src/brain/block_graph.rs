@@ -27,8 +27,8 @@ use crate::brain::config::BrainConfig;
 use crate::brain::emit::{epic_members, topo_order};
 use crate::brain::last_touched::derive_last_touched;
 use crate::brain::state::{
-    BlockedBy, StateEdgeKind, StateFile, StateGraph, StateSource, TierScope, TrackBlock,
-    cycle_paths, derive_focus, derive_rollup, effective_priorities, ready_order,
+    BlockedBy, ExternalDep, StateEdgeKind, StateFile, StateGraph, StateSource, TierScope,
+    TrackBlock, cycle_paths, derive_focus, derive_rollup, effective_priorities, ready_order,
 };
 
 // ---------------------------------------------------------------------------
@@ -382,10 +382,8 @@ pub fn build_block_graph_export(
             .depends_on
             .iter()
             .filter_map(|d| match d {
-                BlockedBy::External { what } => Some(what.clone()),
-                BlockedBy::Block { .. }
-                | BlockedBy::Operator { .. }
-                | BlockedBy::Approval { .. } => None,
+                BlockedBy::External(ExternalDep { what }) => Some(what.clone()),
+                BlockedBy::Block(_) | BlockedBy::Operator(_) | BlockedBy::Approval(_) => None,
             })
             .collect();
 
@@ -586,6 +584,7 @@ pub fn build_block_graph_export(
 mod tests {
     use super::*;
     use crate::brain::config::BrainConfig;
+    use crate::brain::state::BlockDep;
     use crate::brain::state::{Focus, StateFile, StateSource, Track, build_state_graph};
     use std::path::PathBuf;
 
@@ -669,11 +668,11 @@ mod tests {
     }
 
     fn dep(repo: &str, id: &str) -> BlockedBy {
-        BlockedBy::Block {
+        BlockedBy::Block(BlockDep {
             repo: repo.to_string(),
             id: id.to_string(),
             what: None,
-        }
+        })
     }
 
     #[test]
@@ -725,9 +724,9 @@ mod tests {
     #[test]
     fn external_deps_populate_with_no_synthetic_node() {
         let mut b = block("A", Some("open"));
-        b.depends_on = vec![BlockedBy::External {
+        b.depends_on = vec![BlockedBy::External(ExternalDep {
             what: "waiting on vendor API".to_string(),
-        }];
+        })];
         let file = project_file(vec![b]);
         let files = vec![(src("repo"), file)];
         let graph = build_state_graph(&files);

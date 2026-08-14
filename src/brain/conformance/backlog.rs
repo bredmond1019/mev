@@ -186,6 +186,7 @@ mod tests {
                 })
                 .collect(),
             carryover: Vec::new(),
+            reference: Vec::new(),
             extra: serde_json::Map::new(),
         }
     }

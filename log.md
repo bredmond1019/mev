@@ -17,6 +17,33 @@ timestamp: "2026-08-13T12:42:25-03:00"
 
 ---
 
+## [run: 2026-08-14]
+
+`ticket-consumer-compile-gate` re-ran tasks 1–7 and closed the spec PASS (the prior same-day run had BAILED only on task 7's environmental failure — no code changes needed this time, just re-running the full validation suite once the concurrent session's `state.json` drift had settled). All seven tasks: a pure `classify(exit_code, stdout, stderr, was_dirty) -> ConsumerOutcome` classifier distinguishing a real compiler break from a stale lockfile via the `"cannot update the lock file"` stderr signature (task 1); `run_consumer`/`run_consumer_with_spawner` — git-dirty short-circuit (asserted via injected spawner), Cargo.lock byte-identity check, and a real `CARGO_TARGET_DIR=<tmp> cargo nextest run --no-run --locked` spawn (task 2); the `mev check-consumers` subcommand wired atop a new, reusable `discover_mev_consumers` in `src/brain/conformance/consumers.rs`, matching path dependencies under both `[dependencies]`/`[dev-dependencies]`/`[build-dependencies]` and `[workspace.dependencies]` (task 3); a live-fleet measurement recording both `bastion` and `engine-rs` as `lockfile-stale` today, lockfiles verified byte-identical across three isolated runs (task 4); the gate wired into HQ's `hooks/pre-push` as an independently-scoped stage 3 (mev-repo-only, fails only on `Broken`, skips gracefully on a stale mev binary or missing `brain.toml`), deliberately not into CI or `harness.json`'s `validation.checks[]` (task 5); `docs/cli.md`/`docs/index.md` documentation of the five outcomes, exit codes, and post-merge wiring rationale (task 6); and task 7's full validation suite — `cargo fmt --check`, `cargo clippy -D warnings`, `NEXTEST_POLICY_OVERRIDE=1 cargo test`, `cargo build --release` — all green, confirming the earlier `fleet_regression::fleet_readiness_is_unchanged_for_blocks_without_a_new_edge` failure was environmental (a concurrent session's uncommitted HQ `state.json` diff), not a regression from this spec's code. `MV.ticket.consumer-compile-gate` flipped `closed` in `state.json`; `mev emit-state --write` regenerated all derived surfaces, 0 errors. Next: pull the next item from the master-plan or HQ backlog — `MV.ticket.consumer-dependency-parity` (the cheap, lockfile-only sibling check) is a natural follow-on.
+
+```
+22992f7 chore: wrap up ticket-consumer-compile-gate
+389e62b feat: implement ticket-consumer-compile-gate-task6
+46494ac feat: implement ticket-consumer-compile-gate-task3
+c57fa40 feat: implement ticket-consumer-compile-gate-task2
+86d4e35 feat: implement ticket-consumer-compile-gate-task1
+```
+
+---
+
+## [run: 2026-08-14 — bailed attempt]
+
+`ticket-consumer-compile-gate` ran tasks 1–7 and BAILED on task 7. Tasks 1–6 landed clean: a pure `classify(exit_code, stdout, stderr, was_dirty) -> ConsumerOutcome` classifier distinguishing a real compiler break from a stale lockfile (task 1); `run_consumer`/`run_consumer_with_spawner` — git-dirty short-circuit, Cargo.lock byte-identity check, and a real `CARGO_TARGET_DIR=<tmp> cargo nextest run --no-run --locked` spawn (task 2); the `mev check-consumers` subcommand wired atop a new, reusable `discover_mev_consumers` in `src/brain/conformance/consumers.rs` (task 3); a live-fleet measurement recording both `bastion` and `engine-rs` as `lockfile-stale` today, superseding a stale 08-13 baseline (task 4); the gate wired into `hooks/pre-push` as an independently-scoped stage 3 (mev-repo-only, fails only on `Broken`), deliberately not into CI or `harness.json`'s `validation.checks[]` (task 5); and `docs/cli.md`/`docs/index.md` documentation of the five outcomes and the wiring rationale (task 6). Task 7's full validation suite was clean (fmt, clippy, release build) except one pre-existing environmental failure: `cargo test`'s `fleet_regression::fleet_readiness_is_unchanged_for_blocks_without_a_new_edge` fails because `/Users/brandon/Dev/agentic-portfolio/planning/state.json` carries a 1032-line uncommitted diff (BA.20.A/B/C/D block drift) from a concurrent session — re-run directly against current state confirmed the same drift-based panic, unrelated to this spec's code changes and outside this task's ability to fix. Next: re-run task 7's full validation once the concurrent session's `state.json` drift settles, then close the spec.
+
+```
+389e62b feat: implement ticket-consumer-compile-gate-task6
+46494ac feat: implement ticket-consumer-compile-gate-task3
+c57fa40 feat: implement ticket-consumer-compile-gate-task2
+86d4e35 feat: implement ticket-consumer-compile-gate-task1
+```
+
+---
+
 ## [run: 2026-08-13]
 
 ### Lane `substrate` run 2 — Attention operator-queue producer + `reconcile_failed` consumer

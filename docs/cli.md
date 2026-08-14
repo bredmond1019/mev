@@ -1912,6 +1912,117 @@ mev conformance ~/Dev/agentic-portfolio
 
 ---
 
+### `check-consumers [--consumer <slug>] [--json] [path]`
+
+Compiles every path-dependent consumer's **test targets** against the working mev and reports
+the true outcome per consumer (`ticket-consumer-compile-gate`). This is the expensive, rare
+counterpart to `mev conformance --check consumer-dependency-parity` (below) — that one catches a
+stale lockfile cheaply and constantly; this one catches a genuine type/API break expensively and
+rarely. **Neither covers the other's failure class**; do not assume a clean run of one implies
+the other.
+
+Consumers are discovered the same way `consumer-dependency-parity` discovers them
+(`discover_mev_consumers` — path dependencies on mev declared under `[dependencies]`,
+`[dev-dependencies]`, `[build-dependencies]`, or `[workspace.dependencies]` in each repo listed
+under `brain.toml`'s `[[repos]]`). There is deliberately only one discovery implementation; a
+second one would fail this ticket's acceptance criteria outright.
+
+```bash
+mev check-consumers
+mev check-consumers --consumer bastion
+mev check-consumers --json
+```
+
+| Argument / Flag | Default | Description |
+|---|---|---|
+| `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
+| `--consumer <slug>` | unset | Run exactly one discovered consumer by slug instead of every consumer. An unknown slug is a hard error |
+| `--json` | off | Emit the per-consumer `ConsumerResult` list as compact JSON instead of a human, per-consumer summary |
+
+#### The command, and why every flag on it is load-bearing
+
+For each discovered consumer, `check-consumers` spawns exactly:
+
+```bash
+CARGO_TARGET_DIR=<fresh temp dir> cargo nextest run --no-run --locked --manifest-path <consumer>/Cargo.toml
+```
+
+- **`--no-run`** compiles the test targets without executing them, and is the entire reason this
+  command exists as a separate, expensive check rather than folding into `cargo build`. The break
+  class it exists to catch lives only in test-fixture code — struct literals and call sites that
+  only test code constructs. A compile-only build of the consumer's binary sails straight past
+  them; `cargo build` cannot see this class of break at all.
+- **`--locked`** refuses to let cargo silently rewrite the consumer's `Cargo.lock`. mev does not
+  own that repo's lockfile, and a tool that mutates a repo it's only checking is a much worse
+  failure than a false negative. This has been observed to happen for real during manual
+  verification with a raw (non-`--locked`) invocation — see the ticket's own Notes.
+- **A fresh `CARGO_TARGET_DIR`** (a new temp dir per run) avoids `target/` lock contention and
+  incremental-cache churn against a consumer repo that may have its own build or CI lane running
+  concurrently. It costs a cold compile every time; that's the accepted price of never
+  interfering with another lane's build.
+
+A future "simplification" that drops any one of these three restores exactly the failure mode it
+exists to prevent — this section exists so that trade-off is written down, not just implied by a
+command flag.
+
+#### The five outcomes
+
+| Outcome | Meaning | Fails the run? | Operator action |
+|---|---|---|---|
+| `pass` | The consumer's test targets compiled clean against the working mev | No | Nothing to do |
+| `broken` | A genuine type/API break — compiler diagnostics with their site (e.g. `E0063 at src/serve/handlers/board.rs:660:9`) | **Yes — the only outcome that fails the run** | Fix the named sites in that consumer repo. mev never fixes another repo; a break is that repo's to repair |
+| `lockfile-stale` | The consumer's `Cargo.lock` is out of date relative to its `Cargo.toml` (cargo's `cannot update the lock file` signature under `--locked`) — bookkeeping, not a code break | No | Refresh that consumer's lockfile (its change, not mev's) |
+| `skipped-dirty` | `git status --porcelain` was non-empty for that consumer — its compile result is not evidence about mev's change either way | No | Commit or stash there, then re-run |
+| `not-evaluable` | The failure didn't match a known signature, or an input couldn't be gathered at all (e.g. the lockfile moved despite `--locked`) | No | Reported with a `reason`; investigate manually rather than trusting an automatic verdict |
+
+**`broken` and `lockfile-stale` are deliberately distinct outcomes with distinct exit
+behaviour.** Collapsing a stale lockfile into `broken` is exactly the failure mode that made an
+earlier, naive version of this gate untrustworthy: engine-rs's lockfile-stale exit code (102) has
+nothing to do with mev's own compile correctness, and treating it as a red build trains everyone
+to ignore red builds.
+
+The consumer's `Cargo.lock` is verified byte-identical before and after every run — `mev
+check-consumers` reports on a consumer, it never mutates one.
+
+#### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Every consumer reported `pass`, `lockfile-stale`, `skipped-dirty`, or `not-evaluable` |
+| `1` | At least one consumer reported `broken`, `brain.toml` was not found/unreadable, or `--consumer` named a slug that is not a discovered consumer |
+
+#### Why this is a post-merge gate, not a per-task check
+
+`check-consumers` is deliberately **not** wired into `planning/harness.json`'s
+`validation.checks[]` — a cold consumer compile (bastion alone measured at ~1 minute) is too
+expensive to pay at every task and every review inside the SDLC loop. It is instead wired as
+stage 3 of the HQ-level `hooks/pre-push` (mev-repo-scoped, blocking only on `broken`,
+skipping — never blocking — when the installed `mev` predates this subcommand or no
+`brain.toml` is discoverable), which runs once per push after the work in a branch is done. See
+`ticket-consumer-compile-gate`'s spec Notes for the full wiring rationale.
+
+**The three historical breaks that motivate this check** — every one invisible to a plain
+`cargo build`, because the break lived only in test-fixture code:
+
+| Change | Damage |
+|---|---|
+| `okf-core:OK.3.B` added a non-`Option` field to six shared structs | 101 sites broke in mev, 31 in bastion |
+| mev's D58 removed a public constant | broke engine-rs's workspace compile |
+| `MV.ticket.reconcile-failed-consumer` changed a public return type + added a field | 2 sites broke in bastion (`board.rs:660`, `block_graph.rs:414`), both in test fixtures |
+
+```bash
+# Human, per-consumer summary of the whole fleet
+mev check-consumers
+
+# Just one consumer
+mev check-consumers --consumer bastion
+
+# Machine-readable JSON envelope for CI/tooling
+mev check-consumers --json
+```
+
+---
+
 ## Exit codes
 
 | Code | Meaning |

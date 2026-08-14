@@ -14,7 +14,9 @@
 use mev::brain::emit::{
     global_status_map, markers, render_wave_table, splice_generated, wave_order,
 };
-use mev::brain::state::{BlockedBy, StateFile, StateGraph, StateSource, Track, TrackBlock};
+use mev::brain::state::{
+    BlockDep, BlockedBy, ExternalDep, StateFile, StateGraph, StateSource, Track, TrackBlock,
+};
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -87,11 +89,11 @@ fn block_with_dep(
         id: id.to_string(),
         title: title.to_string(),
         status: status.map(|s| s.to_string()),
-        depends_on: vec![BlockedBy::Block {
+        depends_on: vec![BlockedBy::Block(BlockDep {
             repo: dep_repo.to_string(),
             id: dep_id.to_string(),
             what: None,
-        }],
+        })],
         wave,
         origin: None,
         note: None,
@@ -343,9 +345,9 @@ fn render_wave_table_no_wave_shows_em_dash() {
 fn render_wave_table_depends_on_column_lists_deps() {
     let mut b = block_with_dep("B", "B", Some("open"), Some(2), "other", "X");
     // Also add an external dep.
-    b.depends_on.push(BlockedBy::External {
+    b.depends_on.push(BlockedBy::External(ExternalDep {
         what: "deploy-gate".to_string(),
-    });
+    }));
     let file = make_leaf(
         "repo",
         vec![Track {
@@ -4133,7 +4135,9 @@ mod task2_global_status_map {
 
 mod task1_render_hq_board {
     use mev::brain::emit::render_hq_board;
-    use mev::brain::state::{Block, BlockedBy, CrossRepoEdge, Endpoint, Focus};
+    use mev::brain::state::{
+        Block, BlockDep, BlockedBy, CrossRepoEdge, Endpoint, ExternalDep, Focus,
+    };
 
     /// Build a repo-tagged `Block` with no `blocked_by` entries (NOW/NEXT shape).
     fn tagged_block(repo: &str, id: &str, title: &str) -> Block {
@@ -4260,11 +4264,11 @@ _none_";
                 "mev",
                 "C",
                 "Block C",
-                vec![BlockedBy::Block {
+                vec![BlockedBy::Block(BlockDep {
                     repo: "core".to_string(),
                     id: "D".to_string(),
                     what: None,
-                }],
+                })],
             )],
             deferred: Vec::new(),
         };
@@ -4292,11 +4296,11 @@ _none_";
                 "mev",
                 "C",
                 "Block C",
-                vec![BlockedBy::Block {
+                vec![BlockedBy::Block(BlockDep {
                     repo: "core".to_string(),
                     id: "D".to_string(),
                     what: Some("needs the shared schema".to_string()),
-                }],
+                })],
             )],
             deferred: Vec::new(),
         };
@@ -4318,9 +4322,9 @@ _none_";
                 "mev",
                 "E",
                 "Block E",
-                vec![BlockedBy::External {
+                vec![BlockedBy::External(ExternalDep {
                     what: "waiting on hardware".to_string(),
-                }],
+                })],
             )],
             deferred: Vec::new(),
         };
@@ -4339,11 +4343,11 @@ _none_";
                 "mev",
                 "F",
                 "Block F",
-                vec![BlockedBy::Block {
+                vec![BlockedBy::Block(BlockDep {
                     repo: "core".to_string(),
                     id: "G".to_string(),
                     what: None,
-                }],
+                })],
             )],
             deferred: Vec::new(),
         };
@@ -4363,14 +4367,14 @@ _none_";
                 "H",
                 "Block H",
                 vec![
-                    BlockedBy::Block {
+                    BlockedBy::Block(BlockDep {
                         repo: "core".to_string(),
                         id: "I".to_string(),
                         what: None,
-                    },
-                    BlockedBy::External {
+                    }),
+                    BlockedBy::External(ExternalDep {
                         what: "budget approval".to_string(),
-                    },
+                    }),
                 ],
             )],
             deferred: Vec::new(),
@@ -4409,7 +4413,7 @@ mod task2_render_unified_board {
 
     use mev::brain::config::{BrainConfig, RepoEntry};
     use mev::brain::emit::render_unified_board;
-    use mev::brain::state::{Block, BlockedBy, CrossRepoEdge, Endpoint, Focus};
+    use mev::brain::state::{Block, BlockDep, BlockedBy, CrossRepoEdge, Endpoint, Focus};
 
     fn config_with_repos(entries: &[(&str, &str)]) -> BrainConfig {
         BrainConfig {
@@ -4707,11 +4711,11 @@ mod task2_render_unified_board {
                 "Block C",
                 None,
                 None,
-                vec![BlockedBy::Block {
+                vec![BlockedBy::Block(BlockDep {
                     repo: "core".to_string(),
                     id: "D".to_string(),
                     what: None,
-                }],
+                })],
             )],
             deferred: Vec::new(),
         };
@@ -7032,7 +7036,7 @@ mod attention_board {
     };
     use mev::brain::state::{
         Backlog, BacklogOrigin, Carryover, CarryoverScope, StateFile, StateSource,
-        build_state_graph,
+        build_state_graph, carryover_kind_from_str,
     };
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -7058,7 +7062,7 @@ mod attention_board {
                 tier: None,
                 cross_repo: None,
             },
-            kind: kind.to_string(),
+            kind: carryover_kind_from_str(kind),
             text: format!("text for {slug}"),
             related: vec![],
             clears_when: None,
@@ -8145,9 +8149,9 @@ fn topo_order_external_deps_do_not_constrain_order() {
     // participate in ordering — B must fall back to wave order relative to
     // any other block, not be forced after some phantom target.
     let mut b = block("B", "B", Some("open"), Some(1));
-    b.depends_on.push(BlockedBy::External {
+    b.depends_on.push(BlockedBy::External(ExternalDep {
         what: "deploy-gate".to_string(),
-    });
+    }));
     let file = make_leaf(
         "repo",
         vec![Track {
@@ -8177,7 +8181,8 @@ mod epic_emit {
         epic_members, markers, plan_epic_boards, plan_epic_sequences, render_epic_sequence_table,
     };
     use mev::brain::state::{
-        BlockedBy, Epic, Focus, StateFile, StateSource, Track, TrackBlock, build_state_graph,
+        BlockDep, BlockedBy, Epic, Focus, StateFile, StateSource, Track, TrackBlock,
+        build_state_graph,
     };
 
     fn config() -> BrainConfig {
@@ -8325,11 +8330,11 @@ mod epic_emit {
                     "open",
                     3,
                     &["bastion-web"],
-                    vec![BlockedBy::Block {
+                    vec![BlockedBy::Block(BlockDep {
                         repo: "bastion".to_string(),
                         id: "BA.7".to_string(),
                         what: None,
-                    }],
+                    })],
                 )],
             ),
             leaf(dir, "amistad", vec![tb("AM.1", "open", 1, &[], vec![])]),
@@ -8823,7 +8828,7 @@ mod task5_shared_identity_dedup {
     use std::collections::HashMap;
 
     use mev::brain::emit::{group_blocked_by_gate, render_hq_board, render_unified_board};
-    use mev::brain::state::{Block, BlockedBy, Focus};
+    use mev::brain::state::{ApprovalDep, Block, BlockedBy, ExternalDep, Focus, OperatorDep};
 
     /// Build a repo-tagged `Block` with the given `blocked_by` entries.
     fn blocked_block(repo: &str, id: &str, title: &str, blocked_by: Vec<BlockedBy>) -> Block {
@@ -8841,20 +8846,20 @@ mod task5_shared_identity_dedup {
     }
 
     fn operator(slug: &str) -> BlockedBy {
-        BlockedBy::Operator {
+        BlockedBy::Operator(OperatorDep {
             slug: slug.to_string(),
             exit: "artifact exists".to_string(),
             start: "mev do-thing".to_string(),
             what: None,
-        }
+        })
     }
 
     fn approval(slug: &str) -> BlockedBy {
-        BlockedBy::Approval {
+        BlockedBy::Approval(ApprovalDep {
             slug: slug.to_string(),
             what: "ship it?".to_string(),
             digest: "deadbeef".to_string(),
-        }
+        })
     }
 
     /// Extract the bullet lines (`"- ..."`) of the `## {heading}` (or
@@ -8983,9 +8988,9 @@ mod task5_shared_identity_dedup {
                     "core",
                     "A.1",
                     "Block A1",
-                    vec![BlockedBy::External {
+                    vec![BlockedBy::External(ExternalDep {
                         what: "waiting on vendor".to_string(),
-                    }],
+                    })],
                 ),
                 blocked_block("core", "A.2", "Block A2", vec![operator("gate-solo")]),
             ],
@@ -9044,7 +9049,9 @@ mod task5_shared_identity_dedup {
 
 mod task6_rendering {
     use mev::brain::emit::{render_epic_sequence_table, render_hq_board, render_unified_board};
-    use mev::brain::state::{Block, BlockedBy, Focus, TrackBlock};
+    use mev::brain::state::{
+        ApprovalDep, Block, BlockDep, BlockedBy, Focus, OperatorDep, TrackBlock,
+    };
     use std::collections::HashMap;
 
     fn blocked_block(repo: &str, id: &str, title: &str, blocked_by: Vec<BlockedBy>) -> Block {
@@ -9062,20 +9069,20 @@ mod task6_rendering {
     }
 
     fn operator_gate(slug: &str, exit: &str, start: &str) -> BlockedBy {
-        BlockedBy::Operator {
+        BlockedBy::Operator(OperatorDep {
             slug: slug.to_string(),
             exit: exit.to_string(),
             start: start.to_string(),
             what: None,
-        }
+        })
     }
 
     fn approval_gate(slug: &str, what: &str, digest: &str) -> BlockedBy {
-        BlockedBy::Approval {
+        BlockedBy::Approval(ApprovalDep {
             slug: slug.to_string(),
             what: what.to_string(),
             digest: digest.to_string(),
-        }
+        })
     }
 
     #[test]
@@ -9205,11 +9212,11 @@ mod task6_rendering {
                 "core",
                 "A.1",
                 "Block A1",
-                vec![BlockedBy::Block {
+                vec![BlockedBy::Block(BlockDep {
                     repo: "core".to_string(),
                     id: "A.0".to_string(),
                     what: Some("needs the shared schema".to_string()),
-                }],
+                })],
             )],
             deferred: Vec::new(),
         };
