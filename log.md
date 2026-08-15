@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-13T12:42:25-03:00"
+timestamp: "2026-08-14T21:48:46-03:00"
 ---
 
 # Log — mev
@@ -16,6 +16,23 @@ timestamp: "2026-08-13T12:42:25-03:00"
 *Append-only working log. One dated entry per session. Newest entries at the top.*
 
 ---
+
+## [2026-08-14]
+
+### Lane D of lane-aware-briefing: segments, program discriminator, and a CI blind spot
+- **What:** Closed `MV.13.A` (lane files derive to ordered (repo, chain) segments; its new
+  `E_LANE_DOUBLE_CLAIM` found 19 real cross-roadmap double-claims, all annotated with `# ORIGIN:`)
+  and `MV.ticket.consumer-compile-gate` (`mev check-consumers`). Implemented `MV.13.D`
+  (`kind: program | area` on all 22 epics, lane-derived `epic_members`; close-the-loop 0→13 rows,
+  operator-surface 0→44) — PR #38 open, not landed. Fixed three okf-core-rooted compile breaks in
+  one day. Pushed okf-core's 18 stranded commits; refreshed engine-rs's Cargo.lock; enabled
+  `gate / gate` as a required check on mev's main.
+- **Why:** The roadmap needed lane files to become a derived object so the cockpit can answer which
+  lanes are startable. Along the way mev broke three times from upstream okf-core type changes,
+  which is what made the consumer gate urgent rather than theoretical. Enabling branch protection
+  then revealed that mev's CI had been red all day and PRs #36/#37 had been merged straight past it.
+- **Refs:** `planning/roadmaps/lane-aware-briefing/roadmap.md`;
+  `planning/orchestration-run/lane-aware-briefing/{notes.md,review.md}`; `planning/handoff.md`
 
 ## [run: 2026-08-14]
 
