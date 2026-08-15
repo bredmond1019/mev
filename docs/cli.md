@@ -1944,7 +1944,7 @@ mev check-consumers --json
 For each discovered consumer, `check-consumers` spawns exactly:
 
 ```bash
-CARGO_TARGET_DIR=<fresh temp dir> cargo nextest run --no-run --locked --manifest-path <consumer>/Cargo.toml
+CARGO_TARGET_DIR=<fresh temp dir> CARGO_TERM_COLOR=never cargo nextest run --no-run --locked --manifest-path <consumer>/Cargo.toml
 ```
 
 - **`--no-run`** compiles the test targets without executing them, and is the entire reason this
@@ -1960,6 +1960,12 @@ CARGO_TARGET_DIR=<fresh temp dir> cargo nextest run --no-run --locked --manifest
   incremental-cache churn against a consumer repo that may have its own build or CI lane running
   concurrently. It costs a cold compile every time; that's the accepted price of never
   interfering with another lane's build.
+- **`CARGO_TERM_COLOR=never`** forces plain output. A CI runner that presents a pseudo-tty to
+  spawned subprocesses makes rustc auto-detect color support and wrap `error[E....]` diagnostics
+  in ANSI escapes, which the stderr-signature match in `extract_compiler_errors` cannot see
+  through — observed 2026-08-15 as a genuinely `Broken` consumer classified `NotEvaluable` on
+  mev's own hosted CI while passing locally. `extract_compiler_errors` also strips any ANSI it
+  does receive as defense in depth, but forcing color off at the source is the real fix.
 
 A future "simplification" that drops any one of these three restores exactly the failure mode it
 exists to prevent — this section exists so that trade-off is written down, not just implied by a
