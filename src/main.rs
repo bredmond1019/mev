@@ -116,6 +116,28 @@ enum Command {
         #[arg(long)]
         structure: bool,
     },
+    /// Validate a single `state.json` file (Phase 3, Block E:
+    /// `ticket-reference-container-validation` Task 5).
+    ///
+    /// The single-file sibling of `mev validate-brain --state`: runs only the
+    /// per-file schema/field-policy ring (load, `check_schema`, `check_field_policy`)
+    /// against exactly one file, and deliberately skips every corpus-level check
+    /// (block graph, cycles, rollup drift, focus drift, status consistency) — those
+    /// need sibling repos to evaluate and cannot run from one file in isolation.
+    /// Cheap enough to run after every manual `state.json` edit, which is what would
+    /// have caught the live 2026-08-13 shape-error incident (`scope` authored as a
+    /// plain string, `related` as bare slug strings) before it cascaded to 50 errors
+    /// across 7 files.
+    ///
+    /// Exit codes:
+    ///   0 — the file loaded cleanly and no error-severity diagnostic was raised
+    ///       (warnings alone do not fail the run)
+    ///   1 — the file is missing, is not valid JSON, fails the typed schema, or an
+    ///       error-severity diagnostic was raised
+    ValidateState {
+        /// Path to the `state.json` file to validate.
+        path: PathBuf,
+    },
     /// Emit a JSON manifest of every file in the Brain corpus (Phase 3, Block Q).
     ///
     /// Crawls the Brain repo, resolves `brain.toml`, and prints a JSON document listing
@@ -1716,6 +1738,39 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::ValidateState { path } => match mev::validate_state(&path) {
+            Ok(report) => {
+                if cli.json {
+                    let envelope = mev::JsonReport::new("state-file", &path, &report);
+                    match envelope.to_json() {
+                        Ok(s) => println!("{s}"),
+                        Err(err) => {
+                            eprintln!("error serializing JSON: {err:#}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                } else {
+                    for d in &report.diagnostics {
+                        print_diagnostic(d);
+                    }
+                    println!(
+                        "validated {}: {} error(s), {} warning(s)",
+                        path.display(),
+                        report.error_count(),
+                        report.warning_count()
+                    );
+                }
+                if report.is_failure() {
+                    ExitCode::FAILURE
+                } else {
+                    ExitCode::SUCCESS
+                }
+            }
+            Err(err) => {
+                eprintln!("error: {err:#}");
+                ExitCode::FAILURE
+            }
+        },
         Command::EmitState { path, write, scope } => {
             if write && mev::brain::config::is_linked_worktree(&path) {
                 eprintln!(
