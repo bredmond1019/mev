@@ -15,9 +15,18 @@ name: ci
 # `cargo-nextest` binary on the runner, which `mev check-consumers` shells out to directly — its
 # absence was misclassifying every consumer as NotEvaluable. No doctests exist in this crate
 # (`cargo test --doc` -> 0 tests), so nextest's lack of doctest support loses nothing here.
+#
+# push restricted to main (ticket-single-ci-gate-run, 2026-08-15) — an unfiltered `push:` alongside
+# `pull_request:` started two runs per PR-branch push that both reported as the required check
+# `gate / gate`. They are not duplicates of the same commit: `push` builds the branch head while
+# `pull_request` builds GitHub's synthetic refs/pull/N/merge (the branch merged into current main),
+# so the two runs build different trees and can legitimately disagree — which one the required
+# check resolves to depends on which posts last. That nondeterminism forced an `--admin` override
+# to merge PR #38. Direct pushes to main still gate; PR commits now produce exactly one run.
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:
