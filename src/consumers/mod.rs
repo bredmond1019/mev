@@ -102,11 +102,35 @@ pub fn classify(exit_code: i32, stdout: &str, stderr: &str, was_dirty: bool) -> 
     }
 }
 
+/// Remove ANSI CSI escape sequences (`\x1b[...<letter>`) from `input`. rustc's colored output
+/// wraps `error[E....]` in escapes like `\x1b[1m\x1b[38;5;9merror[E0308]\x1b[0m`, which defeats
+/// a literal-prefix match on `"error["` even after `trim_start` (escapes are not whitespace).
+/// Defense in depth alongside forcing `CARGO_TERM_COLOR=never` on the spawned command — this
+/// keeps classification correct even if a future caller's environment forces color back on.
+fn strip_ansi_codes(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next(); // consume '['
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Pull `error[E....]: ...` diagnostics out of rustc/cargo stderr, pairing each with its
 /// `--> file:line:col` site when one appears in the following lines. Returns entries like
 /// `"E0063 at src/serve/handlers/board.rs:660:9"`, or bare `"E0063"` if no site line was found.
 fn extract_compiler_errors(stderr: &str) -> Vec<String> {
-    let lines: Vec<&str> = stderr.lines().collect();
+    let stripped = strip_ansi_codes(stderr);
+    let lines: Vec<&str> = stripped.lines().collect();
     let mut errors = Vec::new();
 
     for (i, line) in lines.iter().enumerate() {
@@ -201,6 +225,13 @@ fn digest_summary(hash: Option<[u8; 32]>) -> String {
 fn spawn_real(manifest_path: &Path, target_dir: &Path) -> io::Result<SpawnOutcome> {
     let output = Command::new("cargo")
         .env("CARGO_TARGET_DIR", target_dir)
+        // Force plain output: on a CI runner that presents a pseudo-tty to spawned
+        // subprocesses, rustc auto-detects color support and wraps `error[E....]` in ANSI
+        // escapes, which `extract_compiler_errors`'s literal-prefix match cannot see through —
+        // observed 2026-08-15 as a genuinely `Broken` consumer being classified
+        // `NotEvaluable` in CI while passing locally. `extract_compiler_errors` also strips
+        // ANSI as defense in depth, but forcing it off here is the real fix.
+        .env("CARGO_TERM_COLOR", "never")
         .args(["nextest", "run", "--no-run", "--locked", "--manifest-path"])
         .arg(manifest_path)
         .output()?;
@@ -431,6 +462,28 @@ Caused by:
         // Same function, called directly: proves it needs nothing but a string.
         let errors = extract_compiler_errors(BASTION_BROKEN_STDERR);
         assert_eq!(errors.len(), 2);
+    }
+
+    #[test]
+    fn extract_compiler_errors_sees_through_ansi_color_codes() {
+        // Reproduces the 2026-08-15 CI-only failure: a pseudo-tty makes rustc emit colored
+        // diagnostics, wrapping "error[E0308]" in ANSI escapes that a literal-prefix match
+        // cannot see through unless they are stripped first.
+        let colored = "\u{1b}[0m\u{1b}[1m\u{1b}[38;5;9merror[E0308]\u{1b}[0m\u{1b}[1m: mismatched types\n \u{1b}[0m\u{1b}[0m\u{1b}[1m\u{1b}[38;5;12m--> \u{1b}[0msrc/lib.rs:5:23\n";
+        let errors = extract_compiler_errors(colored);
+        assert_eq!(errors, vec!["E0308 at src/lib.rs:5:23".to_string()]);
+    }
+
+    #[test]
+    fn strip_ansi_codes_removes_csi_sequences_only() {
+        assert_eq!(
+            strip_ansi_codes("\u{1b}[1;31merror\u{1b}[0m[E0308]"),
+            "error[E0308]"
+        );
+        assert_eq!(
+            strip_ansi_codes("plain text, no escapes"),
+            "plain text, no escapes"
+        );
     }
 
     // -----------------------------------------------------------------
