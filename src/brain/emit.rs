@@ -3343,7 +3343,12 @@ pub fn plan_attention_board(
         }
         let scope = tier_scope_for(file, config);
 
-        // Scope the carryover union (repo-tagged) to this board.
+        // Scope the carryover union (repo-tagged) to this board. Deliberately
+        // does NOT union `f2.reference` — `reference[]` (D72) is permanently-
+        // true material with no clock and no triage lane by design; it must
+        // never reach the Attention board. Pinned by
+        // `tests/reference_container.rs::triage_surface_exclusion`
+        // (`MV.ticket.reference-container-validation` task 3).
         let mut carryover: Vec<(String, &Carryover)> = Vec::new();
         for (s2, f2) in files {
             let include = match &scope {
