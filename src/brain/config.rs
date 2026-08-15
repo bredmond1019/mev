@@ -87,6 +87,15 @@ pub struct AttentionThresholds {
     /// `carryover` kind `constraint` (default 10).
     #[serde(default = "default_constraint_days")]
     pub constraint_days: i64,
+    /// `carryover` kind `defect` (default 10). Added by D72 alongside `drift`
+    /// as the two kinds that replace `known_issue`/`constraint`. No threshold
+    /// exists for `reference[]` entries by design — they have no clock (D72
+    /// §5).
+    #[serde(default = "default_defect_days")]
+    pub defect_days: i64,
+    /// `carryover` kind `drift` (default 10). See [`Self::defect_days`].
+    #[serde(default = "default_drift_days")]
+    pub drift_days: i64,
     /// `backlog[]` `idea`/`ready` nodes (default 7).
     #[serde(default = "default_backlog_days")]
     pub backlog_days: i64,
@@ -118,6 +127,12 @@ fn default_known_issue_days() -> i64 {
 fn default_constraint_days() -> i64 {
     10
 }
+fn default_defect_days() -> i64 {
+    10
+}
+fn default_drift_days() -> i64 {
+    10
+}
 fn default_backlog_days() -> i64 {
     7
 }
@@ -138,6 +153,8 @@ impl Default for AttentionThresholds {
             deferred_days: default_deferred_days(),
             known_issue_days: default_known_issue_days(),
             constraint_days: default_constraint_days(),
+            defect_days: default_defect_days(),
+            drift_days: default_drift_days(),
             backlog_days: default_backlog_days(),
             knowledge_days: default_knowledge_days(),
             memory_days: default_memory_days(),
@@ -156,11 +173,15 @@ impl AttentionThresholds {
             "deferred" => self.deferred_days,
             "known_issue" => self.known_issue_days,
             "constraint" => self.constraint_days,
+            "defect" => self.defect_days,
+            "drift" => self.drift_days,
             _ => self
                 .known_issue_days
                 .max(self.constraint_days)
                 .max(self.deferred_days)
-                .max(self.env_days),
+                .max(self.env_days)
+                .max(self.defect_days)
+                .max(self.drift_days),
         }
     }
 
@@ -580,9 +601,13 @@ mod tests {
         assert_eq!(cfg.attention.backlog_days, 7);
         assert_eq!(cfg.attention.knowledge_days, 45);
         assert_eq!(cfg.attention.memory_days, 30);
+        assert_eq!(cfg.attention.defect_days, 10);
+        assert_eq!(cfg.attention.drift_days, 10);
         // Per-kind lookup + unknown-kind fallback (most conservative).
         assert_eq!(cfg.attention.carryover_threshold("env"), 3);
         assert_eq!(cfg.attention.carryover_threshold("deferred"), 5);
+        assert_eq!(cfg.attention.carryover_threshold("defect"), 10);
+        assert_eq!(cfg.attention.carryover_threshold("drift"), 10);
         assert_eq!(cfg.attention.carryover_threshold("mystery"), 10);
         // Per-stem lookup + unknown-stem fallback (the longer of the two).
         assert_eq!(cfg.attention.distill_threshold("knowledge"), 45);
