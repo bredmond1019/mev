@@ -16,10 +16,17 @@
 //! edited and its sibling was not," which is visible directly in the text.
 //!
 //! [`extract_fn_body`] is the shared primitive: locate `fn <name>` at a word boundary,
+//! skipping any match that falls inside a string literal or `//` line comment (so a
+//! file's own test fixtures — a crafted source string that itself spells out another
+//! member's `fn` signature — can never be mistaken for that member's real declaration,
+//! regardless of which order `discover_sources` happens to enumerate `.rs` files in),
 //! then return the `{ ... }` block by brace-depth counting that ignores braces inside
 //! string literals (honouring `\"` escapes) and `//` line comments. It never guesses — an
 //! unfindable or unbalanced function returns `None`, which [`scan_rule`] turns into a
-//! `missing-member` finding rather than a silent pass.
+//! `missing-member` finding rather than a silent pass. An unreadable source tree (missing
+//! directory, or the build stamp reading `"unknown"`) is caught one level up by
+//! [`discover_sources`], which returns `None` and makes [`evaluate`] report
+//! `NotEvaluable` — never `Drift` and never `Pass` — naming the path it tried.
 
 use std::path::{Path, PathBuf};
 
@@ -131,9 +138,21 @@ impl Finding {
 /// `fn foobar`, nor a `foo` embedded in a longer identifier before `fn`), then return the
 /// `{ ... }` body by brace-depth counting from the first `{` after the match.
 ///
-/// Brace counting ignores braces inside double-quoted string literals (honouring `\"`
-/// escapes) and inside `//` line comments. Returns `None` — never a wrong slice — when the
-/// function is not found, no opening brace follows it, or the braces never balance.
+/// A candidate match is skipped — not accepted — when it falls inside a double-quoted
+/// string literal or a `//` line comment (see [`is_in_string_or_comment`]). This is what
+/// keeps a file's own test fixtures (a `SiblingRule` regression test that builds a
+/// crafted source string literally containing `"fn some_real_member() { ... }"`) from
+/// being mistaken for a real declaration of that function: `discover_sources` walks
+/// every `.rs` file including the one holding the fixture, and without this exclusion
+/// `sources.iter().find_map(...)` in [`scan_rule`] would pick whichever file
+/// `std::fs::read_dir` happens to enumerate first — an unspecified, filesystem-dependent
+/// order that made this exact check flip between `Pass` locally (macOS/APFS) and `Drift`
+/// in CI (Linux/ext4) with zero real drift between them.
+///
+/// Brace counting (once a real match is accepted) ignores braces inside double-quoted
+/// string literals (honouring `\"` escapes) and inside `//` line comments. Returns
+/// `None` — never a wrong slice — when the function is not found outside a string/comment,
+/// no opening brace follows it, or the braces never balance.
 pub fn extract_fn_body<'a>(source: &'a str, fn_name: &str) -> Option<&'a str> {
     let pattern = format!("fn {fn_name}");
     let bytes = source.as_bytes();
@@ -159,13 +178,68 @@ pub fn extract_fn_body<'a>(source: &'a str, fn_name: &str) -> Option<&'a str> {
             None => true,
         };
 
-        if before_ok && after_ok {
+        if before_ok && after_ok && !is_in_string_or_comment(source, match_start) {
             let open_idx = match_end + source[match_end..].find('{')?;
             return extract_balanced(source, open_idx);
         }
 
         search_start = match_start + 1;
     }
+}
+
+/// Returns `true` if byte offset `pos` in `source` falls inside a double-quoted string
+/// literal or a `//` line comment, determined by a left-to-right replay of `source` from
+/// its start up to `pos`. Mirrors [`extract_balanced`]'s string/comment state machine
+/// (including `\"` escape handling) so the two stay consistent about what counts as
+/// "real code" versus text embedded in a literal.
+///
+/// Deliberately does not special-case raw strings (`r#"..."#`) or block comments
+/// (`/* ... */`) — [`extract_balanced`] does not either, and no source in this crate
+/// currently relies on excluding them here. Extend both together if that changes.
+fn is_in_string_or_comment(source: &str, pos: usize) -> bool {
+    let bytes = source.as_bytes();
+    let mut i = 0usize;
+    let mut in_string = false;
+    let mut in_line_comment = false;
+
+    while i < pos && i < bytes.len() {
+        let c = bytes[i];
+
+        if in_line_comment {
+            if c == b'\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_string {
+            if c == b'\\' {
+                i += if i + 1 < bytes.len() { 2 } else { 1 };
+                continue;
+            }
+            if c == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if c == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if c == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            in_line_comment = true;
+            i += 2;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    in_string || in_line_comment
 }
 
 /// Given `source` and the byte index of an opening `{`, return the slice from that brace
@@ -517,6 +591,78 @@ mod tests {
         assert!(extract_fn_body(src, "foo").is_none());
     }
 
+    // --- is_in_string_or_comment / string-literal-fixture exclusion ----------------
+    //
+    // These reproduce the exact CI-vs-local divergence diagnosed in Task 1: a file can
+    // contain a *real* function definition plus, elsewhere in the same file, a string
+    // literal that happens to spell `fn <same name>(...) { ... }` as crafted test-fixture
+    // text (e.g. this very module's own `rule1_regression_*` / `rule2_regression_*`
+    // tests). `extract_fn_body` must find the real definition and skip the literal one,
+    // regardless of which one appears first in the source.
+
+    #[test]
+    fn extract_fn_body_skips_match_inside_string_literal_and_finds_real_one_after() {
+        let src = "let fixture = \"fn foo() { bogus_body(); }\";\n\
+                    fn foo() {\n    real_body();\n}\n";
+        let body = extract_fn_body(src, "foo").expect("real definition found");
+        assert!(body.contains("real_body()"));
+        assert!(!body.contains("bogus_body"));
+    }
+
+    #[test]
+    fn extract_fn_body_skips_match_inside_string_literal_and_finds_real_one_before() {
+        let src = "fn foo() {\n    real_body();\n}\n\
+                    let fixture = \"fn foo() { bogus_body(); }\";\n";
+        let body = extract_fn_body(src, "foo").expect("real definition found");
+        assert!(body.contains("real_body()"));
+        assert!(!body.contains("bogus_body"));
+    }
+
+    #[test]
+    fn extract_fn_body_none_when_only_match_is_inside_string_literal() {
+        let src = "let fixture = \"fn foo() { bogus_body(); }\";\n";
+        assert!(extract_fn_body(src, "foo").is_none());
+    }
+
+    #[test]
+    fn extract_fn_body_skips_match_inside_line_comment() {
+        let src = "// fn foo() { bogus_body(); }\nfn foo() {\n    real_body();\n}\n";
+        let body = extract_fn_body(src, "foo").expect("real definition found");
+        assert!(body.contains("real_body()"));
+        assert!(!body.contains("bogus_body"));
+    }
+
+    #[test]
+    fn scan_rule_ignores_crafted_fixture_text_regardless_of_file_order() {
+        // File A holds the real, clean definitions. File B holds a string-literal
+        // fixture that spells out a deliberately broken shape for `alpha` — exactly the
+        // pattern this module's own Task 5 regression tests use elsewhere in this file.
+        // Feeding the two files in both orders must produce the same, clean result:
+        // `find_map`'s file-enumeration order (unspecified by `std::fs::read_dir`, and
+        // the actual root cause of the CI failure) must not change the verdict.
+        let file_a = src(
+            "src/real.rs",
+            "fn alpha() {\n    shared_helper();\n}\nfn beta() {\n    shared_helper();\n}\n\
+             fn covers_both() {\n    alpha();\n    beta();\n}\n",
+        );
+        let file_b = src(
+            "src/other_module_with_fixture.rs",
+            "let fixture = \"fn alpha() { banned_pattern(); }\";\n",
+        );
+
+        let findings_ab = scan_rule(&test_rule(), &[file_a.clone(), file_b.clone()]);
+        assert!(
+            findings_ab.is_empty(),
+            "expected no findings with real file first: {findings_ab:?}"
+        );
+
+        let findings_ba = scan_rule(&test_rule(), &[file_b, file_a]);
+        assert!(
+            findings_ba.is_empty(),
+            "expected no findings with fixture file first: {findings_ba:?}"
+        );
+    }
+
     // --- scan_rule -----------------------------------------------------------------
 
     fn test_rule() -> SiblingRule {
@@ -697,6 +843,75 @@ mod tests {
     fn evaluate_never_reports_pass_when_source_unreachable() {
         let outcome = evaluate("/another/nonexistent/mev-test-path");
         assert_ne!(outcome.status, CheckStatus::Pass);
+    }
+
+    /// Both directions of the Task 2 acceptance criterion, exercised through `evaluate`
+    /// end-to-end (not just `scan_rule`): an unreadable source tree is `NotEvaluable`,
+    /// and a *readable* tree whose rules genuinely fail is still `Drift`. A temp
+    /// directory stands in for the stamped source dir, holding real (non-string-literal)
+    /// definitions of every `SIBLING_RULES` member so `discover_sources` succeeds —
+    /// `derive_rollup` deliberately regressed, everything else clean.
+    #[test]
+    fn evaluate_distinguishes_unreadable_tree_from_genuine_drift_in_a_readable_one() {
+        let dir = std::env::temp_dir().join(format!(
+            "mev-sibling-eval-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let src_dir = dir.join("src");
+        std::fs::create_dir_all(&src_dir).expect("create temp src dir");
+        std::fs::write(
+            src_dir.join("lib.rs"),
+            "fn derive_rollup() {\n    \
+                 if f.kind == \"project\" {\n        \
+                     // regressed: no longer routes through the shared helper\n    \
+                 }\n\
+             }\n\
+             fn derive_brain_focus() {\n    \
+                 resolve_repo_state_file();\n\
+             }\n\
+             fn dual_role_rule_holds_for_both_resolvers() {\n    \
+                 derive_rollup();\n    \
+                 derive_brain_focus();\n\
+             }\n\
+             fn check_status_consistency() {\n    \
+                 block_status_map();\n\
+             }\n\
+             fn ready_order() {\n    \
+                 block_status_map();\n\
+             }\n\
+             fn derive_focus() {\n    \
+                 block_status_map();\n\
+             }\n\
+             fn all_status_consumers_agree_on_one_fixture() {\n    \
+                 check_status_consistency();\n    \
+                 ready_order();\n    \
+                 derive_focus();\n\
+             }\n",
+        )
+        .expect("write temp lib.rs");
+
+        // Unreadable direction — a sibling path that was never created.
+        let unreadable = evaluate(dir.join("does-not-exist").to_str().unwrap());
+        assert_eq!(unreadable.status, CheckStatus::NotEvaluable);
+        assert!(unreadable.reason.is_some());
+
+        // Readable direction — the tree exists and one rule genuinely regressed.
+        let readable = evaluate(dir.to_str().unwrap());
+        assert_eq!(readable.status, CheckStatus::Drift);
+        assert!(
+            readable
+                .findings
+                .iter()
+                .any(|f| f.contains("derive_rollup")),
+            "expected a derive_rollup finding: {:?}",
+            readable.findings
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // --- Task 5: prove the check fails — regression fixtures against SIBLING_RULES --

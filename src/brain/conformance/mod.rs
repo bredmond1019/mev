@@ -98,6 +98,14 @@ pub struct ConformanceCheck {
     pub name: &'static str,
     pub description: &'static str,
     pub run: fn(&ConformanceCtx) -> CheckOutcome,
+    /// `true` when this check compares against the *running checkout's own source tree*
+    /// (a `build.rs`-stamped path, see `toolchain.rs`/`sibling.rs`) rather than purely
+    /// against the fixture / `ConformanceCtx` facts passed in. Such a check's result
+    /// depends on the checkout running the test — not on the fixture under test — so any
+    /// assertion made *over a fixture* (e.g. "a clean fixture reports zero drift") must
+    /// exclude checks with this property, and should do so by the property, not by a
+    /// hard-coded name list, so the next such check is covered automatically.
+    pub reads_live_checkout: bool,
 }
 
 /// The full registry of conformance checks. Adding a check is adding one entry here plus
@@ -108,26 +116,31 @@ pub fn all_checks() -> Vec<ConformanceCheck> {
             name: "backlog-parity",
             description: "HQ planning/backlog.md ## Active + ## Promoted vs state.json backlog[]",
             run: backlog::run,
+            reads_live_checkout: false,
         },
         ConformanceCheck {
             name: "epics-index-parity",
             description: "HQ state.json epics[] vs core/planning/epics/index.md",
             run: epics_index::run,
+            reads_live_checkout: false,
         },
         ConformanceCheck {
             name: "project-cache-watermark",
             description: "docs/projects/<project>.md synced_from vs sub-repo planning/status.md timestamp (adapter over brain::sync::check_sync)",
             run: project_cache::run,
+            reads_live_checkout: false,
         },
         ConformanceCheck {
             name: "toolchain-freshness",
             description: "the running mev binary's compiled-in build stamp vs its source tree's current HEAD",
             run: toolchain::run,
+            reads_live_checkout: true,
         },
         ConformanceCheck {
             name: "sibling-rule-coverage",
             description: "declared sibling-function pairs vs whether both route through their shared helper, avoid the forbidden inline pattern, and share a covering test",
             run: sibling::run,
+            reads_live_checkout: true,
         },
     ]
 }

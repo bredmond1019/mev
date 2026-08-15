@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-13T12:42:25-03:00"
+timestamp: "2026-08-14T21:48:46-03:00"
 ---
 
 # Log — mev
@@ -16,6 +16,32 @@ timestamp: "2026-08-13T12:42:25-03:00"
 *Append-only working log. One dated entry per session. Newest entries at the top.*
 
 ---
+
+## [2026-08-14]
+
+### Lane D of lane-aware-briefing: segments, program discriminator, and a CI blind spot
+- **What:** Closed `MV.13.A` (lane files derive to ordered (repo, chain) segments; its new
+  `E_LANE_DOUBLE_CLAIM` found 19 real cross-roadmap double-claims, all annotated with `# ORIGIN:`)
+  and `MV.ticket.consumer-compile-gate` (`mev check-consumers`). Implemented `MV.13.D`
+  (`kind: program | area` on all 22 epics, lane-derived `epic_members`; close-the-loop 0→13 rows,
+  operator-surface 0→44) — PR #38 open, not landed. Fixed three okf-core-rooted compile breaks in
+  one day. Pushed okf-core's 18 stranded commits; refreshed engine-rs's Cargo.lock; enabled
+  `gate / gate` as a required check on mev's main.
+- **Why:** The roadmap needed lane files to become a derived object so the cockpit can answer which
+  lanes are startable. Along the way mev broke three times from upstream okf-core type changes,
+  which is what made the consumer gate urgent rather than theoretical. Enabling branch protection
+  then revealed that mev's CI had been red all day and PRs #36/#37 had been merged straight past it.
+- **Refs:** `planning/roadmaps/lane-aware-briefing/roadmap.md`;
+  `planning/orchestration-run/lane-aware-briefing/{notes.md,review.md}`; `planning/handoff.md`
+
+## [run: 2026-08-14]
+
+Ran `ticket-ci-local-conformance-divergence` through tasks 1-4; verdict FAIL, bailed. Task 1 diagnosed the actual CI-vs-local mechanism (no code change): a `find_map` over unsorted `std::fs::read_dir` output in `scan_rule` matched whichever file's text spelled `fn check_status_consistency` first — the real definition in `state.rs` locally, but `sibling.rs`'s own deliberately-broken test-fixture string of the same name on CI's Linux/ext4 enumeration order — ruling out the ticket's stale/unreadable-tree hypotheses via a CI log read. Task 2 fixed the real root cause: `extract_fn_body` now skips fn-name matches inside string literals or `//`-comments, so a sibling file's fixture text can no longer masquerade as a real signature; added both an `evaluate()`-level unreadable-vs-readable test and a `scan_rule` test that feeds the two files in both orders. Task 3 replaced the tests' hard-coded `"toolchain-freshness"` name filter with a registry-level `ConformanceCheck.reads_live_checkout` flag (true for `toolchain-freshness` and `sibling-rule-coverage` only), so `full_fixture_reports_zero_drift` and `seeded_backlog_title_drift_is_detected_and_named` exclude drift by property, not by name. Task 4 verified: all local gates green (fmt, clippy, `cargo test`, release build) and confirmed CI's `tests/brain_conformance.rs` now passes cleanly, proving tasks 1-3's fix — but `gh pr checks 39` still shows `gate / gate` failing, this time because `tests/check_consumers_cli.rs`'s 3 tests hit an `'unrecognised failure: exit code 101, no known signature'` path in `src/consumers/mod.rs`'s signature-matching logic. That file is untouched by this branch's diff and passes locally under both nextest and plain `cargo test` — a second, pre-existing CI-vs-local divergence in a different conformance-check family (consumer compile gate, not sibling-rule-coverage) that was previously masked because `cargo test` aborts on the first failing integration-test binary and `brain_conformance.rs` always failed first. Fixing it is out of this ticket's declared scope (diagnosed nothing about it, planned nothing for it) — bailed rather than silently expanding scope. Next: re-plan or open a new ticket scoped to the `check_consumers_cli.rs` signature-matching divergence; `MV.ticket.ci-local-conformance-divergence` stays open in `state.json`.
+
+```
+f44bc74 feat: implement ticket-ci-local-conformance-divergence-task3
+15df838 feat: implement ticket-ci-local-conformance-divergence-task2
+```
 
 ## [run: 2026-08-14]
 

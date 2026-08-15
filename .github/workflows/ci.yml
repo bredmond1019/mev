@@ -7,6 +7,14 @@ name: ci
 #
 # mev has a path dependency on the sibling okf-core repo (`okf-core = { path = "../okf-core" }`
 # in Cargo.toml), so this caller opts into the reusable workflow's sibling-repo checkout.
+#
+# needs-nextest: true (operator-mev-ci-divergence-strategy, 2026-08-14) — matches every local
+# run (CLAUDE.md standing rule 6 mandates nextest here) so CI reports every failing test binary
+# in one run instead of stopping at the first (plain `cargo test`'s behavior), which is what let
+# three unrelated CI-only failures masquerade as one over several round-trips. Also installs the
+# `cargo-nextest` binary on the runner, which `mev check-consumers` shells out to directly — its
+# absence was misclassifying every consumer as NotEvaluable. No doctests exist in this crate
+# (`cargo test --doc` -> 0 tests), so nextest's lack of doctest support loses nothing here.
 
 on:
   push:
@@ -17,3 +25,4 @@ jobs:
     uses: bredmond1019/agentic-base-template/.github/workflows/gate-rust.yml@main
     with:
       sibling-repos: "bredmond1019/okf-core"
+      needs-nextest: true
