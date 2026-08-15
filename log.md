@@ -13,6 +13,37 @@ timestamp: "2026-08-14T23:32:26-03:00"
 
 # Log — mev
 
+## [run: 2026-08-15]
+
+Shipped `ticket-reference-container-validation` (7 tasks, PASS via `/sdlc-flow`), making mev the
+enforcing half of D72. Task 1 validates okf-core's `reference[]` array (class vocabulary, scope
+exactly-one-of, date format, and a new `E_STATE_REFERENCE_CARRYOVER_COLLISION` for slugs shared with
+`carryover[]`). Task 2 narrows `VALID_CARRYOVER_KINDS` to D72's four (`defect`/`deferred`/`drift`/`env`)
+with legacy `constraint`/`known_issue` downgraded to a `W_STATE_LEGACY_KIND` warning rather than an
+error — the operator's 2026-08-15 legacy-kind-transition decision, since 71% of the live corpus (168/238
+entries) still carries a legacy kind and Block G's migration hasn't landed yet. Task 3 confirmed
+`reference[]` stays off every triage surface (Attention board, attention-queue, staleness warnings) and
+pinned a live-corpus baseline. Task 4 adds `mev carryover --audit` (per-container/kind/class census,
+typed-predicate coverage, a clear-rate scoped to `carryover[]` only, `--window` inflow/outflow), reusing
+the existing `evaluate_carryover` corpus walk. Task 5 adds `mev validate-state <path>` — a single-file
+per-file-ring check (`check_schema` + `check_field_policy` only) with a hand-rolled malformed-shape
+fallback for pre-deserialization errors, under 2s wall-clock on a ~20-track fixture. Task 6 documented
+all three in `docs/cli.md`. Task 7 (full-suite validation) passed all four harness gates (fmt, clippy,
+`cargo test`, release build) but flagged `mev check-consumers` reporting `bastion` newly BROKEN from the
+narrowed-kind change — reported, not fixed, since it's a separate repo/consumer outside this ticket's
+file list. Closes Block E of the `carryover-lifecycle` roadmap. Next: `MV.ticket.consumer-dependency-parity`.
+
+```
+a58ecbe docs: update docs for ticket-reference-container-validation
+da7cc34 docs: document mev carryover --audit and mev validate-state
+ae80579 feat: implement ticket-reference-container-validation-task5
+34504c4 feat: implement ticket-reference-container-validation-task4
+dc4f3be test: pin reference[] off every triage surface; record live-corpus baseline
+5c4d896 feat: narrow VALID_CARRYOVER_KINDS to D72's four, add legacy warning lane
+7534500 feat: implement ticket-reference-container-validation-task1
+44c3f81 docs: log CI-vs-local divergence close-out
+```
+
 ## [2026-08-14]
 
 ### Close CI-vs-local divergence: nextest on CI, ANSI-color fix, both frozen PRs merged
