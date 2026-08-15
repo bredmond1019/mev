@@ -1323,15 +1323,32 @@ pub fn emit_state(
     //    `plan_epic_sequences` targets its own `epics/<slug>.md` docs, which
     //    nothing above touches. The two are still planned together and applied
     //    together (not interleaved) — safe, since they target disjoint files.
-    let epic_board_plan =
-        filter_plan_by_scope(plan_epic_boards(&loaded, &graph, &config), root, scope);
+    let epic_board_plan = filter_plan_by_scope(
+        plan_epic_boards(root, &loaded, &graph, &config),
+        root,
+        scope,
+    );
     let epic_seq_plan = filter_plan_by_scope(
         plan_epic_sequences(root, &loaded, &graph, &config),
         root,
         scope,
     );
-    let epic_board_diags = apply_plan(&epic_board_plan, write);
-    let epic_seq_diags = apply_plan(&epic_seq_plan, write);
+    // `MV.13.D` Task 4: both planners now render lane-derived program membership
+    // (Task 3's `epic_members_resolved`) — a cross-repo derivation that, like the
+    // lane-segments plan below, can regress the corpus if the derivation logic is
+    // wrong (e.g. a duplicate row, a dangling block reference). "Any generator
+    // writing into the corpus must validate its own output and roll back on
+    // net-new errors" applies here too, so — in `--write` mode — the two plans
+    // are merged (safe: they target disjoint files, per the comment above) and
+    // applied through [`apply_with_rollback_on_regression`] rather than a plain
+    // `apply_plan`. Dry-run is unaffected.
+    let mut epic_plan = epic_board_plan;
+    epic_plan.extend(epic_seq_plan);
+    let epic_diags = if write {
+        apply_with_rollback_on_regression(&epic_plan, || Ok(validate_brain(root)?.error_count()))?
+    } else {
+        apply_plan(&epic_plan, false)
+    };
 
     // 7. Run and apply the YAML frontmatter planner last so it sees the updated markdown in write mode.
     let status_fm_plan = filter_plan_by_scope(
@@ -1368,8 +1385,7 @@ pub fn emit_state(
     report.diagnostics.extend(unified_board_diags);
     report.diagnostics.extend(attention_diags);
     report.diagnostics.extend(brain_caches_diags);
-    report.diagnostics.extend(epic_board_diags);
-    report.diagnostics.extend(epic_seq_diags);
+    report.diagnostics.extend(epic_diags);
     report.diagnostics.extend(status_fm_diags);
     report.diagnostics.extend(lane_segments_diags);
 

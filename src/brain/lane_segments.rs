@@ -862,6 +862,67 @@ pub fn plan_lane_segments(
     plan
 }
 
+// ---------------------------------------------------------------------------
+// Program-epic membership feed — `MV.13.D` Task 3
+// ---------------------------------------------------------------------------
+
+/// Extract the roadmap slug an [`crate::brain::state::Epic`]'s `plan` document names,
+/// if it points at a roadmap: `.../<slug>/roadmap.md` → `Some("<slug>")`. Any other
+/// filename (e.g. an area epic's `core/planning/epics/<slug>.md`) returns `None` — an
+/// area has no roadmap to match against, and this deliberately does not fall back to
+/// guessing a slug from the last path segment.
+pub fn roadmap_slug_from_plan_path(plan: &str) -> Option<String> {
+    let path = Path::new(plan);
+    if path.file_name().is_some_and(|f| f == "roadmap.md") {
+        path.parent()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().to_string())
+    } else {
+        None
+    }
+}
+
+/// Derive every lane-file block's position, corpus-wide, grouped by its **executing**
+/// roadmap slug — the feed [`crate::brain::emit::epic_members_resolved`] (`MV.13.D`
+/// Task 3) consumes for `kind: program` epics.
+///
+/// Each roadmap's `Vec` preserves [`derive_lane_positions`]'s own output order exactly
+/// (lane-file discovery order, then each file's segment/position order) — `segment` and
+/// `position` are indices local to one lane file, not a corpus-wide sort key, so
+/// re-sorting by them across lane files would silently interleave unrelated files'
+/// blocks. A block that is a resolved double-claim (`# ORIGIN:`) already appears only
+/// under its executing roadmap here, because [`derive_lane_positions`] excludes it from
+/// every other claiming file — the same `origin_roadmap` guarantee this function's
+/// caller relies on to never render a block under two programs.
+///
+/// Independent derivation from [`plan_lane_segments`] (not a read of the
+/// [`LANE_SEGMENTS_ARTIFACT`] it writes) because `emit_state` plans epic boards and
+/// sequence tables *before* it plans the lane-segments artifact write — see
+/// `src/lib.rs`'s planner ordering comment. Diagnostics are intentionally discarded
+/// here: the identical discovery-and-derivation runs again in [`plan_lane_segments`]
+/// later in the same `emit-state` invocation and reports them there; surfacing the same
+/// diagnostic twice in one run would double-count it.
+pub fn derive_program_membership(
+    root: &Path,
+    files: &[(StateSource, StateFile)],
+) -> HashMap<String, Vec<DerivedBlockPosition>> {
+    let (lane_files, _discover_diags) = discover_lane_files(root);
+    if lane_files.is_empty() {
+        return HashMap::new();
+    }
+
+    let owner_index = build_owner_index(files);
+    let (blocks, _double_claim_diags) = derive_lane_positions(&lane_files, |id| {
+        resolve_owner(&owner_index, id).map(str::to_string)
+    });
+
+    let mut by_roadmap: HashMap<String, Vec<DerivedBlockPosition>> = HashMap::new();
+    for b in blocks {
+        by_roadmap.entry(b.roadmap.clone()).or_default().push(b);
+    }
+    by_roadmap
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1732,6 +1793,67 @@ BT.ticket.two
         let artifact: serde_json::Value =
             serde_json::from_str(&plan.actions[0].new_content).unwrap();
         assert!(artifact["blocks"].as_array().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // roadmap_slug_from_plan_path / derive_program_membership — MV.13.D Task 3
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn roadmap_slug_from_plan_path_extracts_slug_from_a_roadmap_doc() {
+        assert_eq!(
+            roadmap_slug_from_plan_path("planning/roadmaps/lane-aware-briefing/roadmap.md"),
+            Some("lane-aware-briefing".to_string())
+        );
+        assert_eq!(
+            roadmap_slug_from_plan_path("planning/demand-ready/roadmap.md"),
+            Some("demand-ready".to_string())
+        );
+    }
+
+    #[test]
+    fn roadmap_slug_from_plan_path_is_none_for_a_non_roadmap_doc() {
+        // An area epic's plan doc — no roadmap slug to extract, and this must
+        // not guess one from the filename.
+        assert_eq!(
+            roadmap_slug_from_plan_path("core/planning/epics/go-to-market.md"),
+            None
+        );
+    }
+
+    #[test]
+    fn derive_program_membership_groups_by_executing_roadmap_in_derivation_order() {
+        let dir = crate::testsupport::unique_temp_dir("mev-derive-program-membership-basic");
+        write(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.txt",
+            "MV.ticket.a\nBT.ticket.b\n",
+        );
+        let loaded = vec![
+            state_file_fixture("mev", "MV.ticket.a"),
+            state_file_fixture("base-template", "BT.ticket.b"),
+        ];
+
+        let by_roadmap = derive_program_membership(&dir, &loaded);
+        let alpha = by_roadmap
+            .get("alpha")
+            .expect("alpha roadmap must have derived positions");
+        let ids: Vec<&str> = alpha.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["MV.ticket.a", "BT.ticket.b"], "got {ids:?}");
+        assert!(!by_roadmap.contains_key("bravo"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn derive_program_membership_is_empty_with_no_lane_files() {
+        let dir = crate::testsupport::unique_temp_dir("mev-derive-program-membership-empty");
+        std::fs::create_dir_all(dir.join("planning")).unwrap();
+
+        let by_roadmap = derive_program_membership(&dir, &[]);
+        assert!(by_roadmap.is_empty(), "got {by_roadmap:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

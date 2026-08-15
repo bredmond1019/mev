@@ -1199,6 +1199,32 @@ pub fn check_field_policy(src: &StateSource, file: &StateFile) -> Vec<Diagnostic
 /// - `complete` — finished.
 const EPIC_STATUSES: [&str; 4] = ["active", "focused", "paused", "complete"];
 
+/// The valid values of an [`Epic`]'s `kind` discriminator (ratified operator
+/// gate G3, 2026-08-14 — see `planning/MV.13.D/tasks.md`).
+///
+/// - `program` — roadmap-backed, ends. Membership is fed from its lane files
+///   (`MV.13.A`), not authored `block.epics` (Task 3).
+/// - `area` — standing, ongoing. Membership is authored `block.epics` only —
+///   an area has no lanes to derive from.
+///
+/// `kind` is **not yet a typed field on [`Epic`]** — okf-core's `Epic` struct is
+/// shared by other repos (bastion, bastion-web), and this block deliberately
+/// avoids the "adding a field to a shared struct breaks N consumers" hazard
+/// `planning/MV.13.D/tasks.md` Task 5 calls out by name. `kind` instead reads
+/// off `Epic::extra` (its `#[serde(flatten)]` catch-all), which round-trips any
+/// JSON value with zero parse-cliff risk — see okf-core's "Typed-with-fallback"
+/// note in `docs/architecture.md`. Read it with [`epic_kind_raw`].
+const EPIC_KINDS: [&str; 2] = ["program", "area"];
+
+/// Read an [`Epic`]'s `kind` value straight off its `extra` map, without
+/// interpreting it. Returns `None` when the field is absent — never inferred,
+/// never defaulted, and never derived from the epic's `plan` directory (G3
+/// forbids falling back to the lane-file heuristic even when one is present;
+/// see [`check_epics_tests::check_epics_never_infers_kind_from_lane_files`]).
+pub(crate) fn epic_kind_raw(epic: &Epic) -> Option<&serde_json::Value> {
+    epic.extra.get("kind")
+}
+
 /// The inclusive upper bound of an [`Epic`]'s authored `weight`.
 ///
 /// `Epic::weight` is a `u8`, so `0..=255` parses; this is the policy bound mev
@@ -1253,6 +1279,18 @@ pub(crate) fn epic_registry<'a>(
 /// 8. **`W_STATE_EPIC_UNREACHABLE_DEP`** — an unclosed block in some epic
 ///    `depends_on` an unclosed block belonging to no epic. That dependency gates
 ///    the epic but would never appear on its board — the silent-gate case.
+/// 9. **`E_STATE_EPIC_BAD_KIND`** — a registry `kind` is present but ∉
+///    [`EPIC_KINDS`] (including a non-string JSON value). Closed vocabulary,
+///    hard error — an invalid value is always a mistake, unlike "not yet set".
+/// 10. **`W_STATE_EPIC_MISSING_KIND`** — a registry entry has no `kind` at all.
+///     **Warning, not error, by explicit decision** (`planning/MV.13.D/tasks.md`
+///     Task 1): every one of the 22 live epics lacked `kind` the day this field
+///     was introduced, so a hard error would red-gate the corpus for every
+///     concurrent lane on the landing commit — the same precedent
+///     `mev conformance`'s `toolchain-freshness` check set. A missing `kind` is
+///     a diagnostic, **never** inferred, defaulted, or derived from the epic's
+///     `plan` directory contents (the lane-file heuristic G3 rejected
+///     outright) — see [`epic_kind_raw`].
 pub fn check_epics(config: &BrainConfig, files: &[(StateSource, StateFile)]) -> Vec<Diagnostic> {
     use std::collections::{HashMap, HashSet};
 
@@ -1309,6 +1347,38 @@ pub fn check_epics(config: &BrainConfig, files: &[(StateSource, StateFile)]) -> 
                     epic.slug, weight, EPIC_WEIGHT_MAX
                 ),
             ));
+        }
+
+        // 9/10. `kind: program | area` — closed vocabulary; absent is a
+        // diagnostic, never an inferred value (see `epic_kind_raw`'s docs).
+        match epic_kind_raw(epic) {
+            None => {
+                diags.push(Diagnostic::warning(
+                    &path,
+                    "W_STATE_EPIC_MISSING_KIND",
+                    format!(
+                        "epic '{}' has no 'kind'; set it to one of {{{}}} — never inferred \
+                         from the epic's plan directory or lane files",
+                        epic.slug,
+                        EPIC_KINDS.join(", ")
+                    ),
+                ));
+            }
+            Some(value) => {
+                let matches = value.as_str().is_some_and(|s| EPIC_KINDS.contains(&s));
+                if !matches {
+                    diags.push(Diagnostic::error(
+                        &path,
+                        "E_STATE_EPIC_BAD_KIND",
+                        format!(
+                            "epic '{}' has invalid kind {}; must be one of {{{}}}",
+                            epic.slug,
+                            value,
+                            EPIC_KINDS.join(", ")
+                        ),
+                    ));
+                }
+            }
         }
     }
 
@@ -9390,8 +9460,8 @@ mod check_epics_tests {
             r#"{
   "repo": "hq", "kind": "brain", "updated": "2026-07-24",
   "epics": [
-    { "slug": "bastion-os", "title": "Bastion OS", "status": "active" },
-    { "slug": "bastion-web", "title": "Bastion Web + UI", "status": "active" }
+    { "slug": "bastion-os", "title": "Bastion OS", "status": "active", "kind": "area" },
+    { "slug": "bastion-web", "title": "Bastion Web + UI", "status": "active", "kind": "area" }
   ]
 }"#,
         );
@@ -9489,7 +9559,7 @@ mod check_epics_tests {
             "brain",
             r#"{
   "repo": "hq", "kind": "brain", "updated": "2026-07-24",
-  "epics": [{ "slug": "ghost", "title": "Nobody's work", "status": "active" }]
+  "epics": [{ "slug": "ghost", "title": "Nobody's work", "status": "active", "kind": "area" }]
 }"#,
         );
 
@@ -9549,7 +9619,7 @@ mod check_epics_tests {
             &epic_config(),
             &[hq_with_epic(
                 dir.path(),
-                r#"{ "slug": "w", "title": "W", "status": "focus" }"#,
+                r#"{ "slug": "w", "title": "W", "status": "focus", "kind": "area" }"#,
             )],
         );
         assert_eq!(locators(&diags), vec!["E_STATE_EPIC_BAD_STATUS"]);
@@ -9560,7 +9630,7 @@ mod check_epics_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (src, file) = hq_with_epic(
             dir.path(),
-            r#"{ "slug": "w", "title": "W", "weight": 101 }"#,
+            r#"{ "slug": "w", "title": "W", "weight": 101, "kind": "area" }"#,
         );
         let hq_path = src.abs_path.clone();
 
@@ -9587,9 +9657,9 @@ mod check_epics_tests {
         // 100 is the inclusive max, 0 is a legitimate authored value (not "absent"),
         // and an absent weight is the overwhelmingly common case today.
         for body in [
-            r#"{ "slug": "w", "title": "W", "weight": 100 }"#,
-            r#"{ "slug": "w", "title": "W", "weight": 0 }"#,
-            r#"{ "slug": "w", "title": "W" }"#,
+            r#"{ "slug": "w", "title": "W", "weight": 100, "kind": "area" }"#,
+            r#"{ "slug": "w", "title": "W", "weight": 0, "kind": "area" }"#,
+            r#"{ "slug": "w", "title": "W", "kind": "area" }"#,
         ] {
             let dir = tempfile::tempdir().expect("tempdir");
             let diags = check_epics(&epic_config(), &[hq_with_epic(dir.path(), body)]);
@@ -9610,10 +9680,113 @@ mod check_epics_tests {
             &epic_config(),
             &[hq_with_epic(
                 dir.path(),
-                r#"{ "slug": "w", "title": "W", "weight": 255 }"#,
+                r#"{ "slug": "w", "title": "W", "weight": 255, "kind": "area" }"#,
             )],
         );
         assert_eq!(locators(&diags), vec!["E_STATE_EPIC_BAD_WEIGHT"]);
+    }
+
+    #[test]
+    fn check_epics_warns_on_missing_kind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (src, file) = hq_with_epic(dir.path(), r#"{ "slug": "w", "title": "W" }"#);
+        let hq_path = src.abs_path.clone();
+
+        let diags = check_epics(&epic_config(), &[(src, file)]);
+        assert_eq!(locators(&diags), vec!["W_STATE_EPIC_MISSING_KIND"]);
+        assert_eq!(
+            diags[0].severity,
+            crate::Severity::Warning,
+            "missing kind must warn, not error — hard-erroring red-gates every one of the \
+             22 live epics on the landing commit"
+        );
+        assert_eq!(diags[0].file, hq_path);
+        assert!(
+            diags[0].message.contains("'w'"),
+            "the diagnostic must name the offending slug: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn check_epics_accepts_program_and_area_kinds() {
+        for kind in ["program", "area"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let diags = check_epics(
+                &epic_config(),
+                &[hq_with_epic(
+                    dir.path(),
+                    &format!(r#"{{ "slug": "w", "title": "W", "kind": "{kind}" }}"#),
+                )],
+            );
+            assert!(
+                diags.is_empty(),
+                "'{kind}' is a valid epic kind, got: {:?}",
+                locators(&diags)
+            );
+        }
+    }
+
+    #[test]
+    fn check_epics_rejects_an_invalid_kind_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let diags = check_epics(
+            &epic_config(),
+            &[hq_with_epic(
+                dir.path(),
+                r#"{ "slug": "w", "title": "W", "kind": "feature" }"#,
+            )],
+        );
+        assert_eq!(locators(&diags), vec!["E_STATE_EPIC_BAD_KIND"]);
+        assert_eq!(diags[0].severity, crate::Severity::Error);
+        assert!(
+            diags[0].message.contains("'w'") && diags[0].message.contains("feature"),
+            "the diagnostic must name the epic and the offending value: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn check_epics_rejects_a_non_string_kind_value() {
+        // `kind` is read off `extra` as a raw JSON value — a non-string (e.g. an
+        // authored `42`) must diagnose exactly like an unrecognized string,
+        // never panic on `.as_str()` and never silently pass.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let diags = check_epics(
+            &epic_config(),
+            &[hq_with_epic(
+                dir.path(),
+                r#"{ "slug": "w", "title": "W", "kind": 42 }"#,
+            )],
+        );
+        assert_eq!(locators(&diags), vec!["E_STATE_EPIC_BAD_KIND"]);
+    }
+
+    #[test]
+    fn check_epics_never_infers_kind_from_lane_files() {
+        // Pins G3 (ratified 2026-08-14): the lane-file heuristic — "a program is
+        // an epic whose plan directory contains lane-*.txt" — was rejected
+        // outright and must never be reintroduced as a fallback for an unset
+        // `kind`, even when the epic's own plan directory genuinely has lane
+        // files sitting right beside it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan_dir = dir.path().join("planning").join("roadmaps").join("w-prog");
+        std::fs::create_dir_all(&plan_dir).unwrap();
+        std::fs::write(plan_dir.join("roadmap.md"), "# W Program\n").unwrap();
+        std::fs::write(plan_dir.join("lane-substrate.txt"), "HQ.1.A\n").unwrap();
+
+        let (src, file) = hq_with_epic(
+            dir.path(),
+            r#"{ "slug": "w", "title": "W", "plan": "planning/roadmaps/w-prog/roadmap.md" }"#,
+        );
+
+        let diags = check_epics(&epic_config(), &[(src, file)]);
+        assert_eq!(
+            locators(&diags),
+            vec!["W_STATE_EPIC_MISSING_KIND"],
+            "the presence of lane files beside the epic's plan must not suppress or \
+             substitute for the missing-kind diagnostic"
+        );
     }
 
     /// One HQ registry entry `(slug, status)` plus member blocks `(id, status)`,
@@ -9638,7 +9811,7 @@ mod check_epics_tests {
             &format!(
                 r#"{{
   "repo": "hq", "kind": "brain", "updated": "2026-08-01",
-  "epics": [{{ "slug": "e", "title": "E"{status} }}],
+  "epics": [{{ "slug": "e", "title": "E"{status}, "kind": "area" }}],
   "tracks": [{{ "title": "P", "blocks": [{}] }}]
 }}"#,
                 block_json.join(", ")
@@ -9784,7 +9957,7 @@ mod check_epics_tests {
             "brain",
             r#"{
   "repo": "hq", "kind": "brain", "updated": "2026-07-24",
-  "epics": [{ "slug": "bastion-web", "title": "Bastion Web", "status": "active" }]
+  "epics": [{ "slug": "bastion-web", "title": "Bastion Web", "status": "active", "kind": "area" }]
 }"#,
         );
         let bastion = pair(

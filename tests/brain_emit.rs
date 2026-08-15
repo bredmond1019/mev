@@ -8394,7 +8394,7 @@ mod epic_emit {
         ));
         let graph = build_state_graph(&files);
 
-        let plan = plan_epic_boards(&files, &graph, &config());
+        let plan = plan_epic_boards(tmp.path(), &files, &graph, &config());
         assert_eq!(plan.actions.len(), 1, "one board write expected");
         let out = &plan.actions[0].new_content;
 
@@ -8435,7 +8435,7 @@ mod epic_emit {
 
         // Fixed point: re-planning against the emitted output yields no action.
         std::fs::write(&status_path, out).unwrap();
-        let again = plan_epic_boards(&files, &graph, &config());
+        let again = plan_epic_boards(tmp.path(), &files, &graph, &config());
         assert!(
             again.actions.is_empty(),
             "re-running against its own output must be a no-op, got: {:?}",
@@ -8461,7 +8461,7 @@ mod epic_emit {
         ));
         let graph = build_state_graph(&files);
 
-        let plan = plan_epic_boards(&files, &graph, &config());
+        let plan = plan_epic_boards(tmp.path(), &files, &graph, &config());
         let out = &plan.actions[0].new_content;
         assert!(!out.contains("### Bastion OS"), "got:\n{out}");
         assert!(out.contains("### Bastion Web + UI"), "got:\n{out}");
@@ -8488,7 +8488,7 @@ mod epic_emit {
         ));
         let graph = build_state_graph(&files);
 
-        let plan = plan_epic_boards(&files, &graph, &config());
+        let plan = plan_epic_boards(tmp.path(), &files, &graph, &config());
         let out = &plan.actions[0].new_content;
         assert!(out.contains("### Bastion OS"), "got:\n{out}");
         assert!(
@@ -8513,7 +8513,7 @@ mod epic_emit {
         ));
         let graph = build_state_graph(&files);
 
-        let plan = plan_epic_boards(&files, &graph, &config());
+        let plan = plan_epic_boards(tmp.path(), &files, &graph, &config());
         assert!(plan.actions.is_empty(), "must never invent sentinels");
         assert_eq!(
             plan.diagnostics
@@ -8537,7 +8537,7 @@ mod epic_emit {
         files.push(hq(tmp.path(), "hq", vec![]));
         let graph = build_state_graph(&files);
 
-        let plan = plan_epic_boards(&files, &graph, &config());
+        let plan = plan_epic_boards(tmp.path(), &files, &graph, &config());
         assert!(plan.actions.is_empty());
         assert!(plan.diagnostics.is_empty());
     }
@@ -8637,6 +8637,195 @@ mod epic_emit {
         );
         // The surviving table is the first epic's.
         assert!(plan.actions[0].new_content.contains("BA.6"));
+    }
+
+    // -- epic_members_resolved (`MV.13.D` Task 3 — precedence rule) ----------
+
+    fn program_epic(slug: &str, title: &str, plan: &str) -> Epic {
+        let mut e = epic(slug, title, "active", Some(plan));
+        e.extra.insert(
+            "kind".to_string(),
+            serde_json::Value::String("program".to_string()),
+        );
+        e
+    }
+
+    fn write_lane_file(root: &std::path::Path, roadmap: &str, lane: &str, content: &str) {
+        let dir = root.join("planning/roadmaps").join(roadmap);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("lane-{lane}.txt")), content).unwrap();
+    }
+
+    #[test]
+    fn epic_members_resolved_area_kind_falls_back_to_authored_membership() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = corpus(tmp.path());
+        let graph = build_state_graph(&files);
+
+        // No `kind` authored at all — must behave exactly like `epic_members` did
+        // before this block, not silently start deriving.
+        let area = epic("bastion-os", "Bastion OS", "active", None);
+        let resolved = mev::brain::emit::epic_members_resolved(tmp.path(), &graph, &files, &area);
+        let authored = epic_members(&graph, &files, "bastion-os");
+        let resolved_ids: Vec<&str> = resolved.iter().map(|(_, b)| b.id.as_str()).collect();
+        let authored_ids: Vec<&str> = authored.iter().map(|(_, b)| b.id.as_str()).collect();
+        assert_eq!(resolved_ids, authored_ids, "got:\n{resolved_ids:?}");
+    }
+
+    #[test]
+    fn epic_members_resolved_program_kind_prefers_derived_lane_membership_over_authored_tags() {
+        // The live conflict shape: BA.6 is authored to the epic's slug via
+        // `block.epics`, but the epic's lane file claims a disjoint set of
+        // blocks (BW.1, AM.1) instead. A `kind: program` epic must reflect the
+        // lane file exactly — never the authored tag, never a union of both.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut files = vec![
+            leaf(
+                tmp.path(),
+                "bastion",
+                vec![tb("BA.6", "closed", 1, &["conflict-prog"], vec![])],
+            ),
+            leaf(
+                tmp.path(),
+                "bastion-web",
+                vec![tb("BW.1", "open", 2, &[], vec![])],
+            ),
+            leaf(
+                tmp.path(),
+                "amistad",
+                vec![tb("AM.1", "open", 3, &[], vec![])],
+            ),
+        ];
+        files.push(hq(
+            tmp.path(),
+            "hq",
+            vec![program_epic(
+                "conflict-prog",
+                "Conflict Prog",
+                "planning/roadmaps/conflict-prog/roadmap.md",
+            )],
+        ));
+        let graph = build_state_graph(&files);
+
+        write_lane_file(tmp.path(), "conflict-prog", "main", "BW.1\nAM.1\n");
+
+        let epic = files
+            .iter()
+            .find_map(|(_, f)| f.epics.iter().find(|e| e.slug == "conflict-prog"))
+            .unwrap();
+        let members = mev::brain::emit::epic_members_resolved(tmp.path(), &graph, &files, epic);
+        let ids: Vec<&str> = members.iter().map(|(_, b)| b.id.as_str()).collect();
+
+        assert_eq!(
+            ids,
+            vec!["BW.1", "AM.1"],
+            "derived lane membership must win, in lane-file order; got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"BA.6"),
+            "authored-only tag must not add a member to a program epic; got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn epic_members_resolved_program_kind_with_non_roadmap_plan_is_empty() {
+        // An area's plan doc (`.../epics/<slug>.md`) never names a roadmap slug —
+        // a mis-tagged `kind: program` epic must not silently derive from
+        // whatever the last path segment happens to be.
+        let tmp = tempfile::tempdir().unwrap();
+        let files = corpus(tmp.path());
+        let graph = build_state_graph(&files);
+
+        let bad = program_epic(
+            "bastion-os",
+            "Bastion OS",
+            "core/planning/epics/bastion-os.md",
+        );
+        let resolved = mev::brain::emit::epic_members_resolved(tmp.path(), &graph, &files, &bad);
+        assert!(resolved.is_empty(), "got: {resolved:?}");
+    }
+
+    #[test]
+    fn epic_members_resolved_program_kind_with_no_lane_files_falls_back_to_authored() {
+        // BA.6/BA.7 are authored to "bastion-os", and no lane file exists for it —
+        // a program that finished before lane tooling existed. Amended MV.13.D
+        // rule: derived wins *where derivable*; with nothing derivable, the
+        // program falls back to its authored `block.epics` instead of
+        // rendering an empty table (was: `..._is_empty_not_authored`, pinning
+        // the pre-amendment behaviour this test now inverts).
+        let tmp = tempfile::tempdir().unwrap();
+        let files = corpus(tmp.path());
+        let graph = build_state_graph(&files);
+
+        let program = program_epic(
+            "bastion-os",
+            "Bastion OS",
+            "planning/roadmaps/bastion-os/roadmap.md",
+        );
+        let resolved =
+            mev::brain::emit::epic_members_resolved(tmp.path(), &graph, &files, &program);
+        let ids: Vec<&str> = resolved.iter().map(|(_, b)| b.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["BA.6", "BA.7"],
+            "no derivable lane membership must fall back to authored block.epics; got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn epic_members_resolved_origin_roadmap_adoption_renders_once_under_executing_roadmap() {
+        // BA.9 is claimed by both prog-a's and prog-b's lane files. Only prog-b's
+        // claim carries `# ORIGIN:`, so per D57's two-axis rule it is the
+        // executing roadmap: BA.9 must render under prog-b only, never prog-a,
+        // and never both.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut files = vec![leaf(
+            tmp.path(),
+            "bastion",
+            vec![tb("BA.9", "open", 1, &[], vec![])],
+        )];
+        files.push(hq(
+            tmp.path(),
+            "hq",
+            vec![
+                program_epic("prog-a", "Prog A", "planning/roadmaps/prog-a/roadmap.md"),
+                program_epic("prog-b", "Prog B", "planning/roadmaps/prog-b/roadmap.md"),
+            ],
+        ));
+        let graph = build_state_graph(&files);
+
+        write_lane_file(tmp.path(), "prog-a", "main", "BA.9\n");
+        let origin_path = tmp.path().join("planning/roadmaps/prog-a/roadmap.md");
+        write_lane_file(
+            tmp.path(),
+            "prog-b",
+            "main",
+            &format!("# ORIGIN: {}\nBA.9\n", origin_path.display()),
+        );
+
+        let hq_epics = &files
+            .iter()
+            .find(|(_, f)| f.kind == "brain")
+            .unwrap()
+            .1
+            .epics;
+        let a = hq_epics.iter().find(|e| e.slug == "prog-a").unwrap();
+        let b = hq_epics.iter().find(|e| e.slug == "prog-b").unwrap();
+
+        let a_members = mev::brain::emit::epic_members_resolved(tmp.path(), &graph, &files, a);
+        let b_members = mev::brain::emit::epic_members_resolved(tmp.path(), &graph, &files, b);
+        let a_ids: Vec<&str> = a_members.iter().map(|(_, blk)| blk.id.as_str()).collect();
+        let b_ids: Vec<&str> = b_members.iter().map(|(_, blk)| blk.id.as_str()).collect();
+
+        assert!(
+            a_ids.is_empty(),
+            "unannotated claim loses to the annotated one; got {a_ids:?}"
+        );
+        assert_eq!(
+            b_ids,
+            vec!["BA.9"],
+            "adopted block renders under its executing roadmap only; got {b_ids:?}"
+        );
     }
 }
 

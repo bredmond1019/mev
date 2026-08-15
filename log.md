@@ -13,6 +13,21 @@ timestamp: "2026-08-14T21:48:46-03:00"
 
 # Log — mev
 
+## [run: 2026-08-14]
+
+`MV.13.D` (program discriminator + lane-derived membership) shipped: full spec, 5 of 5 tasks, PASS. Task 1 added `kind: program | area` to the epic model as a closed vocabulary (invalid value errors; missing `kind` is a warning naming the slug, never inferred, never falling back to the lane-file heuristic — pinned by a test that puts lane files beside an unset epic and still fires the diagnostic). Task 2 classified all 22 live epics' `kind` in the shared HQ `state.json` (left uncommitted in the working tree per the repo's concurrent-lane-contention rule; rationale recorded in the run notes for a central writer). Task 3 fed `MV.13.A`'s derived `{roadmap, lane, segment, position}` lane membership into `epic_members` for `kind: program` epics, implementing and doc-commenting the authored-vs-derived precedence rule, honouring `origin_roadmap` adoption, and testing the live `lane-aware-briefing` conflict (17 authored tags + 5 lane files, no duplicate rows). Task 4 wired both new epic-board/epic-sequence plans through `emit_state`'s existing rollback-on-regression wrapper and confirmed a live-corpus `emit-state --write` run left `validate-brain` no worse (also left uncommitted, same reason as task 2). Task 5 ran the full gate suite (fmt, clippy `-D warnings`, full `cargo test`, release build, `mev check-consumers`) clean. `close-the-loop` and `operator-surface` sequence tables now populate instead of `_no member blocks_`; closes lane D of the `lane-aware-briefing` roadmap. Next: pull the next item from the master-plan or HQ backlog.
+
+```
+7eb14de docs: update docs for MV.13.D
+e1df863 feat: implement MV.13.D-task4
+d084e11 feat: implement MV.13.D-task3
+db90ab9 feat: implement MV.13.D-task1
+40e4c4d Merge pull request #37 from bredmond1019/MV.13.A-flow
+057e4a9 chore: wrap up MV.13.A
+b260458 docs: update docs for MV.13.A
+803e8de feat: implement MV.13.A-task5
+```
+
 *Append-only working log. One dated entry per session. Newest entries at the top.*
 
 ---
