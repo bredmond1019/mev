@@ -59,6 +59,8 @@
 //! - `E_STATE_SCHEMA_BAD_CLEARS_WHEN` — a carryover `clears_when` typed predicate is
 //!   missing a required member, has an empty required member, or (for `file_exists` /
 //!   `file_contains`) names an absolute path. Well-formedness only — never evaluation.
+//! - `E_STATE_REFERENCE_CARRYOVER_COLLISION` — a slug appears in both `reference[]`
+//!   and `carryover[]` within the same file.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -84,7 +86,7 @@ use crate::brain::config::BrainConfig;
 pub use okf_core::{
     ApprovalDep, Backlog, BacklogOrigin, Block, BlockDep, BlockedBy, Carryover, CarryoverScope,
     ClearsWhen, ClearsWhenPredicate, CrossRepoEdge, Endpoint, Epic, ExternalDep, Focus,
-    OperatorDep, Origin, RepoRollup, StateEdge, StateEdgeKind, StateFile, StateGraph,
+    OperatorDep, Origin, Reference, RepoRollup, StateEdge, StateEdgeKind, StateFile, StateGraph,
     StateLoadError, StateNode, StateSource, TierEntry, Track, TrackBlock, build_state_graph,
     load_state,
 };
@@ -337,6 +339,9 @@ const VALID_BACKLOG_STATUSES: &[&str] = &["idea", "ready", "promoted"];
 
 /// Valid `kind` values for `carryover[]` entries.
 const VALID_CARRYOVER_KINDS: &[&str] = &["constraint", "known_issue", "env", "deferred"];
+
+/// Valid `class` values for `reference[]` entries (D72).
+const VALID_REFERENCE_CLASSES: &[&str] = &["trap", "invariant", "lesson", "deliberate"];
 
 /// The plain string form of a [`okf_core::CarryoverKind`], matching exactly
 /// what mev used before okf-core retyped `Carryover.kind` from `String` to
@@ -1012,6 +1017,78 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                     msg,
                 ));
             }
+        }
+    }
+
+    // --- 10. reference[] validation ---
+    //
+    // `reference[]` entries are permanently-true material (traps, invariants,
+    // lessons, deliberate-choice markers) — structurally un-triageable by
+    // design (D72). This section validates shape only: class vocabulary,
+    // scope shape, date format, and slug collision against `carryover[]` in
+    // the same file. It intentionally never runs staleness (no clock exists
+    // for `reference[]`) or touches any triage surface — see
+    // `MV.ticket.reference-container-validation` task 3.
+    let carryover_slugs: std::collections::HashSet<&str> =
+        file.carryover.iter().map(|c| c.slug.as_str()).collect();
+
+    for item in &file.reference {
+        if !VALID_REFERENCE_CLASSES.contains(&item.class.as_str()) {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_SCHEMA_BAD_KIND",
+                format!(
+                    "reference item '{}' has invalid class '{}'; expected one of: {}",
+                    item.slug,
+                    item.class,
+                    VALID_REFERENCE_CLASSES.join(", ")
+                ),
+            ));
+        }
+
+        let scope_fields_set = item.scope.repo.is_some() as u8
+            + item.scope.tier.is_some() as u8
+            + item.scope.cross_repo.is_some() as u8;
+
+        if scope_fields_set != 1 {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_SCHEMA_MALFORMED_SCOPE",
+                format!(
+                    "reference item '{}' has malformed scope; exactly one of 'repo', 'tier', or 'cross_repo' must be set",
+                    item.slug
+                ),
+            ));
+        }
+
+        for (field, value) in [
+            ("created", Some(item.created.as_str())),
+            ("reviewed", item.reviewed.as_deref()),
+        ] {
+            if let Some(v) = value
+                && parse_state_date(v).is_none()
+            {
+                diags.push(Diagnostic::error(
+                    path,
+                    "E_STATE_DATE_FORMAT",
+                    format!(
+                        "reference item '{}' has malformed {field} date '{}'; must be YYYY-MM-DD \
+                         or RFC3339",
+                        item.slug, v
+                    ),
+                ));
+            }
+        }
+
+        if carryover_slugs.contains(item.slug.as_str()) {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_REFERENCE_CARRYOVER_COLLISION",
+                format!(
+                    "slug '{}' appears in both 'reference[]' and 'carryover[]' in the same file",
+                    item.slug
+                ),
+            ));
         }
     }
 
