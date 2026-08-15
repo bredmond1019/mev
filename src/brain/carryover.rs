@@ -54,7 +54,7 @@
 //! No `regex` dependency is used or added — the grammar is small and fixed, so it is
 //! matched by hand (char scanning) in [`extract_block_id_tokens`].
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -1050,6 +1050,159 @@ pub fn evaluate_carryover_with_dedup(
         clusters,
         suggestions,
         single_repo_finding_ids,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audit — `mev carryover --audit` (`MV.ticket.reference-container-validation`
+// task 4)
+// ---------------------------------------------------------------------------
+
+/// Census of the two triage containers (`carryover[]` and `reference[]`) across the
+/// already-loaded corpus, for `mev carryover --audit`.
+///
+/// Composed entirely from the same `files` slice [`evaluate_carryover`] was given and
+/// the [`CarryoverReport`] it already produced — no new filesystem read, no new corpus
+/// walk. `reference[]` entries are never evaluated by `evaluate_carryover` (D72 — they
+/// are permanently-true material with no clock and no lane), so their counts are
+/// gathered here directly from `files` instead.
+///
+/// The audit only recommends; it never deletes or rewrites anything.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CarryoverAudit {
+    /// `carryover[]` entries plus `reference[]` entries, fleet-wide.
+    pub total: usize,
+    /// `carryover[]` entry count.
+    pub carryover_count: usize,
+    /// `reference[]` entry count.
+    pub reference_count: usize,
+    /// `carryover[]` entries grouped by `kind` (post-D72 narrowing, so this includes
+    /// the legacy `constraint`/`known_issue` values wherever they still appear).
+    pub per_kind: BTreeMap<String, usize>,
+    /// `reference[]` entries grouped by `class` (`trap`/`invariant`/`lesson`/
+    /// `deliberate`, plus any not-yet-valid value present in the corpus).
+    pub per_class: BTreeMap<String, usize>,
+    /// `carryover[]` entries whose `clears_when` is a typed predicate
+    /// (`block_closed`/`file_exists`/`file_contains`/`command_exits_zero`), as
+    /// opposed to free prose or no predicate at all.
+    pub typed_predicate_count: usize,
+    /// `carryover[]` entries eligible for a clear-rate denominator — i.e. every
+    /// `carryover[]` entry. `reference[]` entries are structurally never clearable
+    /// (no `clears_when`) and are excluded here by construction, not by a filter: a
+    /// raw per-repo rate that counted them would punish reference-heavy repos for
+    /// behaving correctly (measured on the live corpus: `bastiel` 11%,
+    /// `okf-core` 0/14 — composition, not discipline).
+    pub clearable_total: usize,
+    /// `carryover[]` entries [`CarryoverReport`] assigned [`CarryoverLane::Cleared`].
+    pub cleared_total: usize,
+    /// `cleared_total / clearable_total`, or `0.0` when `clearable_total` is zero.
+    pub clear_rate: f64,
+    /// Window, in days, `inflow`/`outflow` are measured over.
+    pub window_days: i64,
+    /// `carryover[]` + `reference[]` entries whose `created` date falls within
+    /// `window_days` of `today` — new material entering the corpus.
+    pub inflow: usize,
+    /// `carryover[]` entries landing in [`CarryoverLane::Cleared`] whose staleness
+    /// anchor (`max(created, reviewed)`) falls within `window_days` of `today` —
+    /// material that recently became safe to delete. A proxy, not an exact
+    /// clear-timestamp: no container here records when an entry was actually
+    /// deleted, only when it was last authored or re-affirmed.
+    pub outflow: usize,
+}
+
+/// Compose a [`CarryoverAudit`] from the same loaded corpus and [`CarryoverReport`]
+/// [`evaluate_carryover`] already produced. See [`CarryoverAudit`] for what each field
+/// means and why `reference[]` is excluded from every clear-rate denominator.
+/// `repo_filter` mirrors [`evaluate_carryover`]'s own `repo_filter` — pass the same
+/// value so the audit and the report it was composed alongside agree on scope.
+pub fn audit_carryover(
+    files: &[(StateSource, StateFile)],
+    report: &CarryoverReport,
+    today: &str,
+    window_days: i64,
+    repo_filter: Option<&str>,
+) -> CarryoverAudit {
+    let today_date = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d").ok();
+
+    let mut carryover_count = 0usize;
+    let mut reference_count = 0usize;
+    let mut per_kind: BTreeMap<String, usize> = BTreeMap::new();
+    let mut per_class: BTreeMap<String, usize> = BTreeMap::new();
+    let mut typed_predicate_count = 0usize;
+    let mut inflow = 0usize;
+
+    let within_window = |created: &str| -> bool {
+        let (Some(today_d), Some(anchor)) =
+            (today_date, crate::brain::state::parse_state_date(created))
+        else {
+            return false;
+        };
+        let age = (today_d - anchor).num_days();
+        (0..=window_days).contains(&age)
+    };
+
+    for (src, file) in files {
+        if let Some(filter) = repo_filter
+            && src.repo_slug != filter
+        {
+            continue;
+        }
+        for item in &file.carryover {
+            carryover_count += 1;
+            let kind = carryover_kind_str(&item.kind).into_owned();
+            *per_kind.entry(kind).or_insert(0) += 1;
+            if matches!(item.clears_when, Some(ClearsWhen::Predicate(_))) {
+                typed_predicate_count += 1;
+            }
+            if within_window(&item.created) {
+                inflow += 1;
+            }
+        }
+        for item in &file.reference {
+            reference_count += 1;
+            *per_class.entry(item.class.clone()).or_insert(0) += 1;
+            if within_window(&item.created) {
+                inflow += 1;
+            }
+        }
+    }
+
+    let cleared_total = report
+        .entries
+        .iter()
+        .filter(|e| e.lane == CarryoverLane::Cleared)
+        .count();
+    let clearable_total = carryover_count;
+    let clear_rate = if clearable_total == 0 {
+        0.0
+    } else {
+        cleared_total as f64 / clearable_total as f64
+    };
+
+    let outflow = report
+        .entries
+        .iter()
+        .filter(|e| {
+            e.lane == CarryoverLane::Cleared
+                && e.age_days
+                    .map(|d| (0..=window_days).contains(&d))
+                    .unwrap_or(false)
+        })
+        .count();
+
+    CarryoverAudit {
+        total: carryover_count + reference_count,
+        carryover_count,
+        reference_count,
+        per_kind,
+        per_class,
+        typed_predicate_count,
+        clearable_total,
+        cleared_total,
+        clear_rate,
+        window_days,
+        inflow,
+        outflow,
     }
 }
 

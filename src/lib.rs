@@ -19,9 +19,9 @@ pub use brain::block_graph::{
     BlockLane, build_block_graph_export,
 };
 pub use brain::carryover::{
-    CarryoverLane, CarryoverRanking, CarryoverRef, CarryoverReport, CarryoverVerdict,
-    ClusterMember, DedupSuggestion, FindingCluster, NotEvaluableReason, TriageLane,
-    evaluate_carryover, rank_carryover,
+    CarryoverAudit, CarryoverLane, CarryoverRanking, CarryoverRef, CarryoverReport,
+    CarryoverVerdict, ClusterMember, DedupSuggestion, FindingCluster, NotEvaluableReason,
+    TriageLane, audit_carryover, evaluate_carryover, rank_carryover,
 };
 pub use brain::conformance::{
     CheckOutcome, CheckResult, CheckStatus, ConformanceCheck, ConformanceCtx, ConformanceReport,
@@ -1950,6 +1950,24 @@ pub fn carryover_sweep(
     repo_filter: Option<&str>,
     allow_exec: bool,
 ) -> anyhow::Result<brain::carryover::CarryoverReport> {
+    let (_loaded, report) = load_and_evaluate_carryover_corpus(root, repo_filter, allow_exec)?;
+    Ok(report)
+}
+
+/// Shared discovery+load+evaluate core behind both [`carryover_sweep`] and
+/// [`carryover_audit`] — one corpus walk, reused by both callers rather than
+/// re-discovered per driver. Returns the loaded corpus alongside the evaluated
+/// report so a caller that needs more than [`evaluate_carryover`] returns (e.g.
+/// the `reference[]` counts [`brain::carryover::audit_carryover`] composes) does
+/// not have to re-walk the filesystem to get it.
+fn load_and_evaluate_carryover_corpus(
+    root: &std::path::Path,
+    repo_filter: Option<&str>,
+    allow_exec: bool,
+) -> anyhow::Result<(
+    Vec<(brain::state::StateSource, brain::state::StateFile)>,
+    brain::carryover::CarryoverReport,
+)> {
     use brain::config::find_brain_config;
     use brain::state::{discover_state_files, load_state};
 
@@ -2010,7 +2028,7 @@ pub fn carryover_sweep(
         .date_naive()
         .format("%Y-%m-%d")
         .to_string();
-    Ok(evaluate_carryover(
+    let report = evaluate_carryover(
         &loaded,
         &status_map,
         root,
@@ -2019,7 +2037,35 @@ pub fn carryover_sweep(
         &config.attention,
         repo_filter,
         allow_exec,
-    ))
+    );
+    Ok((loaded, report))
+}
+
+/// Fleet-wide `carryover[]`/`reference[]` census — the `mev carryover --audit` entry
+/// point.
+///
+/// Runs the exact same discovery+load+evaluate walk [`carryover_sweep`] runs (via
+/// [`load_and_evaluate_carryover_corpus`] — one walk, not two), then composes a
+/// [`brain::carryover::CarryoverAudit`] from the loaded corpus and the evaluated
+/// report via [`brain::carryover::audit_carryover`]. `window_days` bounds the
+/// inflow/outflow window. Never writes anything.
+pub fn carryover_audit(
+    root: &std::path::Path,
+    repo_filter: Option<&str>,
+    allow_exec: bool,
+    window_days: i64,
+) -> anyhow::Result<(
+    brain::carryover::CarryoverReport,
+    brain::carryover::CarryoverAudit,
+)> {
+    let (loaded, report) = load_and_evaluate_carryover_corpus(root, repo_filter, allow_exec)?;
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let audit =
+        brain::carryover::audit_carryover(&loaded, &report, &today, window_days, repo_filter);
+    Ok((report, audit))
 }
 
 /// `mev conformance` driver — runs the registry of named drift checks over facts kept in

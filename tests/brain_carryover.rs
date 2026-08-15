@@ -400,3 +400,253 @@ fn live_corpus_evaluable_floor_and_cleared_ceiling() {
     // Nothing in this task writes to any state.json — the sweep above is a
     // pure read, and no code path in this test opens any file for writing.
 }
+
+// ---------------------------------------------------------------------------
+// `mev carryover --audit` — `MV.ticket.reference-container-validation` Task 4.
+//
+// A dedicated fixture (not `write_fixture`, which the tests above assert exact
+// lane counts against) carrying both `carryover[]` and `reference[]` entries
+// across two repos, with a mix of typed and prose `clears_when`, so the audit's
+// per-container, per-class/per-kind, typed-predicate, and clear-rate-denominator
+// figures are all independently checkable.
+// ---------------------------------------------------------------------------
+
+/// Write alpha's leaf state for the audit fixture: three `carryover[]` entries
+/// (one typed-predicate `Cleared`, one typed-predicate `Actionable`, one prose
+/// `NotEvaluable`) plus two `reference[]` entries (`trap`, `invariant`).
+fn write_audit_alpha_state(root: &Path) {
+    let state = serde_json::json!({
+        "repo": "alpha",
+        "kind": "project",
+        "updated": "2026-08-01",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "tracks": [
+            {
+                "title": "Phase 1",
+                "blocks": [
+                    { "id": "AL.1.A", "title": "Alpha block A", "status": "open" }
+                ]
+            }
+        ],
+        "carryover": [
+            {
+                "slug": "a-typed-cleared",
+                "scope": { "repo": "alpha" },
+                "kind": "deferred",
+                "text": "Cleared once beta's block A lands.",
+                "clears_when": { "type": "block_closed", "repo": "beta", "id": "BE.1.A" },
+                "created": "2020-01-01"
+            },
+            {
+                "slug": "a-typed-actionable",
+                "scope": { "repo": "alpha" },
+                "kind": "known_issue",
+                "text": "Actionable until alpha's own block A closes.",
+                "clears_when": { "type": "block_closed", "repo": "alpha", "id": "AL.1.A" },
+                "created": "2020-01-01"
+            },
+            {
+                "slug": "a-prose",
+                "scope": { "repo": "alpha" },
+                "kind": "env",
+                "text": "Needs a human to review the approach manually.",
+                "clears_when": "a human reviews this manually and signs off",
+                "created": "2020-01-01"
+            }
+        ],
+        "reference": [
+            {
+                "slug": "a-ref-trap",
+                "scope": { "repo": "alpha" },
+                "class": "trap",
+                "text": "Do not do X — it silently breaks Y.",
+                "created": "2020-01-01"
+            },
+            {
+                "slug": "a-ref-invariant",
+                "scope": { "repo": "alpha" },
+                "class": "invariant",
+                "text": "Every carryover entry has a `created` date.",
+                "created": "2020-01-01"
+            }
+        ]
+    });
+    write_json(root, "repos/alpha/planning/state.json", &state);
+}
+
+/// Write beta's leaf state for the audit fixture: one closed block (so alpha's
+/// `a-typed-cleared` entry resolves), no `carryover[]` entries of its own, and
+/// one `reference[]` entry (`lesson`).
+fn write_audit_beta_state(root: &Path) {
+    let state = serde_json::json!({
+        "repo": "beta",
+        "kind": "project",
+        "updated": "2026-08-01",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "tracks": [
+            {
+                "title": "Phase 1",
+                "blocks": [
+                    { "id": "BE.1.A", "title": "Beta block A", "status": "closed" }
+                ]
+            }
+        ],
+        "carryover": [],
+        "reference": [
+            {
+                "slug": "b-ref-lesson",
+                "scope": { "repo": "beta" },
+                "class": "lesson",
+                "text": "A lesson learned the hard way.",
+                "created": "2020-01-01"
+            }
+        ]
+    });
+    write_json(root, "repos/beta/planning/state.json", &state);
+}
+
+fn write_audit_fixture(root: &Path) {
+    write_brain_toml(root);
+    write_audit_alpha_state(root);
+    write_audit_beta_state(root);
+}
+
+#[test]
+fn audit_counts_sum_to_totals_and_split_by_container() {
+    let dir = temp_dir("audit-sum");
+    write_audit_fixture(&dir);
+
+    let (_report, audit) =
+        mev::carryover_audit(&dir, None, false, 30).expect("carryover_audit should not error");
+
+    assert_eq!(
+        audit.carryover_count, 3,
+        "expected alpha's 3 carryover[] entries"
+    );
+    assert_eq!(
+        audit.reference_count, 3,
+        "expected alpha's 2 + beta's 1 reference[] entries"
+    );
+    assert_eq!(audit.total, audit.carryover_count + audit.reference_count);
+
+    let per_kind_sum: usize = audit.per_kind.values().sum();
+    assert_eq!(
+        per_kind_sum, audit.carryover_count,
+        "per_kind counts should sum to carryover_count, got {:#?}",
+        audit.per_kind
+    );
+
+    let per_class_sum: usize = audit.per_class.values().sum();
+    assert_eq!(
+        per_class_sum, audit.reference_count,
+        "per_class counts should sum to reference_count, got {:#?}",
+        audit.per_class
+    );
+
+    assert_eq!(audit.per_kind.get("deferred"), Some(&1));
+    assert_eq!(audit.per_kind.get("known_issue"), Some(&1));
+    assert_eq!(audit.per_kind.get("env"), Some(&1));
+    assert_eq!(audit.per_class.get("trap"), Some(&1));
+    assert_eq!(audit.per_class.get("invariant"), Some(&1));
+    assert_eq!(audit.per_class.get("lesson"), Some(&1));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn audit_typed_predicate_coverage_counts_only_typed_clears_when() {
+    let dir = temp_dir("audit-typed");
+    write_audit_fixture(&dir);
+
+    let (_report, audit) =
+        mev::carryover_audit(&dir, None, false, 30).expect("carryover_audit should not error");
+
+    // Two of the three carryover[] entries carry a typed `block_closed`
+    // predicate; the third carries free prose.
+    assert_eq!(audit.typed_predicate_count, 2);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn audit_clear_rate_denominator_excludes_reference_entries() {
+    let dir = temp_dir("audit-clear-rate");
+    write_audit_fixture(&dir);
+
+    let (_report, audit) =
+        mev::carryover_audit(&dir, None, false, 30).expect("carryover_audit should not error");
+
+    // `reference[]` entries (3 of them) must never inflate the clear-rate
+    // denominator: it is scoped to carryover[] only, not `total`.
+    assert_eq!(
+        audit.clearable_total, audit.carryover_count,
+        "clearable_total must equal carryover_count, excluding reference[] entries"
+    );
+    assert_ne!(
+        audit.clearable_total, audit.total,
+        "clearable_total must not equal total when reference[] entries are present"
+    );
+
+    // Exactly one carryover[] entry (`a-typed-cleared`) resolves to Cleared.
+    assert_eq!(audit.cleared_total, 1);
+    assert_eq!(audit.clearable_total, 3);
+    let expected_rate = 1.0 / 3.0;
+    assert!(
+        (audit.clear_rate - expected_rate).abs() < 1e-9,
+        "expected clear_rate {expected_rate}, got {}",
+        audit.clear_rate
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn audit_inflow_outflow_respect_the_window() {
+    let dir = temp_dir("audit-window");
+    write_audit_fixture(&dir);
+
+    // Every fixture entry is dated 2020-01-01 — far outside a 30-day window
+    // from today, so nothing should count as inflow or outflow.
+    let (_report, narrow) =
+        mev::carryover_audit(&dir, None, false, 30).expect("carryover_audit should not error");
+    assert_eq!(
+        narrow.inflow, 0,
+        "no entry should fall inside a 30-day window"
+    );
+    assert_eq!(
+        narrow.outflow, 0,
+        "no cleared entry should fall inside a 30-day window"
+    );
+
+    // A window wide enough to cover 2020-01-01 through today should count
+    // every entry as inflow, and the one Cleared entry as outflow.
+    let (_report, wide) =
+        mev::carryover_audit(&dir, None, false, 20_000).expect("carryover_audit should not error");
+    assert_eq!(
+        wide.inflow, wide.total,
+        "every fixture entry should count as inflow with a wide-enough window"
+    );
+    assert_eq!(
+        wide.outflow, 1,
+        "the single Cleared carryover[] entry should count as outflow"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn audit_respects_repo_filter() {
+    let dir = temp_dir("audit-repo-filter");
+    write_audit_fixture(&dir);
+
+    let (_report, audit) = mev::carryover_audit(&dir, Some("beta"), false, 30)
+        .expect("carryover_audit should not error");
+
+    assert_eq!(
+        audit.carryover_count, 0,
+        "beta carries no carryover[] entries"
+    );
+    assert_eq!(audit.reference_count, 1, "beta carries 1 reference[] entry");
+
+    let _ = fs::remove_dir_all(&dir);
+}
