@@ -116,6 +116,28 @@ enum Command {
         #[arg(long)]
         structure: bool,
     },
+    /// Validate a single `state.json` file (Phase 3, Block E:
+    /// `ticket-reference-container-validation` Task 5).
+    ///
+    /// The single-file sibling of `mev validate-brain --state`: runs only the
+    /// per-file schema/field-policy ring (load, `check_schema`, `check_field_policy`)
+    /// against exactly one file, and deliberately skips every corpus-level check
+    /// (block graph, cycles, rollup drift, focus drift, status consistency) — those
+    /// need sibling repos to evaluate and cannot run from one file in isolation.
+    /// Cheap enough to run after every manual `state.json` edit, which is what would
+    /// have caught the live 2026-08-13 shape-error incident (`scope` authored as a
+    /// plain string, `related` as bare slug strings) before it cascaded to 50 errors
+    /// across 7 files.
+    ///
+    /// Exit codes:
+    ///   0 — the file loaded cleanly and no error-severity diagnostic was raised
+    ///       (warnings alone do not fail the run)
+    ///   1 — the file is missing, is not valid JSON, fails the typed schema, or an
+    ///       error-severity diagnostic was raised
+    ValidateState {
+        /// Path to the `state.json` file to validate.
+        path: PathBuf,
+    },
     /// Emit a JSON manifest of every file in the Brain corpus (Phase 3, Block Q).
     ///
     /// Crawls the Brain repo, resolves `brain.toml`, and prints a JSON document listing
@@ -699,6 +721,18 @@ enum Command {
         /// running the command, regardless of what it would have exited.
         #[arg(long)]
         allow_exec: bool,
+        /// Report a fleet-wide `carryover[]`/`reference[]` census instead of the
+        /// per-entry sweep: total, per-container and per-class/per-kind counts,
+        /// typed-predicate coverage, and inflow/outflow over `--window` days. The
+        /// clear-rate statistic is scoped to `carryover[]` only — `reference[]`
+        /// entries are structurally never clearable and are excluded from its
+        /// denominator. Recommends only; never deletes or rewrites anything.
+        #[arg(long)]
+        audit: bool,
+        /// Window, in days, `--audit`'s inflow/outflow figures are measured over.
+        /// Ignored without `--audit`.
+        #[arg(long, default_value_t = 30)]
+        window: i64,
     },
     /// Run the registry of named drift checks over facts kept in two places
     /// (`MV.ticket.conformance-check-registry`).
@@ -1453,6 +1487,43 @@ fn print_carryover_report(report: &mev::CarryoverReport) {
     }
 }
 
+/// Human-readable summary for `mev carryover --audit`'s default (non-`--json`) output.
+fn print_carryover_audit(audit: &mev::CarryoverAudit) {
+    println!(
+        "carryover audit: {} total — {} carryover[], {} reference[]",
+        audit.total, audit.carryover_count, audit.reference_count
+    );
+
+    if !audit.per_kind.is_empty() {
+        println!("\nCARRYOVER[] BY KIND:");
+        for (kind, count) in &audit.per_kind {
+            println!("  {kind}: {count}");
+        }
+    }
+
+    if !audit.per_class.is_empty() {
+        println!("\nREFERENCE[] BY CLASS:");
+        for (class, count) in &audit.per_class {
+            println!("  {class}: {count}");
+        }
+    }
+
+    println!(
+        "\ntyped clears_when predicates: {} / {} carryover[] entries",
+        audit.typed_predicate_count, audit.carryover_count
+    );
+    println!(
+        "clear rate (carryover[] only, reference[] excluded): {}/{} = {:.1}%",
+        audit.cleared_total,
+        audit.clearable_total,
+        audit.clear_rate * 100.0
+    );
+    println!(
+        "last {} days — inflow: {}, outflow: {}",
+        audit.window_days, audit.inflow, audit.outflow
+    );
+}
+
 /// Human-readable, one-block-per-consumer summary for `mev check-consumers`'s default
 /// (non-`--json`) output. Names the outcome AND the operator's next action for it — the
 /// distinction the whole ticket exists to keep loud (`Broken` vs `LockfileStale` vs
@@ -1667,6 +1738,39 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::ValidateState { path } => match mev::validate_state(&path) {
+            Ok(report) => {
+                if cli.json {
+                    let envelope = mev::JsonReport::new("state-file", &path, &report);
+                    match envelope.to_json() {
+                        Ok(s) => println!("{s}"),
+                        Err(err) => {
+                            eprintln!("error serializing JSON: {err:#}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                } else {
+                    for d in &report.diagnostics {
+                        print_diagnostic(d);
+                    }
+                    println!(
+                        "validated {}: {} error(s), {} warning(s)",
+                        path.display(),
+                        report.error_count(),
+                        report.warning_count()
+                    );
+                }
+                if report.is_failure() {
+                    ExitCode::FAILURE
+                } else {
+                    ExitCode::SUCCESS
+                }
+            }
+            Err(err) => {
+                eprintln!("error: {err:#}");
+                ExitCode::FAILURE
+            }
+        },
         Command::EmitState { path, write, scope } => {
             if write && mev::brain::config::is_linked_worktree(&path) {
                 eprintln!(
@@ -2300,6 +2404,8 @@ fn main() -> ExitCode {
             repo,
             json,
             allow_exec,
+            audit,
+            window,
         } => {
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,
@@ -2308,27 +2414,53 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match mev::carryover_sweep(&root, repo.as_deref(), allow_exec) {
-                Ok(report) => {
-                    if json || cli.json {
-                        match serde_json::to_string(&report) {
-                            Ok(s) => {
-                                println!("{s}");
-                                ExitCode::SUCCESS
+            if audit {
+                match mev::carryover_audit(&root, repo.as_deref(), allow_exec, window) {
+                    Ok((_report, audit)) => {
+                        if json || cli.json {
+                            match serde_json::to_string(&audit) {
+                                Ok(s) => {
+                                    println!("{s}");
+                                    ExitCode::SUCCESS
+                                }
+                                Err(err) => {
+                                    eprintln!("error serializing carryover audit: {err:#}");
+                                    ExitCode::FAILURE
+                                }
                             }
-                            Err(err) => {
-                                eprintln!("error serializing carryover report: {err:#}");
-                                ExitCode::FAILURE
-                            }
+                        } else {
+                            print_carryover_audit(&audit);
+                            ExitCode::SUCCESS
                         }
-                    } else {
-                        print_carryover_report(&report);
-                        ExitCode::SUCCESS
+                    }
+                    Err(err) => {
+                        eprintln!("error: {err:#}");
+                        ExitCode::FAILURE
                     }
                 }
-                Err(err) => {
-                    eprintln!("error: {err:#}");
-                    ExitCode::FAILURE
+            } else {
+                match mev::carryover_sweep(&root, repo.as_deref(), allow_exec) {
+                    Ok(report) => {
+                        if json || cli.json {
+                            match serde_json::to_string(&report) {
+                                Ok(s) => {
+                                    println!("{s}");
+                                    ExitCode::SUCCESS
+                                }
+                                Err(err) => {
+                                    eprintln!("error serializing carryover report: {err:#}");
+                                    ExitCode::FAILURE
+                                }
+                            }
+                        } else {
+                            print_carryover_report(&report);
+                            ExitCode::SUCCESS
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("error: {err:#}");
+                        ExitCode::FAILURE
+                    }
                 }
             }
         }

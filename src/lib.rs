@@ -19,9 +19,9 @@ pub use brain::block_graph::{
     BlockLane, build_block_graph_export,
 };
 pub use brain::carryover::{
-    CarryoverLane, CarryoverRanking, CarryoverRef, CarryoverReport, CarryoverVerdict,
-    ClusterMember, DedupSuggestion, FindingCluster, NotEvaluableReason, TriageLane,
-    evaluate_carryover, rank_carryover,
+    CarryoverAudit, CarryoverLane, CarryoverRanking, CarryoverRef, CarryoverReport,
+    CarryoverVerdict, ClusterMember, DedupSuggestion, FindingCluster, NotEvaluableReason,
+    TriageLane, audit_carryover, evaluate_carryover, rank_carryover,
 };
 pub use brain::conformance::{
     CheckOutcome, CheckResult, CheckStatus, ConformanceCheck, ConformanceCtx, ConformanceReport,
@@ -557,6 +557,166 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     }
 
     Ok(report)
+}
+
+/// Validate a single `state.json` file at `path` (`mev validate-state <path>`).
+///
+/// Phase 3, Block E (`ticket-reference-container-validation`, Task 5): the single-file
+/// sibling of [`validate_brain_state`]. Deliberately runs only the per-file ring that
+/// function runs per discovered source — [`brain::state::load_state`],
+/// [`brain::state::check_schema`], [`brain::state::check_field_policy`] — and skips
+/// every corpus-level check ([`brain::state::build_state_graph`],
+/// [`brain::state::check_rollup`], [`brain::state::detect_cycles`],
+/// [`brain::state::check_focus_drift`], [`brain::state::check_status_consistency`]),
+/// none of which can be evaluated from one file in isolation (no sibling repos, no
+/// brain-wide rollup to compare against). Cheap enough to run after every manual
+/// `state.json` edit — this is the check that would have caught the live 2026-08-13
+/// shape-error incident (a `carryover[]`/`reference[]` entry's `scope` authored as a
+/// plain string, `related` as bare slug strings, instead of the typed
+/// `CarryoverScope`/`BlockedBy` objects) before it cascaded to 50 errors across 7
+/// files.
+///
+/// `expected_kind` for the synthesized single-file [`brain::state::StateSource`] is
+/// derived from the loaded file's own `kind` (falling back to `"project"` for an
+/// invalid value) rather than an externally-known expectation — this path has no
+/// `brain.toml`/`[[repos]]` registry to consult, so kind-membership is still checked
+/// by [`brain::state::check_schema`] but the kind *mismatch* check is structurally a
+/// no-op here.
+///
+/// A shape error severe enough to fail JSON deserialization (the incident case above)
+/// never reaches `check_schema` — [`brain::state::load_state`] fails first with
+/// [`brain::state::StateLoadError::Parse`], and the underlying `serde_json::Error` on
+/// its own carries only a line/column, not which entry's `slug` or field is at fault.
+/// This function re-reads the file as loose JSON in that case and pinpoints the
+/// offending `carryover[]`/`reference[]` entry by hand (see
+/// `diagnose_malformed_state_shape`), reusing the existing
+/// `E_STATE_SCHEMA_MALFORMED_SCOPE` / `E_STATE_SCHEMA_BAD_BLOCKED_BY` codes so the
+/// message shape matches what `check_schema` would have said had the entry parsed.
+/// Falls back to the generic `E_STATE_MALFORMED_JSON` diagnostic when the file isn't
+/// even syntactically valid JSON, or the malformed shape isn't one this function
+/// recognizes.
+pub fn validate_state(path: &std::path::Path) -> anyhow::Result<Report> {
+    use brain::state::{StateLoadError, check_field_policy, check_schema, load_state};
+
+    let mut report = Report::default();
+
+    match load_state(path) {
+        Ok(file) => {
+            let expected_kind: &'static str = match file.kind.as_str() {
+                "brain" => "brain",
+                "portfolio" => "portfolio",
+                _ => "project",
+            };
+            let src = brain::state::StateSource {
+                repo_slug: file.repo.clone(),
+                abs_path: path.to_path_buf(),
+                expected_kind,
+            };
+            report.diagnostics.extend(check_schema(&src, &file));
+            report.diagnostics.extend(check_field_policy(&src, &file));
+        }
+        Err(StateLoadError::Parse { source, .. }) => {
+            let shape_diags = diagnose_malformed_state_shape(path);
+            if shape_diags.is_empty() {
+                report.diagnostics.push(Diagnostic::error(
+                    path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!(
+                        "state.json is not valid JSON or does not match the expected schema: {source}"
+                    ),
+                ));
+            } else {
+                report.diagnostics.extend(shape_diags);
+            }
+        }
+        Err(StateLoadError::Io { source, .. }) => {
+            report.diagnostics.push(Diagnostic::error(
+                path,
+                "E_STATE_MALFORMED_JSON",
+                format!("could not read state.json: {source}"),
+            ));
+        }
+    }
+
+    Ok(report)
+}
+
+/// Re-read `path` as loose JSON and pinpoint which `carryover[]`/`reference[]`
+/// entry (naming its `slug`) carries a field written in the wrong JSON shape —
+/// specifically `scope` written as something other than an object, or a `related[]`
+/// element written as something other than an object (the exact live 2026-08-13
+/// incident shape: `scope` as a plain string, `related` as bare slug strings).
+///
+/// Returns an empty vec when the file isn't syntactically valid JSON at all (the
+/// caller falls back to the generic `E_STATE_MALFORMED_JSON` message in that case),
+/// or when neither container carries a shape this function recognizes — deliberately
+/// narrow rather than a general-purpose schema diff, since [`validate_state`]'s job
+/// is to name the *one* incident class this check exists for, not to reimplement
+/// `okf_core`'s Deserialize impls by hand.
+fn diagnose_malformed_state_shape(path: &std::path::Path) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return diags;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return diags;
+    };
+
+    fn json_type_name(v: &serde_json::Value) -> &'static str {
+        match v {
+            serde_json::Value::Null => "null",
+            serde_json::Value::Bool(_) => "a boolean",
+            serde_json::Value::Number(_) => "a number",
+            serde_json::Value::String(_) => "a string",
+            serde_json::Value::Array(_) => "an array",
+            serde_json::Value::Object(_) => "an object",
+        }
+    }
+
+    for container in ["carryover", "reference"] {
+        let Some(entries) = value.get(container).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for entry in entries {
+            let slug = entry
+                .get("slug")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>");
+
+            if let Some(scope) = entry.get("scope")
+                && !scope.is_object()
+            {
+                diags.push(Diagnostic::error(
+                    path,
+                    "E_STATE_SCHEMA_MALFORMED_SCOPE",
+                    format!(
+                        "{container} item '{slug}' has 'scope' written as {}, not an object \
+                         with repo/tier/cross_repo fields",
+                        json_type_name(scope)
+                    ),
+                ));
+            }
+
+            if let Some(related) = entry.get("related").and_then(|v| v.as_array()) {
+                for (i, dep) in related.iter().enumerate() {
+                    if !dep.is_object() {
+                        diags.push(Diagnostic::error(
+                            path,
+                            "E_STATE_SCHEMA_BAD_BLOCKED_BY",
+                            format!(
+                                "{container} item '{slug}' has 'related[{i}]' written as {}, \
+                                 not a dependency object (e.g. {{\"type\": \"block\", ...}})",
+                                json_type_name(dep)
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    diags
 }
 
 /// Generate derived views for the company-brain repo and optionally write them.
@@ -1950,6 +2110,24 @@ pub fn carryover_sweep(
     repo_filter: Option<&str>,
     allow_exec: bool,
 ) -> anyhow::Result<brain::carryover::CarryoverReport> {
+    let (_loaded, report) = load_and_evaluate_carryover_corpus(root, repo_filter, allow_exec)?;
+    Ok(report)
+}
+
+/// Shared discovery+load+evaluate core behind both [`carryover_sweep`] and
+/// [`carryover_audit`] — one corpus walk, reused by both callers rather than
+/// re-discovered per driver. Returns the loaded corpus alongside the evaluated
+/// report so a caller that needs more than [`evaluate_carryover`] returns (e.g.
+/// the `reference[]` counts [`brain::carryover::audit_carryover`] composes) does
+/// not have to re-walk the filesystem to get it.
+fn load_and_evaluate_carryover_corpus(
+    root: &std::path::Path,
+    repo_filter: Option<&str>,
+    allow_exec: bool,
+) -> anyhow::Result<(
+    Vec<(brain::state::StateSource, brain::state::StateFile)>,
+    brain::carryover::CarryoverReport,
+)> {
     use brain::config::find_brain_config;
     use brain::state::{discover_state_files, load_state};
 
@@ -2010,7 +2188,7 @@ pub fn carryover_sweep(
         .date_naive()
         .format("%Y-%m-%d")
         .to_string();
-    Ok(evaluate_carryover(
+    let report = evaluate_carryover(
         &loaded,
         &status_map,
         root,
@@ -2019,7 +2197,35 @@ pub fn carryover_sweep(
         &config.attention,
         repo_filter,
         allow_exec,
-    ))
+    );
+    Ok((loaded, report))
+}
+
+/// Fleet-wide `carryover[]`/`reference[]` census — the `mev carryover --audit` entry
+/// point.
+///
+/// Runs the exact same discovery+load+evaluate walk [`carryover_sweep`] runs (via
+/// [`load_and_evaluate_carryover_corpus`] — one walk, not two), then composes a
+/// [`brain::carryover::CarryoverAudit`] from the loaded corpus and the evaluated
+/// report via [`brain::carryover::audit_carryover`]. `window_days` bounds the
+/// inflow/outflow window. Never writes anything.
+pub fn carryover_audit(
+    root: &std::path::Path,
+    repo_filter: Option<&str>,
+    allow_exec: bool,
+    window_days: i64,
+) -> anyhow::Result<(
+    brain::carryover::CarryoverReport,
+    brain::carryover::CarryoverAudit,
+)> {
+    let (loaded, report) = load_and_evaluate_carryover_corpus(root, repo_filter, allow_exec)?;
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let audit =
+        brain::carryover::audit_carryover(&loaded, &report, &today, window_days, repo_filter);
+    Ok((report, audit))
 }
 
 /// `mev conformance` driver — runs the registry of named drift checks over facts kept in

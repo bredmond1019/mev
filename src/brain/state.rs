@@ -59,6 +59,8 @@
 //! - `E_STATE_SCHEMA_BAD_CLEARS_WHEN` — a carryover `clears_when` typed predicate is
 //!   missing a required member, has an empty required member, or (for `file_exists` /
 //!   `file_contains`) names an absolute path. Well-formedness only — never evaluation.
+//! - `E_STATE_REFERENCE_CARRYOVER_COLLISION` — a slug appears in both `reference[]`
+//!   and `carryover[]` within the same file.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -84,7 +86,7 @@ use crate::brain::config::BrainConfig;
 pub use okf_core::{
     ApprovalDep, Backlog, BacklogOrigin, Block, BlockDep, BlockedBy, Carryover, CarryoverScope,
     ClearsWhen, ClearsWhenPredicate, CrossRepoEdge, Endpoint, Epic, ExternalDep, Focus,
-    OperatorDep, Origin, RepoRollup, StateEdge, StateEdgeKind, StateFile, StateGraph,
+    OperatorDep, Origin, Reference, RepoRollup, StateEdge, StateEdgeKind, StateFile, StateGraph,
     StateLoadError, StateNode, StateSource, TierEntry, Track, TrackBlock, build_state_graph,
     load_state,
 };
@@ -335,8 +337,19 @@ const FOCUS_LANES: [&str; 4] = ["now", "next", "blocked", "deferred"];
 /// Valid `status` values for `backlog[]` entries (HQ brain only).
 const VALID_BACKLOG_STATUSES: &[&str] = &["idea", "ready", "promoted"];
 
-/// Valid `kind` values for `carryover[]` entries.
-const VALID_CARRYOVER_KINDS: &[&str] = &["constraint", "known_issue", "env", "deferred"];
+/// Valid `kind` values for `carryover[]` entries (D72's four work kinds).
+const VALID_CARRYOVER_KINDS: &[&str] = &["defect", "deferred", "drift", "env"];
+
+/// Legacy `kind` values D72 removes from `VALID_CARRYOVER_KINDS`. These still
+/// deserialize (`okf_core::CarryoverKind` round-trips any string) and warn
+/// rather than error until Block G (`HQ.ticket.reference-container-migration`)
+/// re-kinds the live corpus's remaining entries — see the ticket's "legacy-kind
+/// transition" note. Never listed in an `E_STATE_SCHEMA_BAD_KIND` message: they
+/// must not read as authorable going forward.
+const LEGACY_CARRYOVER_KINDS: &[&str] = &["constraint", "known_issue"];
+
+/// Valid `class` values for `reference[]` entries (D72).
+const VALID_REFERENCE_CLASSES: &[&str] = &["trap", "invariant", "lesson", "deliberate"];
 
 /// The plain string form of a [`okf_core::CarryoverKind`], matching exactly
 /// what mev used before okf-core retyped `Carryover.kind` from `String` to
@@ -876,14 +889,25 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
 
     // --- 9. carryover[] validation ---
     for item in &file.carryover {
-        if !VALID_CARRYOVER_KINDS.contains(&carryover_kind_str(&item.kind).as_ref()) {
+        let kind_str = carryover_kind_str(&item.kind);
+        if LEGACY_CARRYOVER_KINDS.contains(&kind_str.as_ref()) {
+            diags.push(Diagnostic::warning(
+                path,
+                "W_STATE_LEGACY_KIND",
+                format!(
+                    "carryover item '{}' uses legacy kind '{}', removed by D72; \
+                     Block G (HQ.ticket.reference-container-migration) will re-kind it",
+                    item.slug, kind_str
+                ),
+            ));
+        } else if !VALID_CARRYOVER_KINDS.contains(&kind_str.as_ref()) {
             diags.push(Diagnostic::error(
                 path,
                 "E_STATE_SCHEMA_BAD_KIND",
                 format!(
                     "carryover item '{}' has invalid kind '{}'; expected one of: {}",
                     item.slug,
-                    carryover_kind_str(&item.kind),
+                    kind_str,
                     VALID_CARRYOVER_KINDS.join(", ")
                 ),
             ));
@@ -1012,6 +1036,78 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                     msg,
                 ));
             }
+        }
+    }
+
+    // --- 10. reference[] validation ---
+    //
+    // `reference[]` entries are permanently-true material (traps, invariants,
+    // lessons, deliberate-choice markers) — structurally un-triageable by
+    // design (D72). This section validates shape only: class vocabulary,
+    // scope shape, date format, and slug collision against `carryover[]` in
+    // the same file. It intentionally never runs staleness (no clock exists
+    // for `reference[]`) or touches any triage surface — see
+    // `MV.ticket.reference-container-validation` task 3.
+    let carryover_slugs: std::collections::HashSet<&str> =
+        file.carryover.iter().map(|c| c.slug.as_str()).collect();
+
+    for item in &file.reference {
+        if !VALID_REFERENCE_CLASSES.contains(&item.class.as_str()) {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_SCHEMA_BAD_KIND",
+                format!(
+                    "reference item '{}' has invalid class '{}'; expected one of: {}",
+                    item.slug,
+                    item.class,
+                    VALID_REFERENCE_CLASSES.join(", ")
+                ),
+            ));
+        }
+
+        let scope_fields_set = item.scope.repo.is_some() as u8
+            + item.scope.tier.is_some() as u8
+            + item.scope.cross_repo.is_some() as u8;
+
+        if scope_fields_set != 1 {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_SCHEMA_MALFORMED_SCOPE",
+                format!(
+                    "reference item '{}' has malformed scope; exactly one of 'repo', 'tier', or 'cross_repo' must be set",
+                    item.slug
+                ),
+            ));
+        }
+
+        for (field, value) in [
+            ("created", Some(item.created.as_str())),
+            ("reviewed", item.reviewed.as_deref()),
+        ] {
+            if let Some(v) = value
+                && parse_state_date(v).is_none()
+            {
+                diags.push(Diagnostic::error(
+                    path,
+                    "E_STATE_DATE_FORMAT",
+                    format!(
+                        "reference item '{}' has malformed {field} date '{}'; must be YYYY-MM-DD \
+                         or RFC3339",
+                        item.slug, v
+                    ),
+                ));
+            }
+        }
+
+        if carryover_slugs.contains(item.slug.as_str()) {
+            diags.push(Diagnostic::error(
+                path,
+                "E_STATE_REFERENCE_CARRYOVER_COLLISION",
+                format!(
+                    "slug '{}' appears in both 'reference[]' and 'carryover[]' in the same file",
+                    item.slug
+                ),
+            ));
         }
     }
 
@@ -4129,22 +4225,31 @@ mod tests {
         );
     }
 
+    // Replaces `carryover_staleness_permanent_constraint_still_nags` (D72 §5):
+    // permanently-true material now lives in `reference[]`, which has no clock
+    // by design, rather than as a `carryover[]` entry that "still nags" forever.
+    // `check_carryover_staleness` only ever walks `file.carryover`, so a
+    // `reference[]` entry — however old — produces zero staleness diagnostics
+    // regardless of age, with no `clears_when` to resolve and nothing to snooze.
     #[test]
-    fn carryover_staleness_permanent_constraint_still_nags() {
+    fn reference_entry_never_nags_regardless_of_age() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("state.json");
         let src = make_source(&path, "project");
         let today = day("2026-07-15");
-        let cfg = crate::brain::config::AttentionThresholds::default(); // constraint = 10
+        let cfg = crate::brain::config::AttentionThresholds::default();
 
-        // A permanent constraint (no clears_when), created 30d ago → still nags.
+        // A reference[] entry (no clock), created a year ago → never nags.
         let file = parse_file(
             r#"{"repo":"mev","kind":"project","updated":"2026-07-15",
-                "carryover":[{"slug":"perm","scope":{"repo":"mev"},"kind":"constraint",
-                              "text":"always true","created":"2026-06-15"}]}"#,
+                "reference":[{"slug":"perm","scope":{"repo":"mev"},"class":"invariant",
+                              "text":"always true","created":"2025-07-15"}]}"#,
         );
         let d = check_carryover_staleness(&src, &file, today, &cfg);
-        assert_eq!(d.len(), 1, "permanent constraint past threshold nags");
+        assert!(
+            d.is_empty(),
+            "a year-old reference[] entry must never produce a staleness diagnostic: {d:?}"
+        );
     }
 
     #[test]
@@ -4237,6 +4342,125 @@ mod tests {
             1,
             "expected exactly one E_STATE_SCHEMA_BAD_KIND, got: {diags:?}"
         );
+    }
+
+    #[test]
+    fn valid_carryover_kinds_is_exactly_d72s_four() {
+        assert_eq!(
+            VALID_CARRYOVER_KINDS,
+            &["defect", "deferred", "drift", "env"]
+        );
+    }
+
+    #[test]
+    fn legacy_carryover_kind_warns_not_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        for legacy in ["constraint", "known_issue"] {
+            let json = format!(
+                r#"{{"repo":"mev","kind":"project","updated":"2026-07-15",
+                    "carryover":[{{"slug":"legacy-{legacy}","scope":{{"repo":"mev"}},
+                                  "kind":"{legacy}","text":"x","created":"2026-07-01"}}]}}"#
+            );
+            let file = parse_file(&json);
+            let diags = check_schema(&src, &file);
+
+            let legacy_diags: Vec<_> = diags
+                .iter()
+                .filter(|d| d.locator == "W_STATE_LEGACY_KIND")
+                .collect();
+            assert_eq!(
+                legacy_diags.len(),
+                1,
+                "legacy kind '{legacy}' should produce exactly one W_STATE_LEGACY_KIND: {diags:?}"
+            );
+            assert_eq!(
+                legacy_diags[0].severity,
+                crate::Severity::Warning,
+                "W_STATE_LEGACY_KIND must be Warning severity, not error"
+            );
+            assert!(
+                legacy_diags[0].message.contains("D72"),
+                "legacy-kind warning must cite D72: {}",
+                legacy_diags[0].message
+            );
+
+            let bad_kind: Vec<_> = diags
+                .iter()
+                .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_KIND" && d.message.contains(legacy))
+                .collect();
+            assert!(
+                bad_kind.is_empty(),
+                "legacy kind '{legacy}' must not also raise E_STATE_SCHEMA_BAD_KIND: {diags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_carryover_kind_errors_and_message_omits_legacy_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{"repo":"mev","kind":"project","updated":"2026-07-15",
+            "carryover":[{"slug":"mystery","scope":{"repo":"mev"},"kind":"whatever",
+                          "text":"x","created":"2026-07-01"}]}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+
+        let bad_kind: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_SCHEMA_BAD_KIND")
+            .collect();
+        assert_eq!(
+            bad_kind.len(),
+            1,
+            "unrecognised carryover kind must error: {diags:?}"
+        );
+        assert_eq!(bad_kind[0].severity, crate::Severity::Error);
+        assert!(
+            bad_kind[0].message.contains("defect")
+                && bad_kind[0].message.contains("deferred")
+                && bad_kind[0].message.contains("drift")
+                && bad_kind[0].message.contains("env"),
+            "error message must enumerate the four valid kinds: {}",
+            bad_kind[0].message
+        );
+        assert!(
+            !bad_kind[0].message.contains("constraint")
+                && !bad_kind[0].message.contains("known_issue"),
+            "error message must never list the legacy kinds as authorable: {}",
+            bad_kind[0].message
+        );
+    }
+
+    #[test]
+    fn four_d72_carryover_kinds_are_accepted_with_no_diagnostic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        for kind in ["defect", "deferred", "drift", "env"] {
+            let json = format!(
+                r#"{{"repo":"mev","kind":"project","updated":"2026-07-15",
+                    "carryover":[{{"slug":"ok-{kind}","scope":{{"repo":"mev"}},
+                                  "kind":"{kind}","text":"x","created":"2026-07-01"}}]}}"#
+            );
+            let file = parse_file(&json);
+            let diags = check_schema(&src, &file);
+            let kind_diags: Vec<_> = diags
+                .iter()
+                .filter(|d| {
+                    d.locator == "E_STATE_SCHEMA_BAD_KIND" || d.locator == "W_STATE_LEGACY_KIND"
+                })
+                .collect();
+            assert!(
+                kind_diags.is_empty(),
+                "kind '{kind}' should be accepted with no kind diagnostic: {diags:?}"
+            );
+        }
     }
 
     #[test]

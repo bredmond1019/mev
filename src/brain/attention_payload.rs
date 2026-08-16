@@ -12,6 +12,15 @@
 //! writes `engine-core`'s queue state, never opens a notification channel,
 //! and never writes to `state.json`. See the ticket's "Two boundaries this
 //! spec does not cross" section.
+//!
+//! Every [`AttentionRow`] this module renders originates from
+//! `collect_attention_rows`/the board-union pipeline in `src/brain/emit.rs`
+//! and `src/lib.rs::attention_queue`, neither of which ever unions
+//! `StateFile::reference` — `reference[]` (D72) is permanently-true material
+//! with no clock and no triage lane by design, so it is structurally absent
+//! from any row this module ever sees. Pinned by
+//! `tests/reference_container.rs::triage_surface_exclusion`
+//! (`MV.ticket.reference-container-validation` task 3).
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};

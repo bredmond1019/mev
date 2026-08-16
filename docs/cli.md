@@ -274,6 +274,9 @@ When `--state` is passed, `mev` runs the full OKF schema pass first, then append
 5. **Status consistency** — checks that a `closed` block does not depend (via `depends_on`) on a block that is not yet `closed`.
 6. **Rollup** — checks that brain `repos[]` headline entries (now/next) match their children's actual `focus` values.
 7. **Focus drift** — recomputes the expected `focus` from authored `tracks[]` and warns when the stored `focus` disagrees (warning-only; exit code is unchanged).
+8. **`reference[]` validation** (`MV.ticket.reference-container-validation`) — checks the shape of every `reference[]` entry: `class` must be one of `trap`/`invariant`/`lesson`/`deliberate`; `scope` must set exactly one of `repo`/`tier`/`cross_repo` (`cross_repo: false` counts as set, same rule as `carryover[]` scope); `created`/`reviewed` must parse as a date; and a `slug` must not appear in both `reference[]` and `carryover[]` within the same file. `reference[]` entries are permanently-true material (traps, invariants, lessons, deliberate-choice markers) with no clock by design (D72 §5) — they are checked for shape only, never for staleness, and are never evaluated by `check_carryover_staleness` or emitted onto any triage surface (see [Carryover triage lanes](#carryover-triage-lanes), [`attention-queue`](#attention-queue---out-path-path), and `mev carryover` below — none of them read `reference[]`).
+
+**Narrowed carryover vocabulary (D72).** `carryover[].kind` is now exactly `defect`, `deferred`, `drift`, or `env`. The pre-D72 values `constraint` and `known_issue` still deserialize but are legacy: they produce a warning-severity `W_STATE_LEGACY_KIND` naming the entry's slug, citing D72, and naming `HQ.ticket.reference-container-migration` (Block G) as the migration that clears them — they do **not** fail the run. A `kind` in neither set is a hard error, `E_STATE_SCHEMA_BAD_KIND`, whose message enumerates only the four current values (the two legacy ones are deliberately never listed, so they don't read as authorable). Flipping `W_STATE_LEGACY_KIND` from warning to error is a follow-up, gated on Block G reporting zero remaining legacy entries — not yet done.
 
 `--state` takes precedence over `--graph` and `--sync` in the dispatch chain — when `--state` is present, neither `--graph` nor `--sync` are separately invoked. `--structure` takes precedence over `--state`, `--graph`, and `--sync`. `--links` takes the highest precedence overall; when `--links` is present, `--structure`, `--state`, `--graph`, and `--sync` are not separately invoked.
 
@@ -282,7 +285,10 @@ When `--state` is passed, `mev` runs the full OKF schema pass first, then append
 | `W_STATE_FILE_MISSING` | Warning | A registered repo has no `planning/state.json` |
 | `E_STATE_MALFORMED_JSON` | Error | A state.json file is not valid JSON or does not match the expected schema; message includes the underlying serde error (field/type + line:column) |
 | `E_STATE_ROOT_LOAD_FAILED` | Error | The HQ root `state.json` exists but failed to load; tier sub-brain classification is degraded (recovered from `brain.toml` instead of the unloadable root) — see the root's own `E_STATE_MALFORMED_JSON` for the actual cause |
-| `E_STATE_SCHEMA_BAD_KIND` | Error | `kind` is not one of `project`, `brain`, or `portfolio` |
+| `E_STATE_SCHEMA_BAD_KIND` | Error | `kind` is not one of `project`, `brain`, or `portfolio`. Reused for two other bad-vocabulary checks: a `carryover[].kind` outside `defect`/`deferred`/`drift`/`env` (message lists only those four), and a `reference[].class` outside `trap`/`invariant`/`lesson`/`deliberate` (message lists all four) |
+| `W_STATE_LEGACY_KIND` | Warning | A `carryover[].kind` is `constraint` or `known_issue` — pre-D72 vocabulary. Names the slug, cites D72, and names Block G (`HQ.ticket.reference-container-migration`) as the migration that clears it; exit code is unchanged |
+| `E_STATE_SCHEMA_MALFORMED_SCOPE` | Error | A `carryover[]` or `reference[]` entry's `scope` does not set exactly one of `repo`/`tier`/`cross_repo` (`cross_repo: false` counts as set) |
+| `E_STATE_REFERENCE_CARRYOVER_COLLISION` | Error | A `slug` appears in both `reference[]` and `carryover[]` in the same file, naming both containers |
 | `E_STATE_SCHEMA_MISSING_FIELD` | Error/Warning | A required field is absent or a kind-appropriate section is missing |
 | `E_STATE_SCHEMA_BAD_STATUS` | Error | A `status` value is not in the allowed enum |
 | `E_STATE_SCHEMA_BAD_BLOCKED_BY` | Error | A `blocked_by[]` entry has an unknown or malformed `type` |
@@ -404,6 +410,58 @@ mev validate-brain --structure ~/Dev/agentic-portfolio
 
 # Machine-readable output including structural diagnostics
 mev --json validate-brain --structure ~/Dev/agentic-portfolio
+```
+
+---
+
+### `validate-state <path>`
+
+Validate a single `planning/state.json` file — the single-file sibling of
+`validate-brain --state` (`MV.ticket.reference-container-validation` task 5).
+
+```bash
+mev validate-state <PATH>
+```
+
+| Argument | Description |
+|---|---|
+| `<PATH>` | Path to the `state.json` file to validate. Required — there is no default and no directory walk |
+
+Loads exactly the one named file and runs only the **per-file ring** `validate-brain --state`
+already runs against every discovered file — `load_state`, `check_schema`,
+`check_field_policy` — so it catches the same schema errors (bad `kind`, bad `status`,
+malformed `blocked_by`, the narrowed carryover vocabulary, `reference[]` shape) with the same
+diagnostic codes documented under [`--state`](#--state--statejson-schema-and-block-dependency-graph-check)
+above, and it does so on a malformed file whose `scope`/`related` shape prevents it from
+loading cleanly at all: unparseable JSON or a schema mismatch is field-diagnosed (naming the
+offending slug and field) rather than surfacing as an opaque parse error.
+
+**Deliberately excludes every corpus-level check** — the cross-repo block-dependency graph,
+cycle detection, rollup drift, focus drift, and status consistency. Those checks need sibling
+repos loaded to evaluate at all and structurally cannot run from one file in isolation; running
+them here would either silently no-op or require secretly walking the corpus anyway, which
+defeats the point of a single-file command.
+
+This is the check meant to run after every manual `state.json` edit — cheap enough that nothing
+excuses skipping it. It would have caught the live 2026-08-13 incident before it cascaded to 50
+errors across 7 files: `scope` had been hand-authored as a plain string instead of a
+`CarryoverScope` object, and `related` as bare slug strings instead of `BlockedBy` objects.
+
+#### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | The file loaded cleanly and no error-severity diagnostic was raised (warnings — e.g. `W_STATE_LEGACY_KIND`, `W_STATE_CARRYOVER_STALE` — do not fail the run) |
+| `1` | The file is missing or unreadable, is not valid JSON, fails the typed schema, or an error-severity diagnostic was raised |
+
+**Examples:**
+
+```bash
+# Validate one repo's state.json before committing a manual edit
+mev validate-state planning/state.json
+
+# Validate an arbitrary file by absolute path
+mev validate-state ~/Dev/agentic-portfolio/core/mev/planning/state.json
 ```
 
 ---
@@ -1455,22 +1513,26 @@ mev --json doc opportunity ingest --input company-brief.json
 
 ---
 
-### `carryover [--repo <slug>] [--json] [--allow-exec] [path]`
+### `carryover [--repo <slug>] [--json] [--allow-exec] [--audit] [--window <days>] [path]`
 
 Fleet-wide, **read-only** sweep of every discovered `planning/state.json`'s `carryover[]`
 array. Evaluates each entry's `clears_when` predicate where it is machine-checkable and sorts
-the fleet into three lanes.
+the fleet into three lanes. `--audit` switches to a census over both triage containers instead
+(see [`--audit` — the `carryover[]`/`reference[]` census](#--audit--the-carryover-reference-census)
+below).
 
 ```bash
-mev carryover [--repo <SLUG>] [--json] [--allow-exec] [path]
+mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>] [path]
 ```
 
 | Argument / Flag | Default | Description |
 |---|---|---|
 | `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
 | `--repo <SLUG>` | unset | Restrict the sweep to one repo's `carryover[]` entries. An unknown slug is a hard error naming the valid slugs |
-| `--json` | off | Emit the `CarryoverReport` as compact JSON instead of the human, lane-grouped summary |
+| `--json` | off | Emit the `CarryoverReport` (or, under `--audit`, the `CarryoverAudit`) as compact JSON instead of the human summary |
 | `--allow-exec` | off | Opt in to running `command_exits_zero` predicates. Without it, every such entry reports `not-evaluable` (reason `execution-not-allowed`) and **no command is ever run** |
+| `--audit` | off | Report a fleet-wide `carryover[]`/`reference[]` census instead of the per-entry sweep — total, per-container and per-kind/per-class counts, typed-predicate coverage, and inflow/outflow over `--window` days. Composed entirely from the same loaded corpus and `CarryoverReport` the ordinary sweep already produces — no second corpus walk |
+| `--window <DAYS>` | `30` | Window, in days, `--audit`'s inflow/outflow figures are measured over. Ignored without `--audit` |
 
 Resolves `brain.toml` by walking up from `path`, discovers and loads every repo's
 `planning/state.json` (individual load failures are skipped, not fatal), and evaluates every
@@ -1621,11 +1683,29 @@ filed more than once?" using the free-form, authored `finding_id: Option<String>
 All three sections are omitted from the human summary when empty, matching the existing lane
 behaviour, and none of them affects the exit code.
 
+#### `--audit` — the `carryover[]`/`reference[]` census
+
+`mev carryover --audit` (`MV.ticket.reference-container-validation` task 4) answers "what does
+the fleet's triage material actually look like", as opposed to the per-entry sweep above, which
+answers "what should a human act on right now". It is composed entirely from the same loaded
+corpus (`files`) and `CarryoverReport` the ordinary sweep already produced — no new filesystem
+read, no second discovery walk — and, like every other `carryover` invocation, it is
+**read-only**: the audit recommends, a human disposes; nothing is ever deleted or rewritten.
+
+| Figure | Meaning |
+|---|---|
+| `total` / `carryover_count` / `reference_count` | Fleet-wide entry count, and the split across the two containers |
+| per-kind (`carryover[]`) | `carryover[]` entries grouped by `kind` — includes legacy `constraint`/`known_issue` wherever they still appear, since D72's narrowing didn't rewrite any data |
+| per-class (`reference[]`) | `reference[]` entries grouped by `class` (`trap`/`invariant`/`lesson`/`deliberate`, plus any not-yet-valid value present in the corpus) |
+| typed-predicate coverage | How many `carryover[]` entries carry a typed `clears_when` predicate (`block_closed`/`file_exists`/`file_contains`/`command_exits_zero`) rather than free prose or no predicate at all |
+| clear rate | `cleared_total / clearable_total` — **scoped to `carryover[]` only.** `reference[]` entries have no `clears_when` and are structurally never clearable, so they are excluded from the denominator by construction, not by a filter: a raw per-repo rate would punish reference-heavy repos for behaving correctly (measured on the live corpus: `bastiel` 11%, `okf-core` 0/14 — composition, not discipline) |
+| inflow / outflow | Entries whose `created` date falls within `--window` days of today (inflow), and `Cleared`-lane entries whose staleness anchor (`max(created, reviewed)`) falls within the window (outflow) — a proxy for "recently became safe to delete", since no container records an actual deletion timestamp |
+
 #### Exit codes
 
 | Code | Meaning |
 |---|---|
-| `0` | Sweep completed successfully, regardless of how many entries land in any lane |
+| `0` | Sweep (or, under `--audit`, the census) completed successfully, regardless of how many entries land in any lane |
 | `1` | `brain.toml` not found/unreadable, an unknown `--repo` slug, or a serialization error under `--json` |
 
 **Examples:**
@@ -1645,6 +1725,12 @@ mev carryover ~/Dev/agentic-portfolio
 
 # Opt in to running command_exits_zero predicates
 mev carryover --allow-exec
+
+# Fleet-wide carryover[]/reference[] census, default 30-day window
+mev carryover --audit
+
+# Census over a 90-day inflow/outflow window, as JSON
+mev carryover --audit --window 90 --json
 ```
 
 ---
