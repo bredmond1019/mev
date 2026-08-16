@@ -8,10 +8,29 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-14T21:48:46-03:00"
+timestamp: "2026-08-14T23:32:26-03:00"
 ---
 
 # Log — mev
+
+## [2026-08-14]
+
+### Close CI-vs-local divergence: nextest on CI, ANSI-color fix, both frozen PRs merged
+- **What:** Resolved the `operator-mev-ci-divergence-strategy` decision (`ci.yml`
+  `needs-nextest: true`, one line) instead of either originally-framed option. That fixed layer 3
+  (cargo-nextest missing from mev's CI runner, misclassifying every `check-consumers` subprocess
+  as `NotEvaluable`) and surfaced layer 4: ANSI-color-wrapped rustc diagnostics under GitHub
+  Actions' pseudo-tty defeating `extract_compiler_errors`'s signature match, fixed with
+  `CARGO_TERM_COLOR=never` + a `strip_ansi_codes` defense-in-depth helper and two new regression
+  tests (`src/consumers/mod.rs`). PR #39 merged green (`c2a7a2c`). PR #38 admin-merged
+  (`c66ed48`) after verifying its own block was a different, pre-existing, unrelated flake
+  (`full_fixture_reports_zero_drift`), not a regression in its diff. Bumped the
+  `conformance-fixture-tests-depend-on-live-repo-state` carryover to P1 with the new evidence.
+  Patched `docs/cli.md`'s `check-consumers` command snippet. Flipped
+  `MV.ticket.ci-local-conformance-divergence` and `MV.13.D` to `closed`.
+- **Why:** Both PRs were frozen behind the newly-required `gate / gate` check from the prior
+  session; this was the direct continuation to unblock and close them out.
+- **Refs:** `planning/operator-mev-ci-divergence-strategy/tasks.md`; `planning/handoff.md`
 
 ## [run: 2026-08-14]
 
