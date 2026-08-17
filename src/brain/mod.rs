@@ -17,6 +17,7 @@ pub mod crawl;
 pub mod distill;
 pub mod emit;
 pub mod epics;
+pub mod frontier;
 pub mod graph;
 pub mod graph_emit;
 pub mod history;
