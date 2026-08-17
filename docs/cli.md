@@ -1006,6 +1006,13 @@ omitted entirely for `startable`/`done`, which need no explanation. `frees N lan
 is always present, including `frees 0 lanes` — the zero case is a real answer, not an
 absence.
 
+> **Known caveat — `frees N lane(s)` on a `done` segment is historical, not actionable.**
+> A closed segment still reports the lanes it *used to* gate, which are already free, so a
+> board that sorts or ranks by `lanes_freed` will float finished work to the top. Filter
+> `done` out rather than trusting the number. Tracked as a mev carryover
+> (`lanes-freed-nonzero-on-done-segments`); deliberately not folded into
+> `MV.ticket.done-segment-discovery`, whose scope was the missing state itself.
+
 #### `--json` output shape
 
 ```json

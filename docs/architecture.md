@@ -845,7 +845,7 @@ the actual next action.
 
 | State | Meaning |
 |---|---|
-| `done` | The segment has no frontier entry — every block in it is closed |
+| `done` | Every block in the segment is closed. Discovered via `discover_segments` (the frontier has no entry for it) and emitted with `head: None` — **never by omission** |
 | `held-block` | The head's `unmet_blocks` is non-empty |
 | `held-operator` | The head's `unmet_gates` is non-empty (and `unmet_blocks` is empty) |
 | `held-repo-busy` | The head's repo has an `active` orchestration-run record for a *different* roadmap |
@@ -881,9 +881,18 @@ The run record is the only candidate that covers every repo, is written when the
   `LiveRun { repo, roadmap }` for every record whose `lifecycle:` is `active`. A
   record that cannot be read/parsed, or is `active` but missing `roadmap:`, yields a
   diagnostic and never invents a hold.
-- **`segment_statuses(frontier, live_runs) -> Vec<SegmentStatus>`** — intrinsic tier +
-  `held-repo-busy`; a repo running **this same roadmap's** lane is never busy against
-  itself.
+- **`discover_segments(lane_positions) -> Vec<DiscoveredSegment>`** — every
+  `(roadmap, lane, segment)` triple the lane files describe, in first-appearance order,
+  **including segments whose blocks are all closed**. The frontier deliberately carries only
+  *live* segments (`compute_frontier` skips a segment whose head-search finds nothing), so
+  this is the second input the availability pass needs in order to report `done` at all.
+  Added by `MV.ticket.done-segment-discovery`: without it a finished segment produced no
+  status of any kind and the six-state contract silently meant five.
+- **`segment_statuses(frontier, live_runs, segments) -> Vec<SegmentStatus>`** — intrinsic
+  tier + `held-repo-busy`; a repo running **this same roadmap's** lane is never busy against
+  itself. Segments present in `segments` but absent from `frontier.entries` are emitted as
+  `done` with `head: None`; matching is on the `(roadmap, lane, segment)` triple, never on
+  the head block id.
 - **`compute_fleet_slot_view(root) -> FleetSlotView`** / **`heavy_category(repo_root)
   -> Option<String>`** — read `.fleet-locks` directly (never shell out to
   `fleet_concurrency_check.py`; `timeout` does not exist on this shell) and mirror its
@@ -891,7 +900,7 @@ The run record is the only candidate that covers every repo, is written when the
   capacity (`native-build`: 4, everything else: 2). A missing/unreadable
   `.fleet-locks` sets `degraded: true` — "unknown", resolved as *not held*, never a
   hold, mirroring the script's own degrade-to-advisory behavior.
-- **`segment_statuses_with_slots(frontier, live_runs, repos, root) -> (Vec<SegmentStatus>, bool)`**
+- **`segment_statuses_with_slots(frontier, live_runs, repos, root, segments) -> (Vec<SegmentStatus>, bool)`**
   — full three-tier resolution (intrinsic + `held-repo-busy` + `held-slot`) plus the
   `degraded` flag.
 - **`lane_leverage(graph, lane_positions, frontier) -> HashMap<SegmentKey, LaneLeverage>`**
