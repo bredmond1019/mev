@@ -38,11 +38,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 
 use crate::Diagnostic;
-use crate::brain::config::RepoEntry;
-use crate::brain::frontier::{Frontier, FrontierEntry};
-use crate::brain::lane_segments::DerivedBlockPosition;
+use crate::brain::block_graph::{BlockGraphScope, build_block_graph_export};
+use crate::brain::config::{RepoEntry, load_brain_config};
+use crate::brain::emit::{EmitAction, EmitPlan};
+use crate::brain::frontier::{Frontier, FrontierEntry, compute_frontier, ensure_untruncated};
+use crate::brain::lane_segments::{
+    DerivedBlockPosition, build_owner_index, derive_lane_positions, discover_lane_files,
+    resolve_owner, unresolved_owner_diagnostics,
+};
 use crate::brain::lock::pid_is_alive;
-use crate::brain::state::{StateEdgeKind, StateFile, StateGraph, StateSource};
+use crate::brain::state::{
+    StateEdgeKind, StateFile, StateGraph, StateSource, TierScope, build_state_graph,
+    effective_priorities,
+};
 use crate::shared::extract_frontmatter;
 
 /// The six possible availability states for one lane segment.
@@ -809,6 +817,197 @@ pub fn lane_leverage_over_untruncated_graph(
     ensure_untruncated(&export)?;
 
     Ok(lane_leverage(graph, lane_positions, frontier))
+}
+
+// ---------------------------------------------------------------------------
+// Artifact + emit-state wiring + `mev lanes` CLI — MV.13.C Task 5
+// ---------------------------------------------------------------------------
+
+/// Relative path (from the brain root) of the derived lane-availability artifact
+/// [`plan_availability`] writes. Like [`crate::brain::frontier::LANE_FRONTIER_ARTIFACT`]
+/// and [`crate::brain::lane_segments::LANE_SEGMENTS_ARTIFACT`], this is a cross-repo,
+/// corpus-wide derivation, not one repo's scoped surface — it is written
+/// unconditionally, never narrowed by `emit_state`'s `--scope <repo>`.
+pub const LANE_AVAILABILITY_ARTIFACT: &str = "planning/lane-availability.json";
+
+/// One segment's [`SegmentStatus`] plus its [`LaneLeverage`], flattened together —
+/// the per-segment row of [`LaneAvailabilityArtifact`]. `#[serde(flatten)]` on
+/// `status` means the JSON shape carries every `SegmentStatus` field alongside
+/// `leverage` at the same level, not nested under a `status` key.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LaneAvailabilityEntry {
+    #[serde(flatten)]
+    pub status: SegmentStatus,
+    pub leverage: LaneLeverage,
+}
+
+/// The full availability derivation, serialized as-is — `mev emit-state`'s JSON
+/// artifact at [`LANE_AVAILABILITY_ARTIFACT`], plus `derived_at`. `pub` so `mev lanes
+/// --json` can emit this exact shape to stdout without a second definition.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LaneAvailabilityArtifact {
+    /// RFC 3339 timestamp of the derivation run (`chrono::Local::now()`), same
+    /// rationale as [`crate::brain::frontier::FrontierArtifact::derived_at`].
+    pub derived_at: String,
+    /// `true` when the fleet-lock read that feeds `HeldSlot` degraded (`.fleet-locks`
+    /// missing or unreadable) — "unknown", never a hold, mirrors
+    /// [`FleetSlotView::degraded`]. A consumer can use this to tell a corpus with
+    /// zero live `HeldSlot` holds apart from one that could not check.
+    pub degraded: bool,
+    pub segments: Vec<LaneAvailabilityEntry>,
+}
+
+/// Plan the [`LANE_AVAILABILITY_ARTIFACT`] write: derive lane positions and the
+/// untruncated in-process block graph the same way [`crate::brain::frontier::plan_frontier`]
+/// does, refuse via [`ensure_untruncated`] if the export somehow reports
+/// `truncated: true`, then compute the full [`segment_statuses_with_slots`] tier
+/// (intrinsic + `HeldRepoBusy` + `HeldSlot`) and [`lane_leverage`] over the result,
+/// joining the two by `(roadmap, lane, segment)` into one [`LaneAvailabilityEntry`]
+/// per segment — modelled directly on `plan_frontier`, one [`EmitPlan`] for
+/// `emit_state` to apply alongside its other planners.
+///
+/// No `EmitAction` is planned when zero lane files are discovered (an empty corpus,
+/// or `root` has no `planning/` at all), nor when [`ensure_untruncated`] refuses the
+/// export — a diagnostic is carried on the plan in the latter case, but never a
+/// partial write. A segment absent from the resulting `leverage` map (should not
+/// happen — every frontier entry has a corresponding lane-position group) falls back
+/// to [`LaneLeverage::default`] (`lanes_freed: 0`) rather than panicking.
+pub fn plan_availability(root: &Path, loaded: &[(StateSource, StateFile)]) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+
+    let (lane_files, discover_diags) = discover_lane_files(root);
+    plan.diagnostics.extend(discover_diags);
+
+    if lane_files.is_empty() {
+        return plan;
+    }
+
+    let owner_index = build_owner_index(loaded);
+    for lf in &lane_files {
+        plan.diagnostics
+            .extend(unresolved_owner_diagnostics(lf, &owner_index));
+    }
+
+    let (lane_positions, double_claim_diags) = derive_lane_positions(&lane_files, |id| {
+        resolve_owner(&owner_index, id).map(str::to_string)
+    });
+    plan.diagnostics.extend(double_claim_diags);
+
+    // `config` feeds both the block-graph export's TIER stage (a no-op here,
+    // `TierScope::All`, no `--repo`/`--epic` filter) and the `repos[]` list this
+    // module reads for `HeldRepoBusy`/`HeldSlot` — a missing/unreadable
+    // `brain.toml` falls back to `BrainConfig::default()` (empty `repos[]`, so no
+    // environmental holds can be resolved) rather than aborting the plan;
+    // `emit_state`'s own top-level `find_brain_config` call already gates the whole
+    // run on a real config existing.
+    let config = load_brain_config(&root.join("brain.toml")).unwrap_or_default();
+
+    let graph = build_state_graph(loaded);
+    let scope = BlockGraphScope {
+        tier: TierScope::All,
+        epic: None,
+        repo: None,
+        include_closed: true,
+        include_boundary: false,
+        max_nodes: usize::MAX,
+    };
+    let export = build_block_graph_export(root, &config, &graph, loaded, &scope);
+    if let Err(diag) = ensure_untruncated(&export) {
+        plan.diagnostics.push(diag);
+        return plan;
+    }
+
+    let effective = effective_priorities(&graph, loaded);
+    let frontier = compute_frontier(&lane_positions, &graph, loaded, &effective);
+
+    let (live_runs, live_run_diags) = discover_live_runs(root, &config.repos);
+    plan.diagnostics.extend(live_run_diags);
+
+    let (statuses, degraded) =
+        segment_statuses_with_slots(&frontier, &live_runs, &config.repos, root);
+    let leverage_by_segment = lane_leverage(&graph, &lane_positions, &frontier);
+
+    let segments: Vec<LaneAvailabilityEntry> = statuses
+        .into_iter()
+        .map(|status| {
+            let key = SegmentKey {
+                roadmap: status.roadmap.clone(),
+                lane: status.lane.clone(),
+                segment: status.segment,
+            };
+            let leverage = leverage_by_segment.get(&key).cloned().unwrap_or_default();
+            LaneAvailabilityEntry { status, leverage }
+        })
+        .collect();
+
+    let segment_count = segments.len();
+    let artifact = LaneAvailabilityArtifact {
+        derived_at: chrono::Local::now().to_rfc3339(),
+        degraded,
+        segments,
+    };
+
+    let new_content = match serde_json::to_string_pretty(&artifact) {
+        Ok(mut s) => {
+            s.push('\n');
+            s
+        }
+        Err(e) => {
+            plan.diagnostics.push(Diagnostic::error(
+                root,
+                "E_EMIT_AVAILABILITY_SERIALIZE",
+                format!("failed to serialize lane-availability artifact: {e}"),
+            ));
+            return plan;
+        }
+    };
+
+    plan.actions.push(EmitAction {
+        path: root.join(LANE_AVAILABILITY_ARTIFACT),
+        new_content,
+        note: format!("derived lane availability: {segment_count} segment(s), degraded={degraded}"),
+    });
+
+    plan
+}
+
+/// Render one line per segment: `{roadmap}/{lane}#{segment} {repo}:{head} —
+/// {availability} ({reason}) frees N lane(s)`. `head`'s leading `"{repo}:"` prefix
+/// (see [`SegmentStatus::head`]'s `"repo:id"` shape) is stripped before display, so
+/// the repo is not printed twice; `head` renders as `-` for `Done` segments (no live
+/// head). The `(reason)` clause is omitted entirely for `Startable`/`Done`, which
+/// carry `reason: None`. `frees N lane(s)` is always present, including `frees 0
+/// lanes` — a reader scanning for the highest-leverage segment needs the zero case
+/// visible, not silently absent.
+pub fn render_availability_text(artifact: &LaneAvailabilityArtifact) -> String {
+    artifact
+        .segments
+        .iter()
+        .map(|entry| {
+            let s = &entry.status;
+            let head = match &s.head {
+                Some(h) => h
+                    .strip_prefix(&format!("{}:", s.repo))
+                    .unwrap_or(h.as_str()),
+                None => "-",
+            };
+            let avail = serde_json::to_string(&s.availability)
+                .unwrap_or_default()
+                .trim_matches('"')
+                .to_string();
+            let reason = match &s.reason {
+                Some(r) => format!(" ({r})"),
+                None => String::new(),
+            };
+            let lanes = entry.leverage.lanes_freed;
+            let noun = if lanes == 1 { "lane" } else { "lanes" };
+            format!(
+                "{}/{}#{} {}:{} — {avail}{reason} frees {lanes} {noun}",
+                s.roadmap, s.lane, s.segment, s.repo, head,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -1608,5 +1807,165 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].availability, SegmentAvailability::Startable);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // -----------------------------------------------------------------------
+    // plan_availability + render_availability_text — MV.13.C Task 5
+    // -----------------------------------------------------------------------
+
+    fn write_file(dir: &Path, rel: &str, content: &str) {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn availability_state_file_fixture(repo: &str, id: &str) -> (StateSource, StateFile) {
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: PathBuf::from(format!("{repo}/planning/state.json")),
+            expected_kind: "project",
+        };
+        let file: StateFile = serde_json::from_str(&format!(
+            r#"{{"repo":"{repo}","kind":"project","updated":"2026-08-17","tracks":[
+                {{"title":"t","blocks":[{{"id":"{id}","title":"x","status":"open"}}]}}
+            ]}}"#
+        ))
+        .unwrap();
+        (src, file)
+    }
+
+    #[test]
+    fn plan_availability_writes_artifact_with_leverage_and_derived_at() {
+        let dir = crate::testsupport::unique_temp_dir("mev-plan-availability-basic");
+        write_file(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.txt",
+            "MV.ticket.a\n",
+        );
+        let loaded = vec![availability_state_file_fixture("mev", "MV.ticket.a")];
+
+        let plan = plan_availability(&dir, &loaded);
+        assert!(
+            plan.diagnostics.is_empty(),
+            "expected no diagnostics, got {:?}",
+            plan.diagnostics
+        );
+        assert_eq!(plan.actions.len(), 1, "expected exactly one write action");
+
+        let action = &plan.actions[0];
+        assert_eq!(action.path, dir.join(LANE_AVAILABILITY_ARTIFACT));
+
+        let artifact: serde_json::Value =
+            serde_json::from_str(&action.new_content).expect("artifact must be valid JSON");
+        let derived_at = artifact["derived_at"].as_str().expect("derived_at string");
+        chrono::DateTime::parse_from_rfc3339(derived_at)
+            .expect("derived_at must be a parseable RFC 3339 timestamp");
+        assert_eq!(
+            artifact["degraded"], true,
+            "no .fleet-locks dir -> degraded"
+        );
+
+        let segments = artifact["segments"].as_array().expect("segments array");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0]["roadmap"], "alpha");
+        assert_eq!(segments[0]["lane"], "substrate");
+        assert_eq!(segments[0]["repo"], "mev");
+        assert_eq!(segments[0]["availability"], "startable");
+        assert_eq!(segments[0]["leverage"]["lanes_freed"], 0);
+        assert!(
+            segments[0]["leverage"]["lanes"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_availability_no_lane_files_plans_nothing() {
+        let dir = crate::testsupport::unique_temp_dir("mev-plan-availability-empty");
+        std::fs::create_dir_all(dir.join("planning")).unwrap();
+
+        let plan = plan_availability(&dir, &[]);
+        assert!(plan.actions.is_empty());
+        assert!(plan.diagnostics.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_availability_text_shape_for_startable_and_held_block_entries() {
+        let artifact = LaneAvailabilityArtifact {
+            derived_at: "2026-08-17T00:00:00+00:00".to_string(),
+            degraded: false,
+            segments: vec![
+                LaneAvailabilityEntry {
+                    status: SegmentStatus {
+                        roadmap: "alpha".to_string(),
+                        lane: "derive".to_string(),
+                        segment: 0,
+                        repo: "mev".to_string(),
+                        head: Some("mev:MV.13.C".to_string()),
+                        availability: SegmentAvailability::Startable,
+                        reason: None,
+                    },
+                    leverage: LaneLeverage {
+                        lanes_freed: 2,
+                        lanes: vec!["alpha/derive-2".to_string(), "beta/derive".to_string()],
+                    },
+                },
+                LaneAvailabilityEntry {
+                    status: SegmentStatus {
+                        roadmap: "alpha".to_string(),
+                        lane: "consolidate".to_string(),
+                        segment: 1,
+                        repo: "bastion".to_string(),
+                        head: Some("bastion:BA.19.C".to_string()),
+                        availability: SegmentAvailability::HeldBlock,
+                        reason: Some("blocked by mev:MV.13.C".to_string()),
+                    },
+                    leverage: LaneLeverage::default(),
+                },
+            ],
+        };
+
+        let text = render_availability_text(&artifact);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            "alpha/derive#0 mev:MV.13.C — startable frees 2 lanes"
+        );
+        assert_eq!(
+            lines[1],
+            "alpha/consolidate#1 bastion:BA.19.C — held-block (blocked by mev:MV.13.C) frees 0 lanes"
+        );
+    }
+
+    #[test]
+    fn render_availability_text_singular_lane_noun() {
+        let artifact = LaneAvailabilityArtifact {
+            derived_at: "2026-08-17T00:00:00+00:00".to_string(),
+            degraded: false,
+            segments: vec![LaneAvailabilityEntry {
+                status: SegmentStatus {
+                    roadmap: "alpha".to_string(),
+                    lane: "derive".to_string(),
+                    segment: 0,
+                    repo: "mev".to_string(),
+                    head: None,
+                    availability: SegmentAvailability::Done,
+                    reason: None,
+                },
+                leverage: LaneLeverage {
+                    lanes_freed: 1,
+                    lanes: vec!["alpha/consolidate".to_string()],
+                },
+            }],
+        };
+
+        let text = render_availability_text(&artifact);
+        assert_eq!(text, "alpha/derive#0 mev:- — done frees 1 lane");
     }
 }

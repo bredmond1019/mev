@@ -843,6 +843,37 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Compute six-state lane-segment availability plus lane-level unblock leverage
+    /// over the corpus's frontier — `MV.13.C` Task 5.
+    ///
+    /// Read-only; never writes `planning/lane-availability.json` (that is `mev
+    /// emit-state --write`'s job). Same untruncated-graph refusal as `mev frontier`:
+    /// this command always builds the in-process block graph with
+    /// `max_nodes: usize::MAX` and hard-fails rather than degrade if the export
+    /// somehow reports `truncated: true`. See `docs/cli.md` and
+    /// `docs/architecture.md` for the six states, their precedence, and the single
+    /// lane-liveness source `HeldRepoBusy` reads from.
+    ///
+    /// Without `--json`: one line per segment, `{roadmap}/{lane}#{segment}
+    /// {repo}:{head} — {availability} ({reason}) frees N lane(s)`. With `--json`:
+    /// the same shape `mev emit-state` writes to `planning/lane-availability.json`
+    /// (`derived_at`, `degraded`, `segments`), printed to stdout rather than written
+    /// to disk — this command never writes a file.
+    ///
+    /// Exit codes:
+    ///   0 — availability computed and printed
+    ///   1 — brain.toml not found/unreadable, or the in-process graph somehow
+    ///       reported `truncated: true`
+    Lanes {
+        /// Path to search from when locating brain.toml (walks up to find it).
+        /// Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Emit availability as JSON (the `lane-availability.json` artifact shape)
+        /// instead of one text line per segment.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2338,6 +2369,42 @@ fn main() -> ExitCode {
                         }
                     } else {
                         let text = mev::brain::frontier::render_frontier_text(&frontier);
+                        if !text.is_empty() {
+                            println!("{text}");
+                        }
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::Lanes { path, json } => {
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            match mev::lanes_brain(&root) {
+                Ok(artifact) => {
+                    if json {
+                        match serde_json::to_string_pretty(&artifact) {
+                            Ok(s) => {
+                                println!("{s}");
+                                ExitCode::SUCCESS
+                            }
+                            Err(err) => {
+                                eprintln!("error serializing availability: {err:#}");
+                                ExitCode::FAILURE
+                            }
+                        }
+                    } else {
+                        let text = mev::brain::availability::render_availability_text(&artifact);
                         if !text.is_empty() {
                             println!("{text}");
                         }

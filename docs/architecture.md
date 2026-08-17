@@ -818,6 +818,121 @@ is the function behind `mev frontier`.
 
 ---
 
+### Six-state lane-segment availability (`src/brain/availability.rs`) — Phase 13, Block MV.13.C
+
+Folds `MV.13.B`'s frontier — plus two environmental holds this block adds — into
+exactly one of six states per lane segment, so downstream consumers (bastion's
+`/lanes` endpoint, `BA.19.C`; the concurrency-slot endpoint, `BA.19.D`; the `BW.16.x`
+cockpit board views) never re-derive the same judgement call themselves. Also computes
+lane-level unblock leverage: how many *lanes* (not blocks) are freed by closing a given
+segment — a metric distinct from the block-graph export's block-scoped
+`dependent_count`, which exists at no other layer.
+
+#### The six states and their precedence
+
+A segment can genuinely match more than one condition at once — e.g. a head with both
+an unmet block *and* a busy repo. **Exactly one state is reported per segment**, per
+this fixed precedence (highest first):
+
+`done` > `held-block` > `held-operator` > `held-repo-busy` > `held-slot` > `startable`
+
+Intrinsic reasons (`done`, `held-block`, `held-operator` — the segment's own dependency
+graph) outrank environmental ones (`held-repo-busy`, `held-slot`) because the intrinsic
+reason is the one an operator can act on — closing the blocking block or clearing the
+gate — and it does not change just because some unrelated lane exits and frees a repo
+or a concurrency slot. Environmental holds are true but transient; intrinsic holds are
+the actual next action.
+
+| State | Meaning |
+|---|---|
+| `done` | The segment has no frontier entry — every block in it is closed |
+| `held-block` | The head's `unmet_blocks` is non-empty |
+| `held-operator` | The head's `unmet_gates` is non-empty (and `unmet_blocks` is empty) |
+| `held-repo-busy` | The head's repo has an `active` orchestration-run record for a *different* roadmap |
+| `held-slot` | The head's repo is a heavy repo whose concurrency category is at capacity |
+| `startable` | No intrinsic or environmental hold applies — the segment can be worked now |
+
+#### The single source of truth for "a lane is live in repo X"
+
+**Decided at spec time, not re-litigated in code: the single source of truth for lane
+liveness — what `held-repo-busy` reads from — is the per-`(repo, roadmap)`
+orchestration-run record's `lifecycle:` frontmatter**
+(`planning/orchestration-run/<roadmap-slug>/notes.md`, `lifecycle: active |
+lane-complete | consolidated`, per D57, the orchestration-run artifact contract). Two
+other candidates were considered and rejected:
+
+- **`lane-log.jsonl`** — rejected because it records **integrated blocks**, not
+  liveness. A lane that opened and is mid-block has written nothing to it yet, so it
+  reads as idle exactly when it is busiest. It remains the cross-lane progress channel
+  and is read by nothing in this module.
+- **`fleet_concurrency_check.py`'s `.fleet-locks` registry** — rejected as the
+  liveness source because it only ever knows about **heavy** repos (`heavy_category`
+  returns `None` for a light one), so it structurally cannot answer the liveness
+  question for the light half of the fleet. It is, however, the correct source for
+  `held-slot` — a different question (is a heavy repo's concurrency category at
+  capacity) that the run record cannot answer, since it says nothing about capacity.
+
+The run record is the only candidate that covers every repo, is written when the lane
+**opens** rather than when a block closes, and is contract-validated
+(`test_orchestration_run_contract.py`).
+
+- **`discover_live_runs(root, repos) -> (Vec<LiveRun>, Vec<Diagnostic>)`** — walks
+  every registered repo's `planning/orchestration-run/*/notes.md`, returning a
+  `LiveRun { repo, roadmap }` for every record whose `lifecycle:` is `active`. A
+  record that cannot be read/parsed, or is `active` but missing `roadmap:`, yields a
+  diagnostic and never invents a hold.
+- **`segment_statuses(frontier, live_runs) -> Vec<SegmentStatus>`** — intrinsic tier +
+  `held-repo-busy`; a repo running **this same roadmap's** lane is never busy against
+  itself.
+- **`compute_fleet_slot_view(root) -> FleetSlotView`** / **`heavy_category(repo_root)
+  -> Option<String>`** — read `.fleet-locks` directly (never shell out to
+  `fleet_concurrency_check.py`; `timeout` does not exist on this shell) and mirror its
+  staleness rules (dead/absent pid, `started_at` past the TTL) and per-category
+  capacity (`native-build`: 4, everything else: 2). A missing/unreadable
+  `.fleet-locks` sets `degraded: true` — "unknown", resolved as *not held*, never a
+  hold, mirroring the script's own degrade-to-advisory behavior.
+- **`segment_statuses_with_slots(frontier, live_runs, repos, root) -> (Vec<SegmentStatus>, bool)`**
+  — full three-tier resolution (intrinsic + `held-repo-busy` + `held-slot`) plus the
+  `degraded` flag.
+- **`lane_leverage(graph, lane_positions, frontier) -> HashMap<SegmentKey, LaneLeverage>`**
+  — for each segment, the transitive closure (via `BlockedBy::Block` edges) of every
+  block that depends, directly or indirectly, on any block in that segment, then the
+  distinct `(roadmap, lane)` pairs whose *current* segment head falls inside that
+  closure. A segment's own lane is always excluded from its own `lanes_freed`. `graph`
+  MUST be the untruncated in-process graph — `lane_leverage_over_untruncated_graph`
+  layers `ensure_untruncated`'s refusal on top of this pure closure computation, same
+  discipline as the frontier itself.
+- **`plan_availability(root, loaded) -> EmitPlan`** — the `emit-state` planner (Task
+  5), modelled on `plan_frontier`: derives lane positions and the untruncated graph,
+  refuses via `ensure_untruncated`, computes `segment_statuses_with_slots` and
+  `lane_leverage`, joins the two by `(roadmap, lane, segment)` into one
+  `LaneAvailabilityEntry` per segment, and appends one `EmitAction` writing
+  `LANE_AVAILABILITY_ARTIFACT` (`planning/lane-availability.json`) — never a partial
+  write on refusal. Corpus-wide, like `lane-frontier.json`: never narrowed by
+  `emit_state --scope <repo>`. Wired into `emit_state` (`src/lib.rs`) immediately after
+  the frontier planner, applied through `apply_with_rollback_on_regression` in
+  `--write` mode.
+- **`LaneAvailabilityArtifact` / `LaneAvailabilityEntry`** — the JSON artifact shape:
+  `derived_at` (RFC 3339), `degraded`, `segments: Vec<LaneAvailabilityEntry>`, each
+  entry flattening a `SegmentStatus` together with its `LaneLeverage`. Shared by both
+  the `emit-state` artifact write and `mev lanes --json`'s stdout output.
+- **`render_availability_text(artifact) -> String`** — the `mev lanes` (without
+  `--json`) text renderer: one line per segment, `{roadmap}/{lane}#{segment}
+  {repo}:{id} — {availability} (<reason>) frees N lane(s)`.
+
+#### Public library entry point
+
+`lanes_brain(root: &Path) -> anyhow::Result<LaneAvailabilityArtifact>` (in
+`src/lib.rs`) is the read-only sibling of `frontier_brain`: resolves `brain.toml`,
+discovers and loads every `planning/state.json`, derives lane positions and the
+untruncated in-process graph the same way `plan_availability` does, refuses via
+`ensure_untruncated`, computes the frontier, then layers on `discover_live_runs`,
+`segment_statuses_with_slots`, and `lane_leverage`. Never writes
+`LANE_AVAILABILITY_ARTIFACT` — that write path is `plan_availability`/`emit_state`
+only. This is the function behind `mev lanes`.
+
+---
+
 ### Doc materializer (`src/doc/`) — Phase 9, Block MV.9.A
 
 The doc materializer is the generic brain-document **writer**, sitting on the same
