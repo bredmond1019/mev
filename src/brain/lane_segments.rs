@@ -132,10 +132,12 @@ pub struct LaneFile {
 ///   drive while it is open; comma-separated, no other lane in any roadmap may touch them
 ///   concurrently.
 ///
-/// An unrecognised key or a malformed value for a recognised key is a later task's
-/// diagnostic (`MV.ticket.lane-file-structured-directives` Task 2) — this parser only
-/// recognises the three well-formed shapes above; anything else is left untouched, exactly
-/// as free prose always has been.
+/// An unrecognised key or a malformed value for a recognised key produces a diagnostic
+/// (`MV.ticket.lane-file-structured-directives` Task 2) naming the file and line, and is
+/// otherwise left out of the returned struct — this parser recognises only the three
+/// well-formed shapes above; ordinary prose that does not even look like a directive key
+/// is left untouched, exactly as free prose always has been. See
+/// [`parse_lane_directives`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaneDirectives {
     pub held_until: Option<String>,
@@ -185,8 +187,8 @@ fn parse_repo_list(value: &str) -> Vec<String> {
 
 impl LaneBudget {
     /// Parse the text after `# BUDGET:` (already trimmed of the prefix). Returns `None`
-    /// when the leading token is neither `HEAVY` nor `LIGHT` (case-insensitive) — Task 1
-    /// leaves that malformed case unrecorded; Task 2 turns it into a diagnostic.
+    /// when the leading token is neither `HEAVY` nor `LIGHT` (case-insensitive); the
+    /// caller ([`parse_lane_directives`]) turns that into a diagnostic.
     fn parse(value: &str) -> Option<Self> {
         let (level_part, not_with_part) = match value.find(BUDGET_NOT_WITH_MARKER) {
             Some(pos) => (
@@ -210,19 +212,49 @@ impl LaneBudget {
     }
 }
 
+/// Error code on a diagnostic produced when a comment-only line's key looks like a
+/// directive attempt (all-uppercase, hyphenated, immediately followed by `:`) but is
+/// none of the three recognised prefixes.
+const E_LANE_DIRECTIVE_UNRECOGNISED: &str = "E_LANE_DIRECTIVE_UNRECOGNISED";
+/// Error code on a diagnostic produced when a recognised directive key's value does not
+/// parse under its grammar (see [`LaneDirectives`]).
+const E_LANE_DIRECTIVE_MALFORMED: &str = "E_LANE_DIRECTIVE_MALFORMED";
+
+/// `true` iff `candidate` (the text before a `:` in a comment body) has the shape of a
+/// directive key under this module's convention: non-empty, starting with an
+/// upper-case letter, and containing only upper-case letters and hyphens thereafter.
+/// This is deliberately the same shape the three recognised prefixes already have
+/// (`HELD-UNTIL`, `BUDGET`, `EXCLUSIVE-REPOS`) — it is what lets Task 2 tell "an
+/// attempted directive with an unrecognised key" apart from ordinary prose that merely
+/// mentions a recognised key mid-sentence (lower/mixed case, or not immediately after
+/// `#`), without a false positive on the latter.
+fn looks_like_directive_key(candidate: &str) -> bool {
+    let mut chars = candidate.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_uppercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_uppercase() || c == '-')
+}
+
 /// Scan every comment-only line of `content` for the three structured directives (see
 /// [`LaneDirectives`]) and collapse the result: `None` when the file declares none of them,
 /// `Some(..)` with only the declared fields set otherwise. A directive line may appear
 /// anywhere in the file — these describe the whole lane, not one block, so they are not
 /// scoped to a header region the way `# ORIGIN:` is scoped to the block that follows it.
 ///
-/// A malformed value for a recognised key is simply not recorded (Task 1's parser does not
-/// yet diagnose it — see [`LaneDirectives`]'s doc for the Task 2 pointer); an unrecognised
-/// key never matches any of the three prefixes and is left as ordinary prose, unchanged
-/// from today's behaviour.
-fn parse_lane_directives(content: &str) -> Option<LaneDirectives> {
+/// Also returns a diagnostic per malformed or unrecognised directive attempt (Task 2):
+/// a comment-only line whose body has the shape of a directive key (see
+/// [`looks_like_directive_key`]) but is not one of the three recognised prefixes, or is
+/// one of them with a value that fails its grammar. Each diagnostic names `path` and the
+/// 1-based line. A bad directive is never fatal — it is simply left unrecorded in the
+/// returned [`LaneDirectives`], exactly as an absent field always has been; the caller
+/// carries on parsing the rest of this lane file and every other one.
+fn parse_lane_directives(content: &str, path: &Path) -> (Option<LaneDirectives>, Vec<Diagnostic>) {
     let mut out = LaneDirectives::default();
-    for raw_line in content.lines() {
+    let mut diags = Vec::new();
+    for (idx, raw_line) in content.lines().enumerate() {
+        let line = idx + 1;
         let Some(hash_pos) = raw_line.find('#') else {
             continue;
         };
@@ -231,22 +263,59 @@ fn parse_lane_directives(content: &str) -> Option<LaneDirectives> {
         }
         let body = raw_line[hash_pos + 1..].trim_start();
         if let Some(value) = body.strip_prefix(DIRECTIVE_HELD_UNTIL_PREFIX) {
-            let token = value.split_whitespace().next();
-            if let Some(token) = token {
-                out.held_until = Some(token.to_string());
+            match value.split_whitespace().next() {
+                Some(token) => out.held_until = Some(token.to_string()),
+                None => diags.push(Diagnostic::error(
+                    path,
+                    E_LANE_DIRECTIVE_MALFORMED,
+                    format!(
+                        "{}: line {line}: malformed HELD-UNTIL directive — missing a token after the prefix",
+                        path.display()
+                    ),
+                )),
             }
         } else if let Some(value) = body.strip_prefix(DIRECTIVE_BUDGET_PREFIX) {
-            if let Some(budget) = LaneBudget::parse(value.trim()) {
-                out.budget = Some(budget);
+            match LaneBudget::parse(value.trim()) {
+                Some(budget) => out.budget = Some(budget),
+                None => diags.push(Diagnostic::error(
+                    path,
+                    E_LANE_DIRECTIVE_MALFORMED,
+                    format!(
+                        "{}: line {line}: malformed BUDGET directive — expected HEAVY or LIGHT, got '{}'",
+                        path.display(),
+                        value.trim()
+                    ),
+                )),
             }
         } else if let Some(value) = body.strip_prefix(DIRECTIVE_EXCLUSIVE_REPOS_PREFIX) {
             let repos = parse_repo_list(value.trim());
-            if !repos.is_empty() {
+            if repos.is_empty() {
+                diags.push(Diagnostic::error(
+                    path,
+                    E_LANE_DIRECTIVE_MALFORMED,
+                    format!(
+                        "{}: line {line}: malformed EXCLUSIVE-REPOS directive — no repo slugs found",
+                        path.display()
+                    ),
+                ));
+            } else {
                 out.exclusive_repos = Some(repos);
+            }
+        } else if let Some(colon_pos) = body.find(':') {
+            let candidate = &body[..colon_pos];
+            if looks_like_directive_key(candidate) {
+                diags.push(Diagnostic::error(
+                    path,
+                    E_LANE_DIRECTIVE_UNRECOGNISED,
+                    format!(
+                        "{}: line {line}: unrecognised lane directive key '{candidate}'",
+                        path.display()
+                    ),
+                ));
             }
         }
     }
-    if out.is_empty() { None } else { Some(out) }
+    (if out.is_empty() { None } else { Some(out) }, diags)
 }
 
 /// Discover every live `lane-*.txt` file under `root/planning/roadmaps/<slug>/` and legacy
@@ -392,12 +461,14 @@ fn collect_lane_files_in(
             }
         };
 
+        let (directives, directive_diags) = parse_lane_directives(&content, &path);
+        diags.extend(directive_diags);
         lane_files.push(LaneFile {
             roadmap: slug.to_string(),
             lane,
             path,
             blocks: parse_lane_blocks(&content),
-            directives: parse_lane_directives(&content),
+            directives,
         });
     }
 }
@@ -1803,6 +1874,160 @@ MV.ticket.one
             .expect("budget field set");
         assert!(!budget.heavy);
         assert!(budget.not_with.is_empty());
+    }
+
+    // -- MV.ticket.lane-file-structured-directives Task 2: diagnostics ---------------
+
+    #[test]
+    fn parse_lane_directives_unrecognised_key_produces_diagnostic_naming_file_and_line() {
+        let content = "\
+MV.ticket.one
+# STALE-AFTER: BA.19.C
+BT.ticket.two
+";
+        let (files, diags) = discover_and_parse_single(content);
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic, got {diags:?}"
+        );
+        assert!(
+            diags[0].message.contains("STALE-AFTER"),
+            "diagnostic must name the unrecognised key, got {:?}",
+            diags[0].message
+        );
+        assert!(
+            diags[0].message.contains("line 2"),
+            "diagnostic must name the line, got {:?}",
+            diags[0].message
+        );
+        assert!(
+            diags[0]
+                .message
+                .contains(files[0].path.display().to_string().as_str()),
+            "diagnostic must name the file, got {:?}",
+            diags[0].message
+        );
+        // The sweep must not lose the lane's block IDs over a bad directive.
+        assert_eq!(files[0].blocks.len(), 2);
+        assert_eq!(files[0].directives, None);
+    }
+
+    #[test]
+    fn parse_lane_directives_malformed_budget_value_produces_diagnostic() {
+        let content = "\
+# BUDGET: MEDIUM
+MV.ticket.one
+";
+        let (files, diags) = discover_and_parse_single(content);
+        assert_eq!(diags.len(), 1, "got {diags:?}");
+        assert!(
+            diags[0].message.contains("BUDGET"),
+            "{:?}",
+            diags[0].message
+        );
+        assert!(
+            diags[0].message.contains("line 1"),
+            "{:?}",
+            diags[0].message
+        );
+        // A malformed value is left unrecorded, not defaulted to a guessed level.
+        assert_eq!(files[0].directives, None);
+        assert_eq!(files[0].blocks.len(), 1);
+    }
+
+    #[test]
+    fn parse_lane_directives_malformed_held_until_missing_token_produces_diagnostic() {
+        let content = "\
+# HELD-UNTIL:
+MV.ticket.one
+";
+        let (files, diags) = discover_and_parse_single(content);
+        assert_eq!(diags.len(), 1, "got {diags:?}");
+        assert!(
+            diags[0].message.contains("HELD-UNTIL"),
+            "{:?}",
+            diags[0].message
+        );
+        assert_eq!(files[0].directives, None);
+    }
+
+    #[test]
+    fn parse_lane_directives_malformed_exclusive_repos_empty_produces_diagnostic() {
+        let content = "\
+# EXCLUSIVE-REPOS: , ,
+MV.ticket.one
+";
+        let (files, diags) = discover_and_parse_single(content);
+        assert_eq!(diags.len(), 1, "got {diags:?}");
+        assert!(
+            diags[0].message.contains("EXCLUSIVE-REPOS"),
+            "{:?}",
+            diags[0].message
+        );
+        assert_eq!(files[0].directives, None);
+    }
+
+    #[test]
+    fn parse_lane_directives_one_bad_directive_does_not_abort_other_recognised_ones() {
+        let content = "\
+# HELD-UNTIL: BA.19.C
+# BUDGET: MEDIUM
+# EXCLUSIVE-REPOS: mev
+MV.ticket.one
+";
+        let (files, diags) = discover_and_parse_single(content);
+        assert_eq!(
+            diags.len(),
+            1,
+            "only the malformed BUDGET line should diagnose, got {diags:?}"
+        );
+        let directives = files[0]
+            .directives
+            .as_ref()
+            .expect("the two well-formed directives must still parse");
+        assert_eq!(directives.held_until, Some("BA.19.C".to_string()));
+        assert_eq!(directives.budget, None);
+        assert_eq!(directives.exclusive_repos, Some(vec!["mev".to_string()]));
+    }
+
+    #[test]
+    fn parse_lane_directives_prose_that_reads_like_a_directive_produces_no_diagnostic() {
+        // The existing "reads like a directive" prose test asserts `directives` stays
+        // `None`; this pins the companion property that it also raises no diagnostic —
+        // an unrecognised-key diagnostic on ordinary prose would be a false positive.
+        let content = "\
+# This lane's BUDGET: HEAVY is discussed below but not declared here.
+# See HELD-UNTIL: for context on why nothing blocks yet.
+MV.ticket.one
+";
+        let (_files, diags) = discover_and_parse_single(content);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+    }
+
+    #[test]
+    fn discover_lane_files_bad_directive_in_one_lane_does_not_drop_other_lanes() {
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-directives-multi");
+        write(
+            &dir,
+            "planning/roadmaps/alpha/lane-broken.txt",
+            "# STALE-AFTER: x\nMV.ticket.one\n",
+        );
+        write(
+            &dir,
+            "planning/roadmaps/alpha/lane-clean.txt",
+            "BT.ticket.two\n",
+        );
+        let (files, diags) = discover_lane_files(&dir);
+        assert_eq!(diags.len(), 1, "got {diags:?}");
+        assert_eq!(files.len(), 2, "both lane files must still be discovered");
+        let all_ids: Vec<&str> = files
+            .iter()
+            .flat_map(|f| f.blocks.iter().map(|b| b.id.as_str()))
+            .collect();
+        assert!(all_ids.contains(&"MV.ticket.one"));
+        assert!(all_ids.contains(&"BT.ticket.two"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Write `content` as the sole lane file in a fresh temp corpus and discover it —
