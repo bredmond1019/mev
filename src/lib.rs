@@ -1537,6 +1537,21 @@ pub fn emit_state(
         apply_plan(&lane_segments_plan, false)
     };
 
+    // 9. Lane-frontier derivation (`MV.13.B` Task 3) — the startable-block frontier
+    //    plus gate_rank, computed over the untruncated in-process graph. Same
+    //    treatment as the lane-segments planner immediately above: a corpus-wide
+    //    artifact, never passed through `filter_plan_by_scope`, and applied through
+    //    [`apply_with_rollback_on_regression`] in `--write` mode so a generator bug
+    //    here cannot leave a permanent red gate either.
+    let frontier_plan = brain::frontier::plan_frontier(root, &loaded);
+    let frontier_diags = if write {
+        apply_with_rollback_on_regression(&frontier_plan, || {
+            Ok(validate_brain(root)?.error_count())
+        })?
+    } else {
+        apply_plan(&frontier_plan, false)
+    };
+
     report.diagnostics.extend(state_diags);
     report.diagnostics.extend(mp_diags);
     report.diagnostics.extend(project_caches_diags);
@@ -1548,6 +1563,7 @@ pub fn emit_state(
     report.diagnostics.extend(epic_diags);
     report.diagnostics.extend(status_fm_diags);
     report.diagnostics.extend(lane_segments_diags);
+    report.diagnostics.extend(frontier_diags);
 
     Ok(report)
 }

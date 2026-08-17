@@ -15,10 +15,11 @@
 //! `/lanes` endpoint, the cockpit board) never re-derive the closure themselves.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::Diagnostic;
 use crate::brain::block_graph::BlockGraphExport;
-use crate::brain::emit::{effective_priority_for, global_status_map};
+use crate::brain::emit::{EmitAction, EmitPlan, effective_priority_for, global_status_map};
 use crate::brain::lane_segments::DerivedBlockPosition;
 use crate::brain::state::{
     ApprovalDep, BlockDep, BlockedBy, ExternalDep, OperatorDep, StateFile, StateGraph, StateSource,
@@ -309,6 +310,162 @@ pub fn ensure_untruncated(export: &BlockGraphExport) -> Result<(), Diagnostic> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Wired into `emit-state` — MV.13.B Task 3
+// ---------------------------------------------------------------------------
+
+/// Relative path (from the brain root) of the derived lane-frontier artifact
+/// [`plan_frontier`] writes. Like [`crate::brain::lane_segments::LANE_SEGMENTS_ARTIFACT`],
+/// this is a cross-repo, corpus-wide derivation, not one repo's scoped surface — it is
+/// written unconditionally, never narrowed by `emit_state`'s `--scope <repo>`.
+pub const LANE_FRONTIER_ARTIFACT: &str = "planning/lane-frontier.json";
+
+/// The full [`Frontier`] derivation, serialized as-is — `mev emit-state`'s JSON
+/// artifact at [`LANE_FRONTIER_ARTIFACT`], plus `derived_at`.
+#[derive(Debug, Clone, serde::Serialize)]
+struct FrontierArtifact {
+    /// RFC 3339 timestamp of the derivation run (`chrono::Local::now()`).
+    ///
+    /// `state.json` only changes at `/log-work` time, but lane progress (a block
+    /// closing, a new open block landing) lands live between those commits — a
+    /// consumer (bastion's `BA.19.C` `/lanes` endpoint) needs to be able to tell how
+    /// stale this artifact is relative to the live corpus, since the artifact itself
+    /// is only as fresh as the last `mev emit-state --write` run that produced it.
+    derived_at: String,
+    entries: Vec<FrontierEntry>,
+    gate_ranks: Vec<GateRank>,
+}
+
+/// Plan the [`LANE_FRONTIER_ARTIFACT`] write: derive lane positions the same way
+/// [`crate::brain::lane_segments::plan_lane_segments`] does, build the untruncated
+/// (`max_nodes: usize::MAX`) in-process block graph, refuse via [`ensure_untruncated`]
+/// if it somehow reports `truncated: true`, then run [`compute_frontier`] and
+/// [`gate_ranks`] over the result — modelled on `plan_lane_segments`, one [`EmitPlan`]
+/// for `emit_state` to apply alongside its other planners.
+///
+/// No `EmitAction` is planned when zero lane files are discovered (an empty corpus, or
+/// `root` has no `planning/` at all), nor when [`ensure_untruncated`] refuses the
+/// export — a diagnostic is carried on the plan in the latter case, but never a
+/// partial write.
+pub fn plan_frontier(root: &Path, loaded: &[(StateSource, StateFile)]) -> EmitPlan {
+    use crate::brain::block_graph::{BlockGraphScope, build_block_graph_export};
+    use crate::brain::config::load_brain_config;
+    use crate::brain::lane_segments::{
+        build_owner_index, derive_lane_positions, discover_lane_files, resolve_owner,
+        unresolved_owner_diagnostics,
+    };
+    use crate::brain::state::{TierScope, build_state_graph};
+
+    let mut plan = EmitPlan::default();
+
+    let (lane_files, discover_diags) = discover_lane_files(root);
+    plan.diagnostics.extend(discover_diags);
+
+    if lane_files.is_empty() {
+        return plan;
+    }
+
+    let owner_index = build_owner_index(loaded);
+    for lf in &lane_files {
+        plan.diagnostics
+            .extend(unresolved_owner_diagnostics(lf, &owner_index));
+    }
+
+    let (lane_positions, double_claim_diags) = derive_lane_positions(&lane_files, |id| {
+        resolve_owner(&owner_index, id).map(str::to_string)
+    });
+    plan.diagnostics.extend(double_claim_diags);
+
+    // `config` only feeds the block-graph export's TIER stage, which is a no-op here
+    // (`TierScope::All`, no `--repo`/`--epic` filter) — a missing/unreadable
+    // `brain.toml` falls back to `BrainConfig::default()` rather than aborting the
+    // frontier plan; `emit_state`'s own top-level `find_brain_config` call already
+    // gates the whole run on a real config existing.
+    let config = load_brain_config(&root.join("brain.toml")).unwrap_or_default();
+
+    let graph = build_state_graph(loaded);
+    let scope = BlockGraphScope {
+        tier: TierScope::All,
+        epic: None,
+        repo: None,
+        include_closed: true,
+        include_boundary: false,
+        max_nodes: usize::MAX,
+    };
+    let export = build_block_graph_export(root, &config, &graph, loaded, &scope);
+    let lane_file_count = lane_files.len();
+
+    assemble_frontier_plan(
+        root,
+        loaded,
+        &lane_positions,
+        &graph,
+        &export,
+        lane_file_count,
+        plan,
+    )
+}
+
+/// The part of [`plan_frontier`] that runs once the untruncated export is in hand:
+/// refuse via [`ensure_untruncated`], else derive the frontier and append the
+/// [`LANE_FRONTIER_ARTIFACT`] write to `plan`. Split out from [`plan_frontier`] so the
+/// truncation-refusal branch is unit-testable against a fabricated `export` — the real
+/// call site always builds `export` with `max_nodes: usize::MAX`, under which
+/// `truncated` can never actually be `true`, so exercising that branch end-to-end
+/// through `plan_frontier` itself is not possible.
+fn assemble_frontier_plan(
+    root: &Path,
+    loaded: &[(StateSource, StateFile)],
+    lane_positions: &[DerivedBlockPosition],
+    graph: &StateGraph,
+    export: &BlockGraphExport,
+    lane_file_count: usize,
+    mut plan: EmitPlan,
+) -> EmitPlan {
+    use crate::brain::state::effective_priorities;
+
+    if let Err(diag) = ensure_untruncated(export) {
+        plan.diagnostics.push(diag);
+        return plan;
+    }
+
+    let effective = effective_priorities(graph, loaded);
+    let frontier = compute_frontier(lane_positions, graph, loaded, &effective);
+
+    let entry_count = frontier.entries.len();
+    let gate_count = frontier.gate_ranks.len();
+    let artifact = FrontierArtifact {
+        derived_at: chrono::Local::now().to_rfc3339(),
+        entries: frontier.entries,
+        gate_ranks: frontier.gate_ranks,
+    };
+    let new_content = match serde_json::to_string_pretty(&artifact) {
+        Ok(mut s) => {
+            s.push('\n');
+            s
+        }
+        Err(e) => {
+            plan.diagnostics.push(Diagnostic::error(
+                root,
+                "E_EMIT_FRONTIER_SERIALIZE",
+                format!("failed to serialize lane-frontier artifact: {e}"),
+            ));
+            return plan;
+        }
+    };
+
+    plan.actions.push(EmitAction {
+        path: root.join(LANE_FRONTIER_ARTIFACT),
+        new_content,
+        note: format!(
+            "derived lane frontier: {entry_count} entr{} across {lane_file_count} lane file(s), {gate_count} gate rank(s)",
+            if entry_count == 1 { "y" } else { "ies" },
+        ),
+    });
+
+    plan
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,5 +751,108 @@ mod tests {
 
         let full = export(756, false);
         assert!(ensure_untruncated(&full).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // plan_frontier — MV.13.B Task 3
+    // -----------------------------------------------------------------------
+
+    fn write(dir: &std::path::Path, rel: &str, content: &str) {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn plan_state_file_fixture(repo: &str, id: &str) -> (StateSource, StateFile) {
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: PathBuf::from(format!("{repo}/planning/state.json")),
+            expected_kind: "project",
+        };
+        let file: StateFile = serde_json::from_str(&format!(
+            r#"{{"repo":"{repo}","kind":"project","updated":"2026-08-17","tracks":[
+                {{"title":"t","blocks":[{{"id":"{id}","title":"x","status":"open"}}]}}
+            ]}}"#
+        ))
+        .unwrap();
+        (src, file)
+    }
+
+    #[test]
+    fn plan_frontier_writes_artifact_with_parseable_derived_at_and_expected_entries() {
+        let dir = crate::testsupport::unique_temp_dir("mev-plan-frontier-basic");
+        write(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.txt",
+            "MV.ticket.a\n",
+        );
+        let loaded = vec![plan_state_file_fixture("mev", "MV.ticket.a")];
+
+        let plan = plan_frontier(&dir, &loaded);
+        assert!(
+            plan.diagnostics.is_empty(),
+            "expected no diagnostics, got {:?}",
+            plan.diagnostics
+        );
+        assert_eq!(plan.actions.len(), 1, "expected exactly one write action");
+
+        let action = &plan.actions[0];
+        assert_eq!(action.path, dir.join(LANE_FRONTIER_ARTIFACT));
+
+        let artifact: serde_json::Value =
+            serde_json::from_str(&action.new_content).expect("artifact must be valid JSON");
+        let derived_at = artifact["derived_at"].as_str().expect("derived_at string");
+        chrono::DateTime::parse_from_rfc3339(derived_at)
+            .expect("derived_at must be a parseable RFC 3339 timestamp");
+
+        let entries = artifact["entries"].as_array().expect("entries array");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["roadmap"], "alpha");
+        assert_eq!(entries[0]["lane"], "substrate");
+        assert_eq!(entries[0]["repo"], "mev");
+        assert_eq!(entries[0]["id"], "MV.ticket.a");
+        assert_eq!(entries[0]["startable"], true);
+
+        assert!(artifact["gate_ranks"].as_array().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_frontier_no_lane_files_plans_nothing() {
+        let dir = crate::testsupport::unique_temp_dir("mev-plan-frontier-empty");
+        std::fs::create_dir_all(dir.join("planning")).unwrap();
+
+        let plan = plan_frontier(&dir, &[]);
+        assert!(plan.actions.is_empty());
+        assert!(plan.diagnostics.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn assemble_frontier_plan_truncated_export_produces_diagnostic_and_zero_actions() {
+        let root = PathBuf::from("/hq");
+        let truncated_export = export(756, true);
+        let plan = assemble_frontier_plan(
+            &root,
+            &[],
+            &[],
+            &empty_graph(),
+            &truncated_export,
+            1,
+            EmitPlan::default(),
+        );
+
+        assert!(
+            plan.actions.is_empty(),
+            "a truncated export must never produce a write action"
+        );
+        assert_eq!(plan.diagnostics.len(), 1);
+        assert!(
+            plan.diagnostics[0]
+                .message
+                .contains("E_FRONTIER_TRUNCATED_GRAPH")
+        );
     }
 }
