@@ -812,6 +812,37 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Print the corpus-wide lane frontier (`MV.13.B`, Task 4) — read-only.
+    ///
+    /// Closure runs in mev itself, over the untruncated in-process block graph
+    /// (`max_nodes: usize::MAX`) — never the HTTP export's truncated default (which
+    /// defaults to `max_nodes=400` against 756 blocks). Any HTTP-side closure (e.g.
+    /// bastion `BA.19.C`'s `/lanes` endpoint) MUST send `max_nodes=2000` and hard-fail
+    /// on `truncated: true` rather than degrade; see `docs/cli.md` and
+    /// `docs/architecture.md` for the full consumer contract. mev cannot gate that
+    /// half itself — the evidence lives in bastion's own repo.
+    ///
+    /// Without `--json`: one line per frontier entry,
+    /// `{roadmap}/{lane}#{segment} {repo}:{id} — startable | blocked by <reasons>`.
+    /// With `--json`: the same shape `mev emit-state` writes to
+    /// `planning/lane-frontier.json` (`derived_at`, `entries`, `gate_ranks`), printed
+    /// to stdout rather than written to disk — this command never writes a file.
+    ///
+    /// Exit codes:
+    ///   0 — frontier computed and printed
+    ///   1 — brain.toml not found/unreadable, or the in-process graph somehow reported
+    ///       `truncated: true` (should not happen at `max_nodes: usize::MAX`, but this
+    ///       command refuses rather than silently degrading if it ever does)
+    Frontier {
+        /// Path to search from when locating brain.toml (walks up to find it).
+        /// Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Emit the frontier as JSON (the `lane-frontier.json` artifact shape) instead
+        /// of one text line per entry.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2274,6 +2305,43 @@ fn main() -> ExitCode {
                             eprintln!("error serializing block graph: {err:#}");
                             ExitCode::FAILURE
                         }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::Frontier { path, json } => {
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            match mev::frontier_brain(&root) {
+                Ok(frontier) => {
+                    if json {
+                        let artifact = mev::brain::frontier::build_frontier_artifact(frontier);
+                        match serde_json::to_string_pretty(&artifact) {
+                            Ok(s) => {
+                                println!("{s}");
+                                ExitCode::SUCCESS
+                            }
+                            Err(err) => {
+                                eprintln!("error serializing frontier: {err:#}");
+                                ExitCode::FAILURE
+                            }
+                        }
+                    } else {
+                        let text = mev::brain::frontier::render_frontier_text(&frontier);
+                        if !text.is_empty() {
+                            println!("{text}");
+                        }
+                        ExitCode::SUCCESS
                     }
                 }
                 Err(err) => {

@@ -857,6 +857,112 @@ mev emit-block-graph --pretty ~/Dev/agentic-portfolio | jq '{v:.version, n:(.nod
 
 ---
 
+### `frontier [--json] [path]`
+
+Print the corpus-wide lane frontier: one entry per active `(roadmap, lane, segment)`
+naming its startable-or-blocked head block — `MV.13.B`, Task 4. Read-only; never writes
+`planning/lane-frontier.json` (that write happens only via `mev emit-state --write`,
+which runs this same derivation as one of its planners).
+
+```bash
+mev frontier [path]
+mev frontier --json [path]
+```
+
+| Argument / Flag | Default | Description |
+|---|---|---|
+| `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
+| `--json` | off | Emit the `lane-frontier.json` artifact shape (`derived_at`, `entries`, `gate_ranks`) instead of one text line per entry |
+
+#### The consumer contract for HTTP-side closure
+
+**Closure over the block graph MUST run in mev itself, over the untruncated corpus.**
+`mev frontier` always builds the in-process graph with `max_nodes: usize::MAX` — never
+the HTTP export's truncated default. `mev emit-block-graph` (and bastion's `GET
+/api/blocks/graph`, `BA.17.A`) default to `max_nodes=400` against a corpus of ~756
+blocks: a client that runs its own closure over that default silently drops gates from
+the frontier it computes.
+
+**Any HTTP-side closure — bastion's `/lanes` and concurrency-slot endpoints (`BA.19.C`,
+`BA.19.D`) included — MUST send `max_nodes=2000` and hard-fail on `truncated: true`
+rather than degrade.** mev cannot gate that half of the contract itself — the evidence
+that bastion honours it lives in bastion's own repo, not here. mev's own obligations are
+(1) the `ensure_untruncated` refusal, which guarantees `mev frontier`/`mev emit-state`
+never computes a frontier over a truncated node set, and (2) this written contract for
+every downstream consumer to build against.
+
+#### Text output shape
+
+One line per frontier entry:
+
+```
+{roadmap}/{lane}#{segment} {repo}:{id} — startable
+{roadmap}/{lane}#{segment} {repo}:{id} — blocked by <reason>[, <reason>...]
+```
+
+`<reason>` is each unmet `blocked_by` dependency: `repo:id` for a block dep,
+`operator:<slug>` / `approval:<slug>` for a gate, `external:<what>` for an external dep.
+
+#### `--json` output shape
+
+```json
+{
+  "derived_at": "2026-08-17T13:19:58.661626-03:00",
+  "entries": [
+    {
+      "roadmap": "engine-orchestration",
+      "lane": "derive",
+      "segment": 0,
+      "repo": "mev",
+      "key": "mev:MV.13.B",
+      "id": "MV.13.B",
+      "title": "Frontier computation + gate_rank",
+      "status": "in_progress",
+      "unmet_blocks": [],
+      "unmet_gates": [],
+      "startable": true
+    }
+  ],
+  "gate_ranks": [
+    {
+      "kind": "operator",
+      "slug": "operator-fleet-concurrency-live-smoke-test",
+      "rank": 1,
+      "gates": ["base-template:BT.ticket.heavy-command-signals-rust-build"]
+    }
+  ]
+}
+```
+
+`derived_at` is an RFC 3339 timestamp of this run, not of the last `state.json` commit —
+lane progress lands live between `/log-work` runs, so a consumer needs this field to
+tell how stale the frontier is relative to the corpus it read. `gate_ranks` derives a
+rank for operator/approval gates, which are targetless (they gate a block but have no
+dependents of their own) and so never receive an `effective_priority` directly: each
+gate's rank is the minimum effective priority across every block it gates.
+
+#### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Frontier computed and printed |
+| `1` | `brain.toml` not found/unreadable, or the in-process graph reported `truncated: true` (should not happen at `max_nodes: usize::MAX`, but this command refuses rather than degrading if it ever does) |
+
+**Examples:**
+
+```bash
+# Text frontier from the current directory
+mev frontier
+
+# JSON frontier from an explicit brain root
+mev frontier --json ~/Dev/agentic-portfolio
+
+# Just the startable heads
+mev frontier --json | jq '.entries[] | select(.startable)'
+```
+
+---
+
 ### `emit-state [--write] [path]`
 
 Regenerate all derived views in the Brain corpus from the authored `tracks[]` DAG and write them in place (with `--write`) or report what would change (dry-run, without `--write`).

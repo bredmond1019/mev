@@ -50,7 +50,7 @@ src/
     ├── manifest.rs ← ManifestEntry, Manifest, build_manifest() — Phase 3 Block Q (canonical corpus manifest for RAG indexer)
     ├── graph_emit.rs ← GraphExport, ExportedEdge, build_graph_export() (re-exported from okf-core, BA.15.12/D16) — Phase 3B Block R (graph-export envelope for the orchestrator's Postgres edges table, D4)
     ├── last_touched.rs ← derive_last_touched() — Phase 10 Block MV.10.D (per-block last-touched timestamps derived corpus-wide, pre-scope, from on-disk SDLC run-state artifacts; newest `updated_at` wins across every matched spec folder/state-file kind, archive/ included; `null` when never worked, no sentinel fallback)
-    └── lane_segments.rs ← LaneSegment, LaneSegmentBlock (with `.head()`), Origin; discover_lane_files(), parse_lane_blocks() (parses `# ORIGIN:` directives + ordered block-ID lines, roadmap-vs-legacy layout collision diagnostics, both-locations double-registration error), build_owner_index(), resolve_owner() (None on zero or >1 matching repo — never guesses), segment_lane_file() (cuts a new `(repo, chain)` segment on every ownership change), unresolved_owner_diagnostics() (warning per unresolvable ID), resolve_double_claims() (E_LANE_DOUBLE_CLAIM on an unannotated/ambiguously-annotated cross-roadmap block claim; a single annotated claim renders once under the executing roadmap carrying `origin_roadmap`), derive_lane_positions() (wraps double-claim resolution + segmentation into final `{roadmap, lane, segment, position}` per block), plan_lane_segments() (`emit-state` planner writing `planning/lane-segments.json`, unconditional / never scope-filtered), apply_with_rollback_on_regression() (generic plan-apply helper: snapshots the artifact's prior bytes, restores them if a `validate_brain` corpus-error-count regression follows the write), roadmap_slug_from_plan_path() (an `Epic`'s `plan` path → the roadmap slug it names, `None` for a non-`roadmap.md` plan doc — never guesses from the last path segment), derive_program_membership() (corpus-wide, grouped-by-roadmap feed for `emit::epic_members_resolved`'s `kind: program` case; independent re-derivation via `discover_lane_files`/`derive_lane_positions` rather than a read of the `LANE_SEGMENTS_ARTIFACT` file, because epic boards/sequences are planned before the lane-segments artifact write in `emit_state`'s ordering; discards its own discovery/double-claim diagnostics since `plan_lane_segments` reports the same ones later in the same run) — MV.13.A (cross-repo lane-file segmentation + double-claim resolution feeding the deferred MV.13.B frontier computation); MV.13.D Task 3 added roadmap_slug_from_plan_path()/derive_program_membership()
+    └── lane_segments.rs ← LaneSegment, LaneSegmentBlock (with `.head()`), Origin; discover_lane_files(), parse_lane_blocks() (parses `# ORIGIN:` directives + ordered block-ID lines, roadmap-vs-legacy layout collision diagnostics, both-locations double-registration error), build_owner_index(), resolve_owner() (None on zero or >1 matching repo — never guesses), segment_lane_file() (cuts a new `(repo, chain)` segment on every ownership change), unresolved_owner_diagnostics() (warning per unresolvable ID), resolve_double_claims() (E_LANE_DOUBLE_CLAIM on an unannotated/ambiguously-annotated cross-roadmap block claim; a single annotated claim renders once under the executing roadmap carrying `origin_roadmap`), derive_lane_positions() (wraps double-claim resolution + segmentation into final `{roadmap, lane, segment, position}` per block), plan_lane_segments() (`emit-state` planner writing `planning/lane-segments.json`, unconditional / never scope-filtered), apply_with_rollback_on_regression() (generic plan-apply helper: snapshots the artifact's prior bytes, restores them if a `validate_brain` corpus-error-count regression follows the write), roadmap_slug_from_plan_path() (an `Epic`'s `plan` path → the roadmap slug it names, `None` for a non-`roadmap.md` plan doc — never guesses from the last path segment), derive_program_membership() (corpus-wide, grouped-by-roadmap feed for `emit::epic_members_resolved`'s `kind: program` case; independent re-derivation via `discover_lane_files`/`derive_lane_positions` rather than a read of the `LANE_SEGMENTS_ARTIFACT` file, because epic boards/sequences are planned before the lane-segments artifact write in `emit_state`'s ordering; discards its own discovery/double-claim diagnostics since `plan_lane_segments` reports the same ones later in the same run), `LaneDirectives`/`LaneBudget`, `parse_lane_directives()` (scans a lane file's comment-only lines for the fixed-prefix `# HELD-UNTIL:`/`# BUDGET:`/`# EXCLUSIVE-REPOS:` directives, mirroring the `# ORIGIN:` convention; `E_LANE_DIRECTIVE_UNRECOGNISED`/`E_LANE_DIRECTIVE_MALFORMED` diagnostics on a bad attempt, never fatal to the rest of the lane), `segment_lane_file_segments()` (stamps a lane's directives onto every `LaneSegment` it cuts) — MV.13.A (cross-repo lane-file segmentation + double-claim resolution feeding the deferred MV.13.B frontier computation); MV.13.D Task 3 added roadmap_slug_from_plan_path()/derive_program_membership(); `MV.ticket.lane-file-structured-directives` added the directive grammar (a cross-repo contract with `engine-rs:EN.10.B`, which enforces what this module only derives/reports, and `base-template:BT.ticket.generate-roadmap-lane-directives`, which emits it from `/generate-roadmap`) — `DerivedBlockPosition.directives` carries it onto `LANE_SEGMENTS_ARTIFACT`, omitted (not `null`) when a lane declares none
 └── doc/
     ├── mod.rs             ← module docs + re-exports — Phase 9 Block MV.9.A
     ├── materialize.rs     ← plan_document() — generic per-model doc planner
@@ -403,7 +403,7 @@ The emit module is the **single derivation engine** for all generated views decl
 | `plan_tier_rollups` | `(&[(StateSource, StateFile)], &StateGraph, &BrainConfig) -> EmitPlan` | MV.4.B: for each loaded `kind == "brain"` file whose `tier_scope_for` resolves to `TierScope::Tier` (the HQ root, which resolves to `TierScope::All`, is out of scope — that's MV.4.C's `plan_hq_board`), derives tier-scoped rollup rows via `derive_rollup` and renders them (`render_tier_rollup_table`, private: `Repo \| Now \| Next \| Blocked`) into the sibling `status.md`'s `TIER_ROLLUP` sentinel. A missing `status.md` or missing sentinels yields `W_EMIT_NO_SENTINEL` (never invents sentinels). Wired into `emit_state` by MV.4.E. |
 | `render_hq_board` | `(&Focus, &[CrossRepoEdge]) -> String` | MV.4.C: pure renderer for the HQ root's Operating Board — three always-present `## NOW` / `## NEXT` / `## BLOCKED` sections (each `_none_` when empty), one `- {repo}:{id} — {title}` line per block in the input `Focus`'s own order. A block with `blocked_by` entries appends a trailing `(blocked by ...)` parenthetical, comma-joining multiple blockers; per-blocker text prefers a matching `cross_repo[]` edge's note, falling back to the dependency's own `what` gloss, then the bare `repo:id` target (private helpers: `render_hq_board_section`, `render_hq_board_line`, `render_hq_board_blocker`). |
 | `plan_hq_board` | `(&[(StateSource, StateFile)], &StateGraph, &BrainConfig) -> EmitPlan` | MV.4.C: for the loaded `kind == "brain"` file whose `tier_scope_for` resolves to `TierScope::All` (the HQ root; tier sub-brains are skipped — that's `plan_tier_rollups`'s job), resolves the sibling `status.md` (state.json's parent dir) and splices `render_hq_board(derive_brain_focus(...), derive_cross_repo(...))` into its `HQ_BOARD` sentinel. A missing `status.md` or missing sentinels yields `W_EMIT_NO_SENTINEL` (never invents sentinels). Wired into `emit_state` by MV.4.E. |
-| `render_unified_board` | `(&Focus, &[CrossRepoEdge], &BrainConfig, chrono::NaiveDate, &HashMap<String, u8>) -> String` | MV.6.B: pure renderer for the HQ root's priority-ranked unified board — `## NOW` / `## NEXT` / `## BLOCKED` / `## DUE-SOON`, unioning every registered repo (including the business tier) and tagging each row `[BIZ]`/`[ENG]` by the block's `repo` slug looked up in `config.repos` (`tier == "business"` renders `[BIZ]`; the `business` tier ROOT itself — `tier = "_root"`, slug `business` — also renders `[BIZ]` by slug match, fixed 2026-07-17 alongside `derive_brain_focus`'s tier-root fold; everything else, including an unrecognised slug, renders `[ENG]`). MV.7.A: `NEXT` is stably re-sorted by `(effective_priority asc, due asc)`, where `effective_priority_for(block, effective)` looks up `"repo:id"` in the new `effective` map parameter first, falling back to the block's own raw `priority`, then `u8::MAX` when neither is present — so a block that gates a hotter dependent floats to the top even with no own priority. Absent values sort last, keeping wave as the implicit tertiary key since `Focus::next` is already wave-ordered; `NOW`/`BLOCKED` preserve caller order, matching `render_hq_board`. `DUE-SOON` lists every block from the now+next+blocked union whose `due` parses (`%Y-%m-%d`) and is `<= today + 14 days` (`DUE_SOON_WINDOW_DAYS`), sorted by due date ascending, annotating `(overdue)` when `due < today`; blocks with an absent/unparseable `due` are excluded (private helpers: `render_unified_board_section`, `sort_unified_board_next`, `effective_priority_for`, `parse_due`, `render_due_soon_section`). |
+| `render_unified_board` | `(&Focus, &[CrossRepoEdge], &BrainConfig, chrono::NaiveDate, &HashMap<String, u8>) -> String` | MV.6.B: pure renderer for the HQ root's priority-ranked unified board — `## NOW` / `## NEXT` / `## BLOCKED` / `## DUE-SOON`, unioning every registered repo (including the business tier) and tagging each row `[BIZ]`/`[ENG]` by the block's `repo` slug looked up in `config.repos` (`tier == "business"` renders `[BIZ]`; the `business` tier ROOT itself — `tier = "_root"`, slug `business` — also renders `[BIZ]` by slug match, fixed 2026-07-17 alongside `derive_brain_focus`'s tier-root fold; everything else, including an unrecognised slug, renders `[ENG]`). MV.7.A: `NEXT` is stably re-sorted by `(effective_priority asc, due asc)`, where `effective_priority_for(repo, id, priority, effective)` looks up `"repo:id"` in the new `effective` map parameter first, falling back to the block's own raw `priority`, then `u8::MAX` when neither is present — so a block that gates a hotter dependent floats to the top even with no own priority. Absent values sort last, keeping wave as the implicit tertiary key since `Focus::next` is already wave-ordered; `NOW`/`BLOCKED` preserve caller order, matching `render_hq_board`. `DUE-SOON` lists every block from the now+next+blocked union whose `due` parses (`%Y-%m-%d`) and is `<= today + 14 days` (`DUE_SOON_WINDOW_DAYS`), sorted by due date ascending, annotating `(overdue)` when `due < today`; blocks with an absent/unparseable `due` are excluded (private helpers: `render_unified_board_section`, `sort_unified_board_next`, `parse_due`, `render_due_soon_section`; `effective_priority_for` is `pub(crate)` — MV.13.B Task 2 widened it to `(repo, id, priority, effective)` so `frontier::gate_ranks` can share it for `TrackBlock` lookups too). |
 | `plan_unified_board` | `(&[(StateSource, StateFile)], &StateGraph, &BrainConfig, chrono::NaiveDate) -> EmitPlan` | MV.6.B: mirrors `plan_hq_board` exactly (same HQ-root `TierScope::All` gating, same `status.md` target resolution, same `W_EMIT_NO_SENTINEL` diagnostics) but targets the independent `markers::UNIFIED_BOARD` sentinel in the same document and splices `render_unified_board(derive_brain_focus(...), derive_cross_repo(...), config, today, effective)`. MV.7.A: `effective` is `effective_priorities(graph, files)`, computed once up front and threaded into the renderer so `NEXT` sorts by effective (inherited) priority rather than each block's raw own priority. Wired into `emit_state` by MV.6.B, run after `plan_hq_board`. |
 | `topo_order` | `(&StateGraph, &[(StateSource, StateFile)]) -> Vec<String>` | MV.10.A: cycle-safe DFS topological order over the full `depends_on` graph (every block, every repo), seeded in `wave_order` so an unconstrained pair still reads in stable wave-then-iteration order. Only `{type:"block"}` deps resolving to a real node participate; a node already on the DFS stack short-circuits instead of recursing again (mirrors the guard in `effective_priorities`). Extracted out of `epic_members`, which is now a thin filter over this. |
 | `epic_members` | `(&StateGraph, &[(StateSource, StateFile)], &str) -> Vec<(String, &TrackBlock)>` | Every block claiming a slug, across all repos, in dependency-respecting order — the cross-repo sequence for one initiative. MV.10.A: filters `topo_order`'s full-corpus topological order down to the epic's members. |
@@ -739,6 +739,82 @@ builds the `StateGraph`, and calls `build_block_graph_export`. An individual mal
 `state.json` is skipped rather than failing the whole call, matching bastion's
 `assemble_board` posture; only an unresolvable brain root or a failed epic-scope validation
 is a hard `Err`. The returned `BlockGraphExport` is a pure value — nothing is written to disk.
+
+---
+
+### Frontier computation + gate_rank (`src/brain/frontier.rs`) — Phase 13, Block MV.13.B
+
+Computes the corpus-wide startable-block frontier — one entry per active
+`(roadmap, lane, segment)`, naming the segment head (first not-`closed` block) and
+exactly what blocks it — plus `gate_rank`, a derived priority for the targetless
+operator/approval gates `effective_priorities` never reaches. Consumed by `mev
+frontier` (CLI, read-only), `mev emit-state --write` (writes
+`planning/lane-frontier.json`), and, transitively, bastion's `/lanes` and
+concurrency-slot endpoints (`BA.19.C`, `BA.19.D`) and the `BW.16.x` cockpit board
+views — none of which re-derive the frontier themselves.
+
+**The consumer contract, stated plainly:** closure over the block graph MUST run in
+mev itself, over the untruncated in-process graph (`max_nodes: usize::MAX`) —
+`block_graph.rs` builds with `usize::MAX` internally, but the HTTP export (`mev
+emit-block-graph`, bastion's `GET /api/blocks/graph`) defaults to `max_nodes=400`
+against a corpus of ~756 blocks. Any HTTP-side closure — bastion's `BA.19.C`/`BA.19.D`
+included — MUST send `max_nodes=2000` and hard-fail on `truncated: true` rather than
+silently degrade to a partial frontier. mev cannot gate that half of the contract from
+here; the evidence that a given HTTP consumer honours it lives in that consumer's own
+repo. mev's own obligations are the `ensure_untruncated` refusal below and this written
+contract (mirrored in `docs/cli.md`'s `frontier` section).
+
+- **`ensure_untruncated(export: &BlockGraphExport) -> Result<(), Diagnostic>`** — the
+  refusal itself: errors `E_FRONTIER_TRUNCATED_GRAPH` when `export.truncated` is
+  `true`. Both `mev frontier` (via `frontier_brain`) and `mev emit-state`'s
+  `plan_frontier` call this before computing anything; neither path can hand a caller
+  (or write an artifact carrying) a frontier derived over a partial node set.
+- **`compute_frontier(lane_positions, graph, files, effective) -> Frontier`** — walks
+  `crate::brain::lane_segments::derive_lane_positions`'s output (never re-derives
+  segmentation), groups by `(roadmap, lane, segment)`, and picks the first
+  not-`closed` block in file order as the segment head. `unmet_blocks` names every
+  unmet `BlockedBy::Block` dependency (`repo:id`); `unmet_gates` names every unmet
+  `Operator`/`Approval`/`External` dependency (`operator:<slug>` /
+  `approval:<slug>` / `external:<what>`); `startable` is `true` iff both are empty. A
+  segment whose blocks are all `closed` contributes no entry.
+- **`gate_ranks(files, effective) -> Vec<GateRank>`** — operator/approval gates are
+  targetless (they gate a block but are not themselves graph nodes with dependents),
+  so `effective_priorities` never assigns them a priority. This groups every block
+  carrying such a dependency by `(kind, slug)` and takes the minimum
+  `effective_priority_for` across the group — reusing `emit`'s
+  `BlockedGroup::effective_priority` min-over-gated-blocks logic (the
+  `group_blocked_by_gate` section of `src/brain/emit.rs`), not a second
+  implementation. Sorted `(rank asc, slug asc)` for determinism; absent priority
+  sorts last (`u8::MAX`).
+- **`plan_frontier(root, loaded) -> EmitPlan`** — the `emit-state` planner (Task 3),
+  modelled on `plan_lane_segments`: builds the untruncated graph, refuses via
+  `ensure_untruncated`, and appends one `EmitAction` writing
+  `LANE_FRONTIER_ARTIFACT` (`planning/lane-frontier.json`) — never a partial write on
+  refusal. Corpus-wide, like `lane-segments.json`: never narrowed by `emit_state
+  --scope <repo>`. Wired into `emit_state` (`src/lib.rs`) immediately after the
+  lane-segments planner, applied through `apply_with_rollback_on_regression` in
+  `--write` mode.
+- **`FrontierArtifact` / `build_frontier_artifact(frontier) -> FrontierArtifact`** —
+  wraps a `Frontier` with a fresh `derived_at` (RFC 3339, `chrono::Local::now()`).
+  `state.json` only changes at `/log-work` time, but lane progress lands live between
+  those commits, so a consumer (`BA.19.C`) needs `derived_at` to tell how stale the
+  artifact is. Shared by both the `emit-state` artifact write and `mev frontier
+  --json`'s stdout output — one construction, two callers.
+- **`render_frontier_text(frontier) -> String`** — the `mev frontier` (without
+  `--json`) text renderer: one line per entry, `{roadmap}/{lane}#{segment}
+  {repo}:{id} — startable` or `— blocked by <reasons>` (comma-joined
+  `unmet_blocks` then `unmet_gates`). Does not render `gate_ranks` — `--json` is the
+  surface for those.
+
+#### Public library entry point
+
+`frontier_brain(root: &Path) -> anyhow::Result<Frontier>` (in `src/lib.rs`) is the
+read-only sibling of `block_graph_brain`: resolves `brain.toml`, discovers and loads
+every `planning/state.json`, discovers every lane file and derives lane positions the
+same way `plan_frontier` does, builds the in-process graph at `max_nodes: usize::MAX`,
+refuses via `ensure_untruncated`, then calls `compute_frontier`. Never writes
+`LANE_FRONTIER_ARTIFACT` — that write path is `plan_frontier`/`emit_state` only. This
+is the function behind `mev frontier`.
 
 ---
 
