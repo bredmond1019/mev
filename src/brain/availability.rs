@@ -40,7 +40,9 @@ use serde::Deserialize;
 use crate::Diagnostic;
 use crate::brain::config::RepoEntry;
 use crate::brain::frontier::{Frontier, FrontierEntry};
+use crate::brain::lane_segments::DerivedBlockPosition;
 use crate::brain::lock::pid_is_alive;
+use crate::brain::state::{StateEdgeKind, StateFile, StateGraph, StateSource};
 use crate::shared::extract_frontmatter;
 
 /// The six possible availability states for one lane segment.
@@ -620,6 +622,195 @@ pub fn segment_statuses_with_slots(
     (statuses, degraded)
 }
 
+// ---------------------------------------------------------------------------
+// Lane-level unblock leverage — MV.13.C Task 4
+// ---------------------------------------------------------------------------
+
+/// Identity of one lane segment: `(roadmap, lane, segment)`. Used as the map key
+/// for [`lane_leverage`]'s output, and to test self-lane exclusion by comparing
+/// `(roadmap, lane)` against a candidate downstream head's own identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+pub struct SegmentKey {
+    pub roadmap: String,
+    pub lane: String,
+    pub segment: usize,
+}
+
+/// One segment's lane-level unblock leverage: how many *lanes* (not blocks) are
+/// freed by closing this segment.
+///
+/// Deliberately distinct from [`crate::brain::block_graph::BlockGraphNode::dependent_count`],
+/// which counts individual dependent *blocks* corpus-wide. This metric instead
+/// counts distinct `(roadmap, lane)` pairs whose *current segment head* falls
+/// inside the transitive closure of blocks that depend (directly or indirectly)
+/// on any block in this segment — several blocks in the same lane collapse to one
+/// lane, and a lane several hops downstream still counts once it is reached.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct LaneLeverage {
+    pub lanes_freed: usize,
+    /// `"<roadmap>/<lane>"` per freed lane, sorted for deterministic output.
+    pub lanes: Vec<String>,
+}
+
+/// Group `lane_positions` by `(roadmap, lane, segment)` into the set of
+/// `"repo:id"` block keys each segment owns — the closure seed set for
+/// [`lane_leverage`]. Mirrors [`crate::brain::frontier::compute_frontier`]'s own
+/// `(roadmap, lane, segment)` grouping, but keeps every member (not just the
+/// head) since any block in the segment can be the target of a downstream
+/// `BlockedBy::Block` edge.
+fn group_segment_blocks(
+    lane_positions: &[DerivedBlockPosition],
+) -> HashMap<SegmentKey, HashSet<String>> {
+    let mut map: HashMap<SegmentKey, HashSet<String>> = HashMap::new();
+    for p in lane_positions {
+        let key = SegmentKey {
+            roadmap: p.roadmap.clone(),
+            lane: p.lane.clone(),
+            segment: p.segment,
+        };
+        map.entry(key)
+            .or_default()
+            .insert(format!("{}:{}", p.repo, p.id));
+    }
+    map
+}
+
+/// Corpus-wide fan-in index: `to_ref -> {from, from, ...}`, over
+/// `StateEdgeKind::BlockedBy` edges only (`CrossRepo` edges are not dependency
+/// closure edges). The same edge-kind filter
+/// [`crate::brain::block_graph::build_block_graph_export`]'s `dependent_count`
+/// derivation uses, but keeping the actual dependent keys rather than only a
+/// count, since [`lane_leverage`] needs to walk the closure, not just size it.
+fn dependents_index(graph: &StateGraph) -> HashMap<&str, HashSet<&str>> {
+    let mut map: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for edge in &graph.edges {
+        if edge.kind == StateEdgeKind::BlockedBy {
+            map.entry(edge.to_ref.as_str())
+                .or_default()
+                .insert(edge.from.as_str());
+        }
+    }
+    map
+}
+
+/// Transitive closure of every block reachable from `seed` by following
+/// dependent edges outward (`seed`'s own members are never included in the
+/// result) — a BFS/DFS over [`dependents_index`]'s adjacency, not a single hop,
+/// so a three-deep dependency chain across three lanes reaches all three, not
+/// just the first.
+fn transitive_closure(
+    seed: &HashSet<String>,
+    dependents_of: &HashMap<&str, HashSet<&str>>,
+) -> HashSet<String> {
+    let mut visited: HashSet<String> = seed.clone();
+    let mut queue: Vec<String> = seed.iter().cloned().collect();
+    let mut closure: HashSet<String> = HashSet::new();
+
+    while let Some(key) = queue.pop() {
+        if let Some(deps) = dependents_of.get(key.as_str()) {
+            for &dep in deps {
+                let dep_owned = dep.to_string();
+                if visited.insert(dep_owned.clone()) {
+                    closure.insert(dep_owned.clone());
+                    queue.push(dep_owned);
+                }
+            }
+        }
+    }
+
+    closure
+}
+
+/// Compute lane-level unblock leverage for every segment discovered in
+/// `lane_positions`: for each segment `S`, the transitive closure (via
+/// `BlockedBy::Block` edges in `graph`) of every block that depends, directly or
+/// indirectly, on any block in `S`, then the distinct `(roadmap, lane)` pairs
+/// whose *current* segment head (from `frontier.entries`) falls inside that
+/// closure.
+///
+/// A segment's own lane is always excluded from its own `lanes_freed` — a later
+/// segment in the same lane depending on an earlier one is not a *different*
+/// lane being freed.
+///
+/// `graph` MUST be built over the untruncated in-process corpus
+/// (`build_state_graph`, never a `max_nodes`-truncated `BlockGraphExport`) — see
+/// [`lane_leverage_over_untruncated_graph`], which layers
+/// [`crate::brain::frontier::ensure_untruncated`]'s refusal on top of this pure
+/// closure computation.
+pub fn lane_leverage(
+    graph: &StateGraph,
+    lane_positions: &[DerivedBlockPosition],
+    frontier: &Frontier,
+) -> HashMap<SegmentKey, LaneLeverage> {
+    let segment_blocks = group_segment_blocks(lane_positions);
+    let dependents_of = dependents_index(graph);
+
+    let mut result = HashMap::with_capacity(segment_blocks.len());
+    for (seg_key, blocks) in &segment_blocks {
+        let closure = transitive_closure(blocks, &dependents_of);
+
+        let mut lanes: HashSet<(String, String)> = HashSet::new();
+        for entry in &frontier.entries {
+            if entry.roadmap == seg_key.roadmap && entry.lane == seg_key.lane {
+                continue; // self-lane exclusion — never counts toward its own leverage
+            }
+            if closure.contains(&entry.key) {
+                lanes.insert((entry.roadmap.clone(), entry.lane.clone()));
+            }
+        }
+
+        let mut lane_names: Vec<String> = lanes
+            .into_iter()
+            .map(|(roadmap, lane)| format!("{roadmap}/{lane}"))
+            .collect();
+        lane_names.sort();
+
+        result.insert(
+            seg_key.clone(),
+            LaneLeverage {
+                lanes_freed: lane_names.len(),
+                lanes: lane_names,
+            },
+        );
+    }
+
+    result
+}
+
+/// Plan-time wrapper around [`lane_leverage`] that builds the untruncated
+/// (`max_nodes: usize::MAX`) block-graph export purely to run it through
+/// [`crate::brain::frontier::ensure_untruncated`] — the same refusal `MV.13.B`
+/// established for [`crate::brain::frontier::plan_frontier`], reused here rather
+/// than re-implemented: this closure MUST run over the full in-process graph,
+/// never a partial one, for the same reason a truncated frontier silently drops
+/// gates.
+pub fn lane_leverage_over_untruncated_graph(
+    root: &Path,
+    loaded: &[(StateSource, StateFile)],
+    graph: &StateGraph,
+    lane_positions: &[DerivedBlockPosition],
+    frontier: &Frontier,
+) -> Result<HashMap<SegmentKey, LaneLeverage>, Diagnostic> {
+    use crate::brain::block_graph::{BlockGraphScope, build_block_graph_export};
+    use crate::brain::config::load_brain_config;
+    use crate::brain::frontier::ensure_untruncated;
+    use crate::brain::state::TierScope;
+
+    let config = load_brain_config(&root.join("brain.toml")).unwrap_or_default();
+    let scope = BlockGraphScope {
+        tier: TierScope::All,
+        epic: None,
+        repo: None,
+        include_closed: true,
+        include_boundary: false,
+        max_nodes: usize::MAX,
+    };
+    let export = build_block_graph_export(root, &config, graph, loaded, &scope);
+    ensure_untruncated(&export)?;
+
+    Ok(lane_leverage(graph, lane_positions, frontier))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1176,6 +1367,226 @@ mod tests {
         assert_eq!(avail, SegmentAvailability::HeldSlot);
         assert!(reason.is_some());
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // -----------------------------------------------------------------
+    // lane_leverage — MV.13.C Task 4
+    // -----------------------------------------------------------------
+
+    fn lane_pos(
+        roadmap: &str,
+        lane: &str,
+        segment: usize,
+        repo: &str,
+        id: &str,
+    ) -> DerivedBlockPosition {
+        DerivedBlockPosition {
+            roadmap: roadmap.to_string(),
+            lane: lane.to_string(),
+            repo: repo.to_string(),
+            id: id.to_string(),
+            line: 1,
+            segment,
+            position: 0,
+            origin_roadmap: None,
+            directives: None,
+        }
+    }
+
+    fn state_edge(from: &str, to_ref: &str) -> crate::brain::state::StateEdge {
+        crate::brain::state::StateEdge {
+            from: from.to_string(),
+            to_ref: to_ref.to_string(),
+            kind: StateEdgeKind::BlockedBy,
+            source_path: PathBuf::new(),
+        }
+    }
+
+    fn frontier_entry(roadmap: &str, lane: &str, segment: usize, key: &str) -> FrontierEntry {
+        FrontierEntry {
+            roadmap: roadmap.to_string(),
+            lane: lane.to_string(),
+            segment,
+            repo: key.split(':').next().unwrap().to_string(),
+            key: key.to_string(),
+            id: key.split(':').nth(1).unwrap().to_string(),
+            title: String::new(),
+            status: "open".to_string(),
+            unmet_blocks: Vec::new(),
+            unmet_gates: Vec::new(),
+            startable: true,
+        }
+    }
+
+    #[test]
+    fn transitive_chain_across_three_lanes_scores_two_not_one() {
+        // S = lane-a/0 = {repo:A1}. lane-b/0 head B1 depends directly on A1.
+        // lane-c/0 head C1 depends on B1 (two hops from S, not a direct dependent).
+        // A one-hop implementation would score 1 (only B1); the real answer is 2.
+        let lane_positions = vec![
+            lane_pos("r", "lane-a", 0, "repo", "A1"),
+            lane_pos("r", "lane-b", 0, "repo", "B1"),
+            lane_pos("r", "lane-c", 0, "repo", "C1"),
+        ];
+        let graph = StateGraph {
+            nodes: Vec::new(),
+            edges: vec![
+                state_edge("repo:B1", "repo:A1"),
+                state_edge("repo:C1", "repo:B1"),
+            ],
+        };
+        let frontier = Frontier {
+            entries: vec![
+                frontier_entry("r", "lane-b", 0, "repo:B1"),
+                frontier_entry("r", "lane-c", 0, "repo:C1"),
+            ],
+            gate_ranks: Vec::new(),
+        };
+
+        let leverage = lane_leverage(&graph, &lane_positions, &frontier);
+        let s = leverage
+            .get(&SegmentKey {
+                roadmap: "r".to_string(),
+                lane: "lane-a".to_string(),
+                segment: 0,
+            })
+            .expect("segment must be present");
+        assert_eq!(
+            s.lanes_freed, 2,
+            "expected both lane-b and lane-c freed, got {s:?}"
+        );
+        assert_eq!(
+            s.lanes,
+            vec!["r/lane-b".to_string(), "r/lane-c".to_string()]
+        );
+    }
+
+    #[test]
+    fn two_segments_in_the_same_lane_collapse_to_one_lane() {
+        // S = lane-a/0 = {repo:A1}. lane-b has two segments, both reachable from A1:
+        // lane-b/0 head B1 depends on A1; lane-b/1 head B2 depends on B1. Both are
+        // lane-b -> lanes_freed must be 1, not 2.
+        let lane_positions = vec![
+            lane_pos("r", "lane-a", 0, "repo", "A1"),
+            lane_pos("r", "lane-b", 0, "repo", "B1"),
+            lane_pos("r", "lane-b", 1, "repo", "B2"),
+        ];
+        let graph = StateGraph {
+            nodes: Vec::new(),
+            edges: vec![
+                state_edge("repo:B1", "repo:A1"),
+                state_edge("repo:B2", "repo:B1"),
+            ],
+        };
+        let frontier = Frontier {
+            entries: vec![
+                frontier_entry("r", "lane-b", 0, "repo:B1"),
+                frontier_entry("r", "lane-b", 1, "repo:B2"),
+            ],
+            gate_ranks: Vec::new(),
+        };
+
+        let leverage = lane_leverage(&graph, &lane_positions, &frontier);
+        let s = leverage
+            .get(&SegmentKey {
+                roadmap: "r".to_string(),
+                lane: "lane-a".to_string(),
+                segment: 0,
+            })
+            .unwrap();
+        assert_eq!(
+            s.lanes_freed, 1,
+            "two segments in lane-b must collapse to one lane, got {s:?}"
+        );
+        assert_eq!(s.lanes, vec!["r/lane-b".to_string()]);
+    }
+
+    #[test]
+    fn segment_gating_nothing_scores_zero() {
+        let lane_positions = vec![lane_pos("r", "lane-a", 0, "repo", "A1")];
+        let graph = StateGraph {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        };
+        let frontier = Frontier {
+            entries: vec![frontier_entry("r", "lane-a", 0, "repo:A1")],
+            gate_ranks: Vec::new(),
+        };
+
+        let leverage = lane_leverage(&graph, &lane_positions, &frontier);
+        let s = leverage
+            .get(&SegmentKey {
+                roadmap: "r".to_string(),
+                lane: "lane-a".to_string(),
+                segment: 0,
+            })
+            .unwrap();
+        assert_eq!(s.lanes_freed, 0);
+        assert!(s.lanes.is_empty());
+    }
+
+    #[test]
+    fn self_lane_exclusion_holds() {
+        // S = lane-a/0 = {repo:A1}. lane-a/1 head A2 depends on A1 — same lane,
+        // later segment. Must never count toward its own lanes_freed.
+        let lane_positions = vec![
+            lane_pos("r", "lane-a", 0, "repo", "A1"),
+            lane_pos("r", "lane-a", 1, "repo", "A2"),
+        ];
+        let graph = StateGraph {
+            nodes: Vec::new(),
+            edges: vec![state_edge("repo:A2", "repo:A1")],
+        };
+        let frontier = Frontier {
+            entries: vec![frontier_entry("r", "lane-a", 1, "repo:A2")],
+            gate_ranks: Vec::new(),
+        };
+
+        let leverage = lane_leverage(&graph, &lane_positions, &frontier);
+        let s = leverage
+            .get(&SegmentKey {
+                roadmap: "r".to_string(),
+                lane: "lane-a".to_string(),
+                segment: 0,
+            })
+            .unwrap();
+        assert_eq!(
+            s.lanes_freed, 0,
+            "own lane must never count toward its own leverage, got {s:?}"
+        );
+        assert!(s.lanes.is_empty());
+    }
+
+    #[test]
+    fn lane_leverage_over_untruncated_graph_returns_the_same_map() {
+        let root = crate::testsupport::unique_temp_dir("mev-availability-lane-leverage-plan");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let lane_positions = vec![
+            lane_pos("r", "lane-a", 0, "repo", "A1"),
+            lane_pos("r", "lane-b", 0, "repo", "B1"),
+        ];
+        let graph = StateGraph {
+            nodes: Vec::new(),
+            edges: vec![state_edge("repo:B1", "repo:A1")],
+        };
+        let frontier = Frontier {
+            entries: vec![frontier_entry("r", "lane-b", 0, "repo:B1")],
+            gate_ranks: Vec::new(),
+        };
+
+        let result =
+            lane_leverage_over_untruncated_graph(&root, &[], &graph, &lane_positions, &frontier)
+                .expect("untruncated in-process graph must never be refused");
+        let s = result
+            .get(&SegmentKey {
+                roadmap: "r".to_string(),
+                lane: "lane-a".to_string(),
+                segment: 0,
+            })
+            .unwrap();
+        assert_eq!(s.lanes_freed, 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 
