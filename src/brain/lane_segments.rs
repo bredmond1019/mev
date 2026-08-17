@@ -31,6 +31,18 @@
 //! It holds blocks cut by operator decision and is the *only* place that decision is
 //! encoded — nothing in `state.json` mirrors it. The `lane-*.txt` glob must never widen to
 //! catch it.
+//!
+//! # Structured directives (`MV.ticket.lane-file-structured-directives`)
+//!
+//! Three more fixed-prefix, comment-only header lines are machine-readable, mirroring the
+//! `# ORIGIN:` convention above rather than replacing it: `# HELD-UNTIL:`, `# BUDGET:` and
+//! `# EXCLUSIVE-REPOS:`. Unlike `# ORIGIN:`, which attaches to the one block-ID line that
+//! follows it, these three describe the *whole lane* — see [`LaneDirectives`] for the
+//! grammar and [`LaneFile::directives`] for where the parsed value lands. This is a
+//! cross-repo contract: `engine-rs:EN.10.B` enforces what this module only derives and
+//! reports, and `base-template:BT.ticket.generate-roadmap-lane-directives` emits this exact
+//! grammar from `/generate-roadmap`. Do not change the spelling or value shape here without
+//! updating both.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -73,6 +85,168 @@ pub struct LaneFile {
     /// The ordered, comment-and-blank-stripped block-ID list. File order is execution
     /// order and is preserved exactly — never sorted, deduped, or normalised.
     pub blocks: Vec<LaneBlockRef>,
+    /// This lane's structured directives (`MV.ticket.lane-file-structured-directives`
+    /// Task 1), or `None` when the file declares none of `HELD-UNTIL`, `BUDGET` or
+    /// `EXCLUSIVE-REPOS` — absence, never a defaulted or empty-but-present value. See
+    /// [`LaneDirectives`] for the grammar.
+    pub directives: Option<LaneDirectives>,
+}
+
+/// A lane's structured directives — machine-readable declarations of a hold, a heavy/light
+/// resource budget, and cross-lane repo exclusivity, in place of the English-in-a-comment
+/// header this replaces (`planning/operator-surface/lane-terminal.txt`'s retired prose:
+/// *"Nothing in the tooling enforces it — the roadmap and this comment are the only places
+/// it is stated."*).
+///
+/// Every field is `Option`, absent unless the lane file declares it, and the whole struct
+/// is itself wrapped in `Option` on [`LaneFile::directives`]: a lane declaring **none** of
+/// the three directives produces `directives: None` there, never `Some(LaneDirectives {
+/// held_until: None, budget: None, exclusive_repos: None })`. Absence must read as
+/// "unspecified", never as "unconstrained" — a caller that only checks `is_some()` on the
+/// wrapping `Option` gets the right answer either way, but a caller that matches on
+/// individual fields must not be able to mistake "declared nothing" for "declared an empty
+/// constraint".
+///
+/// # Grammar
+///
+/// Each directive is a comment-only line (nothing but `#`, optional leading whitespace, and
+/// the directive itself precede the newline) whose body — after `#` and leading whitespace
+/// — starts with one of three fixed, case-sensitive, upper-case prefixes. This mirrors the
+/// existing `# ORIGIN:` convention (above): a fixed-prefix directive is structure, every
+/// other comment is prose, and a directive-looking string embedded in an ordinary sentence
+/// never parses as one because the prefix must be the first thing after `#`, not merely
+/// present somewhere in the line.
+///
+/// - **`# HELD-UNTIL: <token>`** — the block ID or operator-gate slug the *whole lane*
+///   waits on before any block in it may start. `<token>` is the first whitespace-delimited
+///   word after the prefix; this module carries it as opaque text and never resolves it
+///   against the corpus (that is `engine-rs:EN.10.B`'s job, not this parser's).
+/// - **`# BUDGET: <HEAVY|LIGHT> [NOT-WITH <repo>[,<repo>...]]`** — the lane's resource
+///   class, matched case-insensitively, plus an optional `NOT-WITH` clause naming repo
+///   slugs this lane's budget must not run concurrently beside. The clause is
+///   comma-separated with no required surrounding whitespace; when absent, the budget is
+///   still `Some(..)` (the level was declared) with an empty `not_with` list — an empty
+///   list here means "no additional exclusion beyond the budget class itself", which is
+///   different from `exclusive_repos` being absent entirely.
+/// - **`# EXCLUSIVE-REPOS: <repo>[,<repo>...]`** — repo slugs that this lane alone may
+///   drive while it is open; comma-separated, no other lane in any roadmap may touch them
+///   concurrently.
+///
+/// An unrecognised key or a malformed value for a recognised key is a later task's
+/// diagnostic (`MV.ticket.lane-file-structured-directives` Task 2) — this parser only
+/// recognises the three well-formed shapes above; anything else is left untouched, exactly
+/// as free prose always has been.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaneDirectives {
+    pub held_until: Option<String>,
+    pub budget: Option<LaneBudget>,
+    pub exclusive_repos: Option<Vec<String>>,
+}
+
+impl LaneDirectives {
+    /// `true` iff none of the three fields is set — the signal [`parse_lane_directives`]
+    /// uses to collapse an all-absent result down to `None` rather than an empty `Some`.
+    fn is_empty(&self) -> bool {
+        self.held_until.is_none() && self.budget.is_none() && self.exclusive_repos.is_none()
+    }
+}
+
+/// The `# BUDGET:` directive's parsed value — see [`LaneDirectives`] for the grammar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneBudget {
+    /// `true` for `HEAVY`, `false` for `LIGHT`.
+    pub heavy: bool,
+    /// Repo slugs from an optional `NOT-WITH` clause. Empty when the directive declared
+    /// only a level — this is not the same as [`LaneDirectives::exclusive_repos`] being
+    /// absent; it is a property of the budget class, not a separate directive.
+    pub not_with: Vec<String>,
+}
+
+/// Fixed-prefix keys [`parse_lane_directives`] recognises. See [`LaneDirectives`] for the
+/// grammar each one parses under.
+const DIRECTIVE_HELD_UNTIL_PREFIX: &str = "HELD-UNTIL:";
+const DIRECTIVE_BUDGET_PREFIX: &str = "BUDGET:";
+const DIRECTIVE_EXCLUSIVE_REPOS_PREFIX: &str = "EXCLUSIVE-REPOS:";
+/// The optional clause inside a `# BUDGET:` value naming repos this lane's budget must not
+/// run concurrently beside.
+const BUDGET_NOT_WITH_MARKER: &str = "NOT-WITH";
+
+/// Split a comma-separated repo list into trimmed, non-empty slugs. Used by both
+/// `# EXCLUSIVE-REPOS:` and `# BUDGET:`'s `NOT-WITH` clause — the same grammar in both
+/// places, one function.
+fn parse_repo_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+impl LaneBudget {
+    /// Parse the text after `# BUDGET:` (already trimmed of the prefix). Returns `None`
+    /// when the leading token is neither `HEAVY` nor `LIGHT` (case-insensitive) — Task 1
+    /// leaves that malformed case unrecorded; Task 2 turns it into a diagnostic.
+    fn parse(value: &str) -> Option<Self> {
+        let (level_part, not_with_part) = match value.find(BUDGET_NOT_WITH_MARKER) {
+            Some(pos) => (
+                &value[..pos],
+                Some(&value[pos + BUDGET_NOT_WITH_MARKER.len()..]),
+            ),
+            None => (value, None),
+        };
+        let level = level_part.trim();
+        let heavy = if level.eq_ignore_ascii_case("HEAVY") {
+            true
+        } else if level.eq_ignore_ascii_case("LIGHT") {
+            false
+        } else {
+            return None;
+        };
+        let not_with = not_with_part
+            .map(|rest| parse_repo_list(rest.trim_start().trim_start_matches(':').trim()))
+            .unwrap_or_default();
+        Some(LaneBudget { heavy, not_with })
+    }
+}
+
+/// Scan every comment-only line of `content` for the three structured directives (see
+/// [`LaneDirectives`]) and collapse the result: `None` when the file declares none of them,
+/// `Some(..)` with only the declared fields set otherwise. A directive line may appear
+/// anywhere in the file — these describe the whole lane, not one block, so they are not
+/// scoped to a header region the way `# ORIGIN:` is scoped to the block that follows it.
+///
+/// A malformed value for a recognised key is simply not recorded (Task 1's parser does not
+/// yet diagnose it — see [`LaneDirectives`]'s doc for the Task 2 pointer); an unrecognised
+/// key never matches any of the three prefixes and is left as ordinary prose, unchanged
+/// from today's behaviour.
+fn parse_lane_directives(content: &str) -> Option<LaneDirectives> {
+    let mut out = LaneDirectives::default();
+    for raw_line in content.lines() {
+        let Some(hash_pos) = raw_line.find('#') else {
+            continue;
+        };
+        if !raw_line[..hash_pos].trim().is_empty() {
+            continue; // not a comment-only line — a trailing #comment on a block-ID line
+        }
+        let body = raw_line[hash_pos + 1..].trim_start();
+        if let Some(value) = body.strip_prefix(DIRECTIVE_HELD_UNTIL_PREFIX) {
+            let token = value.split_whitespace().next();
+            if let Some(token) = token {
+                out.held_until = Some(token.to_string());
+            }
+        } else if let Some(value) = body.strip_prefix(DIRECTIVE_BUDGET_PREFIX) {
+            if let Some(budget) = LaneBudget::parse(value.trim()) {
+                out.budget = Some(budget);
+            }
+        } else if let Some(value) = body.strip_prefix(DIRECTIVE_EXCLUSIVE_REPOS_PREFIX) {
+            let repos = parse_repo_list(value.trim());
+            if !repos.is_empty() {
+                out.exclusive_repos = Some(repos);
+            }
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 /// Discover every live `lane-*.txt` file under `root/planning/roadmaps/<slug>/` and legacy
@@ -223,6 +397,7 @@ fn collect_lane_files_in(
             lane,
             path,
             blocks: parse_lane_blocks(&content),
+            directives: parse_lane_directives(&content),
         });
     }
 }
@@ -355,6 +530,11 @@ pub struct LaneSegment {
     pub segment: usize,
     /// Ordered, in file order — never sorted, deduped, or normalised.
     pub blocks: Vec<LaneSegmentBlock>,
+    /// The owning lane's structured directives (see [`LaneDirectives`]), carried onto
+    /// every segment of that lane unchanged — `None` when the lane declared none.
+    /// [`segment_lane_blocks`] always produces `None` here (it has no [`LaneFile`] to read
+    /// them from); [`segment_lane_file`] fills this in from the lane file it segments.
+    pub directives: Option<LaneDirectives>,
 }
 
 impl LaneSegment {
@@ -396,6 +576,7 @@ pub fn segment_lane_blocks(
                 repo,
                 segment: segments.len(),
                 blocks: Vec::new(),
+                directives: None,
             });
         }
         let seg = segments
@@ -425,20 +606,36 @@ pub struct LaneBlockPosition {
     pub position: usize,
 }
 
-/// Segment one [`LaneFile`]'s blocks (via [`segment_lane_blocks`]) and flatten the
+/// Segment one [`LaneFile`]'s blocks (via [`segment_lane_blocks`]) and stamp the lane's
+/// structured directives (see [`LaneDirectives`]) onto every resulting [`LaneSegment`] —
+/// the directives describe the whole lane, so every segment of it carries the same value
+/// (`None` when the lane declared none), never a per-segment default.
+pub fn segment_lane_file_segments(
+    lane_file: &LaneFile,
+    resolve: impl FnMut(&str) -> Option<String>,
+) -> Vec<LaneSegment> {
+    let mut segments = segment_lane_blocks(&lane_file.blocks, resolve);
+    for seg in &mut segments {
+        seg.directives = lane_file.directives.clone();
+    }
+    segments
+}
+
+/// Segment one [`LaneFile`]'s blocks (via [`segment_lane_file_segments`]) and flatten the
 /// result into one [`LaneBlockPosition`] per resolvable block, each carrying its
 /// owning lane file's `roadmap`/`lane`.
 pub fn segment_lane_file(
     lane_file: &LaneFile,
     resolve: impl FnMut(&str) -> Option<String>,
 ) -> Vec<LaneBlockPosition> {
-    segment_lane_blocks(&lane_file.blocks, resolve)
+    segment_lane_file_segments(lane_file, resolve)
         .into_iter()
         .flat_map(|seg| {
             let LaneSegment {
                 repo,
                 segment,
                 blocks,
+                directives: _,
             } = seg;
             let roadmap = lane_file.roadmap.clone();
             let lane = lane_file.lane.clone();
@@ -749,6 +946,7 @@ pub fn derive_lane_positions(
             lane: lf.lane.clone(),
             path: lf.path.clone(),
             blocks: allowed,
+            directives: lf.directives.clone(),
         };
         for p in segment_lane_file(&filtered, &mut resolve_owner) {
             let origin_roadmap = resolved_by_id
@@ -1328,6 +1526,7 @@ OR.ticket.publishable-eval-report
             lane: "substrate".to_string(),
             path: PathBuf::from("planning/close-the-loop/lane-substrate.txt"),
             blocks: refs(&["A.1", "B.1", "B.2"]),
+            directives: None,
         };
         let positions = segment_lane_file(
             &lane_file,
@@ -1370,6 +1569,7 @@ OR.ticket.publishable-eval-report
             lane: "substrate".to_string(),
             path: PathBuf::from("planning/close-the-loop/lane-substrate.txt"),
             blocks: refs(&["A.1", "GHOST.id", "A.2"]),
+            directives: None,
         };
         let index = owner_index_from(&[("A.1", &["repoA"]), ("A.2", &["repoA"])]);
 
@@ -1402,6 +1602,7 @@ OR.ticket.publishable-eval-report
             lane: "substrate".to_string(),
             path: PathBuf::from("planning/close-the-loop/lane-substrate.txt"),
             blocks: refs(&["SHARED.id"]),
+            directives: None,
         };
         let index = owner_index_from(&[("SHARED.id", &["alpha", "beta"])]);
 
@@ -1425,6 +1626,7 @@ OR.ticket.publishable-eval-report
             lane: "substrate".to_string(),
             path: PathBuf::from("planning/close-the-loop/lane-substrate.txt"),
             blocks: refs(&["A.1", "B.1"]),
+            directives: None,
         };
         let index = owner_index_from(&[("A.1", &["repoA"]), ("B.1", &["repoB"])]);
 
@@ -1493,12 +1695,134 @@ BT.ticket.two
         assert!(blocks.iter().all(|b| b.origin.is_none()));
     }
 
+    // -- MV.ticket.lane-file-structured-directives Task 1: LaneDirectives -----------
+
+    #[test]
+    fn parse_lane_directives_all_three_declared_parses_onto_lane_file_and_every_segment() {
+        let content = "\
+# Lane SUBSTRATE
+# HELD-UNTIL: BA.19.C
+# BUDGET: HEAVY NOT-WITH engine-rs,bastion
+# EXCLUSIVE-REPOS: mev, base-template
+
+MV.ticket.one
+BT.ticket.two
+";
+        let (files, diags) = discover_and_parse_single(content);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        let lf = &files[0];
+        let directives = lf
+            .directives
+            .as_ref()
+            .expect("lane declared all three directives");
+        assert_eq!(directives.held_until, Some("BA.19.C".to_string()));
+        let budget = directives.budget.as_ref().expect("budget declared");
+        assert!(budget.heavy);
+        assert_eq!(
+            budget.not_with,
+            vec!["engine-rs".to_string(), "bastion".to_string()]
+        );
+        assert_eq!(
+            directives.exclusive_repos,
+            Some(vec!["mev".to_string(), "base-template".to_string()])
+        );
+
+        // Carried onto every segment of the lane, not just the LaneFile itself.
+        let segments = segment_lane_file_segments(
+            lf,
+            table_resolver(&[("MV.ticket.one", "mev"), ("BT.ticket.two", "base-template")]),
+        );
+        assert_eq!(segments.len(), 2, "expected 2 segments, got {segments:?}");
+        for seg in &segments {
+            assert_eq!(seg.directives.as_ref(), Some(directives));
+        }
+    }
+
+    #[test]
+    fn parse_lane_directives_none_declared_is_absent_not_defaulted() {
+        let content = "\
+# Lane SUBSTRATE — no directives here, just ordinary prose
+MV.ticket.one
+";
+        let (files, _diags) = discover_and_parse_single(content);
+        assert_eq!(
+            files[0].directives, None,
+            "a lane declaring nothing must produce None, never a defaulted or empty Some"
+        );
+    }
+
+    #[test]
+    fn parse_lane_directives_partial_declaration_leaves_other_fields_absent() {
+        let content = "\
+# HELD-UNTIL: operator-tmux-lease-spike
+MV.ticket.one
+";
+        let (files, _diags) = discover_and_parse_single(content);
+        let directives = files[0].directives.as_ref().expect("held_until declared");
+        assert_eq!(
+            directives.held_until,
+            Some("operator-tmux-lease-spike".to_string())
+        );
+        // Declaring one directive must not default the other two — absence stays absence,
+        // never an empty-but-present Some or a defaulted heavy/light budget.
+        assert_eq!(directives.budget, None);
+        assert_eq!(directives.exclusive_repos, None);
+    }
+
+    #[test]
+    fn parse_lane_directives_prose_that_reads_like_a_directive_does_not_parse() {
+        // Free prose that merely mentions these words, or puts them mid-sentence, must not
+        // parse — only a comment-only line whose body starts with the exact fixed prefix
+        // right after `#` is a directive.
+        let content = "\
+# This lane's BUDGET: HEAVY is discussed below but not declared here.
+# See HELD-UNTIL: for context on why nothing blocks yet.
+# repo exclusivity (EXCLUSIVE-REPOS: mev) is explained in the roadmap doc, not asserted.
+MV.ticket.one
+";
+        let (files, _diags) = discover_and_parse_single(content);
+        assert_eq!(
+            files[0].directives, None,
+            "directive-looking prose must not parse as a directive"
+        );
+    }
+
+    #[test]
+    fn parse_lane_directives_budget_level_is_case_insensitive() {
+        let content = "\
+# BUDGET: light
+MV.ticket.one
+";
+        let (files, _diags) = discover_and_parse_single(content);
+        let budget = files[0]
+            .directives
+            .as_ref()
+            .expect("budget declared")
+            .budget
+            .as_ref()
+            .expect("budget field set");
+        assert!(!budget.heavy);
+        assert!(budget.not_with.is_empty());
+    }
+
+    /// Write `content` as the sole lane file in a fresh temp corpus and discover it —
+    /// exercises the real `discover_lane_files` -> `parse_lane_directives` path rather
+    /// than calling the parser in isolation.
+    fn discover_and_parse_single(content: &str) -> (Vec<LaneFile>, Vec<Diagnostic>) {
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-directives");
+        write(&dir, "planning/roadmaps/alpha/lane-substrate.txt", content);
+        let result = discover_lane_files(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    }
+
     fn lane_file(roadmap: &str, lane: &str, path: &str, blocks: Vec<LaneBlockRef>) -> LaneFile {
         LaneFile {
             roadmap: roadmap.to_string(),
             lane: lane.to_string(),
             path: PathBuf::from(path),
             blocks,
+            directives: None,
         }
     }
 
