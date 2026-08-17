@@ -138,10 +138,13 @@ pub struct LaneFile {
 /// well-formed shapes above; ordinary prose that does not even look like a directive key
 /// is left untouched, exactly as free prose always has been. See
 /// [`parse_lane_directives`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct LaneDirectives {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub held_until: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub budget: Option<LaneBudget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub exclusive_repos: Option<Vec<String>>,
 }
 
@@ -154,13 +157,14 @@ impl LaneDirectives {
 }
 
 /// The `# BUDGET:` directive's parsed value — see [`LaneDirectives`] for the grammar.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct LaneBudget {
     /// `true` for `HEAVY`, `false` for `LIGHT`.
     pub heavy: bool,
     /// Repo slugs from an optional `NOT-WITH` clause. Empty when the directive declared
     /// only a level — this is not the same as [`LaneDirectives::exclusive_repos`] being
     /// absent; it is a property of the budget class, not a separate directive.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub not_with: Vec<String>,
 }
 
@@ -675,6 +679,10 @@ pub struct LaneBlockPosition {
     pub line: usize,
     pub segment: usize,
     pub position: usize,
+    /// The owning lane's structured directives (see [`LaneDirectives`]), carried through
+    /// from the [`LaneSegment`] this block belonged to — `None` when the lane declared
+    /// none.
+    pub directives: Option<LaneDirectives>,
 }
 
 /// Segment one [`LaneFile`]'s blocks (via [`segment_lane_blocks`]) and stamp the lane's
@@ -706,7 +714,7 @@ pub fn segment_lane_file(
                 repo,
                 segment,
                 blocks,
-                directives: _,
+                directives,
             } = seg;
             let roadmap = lane_file.roadmap.clone();
             let lane = lane_file.lane.clone();
@@ -718,6 +726,7 @@ pub fn segment_lane_file(
                 line: b.line,
                 segment,
                 position: b.position,
+                directives: directives.clone(),
             })
         })
         .collect()
@@ -960,6 +969,13 @@ pub struct DerivedBlockPosition {
     pub segment: usize,
     pub position: usize,
     pub origin_roadmap: Option<String>,
+    /// The owning lane's structured directives (`MV.ticket.lane-file-structured-directives`
+    /// Task 3), widening the `{roadmap, lane, segment, position}` shape rather than
+    /// replacing it. Omitted entirely (no key, never `null`) when the lane declared none —
+    /// this keeps [`LANE_SEGMENTS_ARTIFACT`] byte-identical for every lane that declares no
+    /// directives.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directives: Option<LaneDirectives>,
 }
 
 /// Derive `{roadmap, lane, segment, position}` for every block across `lane_files`,
@@ -1032,6 +1048,7 @@ pub fn derive_lane_positions(
                 segment: p.segment,
                 position: p.position,
                 origin_roadmap,
+                directives: p.directives,
             });
         }
     }
@@ -2304,6 +2321,53 @@ MV.ticket.one
         assert_eq!(blocks[1]["repo"], "base-template");
         assert_eq!(blocks[1]["segment"], 1);
         assert_eq!(blocks[1]["position"], 0);
+
+        // MV.ticket.lane-file-structured-directives Task 3: a lane declaring no
+        // directives must serialise with NO "directives" key at all — absence, not a
+        // null — so the byte-identical guarantee for the 41 real lane files holds.
+        for b in blocks {
+            assert!(
+                b.as_object().unwrap().get("directives").is_none(),
+                "expected no 'directives' key for a lane declaring none, got {b}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_lane_segments_carries_directives_into_the_emitted_artifact() {
+        let dir = crate::testsupport::unique_temp_dir("mev-plan-lane-segments-directives");
+        write(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.txt",
+            "# HELD-UNTIL: BA.19.C\n# BUDGET: HEAVY NOT-WITH other-repo\n# EXCLUSIVE-REPOS: mev,base-template\nMV.ticket.a\n",
+        );
+        let loaded = vec![state_file_fixture("mev", "MV.ticket.a")];
+
+        let plan = plan_lane_segments(&dir, &loaded);
+        assert!(
+            plan.diagnostics.is_empty(),
+            "expected no diagnostics, got {:?}",
+            plan.diagnostics
+        );
+        assert_eq!(plan.actions.len(), 1, "expected exactly one write action");
+
+        let artifact: serde_json::Value = serde_json::from_str(&plan.actions[0].new_content)
+            .expect("artifact must be valid JSON");
+        let blocks = artifact["blocks"].as_array().expect("blocks array");
+        assert_eq!(blocks.len(), 1);
+        let directives = &blocks[0]["directives"];
+        assert_eq!(directives["held_until"], "BA.19.C");
+        assert_eq!(directives["budget"]["heavy"], true);
+        assert_eq!(
+            directives["budget"]["not_with"],
+            serde_json::json!(["other-repo"])
+        );
+        assert_eq!(
+            directives["exclusive_repos"],
+            serde_json::json!(["mev", "base-template"])
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
