@@ -8,10 +8,52 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-14T23:32:26-03:00"
+timestamp: "2026-08-17T11:28:22-03:00"
 ---
 
 # Log — mev
+
+## [2026-08-17]
+
+### MV.ticket.lane-file-structured-directives shipped + closed out
+- **What:** `/sdlc-task` ran all 5 tasks (PASS) extending `src/brain/lane_segments.rs` with a
+  machine-readable lane-directive grammar — `LaneDirectives`/`LaneBudget`, `parse_lane_directives()`
+  (`# HELD-UNTIL:`/`# BUDGET:`/`# EXCLUSIVE-REPOS:`, comment-only fixed-prefix lines mirroring the
+  `# ORIGIN:` convention), `E_LANE_DIRECTIVE_UNRECOGNISED`/`E_LANE_DIRECTIVE_MALFORMED` diagnostics
+  (non-fatal, per-line), `segment_lane_file_segments()` carrying directives onto every
+  `LaneSegment`, and `DerivedBlockPosition.directives` (omitted, never `null`, when a lane declares
+  none) threading it into `LANE_SEGMENTS_ARTIFACT`. `/close-out` then ran the full gate suite (fmt,
+  clippy, `cargo test` full-binary run, release build, cargo-audit, emoji gate) — all green on
+  `59a33f1..HEAD` — confirmed coverage is adequate (14 new tests), and patched
+  `docs/architecture.md`'s `lane_segments.rs` module-map row for the new API surface.
+- **Why:** `planning/operator-surface/lane-terminal.txt`'s hold/budget/exclusivity rules lived only
+  as prose a human driver reads but an engine (`engine-rs:EN.10.B`) fans out past at machine speed.
+  This is a cross-repo contract — `engine-rs:EN.10.B` enforces what this module only derives/reports,
+  `base-template:BT.ticket.generate-roadmap-lane-directives` emits the grammar this parses.
+- **Refs:** `mev:MV.ticket.lane-file-structured-directives` (wave 219, `engine-orchestration` epic),
+  commits `bfeef46`..`21399a2` on `main`, not yet pushed to `origin`.
+
+### Close-out found + fixed a real corpus-wide regression in the directive parser
+- **What:** `/close-out` Step 4c (`mev emit-state --write` against the live `agentic-portfolio`
+  corpus) found the new parser red-gating the whole fleet — 200 errors, 0 clean. Root cause: every
+  real `lane-*.txt` already carries pre-existing header conventions (`# ORIGIN:`, `# ROADMAP:`,
+  `# LOG:`, `# ISOLATION:`, and 13 more) that `looks_like_directive_key()`'s broad shape check
+  mistook for directive attempts (170 errors, including `# ORIGIN:` itself, which the module's own
+  doc says must keep coexisting unchanged), plus 30 pre-existing free-prose `# BUDGET: HEAVY
+  (explanation...)` lines that `LaneBudget::parse()`'s exact-match grammar rejected as malformed.
+  Fixed both: added `KNOWN_NON_DIRECTIVE_KEYS`, an explicit allowlist of the 17 pre-existing keys
+  enumerated against the live fleet; widened `LaneBudget::parse()` to read the level as the first
+  run of ASCII letters, tolerating trailing prose while still rejecting a line with no
+  recognisable level. Re-run: 200 errors → 3, all genuinely real (three lane files' `# BUDGET:`
+  lines never state a level at all — left as a content follow-up, not a code fix). Added
+  `structured_directives_produce_only_known_diagnostics_against_the_live_fleet`
+  (`tests/lane_segments_fleet.rs`) pinned to that exact 3-file baseline, plus 3 new unit tests. Full
+  gate suite re-confirmed clean (fmt, clippy, 50 test binaries incl. the new fleet regression,
+  release build, cargo-audit).
+- **Why:** synthetic fixture tests never exercised a real lane file's other header lines, so this
+  shipped clean through `/sdlc-task` and would have shipped a corpus-wide regression if `/close-out`
+  hadn't run `emit-state --write` against live data before finishing.
+- **Refs:** same block/commits as above; see `planning/handoff.md` for the 3-file content follow-up.
 
 ## [run: 2026-08-15]
 

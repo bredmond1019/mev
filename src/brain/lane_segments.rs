@@ -136,8 +136,10 @@ pub struct LaneFile {
 /// (`MV.ticket.lane-file-structured-directives` Task 2) naming the file and line, and is
 /// otherwise left out of the returned struct — this parser recognises only the three
 /// well-formed shapes above; ordinary prose that does not even look like a directive key
-/// is left untouched, exactly as free prose always has been. See
-/// [`parse_lane_directives`].
+/// is left untouched, exactly as free prose always has been. A fixed allowlist of
+/// pre-existing header keys (`ORIGIN`, `ROADMAP`, `LOG`, `ISOLATION`, and others —
+/// see [`KNOWN_NON_DIRECTIVE_KEYS`]) is also exempt: these predate this grammar and are
+/// unrelated conventions, not directive attempts. See [`parse_lane_directives`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct LaneDirectives {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -193,6 +195,18 @@ impl LaneBudget {
     /// Parse the text after `# BUDGET:` (already trimmed of the prefix). Returns `None`
     /// when the leading token is neither `HEAVY` nor `LIGHT` (case-insensitive); the
     /// caller ([`parse_lane_directives`]) turns that into a diagnostic.
+    ///
+    /// The level is read as the **first run of ASCII letters** in `value`, not the whole
+    /// trimmed string — every `# BUDGET:` line already live across the fleet (predating
+    /// this grammar, `/generate-roadmap` never having emitted the strict form) states the
+    /// level and then explains itself in prose (`HEAVY (cargo build --release). May run
+    /// beside AT MOST ONE other heavy lane.`, `light. cargo fmt/clippy/test/build only.`),
+    /// so requiring the *entire* remainder to equal `HEAVY`/`LIGHT` verbatim would flag
+    /// every one of them malformed. A first-word match keeps the trailing prose as
+    /// human-only commentary this parser never inspects — exactly like an unset field, not
+    /// a new structured surface. A `# BUDGET:` line with no recognisable leading level at
+    /// all (e.g. `# BUDGET: never run this concurrently with...`) still correctly returns
+    /// `None`.
     fn parse(value: &str) -> Option<Self> {
         let (level_part, not_with_part) = match value.find(BUDGET_NOT_WITH_MARKER) {
             Some(pos) => (
@@ -201,10 +215,12 @@ impl LaneBudget {
             ),
             None => (value, None),
         };
-        let level = level_part.trim();
-        let heavy = if level.eq_ignore_ascii_case("HEAVY") {
+        let level_token = level_part
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .find(|s| !s.is_empty())?;
+        let heavy = if level_token.eq_ignore_ascii_case("HEAVY") {
             true
-        } else if level.eq_ignore_ascii_case("LIGHT") {
+        } else if level_token.eq_ignore_ascii_case("LIGHT") {
             false
         } else {
             return None;
@@ -240,6 +256,40 @@ fn looks_like_directive_key(candidate: &str) -> bool {
     }
     chars.all(|c| c.is_ascii_uppercase() || c == '-')
 }
+
+/// Header-comment keys already in wide use across the live fleet's lane files, predating
+/// this ticket's three structured directives, for purposes this module has no stake in —
+/// which roadmap/log a lane belongs to, worktree isolation notes, held-until prose,
+/// cross-references to a spec, free-standing warnings — plus `ORIGIN`, the pre-existing
+/// `MV.13.A` double-claim directive this module already parses separately (via
+/// `parse_lane_blocks`, scoped to the one block ID it precedes) and which this module's own
+/// doc comment says must keep coexisting unchanged. `looks_like_directive_key`'s shape check
+/// alone (upper-case-and-hyphens before a `:`) cannot distinguish a genuine future typo of
+/// one of the three canonical keys from an established, unrelated header convention — an
+/// unbounded diagnostic would otherwise red-gate the whole corpus (`MV.ticket
+/// .lane-file-structured-directives` close-out found 200 false-positive errors against the
+/// live `agentic-portfolio` fleet before this allowlist existed). Enumerated exhaustively
+/// against that fleet on 2026-08-17 rather than derived from a similarity heuristic; extend
+/// it if a new legitimate header convention is adopted, don't widen the shape check.
+const KNOWN_NON_DIRECTIVE_KEYS: &[&str] = &[
+    "ORIGIN",
+    "ROADMAP",
+    "LOG",
+    "ISOLATION",
+    "SPEC",
+    "TRAPS",
+    "TRAP",
+    "HELD",
+    "EXCEPTION",
+    "CONTEXT",
+    "BUT",
+    "SO",
+    "ALERTING",
+    "BACKUP",
+    "NOTE",
+    "CARE",
+    "SCOPE",
+];
 
 /// Scan every comment-only line of `content` for the three structured directives (see
 /// [`LaneDirectives`]) and collapse the result: `None` when the file declares none of them,
@@ -307,7 +357,8 @@ fn parse_lane_directives(content: &str, path: &Path) -> (Option<LaneDirectives>,
             }
         } else if let Some(colon_pos) = body.find(':') {
             let candidate = &body[..colon_pos];
-            if looks_like_directive_key(candidate) {
+            if looks_like_directive_key(candidate) && !KNOWN_NON_DIRECTIVE_KEYS.contains(&candidate)
+            {
                 diags.push(Diagnostic::error(
                     path,
                     E_LANE_DIRECTIVE_UNRECOGNISED,
@@ -1891,6 +1942,79 @@ MV.ticket.one
             .expect("budget field set");
         assert!(!budget.heavy);
         assert!(budget.not_with.is_empty());
+    }
+
+    #[test]
+    fn parse_lane_directives_budget_with_trailing_prose_still_parses_the_level() {
+        // Every `# BUDGET:` line already live across the fleet predates this grammar and
+        // explains itself in prose after the level — this must parse cleanly, not
+        // malformed, with the prose simply ignored.
+        let content = "\
+# BUDGET: HEAVY (cargo build --release). May run beside AT MOST ONE other heavy lane.
+MV.ticket.one
+";
+        let (files, diags) = discover_and_parse_single(content);
+        assert!(diags.is_empty(), "got {diags:?}");
+        let budget = files[0]
+            .directives
+            .as_ref()
+            .expect("budget declared")
+            .budget
+            .as_ref()
+            .expect("budget field set");
+        assert!(budget.heavy);
+        assert!(budget.not_with.is_empty());
+
+        let lowercase_with_period = "\
+# BUDGET: light. cargo fmt/clippy/test/build only.
+MV.ticket.one
+";
+        let (files, diags) = discover_and_parse_single(lowercase_with_period);
+        assert!(diags.is_empty(), "got {diags:?}");
+        assert!(
+            !files[0]
+                .directives
+                .as_ref()
+                .unwrap()
+                .budget
+                .as_ref()
+                .unwrap()
+                .heavy
+        );
+    }
+
+    #[test]
+    fn parse_lane_directives_budget_with_no_recognisable_level_is_still_malformed() {
+        // A `# BUDGET:` line that never states HEAVY/LIGHT at all is genuinely malformed
+        // under this grammar — tolerating trailing prose after a real level must not widen
+        // into accepting no level at all.
+        let content = "\
+# BUDGET: never run this concurrently with more than one other heavy repo.
+MV.ticket.one
+";
+        let (files, diags) = discover_and_parse_single(content);
+        assert_eq!(diags.len(), 1, "got {diags:?}");
+        assert_eq!(files[0].directives, None);
+    }
+
+    #[test]
+    fn parse_lane_directives_known_pre_existing_header_keys_do_not_diagnose() {
+        // ORIGIN (MV.13.A) plus the other header conventions already live across the fleet
+        // (ROADMAP/LOG/ISOLATION/etc.) must never be treated as an attempted directive —
+        // they predate this grammar and are unrelated conventions.
+        let content = "\
+# ROADMAP: /path/to/roadmap.md
+# LOG:     /path/to/lane-log.jsonl
+# ISOLATION: --no-worktree
+# ORIGIN: some-roadmap
+MV.ticket.one
+";
+        let (files, diags) = discover_and_parse_single(content);
+        assert!(diags.is_empty(), "got {diags:?}");
+        assert_eq!(
+            files[0].directives, None,
+            "none of these keys are real directives"
+        );
     }
 
     // -- MV.ticket.lane-file-structured-directives Task 2: diagnostics ---------------

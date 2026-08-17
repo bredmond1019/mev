@@ -17,7 +17,9 @@
 use std::path::PathBuf;
 
 use mev::brain::config::{find_brain_root, load_brain_config};
-use mev::brain::lane_segments::{build_owner_index, resolve_owner, segment_lane_blocks};
+use mev::brain::lane_segments::{
+    build_owner_index, discover_lane_files, resolve_owner, segment_lane_blocks,
+};
 use mev::brain::state::{StateFile, StateSource, discover_state_files, load_state};
 
 #[test]
@@ -116,4 +118,73 @@ fn close_the_loop_lane_substrate_segments_into_seven_contiguous_repo_runs() {
             "segment index must equal its position in the lane"
         );
     }
+}
+
+/// Exact, known-real `E_LANE_DIRECTIVE_MALFORMED` cases pre-existing in the live fleet as of
+/// `MV.ticket.lane-file-structured-directives` close-out (2026-08-17) — a `# BUDGET:` line
+/// that genuinely never states `HEAVY`/`LIGHT` at all (unlike the 27 other pre-existing
+/// `# BUDGET:` lines, which state a level and then explain it in prose — those are handled
+/// by [`LaneBudget::parse`]'s tolerant grammar, not this list). This is a real content gap in
+/// those three lane files, not a parser false positive; the fix belongs in the lane file
+/// (state the level explicitly), an editorial call outside this ticket's scope. Listed
+/// explicitly rather than just asserting a bare count so a *new*, different diagnostic still
+/// fails this test loudly instead of hiding under a stale tolerance number.
+const KNOWN_PRE_EXISTING_MALFORMED_BUDGET_FILES: &[&str] = &[
+    "planning/close-the-loop/lane-bastion-web.txt",
+    "planning/close-the-loop/lane-learn-ai.txt",
+    "planning/demand-ready/lane-bastion-web.txt",
+];
+
+/// `MV.ticket.lane-file-structured-directives` close-out gate: the structured-directive
+/// parser (`parse_lane_directives`, wired through `discover_lane_files`) must produce no
+/// `E_LANE_DIRECTIVE_*` diagnostics against the real fleet beyond the known pre-existing
+/// content gaps above. Synthetic fixtures alone missed this — every real lane file also
+/// carries pre-existing header conventions (`# ORIGIN:`, `# ROADMAP:`, `# LOG:`, free-prose
+/// `# BUDGET:` lines, and others) that a too-broad "unrecognised directive key" heuristic or
+/// an over-strict `BUDGET` grammar can false-positive on, and a close-out
+/// `mev emit-state --write` run against the live corpus is what actually caught it (200
+/// errors before the allowlist + tolerant `BUDGET` parse existed). Skips gracefully outside
+/// the fleet checkout, like its sibling test above.
+#[test]
+fn structured_directives_produce_only_known_diagnostics_against_the_live_fleet() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = match find_brain_root(&manifest_dir) {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!(
+                "structured_directives_produce_only_known_diagnostics_against_the_live_fleet: \
+                 skipping — no brain.toml found walking up from {}: {e}",
+                manifest_dir.display()
+            );
+            return;
+        }
+    };
+
+    let (files, diags) = discover_lane_files(&root);
+    assert!(
+        files.len() >= 10,
+        "structured_directives_produce_only_known_diagnostics_against_the_live_fleet: only \
+         found {} lane files under {} — this looks like a broken/partial checkout, not the \
+         real fleet; refusing to run a vacuous gate",
+        files.len(),
+        root.display()
+    );
+
+    let unexpected: Vec<_> = diags
+        .iter()
+        .filter(|d| d.locator.starts_with("E_LANE_DIRECTIVE_"))
+        .filter(|d| {
+            let rel = d.file.strip_prefix(&root).unwrap_or(&d.file);
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            !(d.locator == "E_LANE_DIRECTIVE_MALFORMED"
+                && KNOWN_PRE_EXISTING_MALFORMED_BUDGET_FILES.contains(&rel_str.as_str()))
+        })
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "structured_directives_produce_only_known_diagnostics_against_the_live_fleet: {} \
+         unexpected E_LANE_DIRECTIVE_* diagnostic(s) against the live fleet — a real \
+         lane-file convention is colliding with the directive grammar: {unexpected:#?}",
+        unexpected.len()
+    );
 }
