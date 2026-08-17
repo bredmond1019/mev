@@ -2091,6 +2091,67 @@ pub fn block_graph_brain(
     ))
 }
 
+/// Read-only corpus-wide frontier computation — the `mev frontier` entry point
+/// (`MV.13.B` Task 4).
+///
+/// Modelled directly on [`block_graph_brain`]: resolves `brain.toml`, discovers and
+/// loads every `planning/state.json`, then additionally discovers every lane file and
+/// derives lane positions the same way [`brain::frontier::plan_frontier`] does. Builds
+/// the in-process block graph with `max_nodes: usize::MAX` (never the HTTP export's
+/// truncated default) and refuses via [`brain::frontier::ensure_untruncated`] before
+/// computing the frontier — this function can never hand a caller a frontier over a
+/// truncated node set.
+///
+/// Unlike [`brain::frontier::plan_frontier`], this never writes the
+/// [`brain::frontier::LANE_FRONTIER_ARTIFACT`] — it is the read-only CLI/library
+/// surface, not the `emit-state` planner.
+pub fn frontier_brain(root: &std::path::Path) -> anyhow::Result<brain::frontier::Frontier> {
+    use brain::block_graph::{BlockGraphScope, build_block_graph_export};
+    use brain::config::find_brain_config;
+    use brain::frontier::{compute_frontier, ensure_untruncated};
+    use brain::lane_segments::{
+        build_owner_index, derive_lane_positions, discover_lane_files, resolve_owner,
+    };
+    use brain::state::{TierScope, build_state_graph, discover_state_files, load_state};
+
+    let config = find_brain_config(root)
+        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
+
+    let (sources, _discovery_diags) = discover_state_files(root, &config);
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    for src in &sources {
+        if let Ok(file) = load_state(&src.abs_path) {
+            loaded.push((src.clone(), file));
+        }
+    }
+
+    let (lane_files, _discover_diags) = discover_lane_files(root);
+    let owner_index = build_owner_index(&loaded);
+    let (lane_positions, _double_claim_diags) = derive_lane_positions(&lane_files, |id| {
+        resolve_owner(&owner_index, id).map(str::to_string)
+    });
+
+    let graph = build_state_graph(&loaded);
+    let scope = BlockGraphScope {
+        tier: TierScope::All,
+        epic: None,
+        repo: None,
+        include_closed: true,
+        include_boundary: false,
+        max_nodes: usize::MAX,
+    };
+    let export = build_block_graph_export(root, &config, &graph, &loaded, &scope);
+    ensure_untruncated(&export).map_err(|d| anyhow::anyhow!("{}", d.message))?;
+
+    let effective = brain::state::effective_priorities(&graph, &loaded);
+    Ok(compute_frontier(
+        &lane_positions,
+        &graph,
+        &loaded,
+        &effective,
+    ))
+}
+
 /// Generate an interactive HTML knowledge graph of the Brain corpus.
 ///
 /// Discovers `brain.toml`, runs a crawl to build a manifest, and delegates to

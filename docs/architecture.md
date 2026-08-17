@@ -742,6 +742,82 @@ is a hard `Err`. The returned `BlockGraphExport` is a pure value — nothing is 
 
 ---
 
+### Frontier computation + gate_rank (`src/brain/frontier.rs`) — Phase 13, Block MV.13.B
+
+Computes the corpus-wide startable-block frontier — one entry per active
+`(roadmap, lane, segment)`, naming the segment head (first not-`closed` block) and
+exactly what blocks it — plus `gate_rank`, a derived priority for the targetless
+operator/approval gates `effective_priorities` never reaches. Consumed by `mev
+frontier` (CLI, read-only), `mev emit-state --write` (writes
+`planning/lane-frontier.json`), and, transitively, bastion's `/lanes` and
+concurrency-slot endpoints (`BA.19.C`, `BA.19.D`) and the `BW.16.x` cockpit board
+views — none of which re-derive the frontier themselves.
+
+**The consumer contract, stated plainly:** closure over the block graph MUST run in
+mev itself, over the untruncated in-process graph (`max_nodes: usize::MAX`) —
+`block_graph.rs` builds with `usize::MAX` internally, but the HTTP export (`mev
+emit-block-graph`, bastion's `GET /api/blocks/graph`) defaults to `max_nodes=400`
+against a corpus of ~756 blocks. Any HTTP-side closure — bastion's `BA.19.C`/`BA.19.D`
+included — MUST send `max_nodes=2000` and hard-fail on `truncated: true` rather than
+silently degrade to a partial frontier. mev cannot gate that half of the contract from
+here; the evidence that a given HTTP consumer honours it lives in that consumer's own
+repo. mev's own obligations are the `ensure_untruncated` refusal below and this written
+contract (mirrored in `docs/cli.md`'s `frontier` section).
+
+- **`ensure_untruncated(export: &BlockGraphExport) -> Result<(), Diagnostic>`** — the
+  refusal itself: errors `E_FRONTIER_TRUNCATED_GRAPH` when `export.truncated` is
+  `true`. Both `mev frontier` (via `frontier_brain`) and `mev emit-state`'s
+  `plan_frontier` call this before computing anything; neither path can hand a caller
+  (or write an artifact carrying) a frontier derived over a partial node set.
+- **`compute_frontier(lane_positions, graph, files, effective) -> Frontier`** — walks
+  `crate::brain::lane_segments::derive_lane_positions`'s output (never re-derives
+  segmentation), groups by `(roadmap, lane, segment)`, and picks the first
+  not-`closed` block in file order as the segment head. `unmet_blocks` names every
+  unmet `BlockedBy::Block` dependency (`repo:id`); `unmet_gates` names every unmet
+  `Operator`/`Approval`/`External` dependency (`operator:<slug>` /
+  `approval:<slug>` / `external:<what>`); `startable` is `true` iff both are empty. A
+  segment whose blocks are all `closed` contributes no entry.
+- **`gate_ranks(files, effective) -> Vec<GateRank>`** — operator/approval gates are
+  targetless (they gate a block but are not themselves graph nodes with dependents),
+  so `effective_priorities` never assigns them a priority. This groups every block
+  carrying such a dependency by `(kind, slug)` and takes the minimum
+  `effective_priority_for` across the group — reusing `emit`'s
+  `BlockedGroup::effective_priority` min-over-gated-blocks logic (the
+  `group_blocked_by_gate` section of `src/brain/emit.rs`), not a second
+  implementation. Sorted `(rank asc, slug asc)` for determinism; absent priority
+  sorts last (`u8::MAX`).
+- **`plan_frontier(root, loaded) -> EmitPlan`** — the `emit-state` planner (Task 3),
+  modelled on `plan_lane_segments`: builds the untruncated graph, refuses via
+  `ensure_untruncated`, and appends one `EmitAction` writing
+  `LANE_FRONTIER_ARTIFACT` (`planning/lane-frontier.json`) — never a partial write on
+  refusal. Corpus-wide, like `lane-segments.json`: never narrowed by `emit_state
+  --scope <repo>`. Wired into `emit_state` (`src/lib.rs`) immediately after the
+  lane-segments planner, applied through `apply_with_rollback_on_regression` in
+  `--write` mode.
+- **`FrontierArtifact` / `build_frontier_artifact(frontier) -> FrontierArtifact`** —
+  wraps a `Frontier` with a fresh `derived_at` (RFC 3339, `chrono::Local::now()`).
+  `state.json` only changes at `/log-work` time, but lane progress lands live between
+  those commits, so a consumer (`BA.19.C`) needs `derived_at` to tell how stale the
+  artifact is. Shared by both the `emit-state` artifact write and `mev frontier
+  --json`'s stdout output — one construction, two callers.
+- **`render_frontier_text(frontier) -> String`** — the `mev frontier` (without
+  `--json`) text renderer: one line per entry, `{roadmap}/{lane}#{segment}
+  {repo}:{id} — startable` or `— blocked by <reasons>` (comma-joined
+  `unmet_blocks` then `unmet_gates`). Does not render `gate_ranks` — `--json` is the
+  surface for those.
+
+#### Public library entry point
+
+`frontier_brain(root: &Path) -> anyhow::Result<Frontier>` (in `src/lib.rs`) is the
+read-only sibling of `block_graph_brain`: resolves `brain.toml`, discovers and loads
+every `planning/state.json`, discovers every lane file and derives lane positions the
+same way `plan_frontier` does, builds the in-process graph at `max_nodes: usize::MAX`,
+refuses via `ensure_untruncated`, then calls `compute_frontier`. Never writes
+`LANE_FRONTIER_ARTIFACT` — that write path is `plan_frontier`/`emit_state` only. This
+is the function behind `mev frontier`.
+
+---
+
 ### Doc materializer (`src/doc/`) — Phase 9, Block MV.9.A
 
 The doc materializer is the generic brain-document **writer**, sitting on the same

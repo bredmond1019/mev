@@ -311,6 +311,43 @@ pub fn ensure_untruncated(export: &BlockGraphExport) -> Result<(), Diagnostic> {
 }
 
 // ---------------------------------------------------------------------------
+// `mev frontier` CLI text renderer — MV.13.B Task 4
+// ---------------------------------------------------------------------------
+
+/// Render a [`Frontier`]'s entries as one line each: the read-only text shape for
+/// `mev frontier` (without `--json`).
+///
+/// Format: `{roadmap}/{lane}#{segment} {repo}:{id} — startable` for a startable
+/// entry, or `{roadmap}/{lane}#{segment} {repo}:{id} — blocked by <reasons>` where
+/// `<reasons>` is every `unmet_blocks` then `unmet_gates` entry, comma-joined, for a
+/// blocked one. `gate_ranks` are not rendered here — `--json` is the surface for
+/// those. Returns an empty string (no trailing newline) when `entries` is empty.
+pub fn render_frontier_text(frontier: &Frontier) -> String {
+    frontier
+        .entries
+        .iter()
+        .map(|e| {
+            let reasons: Vec<&str> = e
+                .unmet_blocks
+                .iter()
+                .chain(e.unmet_gates.iter())
+                .map(String::as_str)
+                .collect();
+            let status = if e.startable {
+                "startable".to_string()
+            } else {
+                format!("blocked by {}", reasons.join(", "))
+            };
+            format!(
+                "{}/{}#{} {}:{} — {status}",
+                e.roadmap, e.lane, e.segment, e.repo, e.id
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// ---------------------------------------------------------------------------
 // Wired into `emit-state` — MV.13.B Task 3
 // ---------------------------------------------------------------------------
 
@@ -321,9 +358,10 @@ pub fn ensure_untruncated(export: &BlockGraphExport) -> Result<(), Diagnostic> {
 pub const LANE_FRONTIER_ARTIFACT: &str = "planning/lane-frontier.json";
 
 /// The full [`Frontier`] derivation, serialized as-is — `mev emit-state`'s JSON
-/// artifact at [`LANE_FRONTIER_ARTIFACT`], plus `derived_at`.
+/// artifact at [`LANE_FRONTIER_ARTIFACT`], plus `derived_at`. `pub` so `mev frontier
+/// --json` (Task 4) can emit this exact shape to stdout without a second definition.
 #[derive(Debug, Clone, serde::Serialize)]
-struct FrontierArtifact {
+pub struct FrontierArtifact {
     /// RFC 3339 timestamp of the derivation run (`chrono::Local::now()`).
     ///
     /// `state.json` only changes at `/log-work` time, but lane progress (a block
@@ -331,9 +369,21 @@ struct FrontierArtifact {
     /// consumer (bastion's `BA.19.C` `/lanes` endpoint) needs to be able to tell how
     /// stale this artifact is relative to the live corpus, since the artifact itself
     /// is only as fresh as the last `mev emit-state --write` run that produced it.
-    derived_at: String,
-    entries: Vec<FrontierEntry>,
-    gate_ranks: Vec<GateRank>,
+    pub derived_at: String,
+    pub entries: Vec<FrontierEntry>,
+    pub gate_ranks: Vec<GateRank>,
+}
+
+/// Wrap `frontier` with a fresh `derived_at` timestamp — the same construction
+/// [`assemble_frontier_plan`] uses for the `emit-state` artifact, exposed for
+/// `mev frontier --json` (Task 4), which prints this shape to stdout instead of
+/// writing it to [`LANE_FRONTIER_ARTIFACT`].
+pub fn build_frontier_artifact(frontier: Frontier) -> FrontierArtifact {
+    FrontierArtifact {
+        derived_at: chrono::Local::now().to_rfc3339(),
+        entries: frontier.entries,
+        gate_ranks: frontier.gate_ranks,
+    }
 }
 
 /// Plan the [`LANE_FRONTIER_ARTIFACT`] write: derive lane positions the same way
@@ -434,11 +484,7 @@ fn assemble_frontier_plan(
 
     let entry_count = frontier.entries.len();
     let gate_count = frontier.gate_ranks.len();
-    let artifact = FrontierArtifact {
-        derived_at: chrono::Local::now().to_rfc3339(),
-        entries: frontier.entries,
-        gate_ranks: frontier.gate_ranks,
-    };
+    let artifact = build_frontier_artifact(frontier);
     let new_content = match serde_json::to_string_pretty(&artifact) {
         Ok(mut s) => {
             s.push('\n');
@@ -828,6 +874,95 @@ mod tests {
         assert!(plan.diagnostics.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // render_frontier_text — MV.13.B Task 4
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_frontier_text_shape_for_startable_and_blocked_entries() {
+        let frontier = Frontier {
+            entries: vec![
+                FrontierEntry {
+                    roadmap: "alpha".to_string(),
+                    lane: "derive".to_string(),
+                    segment: 0,
+                    repo: "mev".to_string(),
+                    key: "mev:MV.13.A".to_string(),
+                    id: "MV.13.A".to_string(),
+                    title: "Frontier".to_string(),
+                    status: "open".to_string(),
+                    unmet_blocks: Vec::new(),
+                    unmet_gates: Vec::new(),
+                    startable: true,
+                },
+                FrontierEntry {
+                    roadmap: "alpha".to_string(),
+                    lane: "console".to_string(),
+                    segment: 1,
+                    repo: "bastion".to_string(),
+                    key: "bastion:BA.19.C".to_string(),
+                    id: "BA.19.C".to_string(),
+                    title: "Lanes endpoint".to_string(),
+                    status: "open".to_string(),
+                    unmet_blocks: vec!["mev:MV.13.B".to_string()],
+                    unmet_gates: vec!["operator:review-plan".to_string()],
+                    startable: false,
+                },
+            ],
+            gate_ranks: Vec::new(),
+        };
+
+        let text = render_frontier_text(&frontier);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "alpha/derive#0 mev:MV.13.A — startable");
+        assert_eq!(
+            lines[1],
+            "alpha/console#1 bastion:BA.19.C — blocked by mev:MV.13.B, operator:review-plan"
+        );
+    }
+
+    #[test]
+    fn render_frontier_text_empty_entries_yields_empty_string() {
+        let frontier = Frontier::default();
+        assert_eq!(render_frontier_text(&frontier), "");
+    }
+
+    #[test]
+    fn json_round_trips_to_the_same_struct() {
+        let frontier = Frontier {
+            entries: vec![FrontierEntry {
+                roadmap: "alpha".to_string(),
+                lane: "derive".to_string(),
+                segment: 0,
+                repo: "mev".to_string(),
+                key: "mev:MV.13.A".to_string(),
+                id: "MV.13.A".to_string(),
+                title: "Frontier".to_string(),
+                status: "open".to_string(),
+                unmet_blocks: Vec::new(),
+                unmet_gates: Vec::new(),
+                startable: true,
+            }],
+            gate_ranks: vec![GateRank {
+                kind: "operator",
+                slug: "review-plan".to_string(),
+                rank: 1,
+                gates: vec!["mev:MV.13.A".to_string()],
+            }],
+        };
+
+        let json = serde_json::to_string(&frontier).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["entries"][0]["id"], "MV.13.A");
+        assert_eq!(value["entries"][0]["startable"], true);
+        assert_eq!(value["gate_ranks"][0]["kind"], "operator");
+        assert_eq!(value["gate_ranks"][0]["slug"], "review-plan");
+        assert_eq!(value["gate_ranks"][0]["rank"], 1);
+        assert_eq!(value["gate_ranks"][0]["gates"][0], "mev:MV.13.A");
     }
 
     #[test]
