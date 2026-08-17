@@ -31,13 +31,16 @@
 //!
 //! [D57]: ../../../../base-template/planning/decisions/D57-orchestration-run-artifact-contract.md
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
 use crate::Diagnostic;
 use crate::brain::config::RepoEntry;
 use crate::brain::frontier::{Frontier, FrontierEntry};
+use crate::brain::lock::pid_is_alive;
 use crate::shared::extract_frontmatter;
 
 /// The six possible availability states for one lane segment.
@@ -320,6 +323,303 @@ pub fn segment_statuses(frontier: &Frontier, live_runs: &[LiveRun]) -> Vec<Segme
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// held-slot — MV.13.C Task 3
+// ---------------------------------------------------------------------------
+
+/// Name of the fleet lock directory, relative to the brain root. Mirrors
+/// `LOCK_SUBDIR` in `base-template/scripts/fleet_concurrency_check.py`.
+const FLEET_LOCK_SUBDIR: &str = ".fleet-locks";
+
+/// Mirrors `DEFAULT_TTL_SECONDS` in `fleet_concurrency_check.py` — an entry older
+/// than this, regardless of pid liveness, is stale.
+const DEFAULT_TTL_SECONDS: f64 = 4.0 * 60.0 * 60.0;
+
+/// Mirrors `BROWSER_AUTOMATION_SIGNALS` in `fleet_concurrency_check.py`.
+const BROWSER_AUTOMATION_SIGNALS: &[&str] = &[
+    "playwright",
+    "cypress",
+    "puppeteer",
+    "next build",
+    "vite build",
+    "npm run build",
+    "yarn build",
+    "pnpm build",
+];
+
+/// Mirrors `NATIVE_BUILD_SIGNALS` in `fleet_concurrency_check.py`.
+const NATIVE_BUILD_SIGNALS: &[&str] = &["cargo build --release"];
+
+/// Mirrors `MAX_LANES_BY_CATEGORY` in `fleet_concurrency_check.py` — capacity is
+/// per category, not fleet-wide.
+fn category_capacity(category: &str) -> usize {
+    match category {
+        "native-build" => 4,
+        // "browser-automation" and any unknown category default to the
+        // browser-automation cap, matching the Python script's own default.
+        _ => 2,
+    }
+}
+
+/// One raw entry read from a `.fleet-locks/*.json` file. Deliberately permissive
+/// (`pid` as a bare [`serde_json::Value`]) so "pid is absent or not an integer" —
+/// one of the documented staleness conditions — is representable rather than a
+/// parse failure.
+#[derive(Debug, Deserialize)]
+struct FleetLockRaw {
+    repo: String,
+    #[serde(default)]
+    pid: Option<serde_json::Value>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    started_at: Option<f64>,
+}
+
+fn now_unix_seconds() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Apply the same staleness rules `fleet_concurrency_check.py`'s `_sweep_stale`
+/// applies, without mutating the store — this is a read, never a sweep. An entry
+/// is stale when its `pid` is absent/not an integer, the pid is not currently
+/// running, or its `started_at` is more than `ttl_seconds` in the past.
+fn is_stale(entry: &FleetLockRaw, now: f64, ttl_seconds: f64) -> bool {
+    let pid = match entry
+        .pid
+        .as_ref()
+        .and_then(|v| v.as_i64())
+        .filter(|p| *p > 0)
+    {
+        Some(pid) => pid as u32,
+        None => return true,
+    };
+    if !pid_is_alive(pid) {
+        return true;
+    }
+    let started_at = entry.started_at.unwrap_or(0.0);
+    (now - started_at) > ttl_seconds
+}
+
+/// Read every `*.json` entry directly under `lock_dir`, skipping (not erroring on)
+/// any file that is not valid JSON or does not match [`FleetLockRaw`]'s shape —
+/// mirroring the Python sweep's "unreadable/corrupt entry: treat as stale" rule,
+/// since a skipped entry contributes nothing to any category's live count either
+/// way.
+///
+/// Returns `None` when `lock_dir` itself cannot be listed (missing or
+/// unreadable) — the caller turns that into "unknown", never a hold.
+fn read_fleet_lock_entries(lock_dir: &Path) -> Option<Vec<FleetLockRaw>> {
+    let read_dir = std::fs::read_dir(lock_dir).ok()?;
+    let mut entries = Vec::new();
+    for dir_entry in read_dir.flatten() {
+        let path = dir_entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(raw) = serde_json::from_str::<FleetLockRaw>(&contents) {
+            entries.push(raw);
+        }
+    }
+    Some(entries)
+}
+
+/// A snapshot of which repos currently hold a live (non-stale) fleet-lock slot,
+/// per category, plus whether the read degraded (the lock directory could not be
+/// listed at all).
+#[derive(Debug, Default)]
+pub struct FleetSlotView {
+    /// `true` when `.fleet-locks` was missing or unreadable — "unknown", which
+    /// resolves to *not held*, never to a hold. Mirrors the script's
+    /// `{allowed: true, degraded: true}` degrade-to-advisory behavior.
+    pub degraded: bool,
+    live_by_category: HashMap<String, HashSet<String>>,
+}
+
+/// Read `<root>/.fleet-locks` directly (never shells out to
+/// `fleet_concurrency_check.py` — `timeout` does not exist on this shell, and a
+/// subprocess turns a read into a failure mode) and resolve it into a
+/// [`FleetSlotView`].
+pub fn compute_fleet_slot_view(root: &Path) -> FleetSlotView {
+    let lock_dir = root.join(FLEET_LOCK_SUBDIR);
+    let Some(entries) = read_fleet_lock_entries(&lock_dir) else {
+        return FleetSlotView {
+            degraded: true,
+            live_by_category: HashMap::new(),
+        };
+    };
+
+    let now = now_unix_seconds();
+    let mut live_by_category: HashMap<String, HashSet<String>> = HashMap::new();
+    for entry in entries {
+        if is_stale(&entry, now, DEFAULT_TTL_SECONDS) {
+            continue;
+        }
+        let category = entry
+            .category
+            .unwrap_or_else(|| "browser-automation".to_string());
+        live_by_category
+            .entry(category)
+            .or_default()
+            .insert(entry.repo);
+    }
+
+    FleetSlotView {
+        degraded: false,
+        live_by_category,
+    }
+}
+
+/// The heavy-lane category for `repo_root`'s `planning/harness.json`, or `None`
+/// if the repo is light. Mirrors `heavy_category()` in
+/// `fleet_concurrency_check.py` exactly: `uiTest.enabled` or a browser-automation
+/// command signal classifies first (checked first because it is the more
+/// resource-dangerous category), then a native-build command signal, else light.
+/// A missing or unparsable `harness.json` is light, not an error — most repos in
+/// the fleet have no harness.json at all.
+pub fn heavy_category(repo_root: &Path) -> Option<String> {
+    let harness_path = repo_root.join("planning").join("harness.json");
+    let contents = std::fs::read_to_string(&harness_path).ok()?;
+    let data: serde_json::Value = serde_json::from_str(&contents).ok()?;
+
+    if data
+        .get("uiTest")
+        .and_then(|v| v.get("enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Some("browser-automation".to_string());
+    }
+
+    let commands: Vec<String> = data
+        .get("validation")
+        .and_then(|v| v.get("checks"))
+        .and_then(|v| v.as_array())
+        .map(|checks| {
+            checks
+                .iter()
+                .map(|check| {
+                    check
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_lowercase()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if commands
+        .iter()
+        .any(|cmd| BROWSER_AUTOMATION_SIGNALS.iter().any(|s| cmd.contains(s)))
+    {
+        return Some("browser-automation".to_string());
+    }
+    if commands
+        .iter()
+        .any(|cmd| NATIVE_BUILD_SIGNALS.iter().any(|s| cmd.contains(s)))
+    {
+        return Some("native-build".to_string());
+    }
+    None
+}
+
+/// Resolve the environmental `HeldSlot` hold for one [`FrontierEntry`], or `None`
+/// if no hold applies — the repo is light, the view is degraded, the repo already
+/// holds its own live entry, or the category is below capacity.
+fn slot_status(
+    entry: &FrontierEntry,
+    repos: &[RepoEntry],
+    root: &Path,
+    slot_view: &FleetSlotView,
+) -> Option<(SegmentAvailability, String)> {
+    if slot_view.degraded {
+        return None;
+    }
+    let repo_entry = repos.iter().find(|r| r.slug == entry.repo)?;
+    let repo_root = root.join(&repo_entry.repo_path);
+    let category = heavy_category(&repo_root)?;
+
+    let live = slot_view.live_by_category.get(&category);
+    if live.is_some_and(|repos| repos.contains(&entry.repo)) {
+        // The repo already holds its own live entry — not held against itself,
+        // mirroring the script's idempotent re-registration.
+        return None;
+    }
+
+    let count = live.map(HashSet::len).unwrap_or(0);
+    let cap = category_capacity(&category);
+    if count >= cap {
+        Some((
+            SegmentAvailability::HeldSlot,
+            format!("category {category} at capacity ({count}/{cap} lanes active)"),
+        ))
+    } else {
+        None
+    }
+}
+
+/// Resolve one [`FrontierEntry`]'s full availability across all three tiers this
+/// block adds: intrinsic (Task 1), `HeldRepoBusy` (Task 2), `HeldSlot` (Task 3).
+/// Each tier is only consulted when every higher-precedence tier reported
+/// `Startable`, per [`SegmentAvailability`]'s fixed order.
+fn resolve_status_with_slot(
+    entry: &FrontierEntry,
+    live_runs: &[LiveRun],
+    repos: &[RepoEntry],
+    root: &Path,
+    slot_view: &FleetSlotView,
+) -> (SegmentAvailability, Option<String>) {
+    let (availability, reason) = resolve_status(entry, live_runs);
+    if availability != SegmentAvailability::Startable {
+        return (availability, reason);
+    }
+    match slot_status(entry, repos, root, slot_view) {
+        Some((availability, reason)) => (availability, Some(reason)),
+        None => (availability, reason),
+    }
+}
+
+/// Compute full [`SegmentStatus`]es (intrinsic tier + `HeldRepoBusy` + `HeldSlot`)
+/// for every entry in `frontier`, plus whether the fleet-lock read degraded (the
+/// `.fleet-locks` directory was missing or unreadable — "unknown", never a hold).
+/// Supersedes [`segment_statuses`] as the availability entry point once a repo
+/// registry and brain root are in hand, for the same reason `segment_statuses`
+/// supersedes `intrinsic_segment_statuses`.
+pub fn segment_statuses_with_slots(
+    frontier: &Frontier,
+    live_runs: &[LiveRun],
+    repos: &[RepoEntry],
+    root: &Path,
+) -> (Vec<SegmentStatus>, bool) {
+    let slot_view = compute_fleet_slot_view(root);
+    let degraded = slot_view.degraded;
+    let statuses = frontier
+        .entries
+        .iter()
+        .map(|entry| {
+            let (availability, reason) =
+                resolve_status_with_slot(entry, live_runs, repos, root, &slot_view);
+            SegmentStatus {
+                roadmap: entry.roadmap.clone(),
+                lane: entry.lane.clone(),
+                segment: entry.segment,
+                repo: entry.repo.clone(),
+                head: Some(entry.key.clone()),
+                availability,
+                reason,
+            }
+        })
+        .collect();
+    (statuses, degraded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,5 +892,310 @@ mod tests {
         let statuses = segment_statuses(&frontier, &live_runs);
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].availability, SegmentAvailability::HeldRepoBusy);
+    }
+
+    // -----------------------------------------------------------------
+    // held-slot — MV.13.C Task 3
+    // -----------------------------------------------------------------
+
+    fn write_harness(root: &Path, repo: &str, category: Option<&str>) {
+        let dir = root.join(repo).join("planning");
+        std::fs::create_dir_all(&dir).unwrap();
+        let json = match category {
+            Some("native-build") => serde_json::json!({
+                "validation": {"checks": [{"command": "cargo build --release"}]}
+            }),
+            Some("browser-automation") => serde_json::json!({
+                "uiTest": {"enabled": true}
+            }),
+            _ => serde_json::json!({}),
+        };
+        std::fs::write(
+            dir.join("harness.json"),
+            serde_json::to_string(&json).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_lock_entry(
+        root: &Path,
+        repo: &str,
+        category: &str,
+        pid: i64,
+        started_at: f64,
+        label: &str,
+    ) {
+        let dir = root.join(FLEET_LOCK_SUBDIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let json = serde_json::json!({
+            "repo": repo,
+            "pid": pid,
+            "category": category,
+            "started_at": started_at,
+        });
+        std::fs::write(
+            dir.join(format!("{repo}__{label}.json")),
+            serde_json::to_string(&json).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn held_slot_when_category_at_capacity() {
+        let root = crate::testsupport::unique_temp_dir("mev-availability-slot-at-capacity");
+        write_harness(&root, "mev", Some("native-build"));
+        let now = now_unix_seconds();
+        for i in 0..4 {
+            write_lock_entry(
+                &root,
+                &format!("other-{i}"),
+                "native-build",
+                std::process::id() as i64,
+                now,
+                "p",
+            );
+        }
+
+        let e = entry(vec![], vec![]);
+        let repos = vec![repo_entry("mev")];
+        let slot_view = compute_fleet_slot_view(&root);
+        assert!(!slot_view.degraded);
+        let status = slot_status(&e, &repos, &root, &slot_view);
+        assert!(
+            matches!(status, Some((SegmentAvailability::HeldSlot, _))),
+            "expected HeldSlot at capacity, got {status:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn not_held_when_category_below_capacity() {
+        let root = crate::testsupport::unique_temp_dir("mev-availability-slot-below-capacity");
+        write_harness(&root, "mev", Some("native-build"));
+        let now = now_unix_seconds();
+        for i in 0..3 {
+            write_lock_entry(
+                &root,
+                &format!("other-{i}"),
+                "native-build",
+                std::process::id() as i64,
+                now,
+                "p",
+            );
+        }
+
+        let e = entry(vec![], vec![]);
+        let repos = vec![repo_entry("mev")];
+        let slot_view = compute_fleet_slot_view(&root);
+        let status = slot_status(&e, &repos, &root, &slot_view);
+        assert!(
+            status.is_none(),
+            "expected no hold below capacity, got {status:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stale_dead_pid_entry_does_not_count_toward_capacity() {
+        let root = crate::testsupport::unique_temp_dir("mev-availability-slot-dead-pid");
+        write_harness(&root, "mev", Some("native-build"));
+        let now = now_unix_seconds();
+        // Three live entries plus one with a dead pid: capacity is 4, so a dead-pid
+        // entry counting would wrongly hold; it must not.
+        for i in 0..3 {
+            write_lock_entry(
+                &root,
+                &format!("other-{i}"),
+                "native-build",
+                std::process::id() as i64,
+                now,
+                "p",
+            );
+        }
+        write_lock_entry(&root, "other-dead", "native-build", 999_999_999, now, "p");
+
+        let e = entry(vec![], vec![]);
+        let repos = vec![repo_entry("mev")];
+        let slot_view = compute_fleet_slot_view(&root);
+        let status = slot_status(&e, &repos, &root, &slot_view);
+        assert!(
+            status.is_none(),
+            "a stale dead-pid entry must not count toward capacity, got {status:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stale_over_ttl_entry_does_not_count_toward_capacity() {
+        let root = crate::testsupport::unique_temp_dir("mev-availability-slot-over-ttl");
+        write_harness(&root, "mev", Some("native-build"));
+        let now = now_unix_seconds();
+        for i in 0..3 {
+            write_lock_entry(
+                &root,
+                &format!("other-{i}"),
+                "native-build",
+                std::process::id() as i64,
+                now,
+                "p",
+            );
+        }
+        // Alive pid, but started_at is well past DEFAULT_TTL_SECONDS (4h) ago.
+        write_lock_entry(
+            &root,
+            "other-expired",
+            "native-build",
+            std::process::id() as i64,
+            now - (5.0 * 60.0 * 60.0),
+            "p",
+        );
+
+        let e = entry(vec![], vec![]);
+        let repos = vec![repo_entry("mev")];
+        let slot_view = compute_fleet_slot_view(&root);
+        let status = slot_status(&e, &repos, &root, &slot_view);
+        assert!(
+            status.is_none(),
+            "an over-TTL entry must not count toward capacity, got {status:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn light_repo_is_never_held_slot() {
+        let root = crate::testsupport::unique_temp_dir("mev-availability-slot-light-repo");
+        // No harness.json at all -> light.
+        let now = now_unix_seconds();
+        for i in 0..4 {
+            write_lock_entry(
+                &root,
+                &format!("other-{i}"),
+                "native-build",
+                std::process::id() as i64,
+                now,
+                "p",
+            );
+        }
+
+        let e = entry(vec![], vec![]);
+        let repos = vec![repo_entry("mev")];
+        let slot_view = compute_fleet_slot_view(&root);
+        let status = slot_status(&e, &repos, &root, &slot_view);
+        assert!(
+            status.is_none(),
+            "a light repo must never be HeldSlot, got {status:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn missing_lock_dir_degrades_and_holds_nothing() {
+        let root = crate::testsupport::unique_temp_dir("mev-availability-slot-missing-dir");
+        std::fs::create_dir_all(&root).unwrap();
+        write_harness(&root, "mev", Some("native-build"));
+        // Deliberately no .fleet-locks directory created.
+
+        let e = entry(vec![], vec![]);
+        let repos = vec![repo_entry("mev")];
+        let slot_view = compute_fleet_slot_view(&root);
+        assert!(
+            slot_view.degraded,
+            "missing lock dir must set degraded: true"
+        );
+        let status = slot_status(&e, &repos, &root, &slot_view);
+        assert!(
+            status.is_none(),
+            "a degraded read must never report a hold, got {status:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn repo_already_holding_own_entry_is_not_held_against_itself() {
+        let root = crate::testsupport::unique_temp_dir("mev-availability-slot-self-hold");
+        write_harness(&root, "mev", Some("native-build"));
+        let now = now_unix_seconds();
+        // Capacity (4) reached, and "mev" itself is one of the four holders.
+        write_lock_entry(
+            &root,
+            "mev",
+            "native-build",
+            std::process::id() as i64,
+            now,
+            "self",
+        );
+        for i in 0..3 {
+            write_lock_entry(
+                &root,
+                &format!("other-{i}"),
+                "native-build",
+                std::process::id() as i64,
+                now,
+                "p",
+            );
+        }
+
+        let e = entry(vec![], vec![]);
+        let repos = vec![repo_entry("mev")];
+        let slot_view = compute_fleet_slot_view(&root);
+        let status = slot_status(&e, &repos, &root, &slot_view);
+        assert!(
+            status.is_none(),
+            "a repo already holding its own slot must not be held against itself, got {status:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_status_with_slot_reaches_held_slot_only_when_startable() {
+        let root = crate::testsupport::unique_temp_dir("mev-availability-slot-resolve");
+        write_harness(&root, "mev", Some("native-build"));
+        let now = now_unix_seconds();
+        for i in 0..4 {
+            write_lock_entry(
+                &root,
+                &format!("other-{i}"),
+                "native-build",
+                std::process::id() as i64,
+                now,
+                "p",
+            );
+        }
+        let repos = vec![repo_entry("mev")];
+        let slot_view = compute_fleet_slot_view(&root);
+
+        // A held-block segment must report HeldBlock, never HeldSlot, even at
+        // fleet capacity.
+        let held = entry(vec!["mev:MV.13.B"], vec![]);
+        let (avail, _) = resolve_status_with_slot(&held, &[], &repos, &root, &slot_view);
+        assert_eq!(avail, SegmentAvailability::HeldBlock);
+
+        // A startable segment falls through to HeldSlot when at capacity.
+        let startable = entry(vec![], vec![]);
+        let (avail, reason) = resolve_status_with_slot(&startable, &[], &repos, &root, &slot_view);
+        assert_eq!(avail, SegmentAvailability::HeldSlot);
+        assert!(reason.is_some());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn segment_statuses_with_slots_reports_degraded_flag() {
+        let root = crate::testsupport::unique_temp_dir("mev-availability-slots-artifact");
+        std::fs::create_dir_all(&root).unwrap();
+        write_harness(&root, "mev", Some("native-build"));
+        // No .fleet-locks directory -> degraded read, no hold.
+
+        let e = entry(vec![], vec![]);
+        let frontier = Frontier {
+            entries: vec![e],
+            gate_ranks: Vec::new(),
+        };
+        let repos = vec![repo_entry("mev")];
+        let (statuses, degraded) = segment_statuses_with_slots(&frontier, &[], &repos, &root);
+        assert!(degraded);
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].availability, SegmentAvailability::Startable);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

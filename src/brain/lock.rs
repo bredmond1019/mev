@@ -182,7 +182,7 @@ fn try_create_lock(lock_path: &Path) -> Result<(), TryCreateError> {
 /// invoke `ps` at all (missing from `PATH`, non-Unix, etc.) fails closed — the
 /// pid is reported alive so a real held lock is never reclaimed out from under
 /// its owner just because the liveness probe itself broke.
-fn pid_is_alive(pid: u32) -> bool {
+pub(crate) fn pid_is_alive(pid: u32) -> bool {
     if pid == 0 {
         return true;
     }
