@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use crate::Diagnostic;
 use crate::brain::block_graph::BlockGraphExport;
-use crate::brain::emit::global_status_map;
+use crate::brain::emit::{effective_priority_for, global_status_map};
 use crate::brain::lane_segments::DerivedBlockPosition;
 use crate::brain::state::{
     ApprovalDep, BlockDep, BlockedBy, ExternalDep, OperatorDep, StateFile, StateGraph, StateSource,
@@ -56,6 +56,96 @@ pub struct FrontierEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 pub struct Frontier {
     pub entries: Vec<FrontierEntry>,
+    pub gate_ranks: Vec<GateRank>,
+}
+
+/// One operator/approval gate's rank, derived over every block it gates —
+/// `MV.13.B` Task 2.
+///
+/// Operator and approval gates are targetless: they gate a block but are not
+/// themselves graph nodes with dependents, so
+/// [`crate::brain::state::effective_priorities`] never assigns them a
+/// priority directly. This is the derived substitute — the minimum effective
+/// priority across every block the gate blocks, via
+/// [`crate::brain::emit::effective_priority_for`] (the same lookup `emit`'s
+/// `BlockedGroup::effective_priority` uses, widened to take `repo`/`id`/
+/// `priority` directly so it works for `TrackBlock` too — no second min
+/// implementation).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct GateRank {
+    /// `"operator"` or `"approval"`.
+    pub kind: &'static str,
+    pub slug: String,
+    /// The minimum effective priority across every block in `gates`. Absent
+    /// priority throughout sorts last (`u8::MAX`), matching
+    /// [`crate::brain::emit::effective_priority_for`]'s own fallback.
+    pub rank: u8,
+    /// Every block this gate blocks, rendered `"repo:id"`, in the order
+    /// first encountered.
+    pub gates: Vec<String>,
+}
+
+/// Derive [`GateRank`]s for every operator/approval gate named in `files`'
+/// `depends_on` edges.
+///
+/// Groups every `TrackBlock` carrying an `Operator`/`Approval` dependency by
+/// `(kind, slug)` — a shared slug is a join key: several otherwise-unrelated
+/// blocks across any number of repos can name the same operator session or
+/// approval decision, mirroring [`crate::brain::emit::group_blocked_by_gate`]'s
+/// shared-identity dedup. Each group's `rank` is the minimum
+/// [`crate::brain::emit::effective_priority_for`] across its `gates`.
+///
+/// Output is sorted `(rank asc, slug asc)` so it is deterministic regardless
+/// of corpus file-walk order.
+pub fn gate_ranks(
+    files: &[(StateSource, StateFile)],
+    effective: &HashMap<String, u8>,
+) -> Vec<GateRank> {
+    // (kind, slug) -> index into `groups`, preserving first-seen order.
+    let mut order: Vec<(&'static str, String)> = Vec::new();
+    let mut groups: HashMap<(&'static str, String), (u8, Vec<String>)> = HashMap::new();
+
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let block_key = format!("{}:{}", src.repo_slug, block.id);
+                let block_rank =
+                    effective_priority_for(&src.repo_slug, &block.id, block.priority, effective);
+                for dep in &block.depends_on {
+                    let key = match dep {
+                        BlockedBy::Operator(OperatorDep { slug, .. }) => ("operator", slug.clone()),
+                        BlockedBy::Approval(ApprovalDep { slug, .. }) => ("approval", slug.clone()),
+                        BlockedBy::Block(_) | BlockedBy::External(_) => continue,
+                    };
+                    if !groups.contains_key(&key) {
+                        order.push(key.clone());
+                    }
+                    let entry = groups.entry(key).or_insert_with(|| (u8::MAX, Vec::new()));
+                    entry.0 = entry.0.min(block_rank);
+                    if !entry.1.contains(&block_key) {
+                        entry.1.push(block_key.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut ranks: Vec<GateRank> = order
+        .into_iter()
+        .map(|(kind, slug)| {
+            let (rank, gates) = groups
+                .remove(&(kind, slug.clone()))
+                .unwrap_or((u8::MAX, Vec::new()));
+            GateRank {
+                kind,
+                slug,
+                rank,
+                gates,
+            }
+        })
+        .collect();
+    ranks.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.slug.cmp(&b.slug)));
+    ranks
 }
 
 /// Look up a `TrackBlock` by its canonical `"repo:id"` key across every loaded state
@@ -82,10 +172,14 @@ fn track_block_index(files: &[(StateSource, StateFile)]) -> HashMap<String, &Tra
 /// caller already refused a truncated node set via [`ensure_untruncated`]; it does not
 /// re-check truncation itself since [`StateGraph`] carries no such flag (that lives on
 /// [`BlockGraphExport`], the HTTP-side shape).
+/// `effective` is the [`crate::brain::state::effective_priorities`] map
+/// (keyed `"repo:id"`) — threaded through so [`gate_ranks`] can derive a rank
+/// for the targetless operator/approval gates that map itself never reaches.
 pub fn compute_frontier(
     lane_positions: &[DerivedBlockPosition],
     graph: &StateGraph,
     files: &[(StateSource, StateFile)],
+    effective: &HashMap<String, u8>,
 ) -> Frontier {
     let node_titles: HashMap<&str, &str> = graph
         .nodes
@@ -186,7 +280,10 @@ pub fn compute_frontier(
         });
     }
 
-    Frontier { entries }
+    Frontier {
+        entries,
+        gate_ranks: gate_ranks(files, effective),
+    }
 }
 
 /// Refuse to compute a frontier over a truncated node set.
@@ -311,7 +408,7 @@ mod tests {
                 track_block("A.2", Some("open"), vec![]),
             ],
         )];
-        let frontier = compute_frontier(&lane_positions, &empty_graph(), &files);
+        let frontier = compute_frontier(&lane_positions, &empty_graph(), &files, &HashMap::new());
         assert_eq!(frontier.entries.len(), 1);
         assert_eq!(frontier.entries[0].id, "A.2");
         assert!(frontier.entries[0].startable);
@@ -324,7 +421,7 @@ mod tests {
             "repo",
             vec![track_block("A.1", Some("closed"), vec![])],
         )];
-        let frontier = compute_frontier(&lane_positions, &empty_graph(), &files);
+        let frontier = compute_frontier(&lane_positions, &empty_graph(), &files, &HashMap::new());
         assert!(frontier.entries.is_empty());
     }
 
@@ -340,7 +437,7 @@ mod tests {
             state_file("repoA", vec![track_block("A.1", Some("open"), vec![dep])]),
             state_file("repoB", vec![track_block("B.1", Some("open"), vec![])]),
         ];
-        let frontier = compute_frontier(&lane_positions, &empty_graph(), &files);
+        let frontier = compute_frontier(&lane_positions, &empty_graph(), &files, &HashMap::new());
         assert_eq!(frontier.entries.len(), 1);
         let entry = &frontier.entries[0];
         assert!(!entry.startable);
@@ -361,12 +458,131 @@ mod tests {
             "repo",
             vec![track_block("A.1", Some("open"), vec![dep])],
         )];
-        let frontier = compute_frontier(&lane_positions, &empty_graph(), &files);
+        let frontier = compute_frontier(&lane_positions, &empty_graph(), &files, &HashMap::new());
         assert_eq!(frontier.entries.len(), 1);
         let entry = &frontier.entries[0];
         assert!(!entry.startable);
         assert!(entry.unmet_blocks.is_empty());
         assert_eq!(entry.unmet_gates, vec!["operator:review-plan".to_string()]);
+    }
+
+    fn track_block_with_priority(
+        id: &str,
+        priority: Option<u8>,
+        depends_on: Vec<BlockedBy>,
+    ) -> TrackBlock {
+        TrackBlock {
+            id: id.to_string(),
+            title: format!("Title for {id}"),
+            status: Some("open".to_string()),
+            priority,
+            depends_on,
+            ..Default::default()
+        }
+    }
+
+    fn operator_dep(slug: &str) -> BlockedBy {
+        BlockedBy::Operator(OperatorDep {
+            slug: slug.to_string(),
+            exit: "planning/decision.md".to_string(),
+            start: format!("/begin-session {slug}"),
+            what: None,
+        })
+    }
+
+    #[test]
+    fn shared_slug_across_two_repos_collapses_to_one_gate_rank_carrying_the_minimum() {
+        let files = vec![
+            state_file(
+                "repoA",
+                vec![
+                    track_block_with_priority("A.1", Some(2), vec![operator_dep("review-plan")]),
+                    track_block_with_priority("A.2", Some(1), vec![operator_dep("review-plan")]),
+                ],
+            ),
+            state_file(
+                "repoB",
+                vec![track_block_with_priority(
+                    "B.1",
+                    Some(3),
+                    vec![operator_dep("review-plan")],
+                )],
+            ),
+        ];
+        let ranks = gate_ranks(&files, &HashMap::new());
+        assert_eq!(ranks.len(), 1);
+        let rank = &ranks[0];
+        assert_eq!(rank.kind, "operator");
+        assert_eq!(rank.slug, "review-plan");
+        assert_eq!(rank.rank, 1);
+        assert_eq!(
+            rank.gates,
+            vec![
+                "repoA:A.1".to_string(),
+                "repoA:A.2".to_string(),
+                "repoB:B.1".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn absent_priority_throughout_ranks_u8_max_and_sorts_last() {
+        let files = vec![
+            state_file(
+                "repoA",
+                vec![track_block_with_priority(
+                    "A.1",
+                    Some(0),
+                    vec![operator_dep("hot-gate")],
+                )],
+            ),
+            state_file(
+                "repoB",
+                vec![track_block_with_priority(
+                    "B.1",
+                    None,
+                    vec![operator_dep("cold-gate")],
+                )],
+            ),
+        ];
+        let ranks = gate_ranks(&files, &HashMap::new());
+        assert_eq!(ranks.len(), 2);
+        // sorted rank asc, so the absent-priority gate sorts last.
+        assert_eq!(ranks[0].slug, "hot-gate");
+        assert_eq!(ranks[0].rank, 0);
+        assert_eq!(ranks[1].slug, "cold-gate");
+        assert_eq!(ranks[1].rank, u8::MAX);
+    }
+
+    #[test]
+    fn effective_priorities_map_wins_over_raw_priority_for_gate_rank() {
+        let files = vec![state_file(
+            "repo",
+            vec![track_block_with_priority(
+                "A.1",
+                Some(3),
+                vec![operator_dep("review-plan")],
+            )],
+        )];
+        let mut effective = HashMap::new();
+        effective.insert("repo:A.1".to_string(), 0u8);
+        let ranks = gate_ranks(&files, &effective);
+        assert_eq!(ranks.len(), 1);
+        assert_eq!(ranks[0].rank, 0);
+    }
+
+    #[test]
+    fn compute_frontier_attaches_gate_ranks() {
+        let lane_positions = vec![pos("r1", "lane-a", 0, 0, "repo", "A.1")];
+        let dep = operator_dep("review-plan");
+        let files = vec![state_file(
+            "repo",
+            vec![track_block_with_priority("A.1", Some(1), vec![dep])],
+        )];
+        let frontier = compute_frontier(&lane_positions, &empty_graph(), &files, &HashMap::new());
+        assert_eq!(frontier.gate_ranks.len(), 1);
+        assert_eq!(frontier.gate_ranks[0].slug, "review-plan");
+        assert_eq!(frontier.gate_ranks[0].rank, 1);
     }
 
     #[test]

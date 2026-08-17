@@ -605,7 +605,14 @@ impl<'a> BlockedGroup<'a> {
     pub fn effective_priority(&self, effective: &HashMap<String, u8>) -> u8 {
         self.blocks
             .iter()
-            .map(|b| effective_priority_for(b, effective))
+            .map(|b| {
+                effective_priority_for(
+                    b.repo.as_deref().unwrap_or(""),
+                    &b.id,
+                    b.priority,
+                    effective,
+                )
+            })
             .min()
             .unwrap_or(u8::MAX)
     }
@@ -907,18 +914,25 @@ fn unified_board_tag(block: &Block, config: &BrainConfig) -> &'static str {
     if is_business { "[BIZ]" } else { "[ENG]" }
 }
 
-/// Look up `block`'s effective priority (MV.7.A): the `effective_priorities`
-/// map (keyed `"repo:id"`) wins when present — it reflects reverse-topo
+/// Look up the effective priority (MV.7.A) for a `"repo:id"` node: the
+/// `effective_priorities` map wins when present — it reflects reverse-topo
 /// `min`-propagation, so a block gating a hotter dependent floats up — and
-/// falls back to the block's own raw `priority` (absent → `u8::MAX`, sorts
-/// last) when the block has no entry in the map.
-fn effective_priority_for(block: &Block, effective: &HashMap<String, u8>) -> u8 {
-    let key = format!("{}:{}", block.repo.as_deref().unwrap_or(""), block.id);
-    effective
-        .get(&key)
-        .copied()
-        .or(block.priority)
-        .unwrap_or(u8::MAX)
+/// falls back to the node's own raw `priority` (absent → `u8::MAX`, sorts
+/// last) when the map has no entry for it.
+///
+/// Takes `repo`/`id`/`priority` rather than a `&Block` so both `Block`
+/// (`focus.*` entries) and `TrackBlock` (`tracks[]` entries — MV.13.B Task 2's
+/// `gate_rank` derivation) can share this one lookup instead of each growing
+/// its own copy. `pub(crate)` so [`crate::brain::frontier::gate_ranks`] can
+/// reuse it directly instead of re-deriving the map semantics.
+pub(crate) fn effective_priority_for(
+    repo: &str,
+    id: &str,
+    priority: Option<u8>,
+    effective: &HashMap<String, u8>,
+) -> u8 {
+    let key = format!("{repo}:{id}");
+    effective.get(&key).copied().or(priority).unwrap_or(u8::MAX)
 }
 
 /// Stably sort `next` by `(effective priority asc, due asc)`, both with an
@@ -930,8 +944,18 @@ fn effective_priority_for(block: &Block, effective: &HashMap<String, u8>) -> u8 
 fn sort_unified_board_next(next: &[Block], effective: &HashMap<String, u8>) -> Vec<Block> {
     let mut sorted = next.to_vec();
     sorted.sort_by(|a, b| {
-        let pa = effective_priority_for(a, effective);
-        let pb = effective_priority_for(b, effective);
+        let pa = effective_priority_for(
+            a.repo.as_deref().unwrap_or(""),
+            &a.id,
+            a.priority,
+            effective,
+        );
+        let pb = effective_priority_for(
+            b.repo.as_deref().unwrap_or(""),
+            &b.id,
+            b.priority,
+            effective,
+        );
         pa.cmp(&pb)
             .then_with(|| match (parse_due(&a.due), parse_due(&b.due)) {
                 (Some(da), Some(db)) => da.cmp(&db),
