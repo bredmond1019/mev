@@ -131,17 +131,99 @@ fn intrinsic_status(entry: &FrontierEntry) -> (SegmentAvailability, Option<Strin
     (SegmentAvailability::Startable, None)
 }
 
-/// Compute intrinsic [`SegmentStatus`]es for every entry in `frontier`.
+/// One segment's identity — `(roadmap, lane, segment)` plus its owning `repo` — the
+/// full segment list [`intrinsic_segment_statuses`], [`segment_statuses`], and
+/// [`segment_statuses_with_slots`] use to detect segments with no frontier entry
+/// (every block in the segment is closed) and emit `Done` for them.
 ///
-/// `Done` segments (every block closed, so no frontier entry exists) are not produced
-/// here — the frontier itself carries no record of a closed-out segment, since
-/// [`crate::brain::frontier::compute_frontier`] skips segments whose head-search finds
-/// nothing. A future task threading in `lane_segments`' full segment list (not just
-/// the frontier's live subset) is what would let `Done` segments be reported too; this
-/// task's tests exercise `Done` directly against a synthetic entry set instead of
-/// wiring that discovery in yet, since no task in this spec names it as in scope.
-pub fn intrinsic_segment_statuses(frontier: &Frontier) -> Vec<SegmentStatus> {
-    frontier
+/// Derived from `lane_positions` via [`discover_segments`] — the same
+/// [`DerivedBlockPosition`] list [`crate::brain::frontier::compute_frontier`] groups
+/// internally — rather than re-parsing lane files a second, independent way, so the
+/// frontier's live subset and this module's full segment set agree by construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredSegment {
+    pub roadmap: String,
+    pub lane: String,
+    pub segment: usize,
+    pub repo: String,
+}
+
+/// Group `lane_positions` into one [`DiscoveredSegment`] per `(roadmap, lane,
+/// segment)`, first-seen order — the same grouping
+/// [`crate::brain::frontier::compute_frontier`] performs internally to find each
+/// segment's head, except every group survives here (that function drops a group
+/// whose every block is closed; this one is what lets a `Done` segment be told apart
+/// from a segment that does not exist at all).
+pub fn discover_segments(lane_positions: &[DerivedBlockPosition]) -> Vec<DiscoveredSegment> {
+    let mut order: Vec<(String, String, usize)> = Vec::new();
+    let mut repos: HashMap<(String, String, usize), String> = HashMap::new();
+    for p in lane_positions {
+        let key = (p.roadmap.clone(), p.lane.clone(), p.segment);
+        repos.entry(key.clone()).or_insert_with(|| {
+            order.push(key);
+            p.repo.clone()
+        });
+    }
+    order
+        .into_iter()
+        .map(|key| DiscoveredSegment {
+            repo: repos.remove(&key).unwrap_or_default(),
+            roadmap: key.0,
+            lane: key.1,
+            segment: key.2,
+        })
+        .collect()
+}
+
+/// Append a `Done` [`SegmentStatus`] for every entry in `segments` that has no
+/// matching entry in `frontier` — i.e. every block in that segment is closed.
+/// Matched on the `(roadmap, lane, segment)` identity triple only, never on a head
+/// block id (a `Done` segment has none).
+///
+/// Appended after the frontier-derived statuses already in `statuses`, in
+/// `segments`' own (first-seen) order — the existing (live) entries keep exactly the
+/// order they had before this function ran; nothing is re-sorted to interleave the
+/// two, per this task's ordering requirement.
+fn append_done_segments(
+    statuses: &mut Vec<SegmentStatus>,
+    frontier: &Frontier,
+    segments: &[DiscoveredSegment],
+) {
+    let present: HashSet<(String, String, usize)> = frontier
+        .entries
+        .iter()
+        .map(|e| (e.roadmap.clone(), e.lane.clone(), e.segment))
+        .collect();
+    for seg in segments {
+        let key = (seg.roadmap.clone(), seg.lane.clone(), seg.segment);
+        if present.contains(&key) {
+            continue;
+        }
+        statuses.push(SegmentStatus {
+            roadmap: seg.roadmap.clone(),
+            lane: seg.lane.clone(),
+            segment: seg.segment,
+            repo: seg.repo.clone(),
+            head: None,
+            availability: SegmentAvailability::Done,
+            reason: None,
+        });
+    }
+}
+
+/// Compute intrinsic [`SegmentStatus`]es for every entry in `frontier`, plus a `Done`
+/// status for every entry in `segments` the frontier has no record of (every block in
+/// that segment is closed — [`crate::brain::frontier::compute_frontier`] skips such
+/// segments entirely, so their only trace is their absence). `segments` should be
+/// [`discover_segments`] run over the same `lane_positions` `frontier` was computed
+/// from, so the two agree by construction; passing a `segments` list that disagrees
+/// with `frontier`'s own derivation is a caller bug, not something this function
+/// detects.
+pub fn intrinsic_segment_statuses(
+    frontier: &Frontier,
+    segments: &[DiscoveredSegment],
+) -> Vec<SegmentStatus> {
+    let mut statuses: Vec<SegmentStatus> = frontier
         .entries
         .iter()
         .map(|entry| {
@@ -156,7 +238,9 @@ pub fn intrinsic_segment_statuses(frontier: &Frontier) -> Vec<SegmentStatus> {
                 reason,
             }
         })
-        .collect()
+        .collect();
+    append_done_segments(&mut statuses, frontier, segments);
+    statuses
 }
 
 // ---------------------------------------------------------------------------
@@ -310,12 +394,18 @@ fn resolve_status(
 }
 
 /// Compute full [`SegmentStatus`]es (intrinsic tier + `HeldRepoBusy`) for every entry
-/// in `frontier`. Supersedes [`intrinsic_segment_statuses`] as the availability
-/// entry point once a repo-liveness reading (from [`discover_live_runs`]) is in
-/// hand; `intrinsic_segment_statuses` remains for callers (and tests) that only need
-/// the intrinsic tier.
-pub fn segment_statuses(frontier: &Frontier, live_runs: &[LiveRun]) -> Vec<SegmentStatus> {
-    frontier
+/// in `frontier`, plus a `Done` status for every entry in `segments` the frontier has
+/// no record of — see [`intrinsic_segment_statuses`] for the `Done`-discovery
+/// contract `segments` must satisfy. Supersedes [`intrinsic_segment_statuses`] as the
+/// availability entry point once a repo-liveness reading (from
+/// [`discover_live_runs`]) is in hand; `intrinsic_segment_statuses` remains for
+/// callers (and tests) that only need the intrinsic tier.
+pub fn segment_statuses(
+    frontier: &Frontier,
+    live_runs: &[LiveRun],
+    segments: &[DiscoveredSegment],
+) -> Vec<SegmentStatus> {
+    let mut statuses: Vec<SegmentStatus> = frontier
         .entries
         .iter()
         .map(|entry| {
@@ -330,7 +420,9 @@ pub fn segment_statuses(frontier: &Frontier, live_runs: &[LiveRun]) -> Vec<Segme
                 reason,
             }
         })
-        .collect()
+        .collect();
+    append_done_segments(&mut statuses, frontier, segments);
+    statuses
 }
 
 // ---------------------------------------------------------------------------
@@ -597,20 +689,23 @@ fn resolve_status_with_slot(
 }
 
 /// Compute full [`SegmentStatus`]es (intrinsic tier + `HeldRepoBusy` + `HeldSlot`)
-/// for every entry in `frontier`, plus whether the fleet-lock read degraded (the
-/// `.fleet-locks` directory was missing or unreadable — "unknown", never a hold).
-/// Supersedes [`segment_statuses`] as the availability entry point once a repo
-/// registry and brain root are in hand, for the same reason `segment_statuses`
-/// supersedes `intrinsic_segment_statuses`.
+/// for every entry in `frontier`, plus a `Done` status for every entry in `segments`
+/// the frontier has no record of (see [`intrinsic_segment_statuses`] for the
+/// `Done`-discovery contract `segments` must satisfy), plus whether the fleet-lock
+/// read degraded (the `.fleet-locks` directory was missing or unreadable —
+/// "unknown", never a hold). Supersedes [`segment_statuses`] as the availability
+/// entry point once a repo registry and brain root are in hand, for the same reason
+/// `segment_statuses` supersedes `intrinsic_segment_statuses`.
 pub fn segment_statuses_with_slots(
     frontier: &Frontier,
     live_runs: &[LiveRun],
     repos: &[RepoEntry],
     root: &Path,
+    segments: &[DiscoveredSegment],
 ) -> (Vec<SegmentStatus>, bool) {
     let slot_view = compute_fleet_slot_view(root);
     let degraded = slot_view.degraded;
-    let statuses = frontier
+    let mut statuses: Vec<SegmentStatus> = frontier
         .entries
         .iter()
         .map(|entry| {
@@ -627,6 +722,7 @@ pub fn segment_statuses_with_slots(
             }
         })
         .collect();
+    append_done_segments(&mut statuses, frontier, segments);
     (statuses, degraded)
 }
 
@@ -923,8 +1019,9 @@ pub fn plan_availability(root: &Path, loaded: &[(StateSource, StateFile)]) -> Em
     let (live_runs, live_run_diags) = discover_live_runs(root, &config.repos);
     plan.diagnostics.extend(live_run_diags);
 
+    let all_segments = discover_segments(&lane_positions);
     let (statuses, degraded) =
-        segment_statuses_with_slots(&frontier, &live_runs, &config.repos, root);
+        segment_statuses_with_slots(&frontier, &live_runs, &config.repos, root, &all_segments);
     let leverage_by_segment = lane_leverage(&graph, &lane_positions, &frontier);
 
     let segments: Vec<LaneAvailabilityEntry> = statuses
@@ -1068,32 +1165,82 @@ mod tests {
         assert_eq!(reason.as_deref(), Some("blocked by mev:MV.13.B"));
     }
 
+    fn discovered(roadmap: &str, lane: &str, segment: usize, repo: &str) -> DiscoveredSegment {
+        DiscoveredSegment {
+            roadmap: roadmap.to_string(),
+            lane: lane.to_string(),
+            segment,
+            repo: repo.to_string(),
+        }
+    }
+
     #[test]
     fn all_closed_segment_reports_done_with_no_head() {
         // A segment with every block closed contributes no FrontierEntry at all
-        // (compute_frontier skips it) — Done is represented by absence, and a
-        // SegmentStatus built for a Done segment carries head: None.
+        // (compute_frontier skips it) — Done is represented by absence from the
+        // frontier, and intrinsic_segment_statuses is what turns that absence back
+        // into a real SegmentStatus, driven by real (discovered) segment data rather
+        // than a hand-built one.
         let frontier = Frontier::default();
-        let statuses = intrinsic_segment_statuses(&frontier);
-        assert!(
-            statuses.is_empty(),
-            "an all-closed / entryless frontier should yield no live segment statuses"
-        );
+        let segments = vec![discovered("engine-orchestration", "derive", 0, "mev")];
 
-        // Directly construct the Done representation a caller would build once it
-        // knows (from lane_segments, out of scope for this task) that a segment
-        // exists but has no live head.
-        let done = SegmentStatus {
-            roadmap: "engine-orchestration".to_string(),
-            lane: "derive".to_string(),
-            segment: 0,
-            repo: "mev".to_string(),
-            head: None,
-            availability: SegmentAvailability::Done,
-            reason: None,
+        let statuses = intrinsic_segment_statuses(&frontier, &segments);
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].roadmap, "engine-orchestration");
+        assert_eq!(statuses[0].lane, "derive");
+        assert_eq!(statuses[0].segment, 0);
+        assert_eq!(statuses[0].repo, "mev");
+        assert_eq!(statuses[0].availability, SegmentAvailability::Done);
+        assert_eq!(statuses[0].head, None);
+        assert_eq!(statuses[0].reason, None);
+    }
+
+    #[test]
+    fn done_segment_appears_once_alongside_live_sibling_unaffected() {
+        // One live segment (segment 0, has a frontier entry) and one all-closed
+        // sibling (segment 1, no frontier entry). The closed one must appear exactly
+        // once as Done with head: None; the live one must keep exactly the status it
+        // had before Done discovery existed.
+        let live = entry(vec![], vec![]);
+        let frontier = Frontier {
+            entries: vec![live],
+            gate_ranks: Vec::new(),
         };
-        assert_eq!(done.availability, SegmentAvailability::Done);
-        assert_eq!(done.head, None);
+        let segments = vec![
+            discovered("engine-orchestration", "derive", 0, "mev"),
+            discovered("engine-orchestration", "derive", 1, "mev"),
+        ];
+
+        let statuses = intrinsic_segment_statuses(&frontier, &segments);
+
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].segment, 0);
+        assert_eq!(statuses[0].availability, SegmentAvailability::Startable);
+        assert_eq!(statuses[0].head, Some("mev:MV.13.C".to_string()));
+        assert_eq!(statuses[1].segment, 1);
+        assert_eq!(statuses[1].availability, SegmentAvailability::Done);
+        assert_eq!(statuses[1].head, None);
+        assert_eq!(statuses[1].reason, None);
+    }
+
+    #[test]
+    fn no_closed_segments_produces_output_identical_to_frontier_only() {
+        // Every discovered segment has a live frontier entry — output must match
+        // what intrinsic_segment_statuses produced before Done discovery existed,
+        // byte for byte (no spurious Done entries appended).
+        let live = entry(vec![], vec![]);
+        let frontier = Frontier {
+            entries: vec![live],
+            gate_ranks: Vec::new(),
+        };
+        let segments = vec![discovered("engine-orchestration", "derive", 0, "mev")];
+
+        let statuses = intrinsic_segment_statuses(&frontier, &segments);
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].availability, SegmentAvailability::Startable);
+        assert_eq!(statuses[0].head, Some("mev:MV.13.C".to_string()));
     }
 
     #[test]
@@ -1279,7 +1426,7 @@ mod tests {
             repo: "mev".to_string(),
             roadmap: "close-the-loop".to_string(),
         }];
-        let statuses = segment_statuses(&frontier, &live_runs);
+        let statuses = segment_statuses(&frontier, &live_runs, &[]);
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].availability, SegmentAvailability::HeldRepoBusy);
     }
@@ -1802,7 +1949,7 @@ mod tests {
             gate_ranks: Vec::new(),
         };
         let repos = vec![repo_entry("mev")];
-        let (statuses, degraded) = segment_statuses_with_slots(&frontier, &[], &repos, &root);
+        let (statuses, degraded) = segment_statuses_with_slots(&frontier, &[], &repos, &root, &[]);
         assert!(degraded);
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].availability, SegmentAvailability::Startable);

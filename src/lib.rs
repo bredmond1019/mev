@@ -2190,7 +2190,7 @@ pub fn lanes_brain(
 ) -> anyhow::Result<brain::availability::LaneAvailabilityArtifact> {
     use brain::availability::{
         LaneAvailabilityArtifact, LaneAvailabilityEntry, SegmentKey, discover_live_runs,
-        lane_leverage, segment_statuses_with_slots,
+        discover_segments, lane_leverage, segment_statuses_with_slots,
     };
     use brain::block_graph::{BlockGraphScope, build_block_graph_export};
     use brain::config::find_brain_config;
@@ -2233,8 +2233,9 @@ pub fn lanes_brain(
     let frontier = compute_frontier(&lane_positions, &graph, &loaded, &effective);
 
     let (live_runs, _live_run_diags) = discover_live_runs(root, &config.repos);
+    let all_segments = discover_segments(&lane_positions);
     let (statuses, degraded) =
-        segment_statuses_with_slots(&frontier, &live_runs, &config.repos, root);
+        segment_statuses_with_slots(&frontier, &live_runs, &config.repos, root, &all_segments);
     let leverage_by_segment = lane_leverage(&graph, &lane_positions, &frontier);
 
     let segments: Vec<LaneAvailabilityEntry> = statuses
