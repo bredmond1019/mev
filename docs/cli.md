@@ -963,6 +963,103 @@ mev frontier --json | jq '.entries[] | select(.startable)'
 
 ---
 
+### `lanes [--json] [path]`
+
+Print six-state lane-segment availability plus lane-level unblock leverage, computed
+over the corpus-wide lane frontier — `MV.13.C`, Task 5. Read-only; never writes
+`planning/lane-availability.json` (that write happens only via `mev emit-state
+--write`, which runs this same derivation as one of its planners).
+
+```bash
+mev lanes [path]
+mev lanes --json [path]
+```
+
+| Argument / Flag | Default | Description |
+|---|---|---|
+| `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
+| `--json` | off | Emit the `lane-availability.json` artifact shape (`derived_at`, `degraded`, `segments`) instead of one text line per segment |
+
+#### The six states
+
+Every lane segment resolves to exactly one of six states, in this fixed precedence
+(highest first) — see `docs/architecture.md` for the full rationale:
+
+`done` > `held-block` > `held-operator` > `held-repo-busy` > `held-slot` > `startable`
+
+`held-repo-busy` is derived from exactly one source of lane-liveness truth: the
+per-`(repo, roadmap)` orchestration-run record's `lifecycle:` frontmatter
+(`planning/orchestration-run/<roadmap>/notes.md`) — never `lane-log.jsonl` or the
+`.fleet-locks` fleet-lock registry. `docs/architecture.md` names both rejected
+candidates and why.
+
+#### Text output shape
+
+One line per segment:
+
+```
+{roadmap}/{lane}#{segment} {repo}:{id} — {availability} (<reason>) frees N lane(s)
+```
+
+`{id}` renders as `-` for `done` segments (no live head). The `(<reason>)` clause is
+omitted entirely for `startable`/`done`, which need no explanation. `frees N lane(s)`
+is always present, including `frees 0 lanes` — the zero case is a real answer, not an
+absence.
+
+#### `--json` output shape
+
+```json
+{
+  "derived_at": "2026-08-17T17:53:38.409934-03:00",
+  "degraded": false,
+  "segments": [
+    {
+      "roadmap": "engine-orchestration",
+      "lane": "derive",
+      "segment": 0,
+      "repo": "mev",
+      "head": "mev:MV.13.C",
+      "availability": "held-repo-busy",
+      "reason": "repo mev is live on carryover-improvements",
+      "leverage": {
+        "lanes_freed": 1,
+        "lanes": ["engine-orchestration/wire"]
+      }
+    }
+  ]
+}
+```
+
+`derived_at` is an RFC 3339 timestamp of this run, same rationale as `mev frontier`'s
+field of the same name. `degraded` is `true` when the fleet-lock read that feeds
+`held-slot` could not run (`.fleet-locks` missing or unreadable) — "unknown", never a
+hold; a consumer can use it to tell a corpus with zero live `held-slot` holds apart
+from one that could not check. Each segment's `leverage.lanes_freed` counts distinct
+`(roadmap, lane)` pairs downstream of this segment — a lane-scoped metric, distinct
+from the block-graph export's block-scoped `dependent_count`.
+
+#### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Availability computed and printed |
+| `1` | `brain.toml` not found/unreadable, or the in-process graph reported `truncated: true` (should not happen at `max_nodes: usize::MAX`, but this command refuses rather than degrading if it ever does) |
+
+**Examples:**
+
+```bash
+# Text availability from the current directory
+mev lanes
+
+# JSON availability from an explicit brain root
+mev lanes --json ~/Dev/agentic-portfolio
+
+# Just the startable segments with nonzero leverage
+mev lanes --json | jq '.segments[] | select(.availability == "startable" and .leverage.lanes_freed > 0)'
+```
+
+---
+
 ### `emit-state [--write] [path]`
 
 Regenerate all derived views in the Brain corpus from the authored `tracks[]` DAG and write them in place (with `--write`) or report what would change (dry-run, without `--write`).

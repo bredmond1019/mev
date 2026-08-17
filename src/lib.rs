@@ -1552,6 +1552,22 @@ pub fn emit_state(
         apply_plan(&frontier_plan, false)
     };
 
+    // 10. Lane-segment availability derivation (`MV.13.C` Task 5) — six-state
+    //    availability plus lane-level unblock leverage, computed over MV.13.B's
+    //    frontier. Same treatment as the lane-segments and lane-frontier planners
+    //    immediately above: a corpus-wide artifact, never passed through
+    //    `filter_plan_by_scope`, and applied through
+    //    [`apply_with_rollback_on_regression`] in `--write` mode so a generator bug
+    //    here cannot leave a permanent red gate either.
+    let availability_plan = brain::availability::plan_availability(root, &loaded);
+    let availability_diags = if write {
+        apply_with_rollback_on_regression(&availability_plan, || {
+            Ok(validate_brain(root)?.error_count())
+        })?
+    } else {
+        apply_plan(&availability_plan, false)
+    };
+
     report.diagnostics.extend(state_diags);
     report.diagnostics.extend(mp_diags);
     report.diagnostics.extend(project_caches_diags);
@@ -1564,6 +1580,7 @@ pub fn emit_state(
     report.diagnostics.extend(status_fm_diags);
     report.diagnostics.extend(lane_segments_diags);
     report.diagnostics.extend(frontier_diags);
+    report.diagnostics.extend(availability_diags);
 
     Ok(report)
 }
@@ -2150,6 +2167,95 @@ pub fn frontier_brain(root: &std::path::Path) -> anyhow::Result<brain::frontier:
         &loaded,
         &effective,
     ))
+}
+
+/// Read-only corpus-wide segment-availability computation — the `mev lanes` entry
+/// point (`MV.13.C` Task 5).
+///
+/// Modelled directly on [`frontier_brain`]: resolves `brain.toml`, discovers and
+/// loads every `planning/state.json`, derives lane positions and the untruncated
+/// (`max_nodes: usize::MAX`) in-process block graph, refuses via
+/// [`brain::frontier::ensure_untruncated`], computes the frontier, then layers on
+/// [`brain::availability::discover_live_runs`],
+/// [`brain::availability::segment_statuses_with_slots`], and
+/// [`brain::availability::lane_leverage`] to build the same
+/// [`brain::availability::LaneAvailabilityArtifact`] shape
+/// [`brain::availability::plan_availability`] writes to
+/// [`brain::availability::LANE_AVAILABILITY_ARTIFACT`].
+///
+/// Unlike `plan_availability`, this never writes the artifact — it is the read-only
+/// CLI/library surface, not the `emit-state` planner.
+pub fn lanes_brain(
+    root: &std::path::Path,
+) -> anyhow::Result<brain::availability::LaneAvailabilityArtifact> {
+    use brain::availability::{
+        LaneAvailabilityArtifact, LaneAvailabilityEntry, SegmentKey, discover_live_runs,
+        discover_segments, lane_leverage, segment_statuses_with_slots,
+    };
+    use brain::block_graph::{BlockGraphScope, build_block_graph_export};
+    use brain::config::find_brain_config;
+    use brain::frontier::{compute_frontier, ensure_untruncated};
+    use brain::lane_segments::{
+        build_owner_index, derive_lane_positions, discover_lane_files, resolve_owner,
+    };
+    use brain::state::{TierScope, build_state_graph, discover_state_files, load_state};
+
+    let config = find_brain_config(root)
+        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
+
+    let (sources, _discovery_diags) = discover_state_files(root, &config);
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    for src in &sources {
+        if let Ok(file) = load_state(&src.abs_path) {
+            loaded.push((src.clone(), file));
+        }
+    }
+
+    let (lane_files, _discover_diags) = discover_lane_files(root);
+    let owner_index = build_owner_index(&loaded);
+    let (lane_positions, _double_claim_diags) = derive_lane_positions(&lane_files, |id| {
+        resolve_owner(&owner_index, id).map(str::to_string)
+    });
+
+    let graph = build_state_graph(&loaded);
+    let scope = BlockGraphScope {
+        tier: TierScope::All,
+        epic: None,
+        repo: None,
+        include_closed: true,
+        include_boundary: false,
+        max_nodes: usize::MAX,
+    };
+    let export = build_block_graph_export(root, &config, &graph, &loaded, &scope);
+    ensure_untruncated(&export).map_err(|d| anyhow::anyhow!("{}", d.message))?;
+
+    let effective = brain::state::effective_priorities(&graph, &loaded);
+    let frontier = compute_frontier(&lane_positions, &graph, &loaded, &effective);
+
+    let (live_runs, _live_run_diags) = discover_live_runs(root, &config.repos);
+    let all_segments = discover_segments(&lane_positions);
+    let (statuses, degraded) =
+        segment_statuses_with_slots(&frontier, &live_runs, &config.repos, root, &all_segments);
+    let leverage_by_segment = lane_leverage(&graph, &lane_positions, &frontier);
+
+    let segments: Vec<LaneAvailabilityEntry> = statuses
+        .into_iter()
+        .map(|status| {
+            let key = SegmentKey {
+                roadmap: status.roadmap.clone(),
+                lane: status.lane.clone(),
+                segment: status.segment,
+            };
+            let leverage = leverage_by_segment.get(&key).cloned().unwrap_or_default();
+            LaneAvailabilityEntry { status, leverage }
+        })
+        .collect();
+
+    Ok(LaneAvailabilityArtifact {
+        derived_at: chrono::Local::now().to_rfc3339(),
+        degraded,
+        segments,
+    })
 }
 
 /// Generate an interactive HTML knowledge graph of the Brain corpus.

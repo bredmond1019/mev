@@ -15,6 +15,37 @@ timestamp: "2026-08-17T11:28:22-03:00"
 
 ## [run: 2026-08-17]
 
+Shipped `MV.13.C — Segment availability + lane-level unblock leverage` (6 tasks, PASS via
+`/sdlc-flow`). Added `src/brain/availability.rs` computing six-state lane-segment availability
+(`startable`/`held-block`/`held-operator`/`held-repo-busy`/`held-slot`/`done`) over `MV.13.B`'s
+frontier: task 1 built the enum, `SegmentStatus`, and `intrinsic_segment_statuses` (Done/HeldBlock/
+HeldOperator/Startable) from `compute_frontier`; task 2 derived `held-repo-busy` from exactly one
+named source — orchestration-run `notes.md` `lifecycle: active` frontmatter via `discover_live_runs`
+— rather than averaging lane logs or `fleet_concurrency_check.py` into it, with malformed frontmatter
+producing a diagnostic instead of an invented hold; task 3 derived `held-slot` by reading
+`.fleet-locks` directly (stale-pid/TTL sweep, per-category caps: browser-automation 2, native-build
+4), reusing `lock.rs`'s `pid_is_alive` rather than shelling out to the Python script; task 4 added
+`lane_leverage()`, the transitive closure over `BlockedBy` edges counting distinct `(roadmap, lane)`
+pairs freed by closing a segment — lane-scoped, distinct from the existing block-scoped
+`dependent_count`; task 5 wired the whole artifact into `emit_state` (`LANE_AVAILABILITY_ARTIFACT`)
+and a read-only `mev lanes [--json]` CLI subcommand, with `docs/cli.md`/`docs/architecture.md`/
+`docs/index.md` updated; task 6 ran the full validation suite (fmt, clippy `-D warnings`, full
+`cargo test`, release build, `cargo-audit`) and a live-corpus `mev lanes` run, all clean — this
+lane's own segment correctly resolved to `held-repo-busy` against a real concurrent orchestration-run
+record. `./scripts/validate_brain.sh` surfaced 7 pre-existing corpus errors outside this block's
+touched files (business/legal docs, a stale wikilink, malformed lane-directive BUDGET lines in two
+roadmaps), none net-new. Unblocks bastion's `BA.19.C`/`BA.19.D` and transitively the `BW.16.x`
+cockpit board views. Next: pull the next item from the master-plan or HQ backlog.
+
+```
+2d593a8 feat: implement MV.13.C-task5
+2f95a88 feat: implement MV.13.C-task4
+dada953 feat: implement MV.13.C-task3
+e184bdb feat: implement MV.13.C-task2
+94243b0 feat: implement MV.13.C-task1
+87ff07c Merge pull request #42 from bredmond1019/MV.13.B-flow
+```
+
 Shipped `MV.13.B — Frontier computation + gate_rank` (5 tasks, PASS via `/sdlc-flow`). Task 1 added
 `src/brain/frontier.rs` with `compute_frontier` (segment-head derivation over lane positions plus
 `unmet_blocks`/`unmet_gates`) and `ensure_untruncated`, closing over the untruncated in-process block
