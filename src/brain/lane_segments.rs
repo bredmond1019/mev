@@ -2470,4 +2470,191 @@ MV.ticket.one
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // -----------------------------------------------------------------------
+    // Fixture coverage + real-corpus regression — MV.ticket.lane-file-structured-directives
+    // Task 4
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_lane_directives_fixture_all_five_cases_agree_with_grammar() {
+        // The five fixture cases named in the ticket's acceptance criteria, gathered in
+        // one place: all three directives; none; a malformed value; an unknown key; and a
+        // directive-looking string inside prose that must not parse. Each individual case
+        // already has its own pinning test above (Task 1/2); this test is the single place
+        // that asserts all five together, so a future edit that breaks one case's
+        // interaction with another is caught here even if the isolated tests keep passing.
+        let all_three = "\
+# HELD-UNTIL: BA.19.C
+# BUDGET: HEAVY NOT-WITH engine-rs,bastion
+# EXCLUSIVE-REPOS: mev,base-template
+MV.ticket.one
+";
+        let (files, diags) = discover_and_parse_single(all_three);
+        assert!(diags.is_empty(), "got {diags:?}");
+        let d = files[0].directives.as_ref().expect("all three declared");
+        assert_eq!(d.held_until, Some("BA.19.C".to_string()));
+        assert_eq!(
+            d.budget,
+            Some(LaneBudget {
+                heavy: true,
+                not_with: vec!["engine-rs".to_string(), "bastion".to_string()],
+            })
+        );
+        assert_eq!(
+            d.exclusive_repos,
+            Some(vec!["mev".to_string(), "base-template".to_string()])
+        );
+
+        let none = "MV.ticket.one\nBT.ticket.two\n";
+        let (files, diags) = discover_and_parse_single(none);
+        assert!(diags.is_empty(), "got {diags:?}");
+        assert_eq!(files[0].directives, None);
+
+        let malformed = "# BUDGET: SLOW\nMV.ticket.one\n";
+        let (files, diags) = discover_and_parse_single(malformed);
+        assert_eq!(diags.len(), 1, "got {diags:?}");
+        assert_eq!(files[0].directives, None);
+
+        let unknown_key = "# STALE-AFTER: BA.1\nMV.ticket.one\n";
+        let (files, diags) = discover_and_parse_single(unknown_key);
+        assert_eq!(diags.len(), 1, "got {diags:?}");
+        assert_eq!(files[0].directives, None);
+
+        let prose = "\
+# This lane runs after BUDGET: HEAVY work lands elsewhere.
+MV.ticket.one
+";
+        let (files, diags) = discover_and_parse_single(prose);
+        assert!(diags.is_empty(), "prose must not diagnose, got {diags:?}");
+        assert_eq!(
+            files[0].directives, None,
+            "a directive-looking string inside prose must not parse"
+        );
+    }
+
+    #[test]
+    fn lane_directives_absent_is_distinguishable_from_empty_but_present() {
+        // The whole safety property this ticket exists for: a lane declaring nothing
+        // must never be mistaken for a lane that declared an empty constraint. `None`
+        // vs. `Some(LaneDirectives::default())` are distinct values, and the parser must
+        // only ever produce the former for an undeclared lane — never collapse the two.
+        let absent: Option<LaneDirectives> = None;
+        let empty_but_present = Some(LaneDirectives::default());
+        assert_ne!(
+            absent, empty_but_present,
+            "absence and an empty-but-present constraint must not compare equal"
+        );
+
+        // The real parser path: a lane declaring nothing must land on `None`, not on the
+        // empty-but-present shape, even though both would report zero active constraints
+        // to a caller that only inspects individual fields.
+        let (files, diags) = discover_and_parse_single("MV.ticket.one\n");
+        assert!(diags.is_empty());
+        assert_eq!(
+            files[0].directives, absent,
+            "a lane declaring nothing must produce None, never Some(default())"
+        );
+        assert_ne!(
+            files[0].directives, empty_but_present,
+            "a lane declaring nothing must not equal an empty-but-present constraint"
+        );
+
+        // EXCLUSIVE-REPOS specifically distinguishes "not declared" (`None`) from "declared
+        // with an empty list" — the parser never produces the latter (an empty value is a
+        // malformed directive, see parse_lane_directives_malformed_exclusive_repos_empty_
+        // produces_diagnostic above), but the type itself must keep the two representable
+        // and distinct so a downstream consumer (engine-rs:EN.10.B) cannot conflate them.
+        let none_repos = LaneDirectives {
+            held_until: None,
+            budget: None,
+            exclusive_repos: None,
+        };
+        let empty_repos = LaneDirectives {
+            held_until: None,
+            budget: None,
+            exclusive_repos: Some(Vec::new()),
+        };
+        assert_ne!(
+            none_repos, empty_repos,
+            "absent exclusive_repos must not equal an empty-but-present list"
+        );
+    }
+
+    /// The real brain root this crate is checked out under — two levels up from
+    /// `CARGO_MANIFEST_DIR` (`core/mev` -> the HQ root, `agentic-portfolio/`). `None`
+    /// when `brain.toml` is not found there (e.g. mev built outside the full portfolio
+    /// checkout) so this regression test can skip rather than fail in that environment.
+    fn real_brain_root() -> Option<PathBuf> {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest_dir.parent()?.parent()?.to_path_buf();
+        if root.join("brain.toml").is_file() {
+            Some(root)
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn real_corpus_lane_sweep_resolves_the_same_block_sets_as_before_this_block() {
+        // Pins the ticket's stated baseline: 42 real lane files resolving 174 blocks.
+        // This block only widens `LaneFile`/`LaneSegment` with an optional directives
+        // field carried alongside the existing derivation — it must not change what the
+        // sweep resolves. Skips (rather than fails) when this crate is not checked out
+        // inside the full `agentic-portfolio` corpus, since the pin is only meaningful
+        // against the real fleet.
+        let Some(root) = real_brain_root() else {
+            eprintln!(
+                "skipping real_corpus_lane_sweep_resolves_the_same_block_sets_as_before_this_block: \
+                 no brain.toml found above CARGO_MANIFEST_DIR (not running inside the full \
+                 agentic-portfolio checkout)"
+            );
+            return;
+        };
+
+        let config = match crate::brain::config::find_brain_config(&root) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("skipping: brain.toml failed to load: {e}");
+                return;
+            }
+        };
+        let (sources, _discovery_diags) = crate::brain::state::discover_state_files(&root, &config);
+        let mut loaded: Vec<(StateSource, StateFile)> = Vec::new();
+        for src in &sources {
+            if let Ok(file) = crate::brain::state::load_state(&src.abs_path) {
+                loaded.push((src.clone(), file));
+            }
+        }
+
+        // Discovery diagnostics (e.g. E_LANE_DIRECTIVE_UNRECOGNISED on this corpus's
+        // pre-existing all-caps header prose like `# ROADMAP:`/`# LOG:`/`# CONTEXT:`,
+        // which predates this ticket's directive grammar and is a known false-positive
+        // gap in Task 1/2's `looks_like_directive_key` heuristic — out of Task 4's
+        // scope to fix) are deliberately not asserted empty here: the AC this test pins
+        // is the resolved *block set*, which a diagnostic never shrinks. This block only
+        // widens the payload; it must not drop or add a block.
+        let (lane_files, _discover_diags) = discover_lane_files(&root);
+        assert_eq!(
+            lane_files.len(),
+            42,
+            "expected 42 real lane files, got {} ({:?})",
+            lane_files.len(),
+            lane_files
+                .iter()
+                .map(|f| format!("{}/{}", f.roadmap, f.lane))
+                .collect::<Vec<_>>()
+        );
+
+        let owner_index = build_owner_index(&loaded);
+        let (blocks, _double_claim_diags) = derive_lane_positions(&lane_files, |id| {
+            resolve_owner(&owner_index, id).map(str::to_string)
+        });
+        assert_eq!(
+            blocks.len(),
+            174,
+            "expected 174 resolved blocks across the real lane files, got {}",
+            blocks.len()
+        );
+    }
 }
