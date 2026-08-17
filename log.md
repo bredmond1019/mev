@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-17T11:28:22-03:00"
+timestamp: "2026-08-17T19:35:00-03:00"
 ---
 
 # Log — mev
@@ -74,6 +74,29 @@ d52db01 docs: update docs for MV.13.B
 ```
 
 ## [2026-08-17]
+
+### Phase 13 derive lane — frontier, gate_rank, six-state lane availability
+
+- **What:** Ran the `engine-orchestration` roadmap's `derive` lane end to end. `MV.13.B` (corpus-wide
+  block frontier + `gate_rank` over the untruncated graph, `mev frontier`, `planning/lane-frontier.json`;
+  PR #42 merged) and `MV.13.C` (six-state segment availability + transitive lane-level unblock leverage,
+  `mev lanes`, `planning/lane-availability.json`), plus `MV.ticket.done-segment-discovery`, a hotfix for
+  `MV.13.C`'s unmet AC1 — a fully-closed segment emitted no status at all instead of `done`, so live
+  output was 16 segments with zero `done`; it is now 55 with 39. Also fixed three malformed `# BUDGET:`
+  lane directives in HQ (`ddf30428`) that were hard-failing `mev emit-state --write` fleet-wide,
+  nightly `routine.sh` included. Close-out added `tests/lanes_driver.rs` over the previously-untested
+  `lanes_brain` assembly seam, and corrected `docs/architecture.md`'s post-hotfix signatures. Full suite
+  1604 tests green. Merged to local `main` (`64fcb35`); **not pushed** — the corpus gate is red on six
+  errors owned by the business lane and bastion-web.
+- **Why:** `MV.13.C` was the fleet bottleneck — bastion's `BA.19.C`/`BA.19.D` and all four `BW.16.x`
+  cockpit views were held on it, and everything downstream was reading a client-side approximation of
+  the frontier that silently drops gates (the HTTP export caps at 400 nodes against 756 blocks). The
+  block also had to settle where "a lane is live in repo X" is read from, since three partial sources
+  existed; it now reads the D57 run record's `lifecycle:` frontmatter and nothing else.
+- **Refs:** `planning/orchestration-run/engine-orchestration/{notes.md,review.md}`,
+  `planning/roadmaps/engine-orchestration/lane-derive.txt`, blocks `MV.13.B` / `MV.13.C` /
+  `MV.ticket.done-segment-discovery`
+
 
 ### MV.ticket.lane-file-structured-directives shipped + closed out
 - **What:** `/sdlc-task` ran all 5 tasks (PASS) extending `src/brain/lane_segments.rs` with a
