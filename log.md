@@ -8,10 +8,28 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-17T22:05:00-03:00"
+timestamp: "2026-08-18T14:20:00-03:00"
 ---
 
 # Log — mev
+
+## [2026-08-18]
+
+### MV.ticket.master-plan-generator shipped (5 tasks, PASS)
+- **What:** `src/brain/master_plan.rs` renders a repo's authored `tracks[]` as an initiative
+  index plus per-phase block sections and splices it into `planning/master-plan.md`'s
+  `master-plan-body` sentinel region, wired into `emit_state` immediately after
+  `plan_master_plan_tables` (same file, disjoint regions, so the interleave order matters).
+  Also: replaced a drift-prone live-corpus count pin in `lane_segments.rs` with invariants
+  (`c0dc081`), added the missing end-to-end test for the `emit_state` wiring (`688c827`), and
+  documented the generator in `docs/architecture.md` + `docs/cli.md` (`cbf3ff0`).
+- **Why:** `master-plan.md` bodies were hand-maintained and drifted from the block graph they
+  describe; the wave table was already derived, the narrative body was not. The count-pin fix
+  was forced: the exact `42 lane files / 174 blocks` assertion went red on ordinary corpus
+  growth and bailed the first engine run for a reason unrelated to the change.
+- **Refs:** `planning/MV.ticket.master-plan-generator/`,
+  `tests/fixtures/master-plan/FLEET_DRY_RUN_REPORT.md` (fleet dry run: no repo carries the
+  sentinel pair yet, so the generator is inert until a repo opts in).
 
 ## [run: 2026-08-17]
 
