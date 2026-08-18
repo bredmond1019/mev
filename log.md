@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-17T19:35:00-03:00"
+timestamp: "2026-08-17T22:05:00-03:00"
 ---
 
 # Log — mev
@@ -74,6 +74,28 @@ d52db01 docs: update docs for MV.13.B
 ```
 
 ## [2026-08-17]
+
+### Delivery close-out: binaries installed, artifacts emitted, drift lesson filed
+
+- **What:** Closed the delivery gap the derive lane left open. Installed `mev` + `bastion` from the
+  merged source (both were hours-stale) and re-ran `emit-state`, which finally wrote
+  `planning/lane-frontier.json` (16 entries, 30 gate ranks) and `planning/lane-availability.json`
+  (55 segments, `degraded: false`) — neither had ever existed, because every `emit-state` run that
+  day used a binary without the planners in it. Filed the paired tickets
+  `MV.ticket.toolchain-freshness-covers-the-writer` and `bastion:BA.ticket.build-stamp-for-corpus-writer`
+  (cross-repo edge, `{git_sha, dirty, source_dir}` contract pinned in both). Second close-out pass
+  added direct coverage for `discover_segments` and `heavy_category` (1604 -> 1608 tests) and pinned
+  the `heavy_category` missing-harness hazard in both a test and `docs/architecture.md`.
+- **Why:** A downstream lane read `BA.19.C` as startable against a CLI that did not exist for it.
+  The diagnosis that mattered was a correction: the blocker was never the unpushed branch — on a
+  single-machine fleet local merge IS delivery, and `cargo install` is the boundary nothing observes.
+  `toolchain-freshness` exists for exactly this class (a stale binary once destroyed 29 authored
+  block notes) but is scoped to mev's binary while `bastion` — the actual corpus writer — carries no
+  build stamp at all.
+- **Refs:** `planning/orchestration-run/engine-orchestration/{notes.md,review.md}`, carryover
+  `closed-but-uninstalled-reads-as-delivered-downstream`, reference
+  `block-record-validation-commands-drift-from-the-harness`
+
 
 ### Phase 13 derive lane — frontier, gate_rank, six-state lane availability
 
