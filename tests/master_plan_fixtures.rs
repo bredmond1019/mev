@@ -258,3 +258,128 @@ fn ordering_fixture_is_deterministic_across_repeated_runs() {
     let out_b = mev::brain::master_plan::render_master_plan_body(&file4, &[]);
     assert_eq!(out_a, out_b);
 }
+
+// ---------------------------------------------------------------------------
+// emit_state wiring — the generator is actually reached by the real pipeline
+// ---------------------------------------------------------------------------
+
+/// Every other test in this file calls `plan_master_plan_body` directly, so all
+/// of them would still pass if the `emit_state` call site in `src/lib.rs` were
+/// deleted. This one closes that gap: it builds a minimal brain root on disk,
+/// runs the real `mev::emit_state(root, write = true, scope = None)` entry
+/// point, and asserts the `master-plan-body` region of the leaf repo's
+/// `master-plan.md` was actually filled in — i.e. the generator is wired into
+/// the pipeline, not merely reachable in a unit test.
+#[test]
+fn emit_state_splices_the_master_plan_body_region_end_to_end() {
+    use std::fs;
+
+    let root = mev::testsupport::unique_temp_dir("mev-master-plan-body-e2e");
+    fs::create_dir_all(&root).unwrap();
+
+    let write = |rel: &str, content: &str| {
+        let target = root.join(rel);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, content.as_bytes()).unwrap();
+    };
+
+    write(
+        "brain.toml",
+        r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "brain"
+tier = "_root"
+repo_path = "."
+status_file = "planning/status.md"
+cache_doc = "README.md"
+heading = "Company Brain"
+
+[[repos]]
+slug = "fx"
+tier = "_root"
+repo_path = "fx"
+status_file = "fx/planning/status.md"
+cache_doc = "docs/projects/fx.md"
+heading = "fx"
+"#,
+    );
+
+    write(
+        "planning/state.json",
+        r#"{
+  "repo": "brain",
+  "kind": "brain",
+  "updated": "2026-08-18",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "repos": [],
+  "cross_repo": [],
+  "tiers": []
+}
+"#,
+    );
+
+    // The leaf repo: a state.json with one block, and a master-plan.md carrying
+    // the sentinel pair the generator splices into.
+    write(
+        "fx/planning/state.json",
+        r#"{
+  "repo": "fx",
+  "kind": "project",
+  "updated": "2026-08-18",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [
+    {
+      "title": "Phase 1: Foundations",
+      "blocks": [
+        {
+          "id": "FX.1.A",
+          "title": "First fixture block",
+          "status": "open",
+          "wave": 1,
+          "description": "A fixture block used to exercise the master-plan renderer."
+        }
+      ]
+    }
+  ]
+}
+"#,
+    );
+
+    write(
+        "fx/planning/master-plan.md",
+        "# fx — Master Plan\n\
+         \n\
+         ## Preface\n\
+         \n\
+         Authored prose that must survive.\n\
+         \n\
+         <!-- BEGIN generated:master-plan-body -->\n\
+         (stale placeholder content the renderer must replace)\n\
+         <!-- END generated:master-plan-body -->\n",
+    );
+
+    mev::emit_state(&root, true, None).expect("emit_state should not error on this fixture brain");
+
+    let rendered = fs::read_to_string(root.join("fx/planning/master-plan.md"))
+        .expect("master-plan.md must still exist after emit_state");
+
+    assert!(
+        !rendered.contains("stale placeholder"),
+        "emit_state did not replace the generated region — the master_plan generator is not \
+         wired into the pipeline. Rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("FX.1.A"),
+        "expected the block id in the spliced region; got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("## Preface") && rendered.contains("Authored prose that must survive."),
+        "authored prose outside the sentinels must survive emit_state; got:\n{rendered}"
+    );
+}

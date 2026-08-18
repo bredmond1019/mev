@@ -490,7 +490,7 @@ mod tests {
 
         assert_eq!(records.len(), 1);
         assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].message.contains("could not parse"), true);
+        assert!(diags[0].message.contains("could not parse"));
     }
 
     #[test]
