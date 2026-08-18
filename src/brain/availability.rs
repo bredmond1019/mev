@@ -2115,4 +2115,110 @@ mod tests {
         let text = render_availability_text(&artifact);
         assert_eq!(text, "alpha/derive#0 mev:- — done frees 1 lane");
     }
+
+    // -----------------------------------------------------------------
+    // discover_segments — MV.ticket.done-segment-discovery
+    // -----------------------------------------------------------------
+
+    /// The hotfix's core: `done` is only reachable because this returns segments the
+    /// frontier has no entry for. Covered end-to-end by `tests/lanes_driver.rs`, but its
+    /// own contract — one entry per `(roadmap, lane, segment)` triple, first-appearance
+    /// order, repo carried through — was never asserted directly.
+    #[test]
+    fn discover_segments_yields_one_entry_per_triple_in_first_appearance_order() {
+        let positions = vec![
+            lane_pos("rm", "derive", 0, "mev", "MV.1.A"),
+            lane_pos("rm", "derive", 0, "mev", "MV.1.B"),
+            lane_pos("rm", "derive", 1, "bastion", "BA.1.A"),
+            lane_pos("rm", "wire", 0, "bastion", "BA.2.A"),
+            lane_pos("rm", "derive", 0, "mev", "MV.1.C"),
+        ];
+
+        let segs = discover_segments(&positions);
+
+        let keys: Vec<(String, String, usize, String)> = segs
+            .iter()
+            .map(|s| (s.roadmap.clone(), s.lane.clone(), s.segment, s.repo.clone()))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("rm".into(), "derive".into(), 0, "mev".into()),
+                ("rm".into(), "derive".into(), 1, "bastion".into()),
+                ("rm".into(), "wire".into(), 0, "bastion".into()),
+            ],
+            "three distinct triples, deduped, in first-appearance order — the trailing \
+             MV.1.C must not re-add derive#0"
+        );
+    }
+
+    #[test]
+    fn discover_segments_is_empty_for_no_positions() {
+        assert!(discover_segments(&[]).is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // heavy_category — MV.13.C Task 3
+    // -----------------------------------------------------------------
+
+    /// Distinct from the 3-arg `write_harness` above (which builds a canned category
+    /// under a named sub-repo); this writes a literal body at the repo root under test.
+    fn write_harness_body(root: &std::path::Path, body: &str) {
+        let dir = root.join("planning");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("harness.json"), body).unwrap();
+    }
+
+    #[test]
+    fn heavy_category_classifies_browser_before_native_and_light_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // uiTest.enabled wins outright, even with a native-build command present.
+        write_harness_body(
+            dir.path(),
+            r#"{"uiTest":{"enabled":true},"validation":{"checks":[{"command":"cargo build --release"}]}}"#,
+        );
+        assert_eq!(
+            heavy_category(dir.path()).as_deref(),
+            Some("browser-automation"),
+            "browser-automation is the more resource-dangerous class and is checked first"
+        );
+
+        write_harness_body(
+            dir.path(),
+            r#"{"validation":{"checks":[{"command":"cargo build --release"}]}}"#,
+        );
+        assert_eq!(heavy_category(dir.path()).as_deref(), Some("native-build"));
+
+        write_harness_body(
+            dir.path(),
+            r#"{"validation":{"checks":[{"command":"cargo fmt --check"}]}}"#,
+        );
+        assert_eq!(
+            heavy_category(dir.path()),
+            None,
+            "a repo with only cheap gates is light"
+        );
+    }
+
+    /// Pins a KNOWN HAZARD rather than endorsing it: a repo path with no
+    /// `planning/harness.json` returns `None`, which is indistinguishable from "this repo
+    /// is light". A mistyped or wrongly-relative path therefore reads as light in the one
+    /// derivation that exists to stop the fleet being overloaded. This bit for real on
+    /// 2026-08-17 via the Python twin (`fleet_concurrency_check.py:305-307`), where
+    /// `is-heavy --repo-path core/mev` answered `heavy: false` for a path that did not
+    /// resolve, and mev was in fact `native-build`. Tracked as carryover
+    /// `is-heavy-answers-light-for-a-nonexistent-repo-path` (owner base-template). If that
+    /// carryover is resolved by making absence an error, this test is the one that must
+    /// change — deliberately, not by accident.
+    #[test]
+    fn heavy_category_returns_none_for_a_missing_harness_which_reads_as_light() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(heavy_category(&dir.path().join("no-such-repo")), None);
+        assert_eq!(
+            heavy_category(dir.path()),
+            None,
+            "existing dir, absent harness.json — same answer as a genuinely light repo"
+        );
+    }
 }
