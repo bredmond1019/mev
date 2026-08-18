@@ -1,0 +1,24 @@
+{
+  "repo": "fixture-prose",
+  "kind": "project",
+  "updated": "2026-08-17",
+  "focus": {
+    "now": [],
+    "next": [],
+    "blocked": []
+  },
+  "tracks": [
+    {
+      "title": "Phase 1: Foundations",
+      "blocks": [
+        {
+          "id": "FX.1.A",
+          "title": "First fixture block",
+          "status": "open",
+          "wave": 1,
+          "description": "A fixture block used to exercise the master-plan renderer."
+        }
+      ]
+    }
+  ]
+}

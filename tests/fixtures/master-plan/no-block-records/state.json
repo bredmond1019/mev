@@ -1,0 +1,16 @@
+{
+  "repo": "fixture-no-block-records",
+  "kind": "project",
+  "updated": "2026-08-17",
+  "focus": {
+    "now": [],
+    "next": [],
+    "blocked": []
+  },
+  "tracks": [
+    {
+      "title": "Phase 1",
+      "blocks": []
+    }
+  ]
+}

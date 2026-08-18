@@ -1,0 +1,23 @@
+{
+  "repo": "fixture-no-sentinel",
+  "kind": "project",
+  "updated": "2026-08-17",
+  "focus": {
+    "now": [],
+    "next": [],
+    "blocked": []
+  },
+  "tracks": [
+    {
+      "title": "Phase 1",
+      "blocks": [
+        {
+          "id": "FX.2.A",
+          "title": "Fixture block with no sentinel target",
+          "status": "open",
+          "wave": 1
+        }
+      ]
+    }
+  ]
+}
