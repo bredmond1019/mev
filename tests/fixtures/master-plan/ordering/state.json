@@ -1,0 +1,62 @@
+{
+  "repo": "fixture-ordering",
+  "kind": "project",
+  "updated": "2026-08-17",
+  "focus": {
+    "now": [],
+    "next": [],
+    "blocked": []
+  },
+  "tracks": [
+    {
+      "title": "Phase 1: Foundations",
+      "blocks": [
+        {
+          "id": "ORD.1.A",
+          "title": "First foundations block",
+          "status": "closed",
+          "wave": 1,
+          "description": "Earliest block, wave 1, phase 1."
+        },
+        {
+          "id": "ORD.1.B",
+          "title": "Second foundations block",
+          "status": "open",
+          "wave": 3,
+          "description": "Later wave within phase 1."
+        }
+      ]
+    },
+    {
+      "title": "Phase 2: Build",
+      "blocks": [
+        {
+          "id": "ORD.2.A",
+          "title": "First build block",
+          "status": "open",
+          "wave": 2,
+          "description": "Wave 2, phase 2."
+        },
+        {
+          "id": "ORD.2.B",
+          "title": "Second build block",
+          "status": "open",
+          "wave": 4,
+          "description": "Wave 4, phase 2."
+        }
+      ]
+    },
+    {
+      "title": "Phase 3: Ship",
+      "blocks": [
+        {
+          "id": "ORD.3.A",
+          "title": "Ship block",
+          "status": "open",
+          "wave": 5,
+          "description": "Wave 5, phase 3."
+        }
+      ]
+    }
+  ]
+}
