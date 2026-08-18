@@ -900,6 +900,16 @@ The run record is the only candidate that covers every repo, is written when the
   capacity (`native-build`: 4, everything else: 2). A missing/unreadable
   `.fleet-locks` sets `degraded: true` — "unknown", resolved as *not held*, never a
   hold, mirroring the script's own degrade-to-advisory behavior.
+  **Known hazard, pinned by test, not endorsed:** `heavy_category` returns `None` for a
+  `repo_root` with no `planning/harness.json`, which is indistinguishable from "this repo
+  is light". A mistyped or wrongly-relative path therefore reads as light in the one
+  derivation that exists to stop the fleet being overloaded. This bit for real on
+  2026-08-17 via the Python twin (`fleet_concurrency_check.py:305-307`), where
+  `is-heavy --repo-path core/mev` answered `heavy: false` for a path that did not resolve
+  while mev was in fact `native-build`. Tracked as carryover
+  `is-heavy-answers-light-for-a-nonexistent-repo-path` (owner `base-template`); if that is
+  resolved by making absence an error, `heavy_category_returns_none_for_a_missing_harness_which_reads_as_light`
+  is the test that must change, deliberately.
 - **`segment_statuses_with_slots(frontier, live_runs, repos, root, segments) -> (Vec<SegmentStatus>, bool)`**
   — full three-tier resolution (intrinsic + `held-repo-busy` + `held-slot`) plus the
   `degraded` flag.
