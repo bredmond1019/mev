@@ -84,6 +84,13 @@ pub mod markers {
     /// epic's own `plan` document. Distinct from [`EPIC_BOARD`]: the board is a
     /// live focus snapshot, this is the full ordered roadmap for one initiative.
     pub const EPIC_SEQUENCE: &str = "epic-sequence";
+
+    /// Marker for the initiative index + per-phase block sections spliced into
+    /// a repo's `master-plan.md` by [`crate::brain::master_plan`]
+    /// (`MV.ticket.master-plan-generator`). Distinct from [`WAVE_TABLE`]: the
+    /// wave table is a flat roadmap table, this is the fuller narrative-style
+    /// rendering grouped by initiative and phase.
+    pub const MASTER_PLAN_BODY: &str = "master-plan-body";
 }
 
 // ---------------------------------------------------------------------------

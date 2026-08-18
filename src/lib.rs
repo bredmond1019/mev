@@ -1345,6 +1345,7 @@ pub fn emit_state(
         plan_project_caches, plan_state_json, plan_status_frontmatter, plan_tier_rollups,
         plan_unified_board,
     };
+    use brain::master_plan::plan_master_plan_body;
     use brain::state::{StateLoadError, build_state_graph, discover_state_files, load_state};
 
     let config = match find_brain_config(root) {
@@ -1440,6 +1441,13 @@ pub fn emit_state(
 
     let mp_plan = filter_plan_by_scope(plan_master_plan_tables(&loaded, &graph), root, scope);
     let mp_diags = apply_plan(&mp_plan, write);
+
+    // Initiative index + per-phase block sections (`MV.ticket.master-plan-generator`
+    // task 1), spliced into the same `master-plan.md` files immediately after the
+    // wave table so a later read (write mode) sees the wave table's own edit and
+    // both sentinel regions land in one pass, per the interleaving rationale above.
+    let mp_body_plan = filter_plan_by_scope(plan_master_plan_body(&loaded), root, scope);
+    let mp_body_diags = apply_plan(&mp_body_plan, write);
 
     let project_caches_plan = filter_plan_by_scope(
         plan_project_caches(root, &loaded, &graph, &config),
@@ -1570,6 +1578,7 @@ pub fn emit_state(
 
     report.diagnostics.extend(state_diags);
     report.diagnostics.extend(mp_diags);
+    report.diagnostics.extend(mp_body_diags);
     report.diagnostics.extend(project_caches_diags);
     report.diagnostics.extend(tier_rollups_diags);
     report.diagnostics.extend(hq_board_diags);

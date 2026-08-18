@@ -27,6 +27,7 @@ pub mod last_touched;
 pub mod links;
 pub mod lock;
 pub mod manifest;
+pub mod master_plan;
 pub mod okf;
 pub mod operator;
 pub mod scope;
