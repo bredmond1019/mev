@@ -21,6 +21,12 @@
 //!   - `no-block-records/` — a repo whose `state.json` has no blocks in any
 //!     track (and no `planning/blocks/` dir); asserts the file is left
 //!     completely untouched, no action and no diagnostic.
+//!   - `ordering/` (`MV.ticket.master-plan-generator`, task 3) — three
+//!     phases with interleaved wave numbers; asserts the render orders
+//!     blocks by phase (authored `tracks[]` order) then by wave within a
+//!     phase (authored block order, which this fixture pins to ascending
+//!     wave), and that successive runs over the same input produce
+//!     byte-identical output.
 
 use mev::brain::master_plan::plan_master_plan_body;
 use mev::brain::state::{StateSource, load_state};
@@ -181,4 +187,74 @@ fn no_block_records_fixture_is_left_completely_untouched() {
         reread, original,
         "fixture file on disk must be byte-identical after planning"
     );
+}
+
+// ---------------------------------------------------------------------------
+// ordering — deterministic ordering by phase then wave, stable across runs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ordering_fixture_renders_blocks_by_phase_then_ascending_wave() {
+    let (src, file) = load_fixture("ordering");
+
+    let plan = plan_master_plan_body(&[(src, file)]);
+    assert_eq!(
+        plan.actions.len(),
+        1,
+        "expected exactly one splice action; got {:?}",
+        plan.actions
+    );
+    let rendered = &plan.actions[0].new_content;
+
+    // Every block, across all three phases, must appear in this exact
+    // sequence: authored `tracks[]` (phase) order, and within each phase,
+    // authored block order — which this fixture pins to ascending wave.
+    let expected_order = ["ORD.1.A", "ORD.1.B", "ORD.2.A", "ORD.2.B", "ORD.3.A"];
+    let mut positions = Vec::with_capacity(expected_order.len());
+    for id in expected_order {
+        let pos = rendered
+            .find(id)
+            .unwrap_or_else(|| panic!("rendered output must contain block '{id}'"));
+        positions.push((id, pos));
+    }
+    for window in positions.windows(2) {
+        let (prev_id, prev_pos) = window[0];
+        let (next_id, next_pos) = window[1];
+        assert!(
+            prev_pos < next_pos,
+            "expected '{prev_id}' to render before '{next_id}' (phase-then-wave order); \
+             got positions {prev_pos} >= {next_pos} in:\n{rendered}"
+        );
+    }
+
+    // The phase headings themselves must also appear in authored order.
+    let phase1 = rendered.find("### Phase 1: Foundations").unwrap();
+    let phase2 = rendered.find("### Phase 2: Build").unwrap();
+    let phase3 = rendered.find("### Phase 3: Ship").unwrap();
+    assert!(phase1 < phase2 && phase2 < phase3);
+}
+
+#[test]
+fn ordering_fixture_is_deterministic_across_repeated_runs() {
+    let (src1, file1) = load_fixture("ordering");
+    let (src2, file2) = load_fixture("ordering");
+
+    let plan1 = plan_master_plan_body(&[(src1, file1)]);
+    let plan2 = plan_master_plan_body(&[(src2, file2)]);
+
+    assert_eq!(plan1.actions.len(), 1);
+    assert_eq!(plan2.actions.len(), 1);
+    assert_eq!(
+        plan1.actions[0].new_content, plan2.actions[0].new_content,
+        "rendering the same fixture twice must produce byte-identical output"
+    );
+
+    // A third, independent render (re-invoking the render function directly
+    // rather than the full plan/splice path) must also match, pinning
+    // determinism at the render layer, not just the splice layer.
+    let (_, file3) = load_fixture("ordering");
+    let out_a = mev::brain::master_plan::render_master_plan_body(&file3, &[]);
+    let (_, file4) = load_fixture("ordering");
+    let out_b = mev::brain::master_plan::render_master_plan_body(&file4, &[]);
+    assert_eq!(out_a, out_b);
 }
