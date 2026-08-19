@@ -453,8 +453,10 @@ const BROWSER_AUTOMATION_SIGNALS: &[&str] = &[
 const NATIVE_BUILD_SIGNALS: &[&str] = &["cargo build --release"];
 
 /// Mirrors `MAX_LANES_BY_CATEGORY` in `fleet_concurrency_check.py` — capacity is
-/// per category, not fleet-wide.
-fn category_capacity(category: &str) -> usize {
+/// per category, not fleet-wide. `pub` (`BA.19.D` Task 1) so out-of-crate consumers
+/// (bastion's `/concurrency` endpoint) can report the same caps this module enforces,
+/// rather than re-stating them — mirrors `MAX_LANES_BY_CATEGORY`.
+pub fn category_capacity(category: &str) -> usize {
     match category {
         "native-build" => 4,
         // "browser-automation" and any unknown category default to the
@@ -543,6 +545,39 @@ pub struct FleetSlotView {
     pub degraded: bool,
     live_by_category: HashMap<String, HashSet<String>>,
 }
+
+impl FleetSlotView {
+    /// The category names this view knows about — the union of the categories
+    /// [`category_capacity`] has an explicit cap for (`native-build`,
+    /// `browser-automation`) and any category present in the live-hold data, sorted
+    /// for a deterministic wire order. A category with zero live holds still
+    /// reports (with an empty `live_repos`), so a caller building a full per-category
+    /// table never has to special-case "no one is holding this category right now".
+    pub fn known_categories(&self) -> Vec<String> {
+        let mut set: HashSet<String> = KNOWN_CATEGORIES.iter().map(|s| s.to_string()).collect();
+        set.extend(self.live_by_category.keys().cloned());
+        let mut categories: Vec<String> = set.into_iter().collect();
+        categories.sort();
+        categories
+    }
+
+    /// The repos currently holding a live (non-stale) slot in `category`, sorted —
+    /// `HashSet` iteration order must never reach the wire. Empty (never `None`) for
+    /// a category with no live holds, including one this view has never heard of.
+    pub fn live_repos(&self, category: &str) -> Vec<String> {
+        let mut repos: Vec<String> = self
+            .live_by_category
+            .get(category)
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default();
+        repos.sort();
+        repos
+    }
+}
+
+/// The categories [`category_capacity`] has an explicit cap for — used by
+/// [`FleetSlotView::known_categories`] so a zero-hold category still reports.
+const KNOWN_CATEGORIES: &[&str] = &["native-build", "browser-automation"];
 
 /// Read `<root>/.fleet-locks` directly (never shells out to
 /// `fleet_concurrency_check.py` — `timeout` does not exist on this shell, and a
@@ -2220,5 +2255,150 @@ mod tests {
             None,
             "existing dir, absent harness.json — same answer as a genuinely light repo"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // FleetSlotView accessors + pub category_capacity — BA.19.D Task 1
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn category_capacity_returns_documented_caps() {
+        assert_eq!(category_capacity("native-build"), 4);
+        assert_eq!(category_capacity("browser-automation"), 2);
+        assert_eq!(category_capacity("some-unknown-category"), 2);
+    }
+
+    #[test]
+    fn known_categories_includes_zero_hold_categories_and_sorts() {
+        let root = crate::testsupport::unique_temp_dir("mev-availability-known-categories");
+        let now = now_unix_seconds();
+        // Only native-build has a live hold; browser-automation has none.
+        write_lock_entry(
+            &root,
+            "some-repo",
+            "native-build",
+            std::process::id() as i64,
+            now,
+            "p",
+        );
+
+        let slot_view = compute_fleet_slot_view(&root);
+        assert!(!slot_view.degraded);
+        assert_eq!(
+            slot_view.known_categories(),
+            vec!["browser-automation".to_string(), "native-build".to_string()],
+            "browser-automation still reports with zero live holds, sorted order"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn known_categories_includes_a_category_seen_only_in_live_data() {
+        let root = crate::testsupport::unique_temp_dir("mev-availability-known-categories-extra");
+        let now = now_unix_seconds();
+        write_lock_entry(
+            &root,
+            "some-repo",
+            "some-other-category",
+            std::process::id() as i64,
+            now,
+            "p",
+        );
+
+        let slot_view = compute_fleet_slot_view(&root);
+        assert_eq!(
+            slot_view.known_categories(),
+            vec![
+                "browser-automation".to_string(),
+                "native-build".to_string(),
+                "some-other-category".to_string(),
+            ],
+            "a category present only in live-hold data still appears, alongside the two \
+             known-capacity categories, sorted"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn live_repos_covers_live_stale_ttl_dead_pid_and_no_category_entries() {
+        let root = crate::testsupport::unique_temp_dir("mev-availability-live-repos-mix");
+        let now = now_unix_seconds();
+
+        // (a) a live entry.
+        write_lock_entry(
+            &root,
+            "repo-live",
+            "browser-automation",
+            std::process::id() as i64,
+            now,
+            "p",
+        );
+        // (b) a stale-by-ttl entry (alive pid, started_at well past the 4h TTL).
+        write_lock_entry(
+            &root,
+            "repo-stale-ttl",
+            "browser-automation",
+            std::process::id() as i64,
+            now - (5.0 * 60.0 * 60.0),
+            "p",
+        );
+        // (c) a dead-pid entry.
+        write_lock_entry(
+            &root,
+            "repo-dead-pid",
+            "browser-automation",
+            999_999_999,
+            now,
+            "p",
+        );
+        // (d) an entry with no `category` field — defaults to browser-automation.
+        let dir = root.join(FLEET_LOCK_SUBDIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("repo-no-category__p.json"),
+            serde_json::to_string(&serde_json::json!({
+                "repo": "repo-no-category",
+                "pid": std::process::id(),
+                "started_at": now,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let slot_view = compute_fleet_slot_view(&root);
+        assert!(!slot_view.degraded);
+        assert_eq!(
+            slot_view.live_repos("browser-automation"),
+            vec!["repo-live".to_string(), "repo-no-category".to_string()],
+            "only the genuinely live entries count, sorted; the no-category entry \
+             defaults into browser-automation; stale-ttl and dead-pid entries are excluded"
+        );
+        assert_eq!(
+            slot_view.live_repos("native-build"),
+            Vec::<String>::new(),
+            "a category with no live holds returns an empty vec, never absent/None"
+        );
+        assert_eq!(
+            slot_view.live_repos("unknown-category"),
+            Vec::<String>::new(),
+            "an entirely unknown category also returns an empty vec"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn category_capacity_matches_known_categories_documented_values() {
+        // Cross-check: every category known_categories() ever surfaces resolves
+        // through category_capacity() to one of the two documented caps.
+        let root = crate::testsupport::unique_temp_dir("mev-availability-cap-cross-check");
+        let slot_view = compute_fleet_slot_view(&root);
+        for category in slot_view.known_categories() {
+            let cap = category_capacity(&category);
+            assert!(
+                cap == 4 || cap == 2,
+                "category {category} resolved to unexpected cap {cap}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
