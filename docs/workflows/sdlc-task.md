@@ -7,7 +7,7 @@ layer: [factory]
 project: mev
 status: active
 keywords: [lean SDLC engine, single unit, implement-test-commit, worktree, chore ticket]
-related: [workflows-index, workflows-commands, sdlc-run, sdlc-flow]
+related: [workflows-index, workflows-commands, sdlc-flow]
 ---
 
 # `/sdlc-task` — lean single-unit SDLC engine

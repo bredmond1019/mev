@@ -7,7 +7,7 @@ layer: [factory]
 project: mev
 status: active
 keywords: [SDLC engines, pipeline ladder, sdlc-flow, sdlc-run, sdlc-task, sdlc-block]
-related: [sdlc-flow, sdlc-run, sdlc-task, sdlc-block, workflows-commands]
+related: [sdlc-flow, sdlc-task, workflows-commands]
 ---
 
 # SDLC Workflows
@@ -38,9 +38,9 @@ slash-command lifecycle they automate.
 | Engine | Scope | Isolation | Pairs with | You reach for it when… |
 |---|---|---|---|---|
 | [`/sdlc-task`](sdlc-task.md) | **one small unit** | in-place / `--worktree` | `/chore`, `/ticket` | small tested change — fast implement→test→commit |
-| [`/sdlc-run`](sdlc-run.md) | one task **or** a full spec, **sequential** | none — runs on the current branch | `/generate-tasks` | sequential full pipeline on the current branch; resuming a spec |
+| `/sdlc-run` | one task **or** a full spec, **sequential** | none — runs on the current branch | `/generate-tasks` | sequential full pipeline on the current branch; resuming a spec |
 | [`/sdlc-flow`](sdlc-flow.md) | **a whole spec**, **sequential** | its own git worktree (one shared for the whole spec) | `/generate-tasks` | **the default for non-trivial feature work** — sequential, conflict-free, terminates in a PR |
-| [`/sdlc-block`](sdlc-block.md) | **a roadmap** (master-plan-format file) | per-block worktrees driving `/sdlc-flow` | `/generate-master-plan`, `/plan` | a whole roadmap fanned out as a branch train of reviewable PRs |
+| `/sdlc-block` | **a roadmap** (master-plan-format file) | per-block worktrees driving `/sdlc-flow` | `/generate-master-plan`, `/plan` | a whole roadmap fanned out as a branch train of reviewable PRs |
 
 For step-by-step **manual** control (run `/implement`, then inspect, then `/test`, …), see the
 [manual command lifecycle](commands.md). The engines automate exactly those commands.
@@ -177,9 +177,9 @@ each engine's committed state file — check the state JSON for real figures fro
 
 - **[sdlc-flow.md](sdlc-flow.md)** — the default for non-trivial feature work (D30). Shared worktree,
   per-task test-fix loop, triage-gated bail (D32), committed state model (D31), PR wrap-up (D33).
-- **[sdlc-run.md](sdlc-run.md)** — the sequential engine. Parameters, `--from`, stages, resumption, gates.
+- **sdlc-run.md** — the sequential engine. Parameters, `--from`, stages, resumption, gates.
 - **[sdlc-task.md](sdlc-task.md)** — lean single-unit engine (D38). In-place or `--worktree`, implement→test→fix→commit, pairs with `/chore`/`/ticket`.
-- **[sdlc-block.md](sdlc-block.md)** — roadmap orchestrator (D39/D40/D43). Pre-flight, enumerate-blocks, per-block `/sdlc-flow`, branch train, `/review-PR`, `/merge-train`.
+- **sdlc-block.md** — roadmap orchestrator (D39/D40/D43). Pre-flight, enumerate-blocks, per-block `/sdlc-flow`, branch train, `/review-PR`, `/merge-train`.
 - **[commands.md](commands.md)** — the manual command lifecycle the engines automate (Phase 1 → 7).
 
 ## Related

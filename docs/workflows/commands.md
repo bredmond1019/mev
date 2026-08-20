@@ -7,12 +7,12 @@ layer: [factory]
 project: mev
 status: active
 keywords: [SDLC commands, manual pipeline, implement, test, review, wrap-up]
-related: [workflows-index, sdlc-flow, sdlc-run, sdlc-task, sdlc-block]
+related: [workflows-index, sdlc-flow, sdlc-task]
 ---
 
 # Manual SDLC command lifecycle
 
-The four engines ([`/sdlc-run`](sdlc-run.md), [`/sdlc-task`](sdlc-task.md), [`/sdlc-flow`](sdlc-flow.md), [`/sdlc-block`](sdlc-block.md))
+The four engines (`/sdlc-run`, [`/sdlc-task`](sdlc-task.md), [`/sdlc-flow`](sdlc-flow.md), `/sdlc-block`)
 **automate** the manual slash-command pipeline below. Run the commands by hand when you want a human
 checkpoint between stages — inspect each report before proceeding, intervene, or cherry-pick stages.
 
@@ -128,7 +128,7 @@ Phase 2–6 pipeline (downstream commands derive report paths from the spec's pa
 ## Worktree commands (manual isolation)
 
 `/init-worktree` and `/clean-worktree` are the manual entry points to the isolated-worktree lifecycle
-that [`/sdlc-task`](sdlc-task.md) and [`/sdlc-block`](sdlc-block.md) automate.
+that [`/sdlc-task`](sdlc-task.md) and `/sdlc-block` automate.
 
 - **`/init-worktree <spec> [N]`** — derive a branch/worktree from the spec slug and create an isolated
   cone-mode sparse checkout. Open it as a new Claude Code session and run the pipeline (manual or
@@ -146,6 +146,6 @@ that [`/sdlc-task`](sdlc-task.md) and [`/sdlc-block`](sdlc-block.md) automate.
 |---|---|
 | Step-by-step with a human checkpoint between stages | manual commands (this page) |
 | Small tested change — a `/chore` or `/ticket` spec | [`/sdlc-task`](sdlc-task.md) |
-| One task / full spec, sequential, no isolation | [`/sdlc-run`](sdlc-run.md) |
+| One task / full spec, sequential, no isolation | `/sdlc-run` |
 | Non-trivial feature work, branch-isolated, terminates in PR | [`/sdlc-flow`](sdlc-flow.md) |
-| Drive a whole roadmap as a branch train of PRs | [`/sdlc-block`](sdlc-block.md) |
+| Drive a whole roadmap as a branch train of PRs | `/sdlc-block` |

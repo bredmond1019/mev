@@ -7,7 +7,7 @@ layer: [factory]
 project: mev
 status: active
 keywords: [shared worktree, PR flow, end-review, non-trivial feature work, branch isolation]
-related: [workflows-index, workflows-commands, sdlc-run, sdlc-task, sdlc-block]
+related: [workflows-index, workflows-commands, sdlc-task]
 ---
 
 # `/sdlc-flow` — shared-worktree, PR-terminating SDLC engine
