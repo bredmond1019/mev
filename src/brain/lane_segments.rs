@@ -289,6 +289,7 @@ const KNOWN_NON_DIRECTIVE_KEYS: &[&str] = &[
     "NOTE",
     "CARE",
     "SCOPE",
+    "RISK",
 ];
 
 /// Scan every comment-only line of `content` for the three structured directives (see
@@ -2051,6 +2052,20 @@ BT.ticket.two
         );
         // The sweep must not lose the lane's block IDs over a bad directive.
         assert_eq!(files[0].blocks.len(), 2);
+        assert_eq!(files[0].directives, None);
+    }
+
+    #[test]
+    fn parse_lane_directives_known_non_directive_risk_key_produces_no_diagnostic() {
+        // `# RISK:` is an established free-prose warning convention in lane files (e.g.
+        // planning/roadmaps/surfaces-e2e/lane-mobile.txt) — it must not collide with the
+        // directive grammar's "looks like a key" shape check.
+        let content = "\
+MV.ticket.one
+#   RISK: mounting the banner PER ROUTE re-creates the defect.
+";
+        let (files, diags) = discover_and_parse_single(content);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
         assert_eq!(files[0].directives, None);
     }
 
