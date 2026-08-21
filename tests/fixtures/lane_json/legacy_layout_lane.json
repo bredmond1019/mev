@@ -1,0 +1,17 @@
+{
+  "lane": "mev-substrate",
+  "roadmap": "lane-files-decompose-into-json-and-block-records",
+  "repo": "mev",
+  "blocks": [
+    {
+      "id": "MV.17.A",
+      "origin_roadmap": "lane-files-decompose-into-json-and-block-records",
+      "repo": "mev"
+    }
+  ],
+  "budget": {
+    "heavy": true,
+    "not_with": []
+  },
+  "isolation": "in-place"
+}

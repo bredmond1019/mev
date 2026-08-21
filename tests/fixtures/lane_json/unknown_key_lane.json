@@ -1,0 +1,29 @@
+{
+  "lane": "docs-sync",
+  "roadmap": "close-the-loop",
+  "repo": "base-template",
+  "blocks": [
+    {
+      "id": "BT.ticket.harness-schema-realpath",
+      "origin_roadmap": "close-the-loop",
+      "repo": "base-template"
+    },
+    {
+      "id": "BT.5.A",
+      "origin_roadmap": "lane-files-decompose-into-json-and-block-records",
+      "repo": "base-template"
+    }
+  ],
+  "budget": {
+    "heavy": false,
+    "not_with": [
+      "substrate"
+    ]
+  },
+  "held_until": "2026-08-25",
+  "isolation": "worktree",
+  "exclusive_repos": [
+    "base-template"
+  ],
+  "unexpected_top_level_key": "this key is not in lane.schema.json"
+}

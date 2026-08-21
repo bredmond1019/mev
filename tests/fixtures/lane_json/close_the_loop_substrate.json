@@ -1,0 +1,108 @@
+{
+  "lane": "substrate",
+  "roadmap": "close-the-loop",
+  "blocks": [
+    {
+      "id": "BT.ticket.generate-tasks-json-on-ticket",
+      "origin_roadmap": "close-the-loop",
+      "repo": "base-template"
+    },
+    {
+      "id": "BT.ticket.compilable-task-boundaries",
+      "origin_roadmap": "close-the-loop",
+      "repo": "base-template"
+    },
+    {
+      "id": "BT.ticket.auto-merge-returns-null-pr",
+      "origin_roadmap": "close-the-loop",
+      "repo": "base-template"
+    },
+    {
+      "id": "BT.ticket.engines-cannot-commit-planning-vault",
+      "origin_roadmap": "close-the-loop",
+      "repo": "base-template"
+    },
+    {
+      "id": "BT.ticket.sdlc-task-bookkeep-drift",
+      "origin_roadmap": "close-the-loop",
+      "repo": "base-template"
+    },
+    {
+      "id": "BT.ticket.emoji-gate-diff-scoped",
+      "origin_roadmap": "close-the-loop",
+      "repo": "base-template"
+    },
+    {
+      "id": "BT.ticket.close-out-emoji-gate-empty-diff",
+      "origin_roadmap": "close-the-loop",
+      "repo": "base-template"
+    },
+    {
+      "id": "BT.ticket.d56-reconcile-failed-consumers",
+      "origin_roadmap": "close-the-loop",
+      "repo": "base-template"
+    },
+    {
+      "id": "BT.ticket.orchestrate-command-improvements",
+      "origin_roadmap": "close-the-loop",
+      "repo": "base-template"
+    },
+    {
+      "id": "BT.ticket.generate-roadmap-command",
+      "origin_roadmap": "close-the-loop",
+      "repo": "base-template"
+    },
+    {
+      "id": "BT.ticket.harness-schema-realpath",
+      "origin_roadmap": "close-the-loop",
+      "repo": "base-template"
+    },
+    {
+      "id": "MV.ticket.learn-link-mapping-masks-dead-links",
+      "origin_roadmap": "close-the-loop",
+      "repo": "mev"
+    },
+    {
+      "id": "MV.ticket.close-stale-conformance-branch",
+      "origin_roadmap": "close-the-loop",
+      "repo": "mev"
+    },
+    {
+      "id": "MV.ticket.funnel-conformance-extraction-spike",
+      "origin_roadmap": "close-the-loop",
+      "repo": "mev"
+    },
+    {
+      "id": "OK.ticket.conformance-field-count-floor",
+      "origin_roadmap": "close-the-loop",
+      "repo": "okf-core"
+    },
+    {
+      "id": "CC.ticket.publish-to-crates-io",
+      "origin_roadmap": "close-the-loop",
+      "repo": "claude-code-rs"
+    },
+    {
+      "id": "EN.ticket.stale-generate-timeout-caveat",
+      "origin_roadmap": "close-the-loop",
+      "repo": "engine-rs"
+    },
+    {
+      "id": "EN.ticket.implement-node-transport-retry",
+      "origin_roadmap": "close-the-loop",
+      "repo": "engine-rs"
+    },
+    {
+      "id": "BA.ticket.spawn-schedule-loop",
+      "origin_roadmap": "close-the-loop",
+      "repo": "bastion"
+    },
+    {
+      "id": "OR.ticket.publishable-eval-report",
+      "origin_roadmap": "close-the-loop",
+      "repo": "orchestrator"
+    }
+  ],
+  "isolation": "worktree (base-template only; others in-place)",
+  "spec_source": "planning/close-the-loop/lane-substrate.txt (converted by hand for MV.17.A task 1)"
+}
