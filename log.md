@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-18T14:20:00-03:00"
+timestamp: "2026-08-21T07:20:00-03:00"
 ---
 
 # Log — mev
@@ -84,6 +84,13 @@ d5c05c4 feat: warn on a roadmap dir with no lane record (MV.17.A task 4)
 74d0051 chore: init worktree MV.17.A-flow
 ```
 
+
+## [2026-08-21]
+
+### MV.17.A — lane.json parser lands; two mev defects found and fixed in passing
+- **What:** Closed and merged `MV.17.A` (mev `main` at `94b5720`, ff, 11 commits). `lane_segments.rs` now reads the D71 `lane-<name>.json` record with `deny_unknown_fields` across both discovery layouts; the `.txt` directive grammar, the `Origin` enum, `parse_lane_blocks` and the three `E_LANE_*` diagnostics are deleted, and `W_LANE_DIR_NO_RECORD` makes a roadmap dir with no lane record impossible to miss. Literal-JSON goldens pin the frozen `LaneDirectives`/`LaneBudget`/`DerivedBlockPosition` contract that `engine-rs`'s `chain.rs` mirrors with `deny_unknown_fields`. Two defects surfaced and were fixed on the branch: the wall-clock gate measured `cargo run`'s freshness scan rather than the binary (0.00s direct vs 2.73s via cargo — now `CARGO_BIN_EXE_mev`), and, **P0**, inherited `GIT_DIR` overrode both `-C` and `current_dir`, letting a `brain_emit` fixture run `git init`/`commit`/`worktree add` against the real `core/mev` repo and move `main` onto a junk commit (recovered to `2701bda`, nothing lost; fixed via `shared::git_command()` across five `src/` sites plus `testsupport`). Also reversed `MV.ticket.carryover-dispose` to archive-not-delete per operator decision, which adds an `okf-core:OK.4.A` dependency and holds it.
+- **Why:** `MV.17.A` is the head of the `mev` lane of the `autonomous-foundation` roadmap — it makes `E_LANE_DIRECTIVE_UNRECOGNISED` and `E_LANE_DOUBLE_CLAIM` unrepresentable rather than merely fixed, and `BT.5.B`/`HQ.8.A` cannot start until a `lane.json` can be parsed. The two defects were found because the block's PR was blocked by gates that had nothing to do with the branch; both turned out to be real, and the second was actively corrupting the repository.
+- **Refs:** `planning/orchestration-run/autonomous-foundation/notes.md`, `planning/MV.17.A/tasks.json`, `planning/blocks/MV.17.A.json`, lane `planning/roadmaps/autonomous-foundation/lane-mev.txt`
 
 ## [2026-08-18]
 
