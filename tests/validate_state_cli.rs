@@ -9,9 +9,11 @@
 //!   the typed `CarryoverScope`/`BlockedBy` objects — asserting the command exits
 //!   non-zero and names both the entry's `slug` and the offending field;
 //! - a clean file exits zero;
-//! - a wall-clock assertion on a representative real-sized file, measured against the
-//!   release build (`cargo run --release --`), never the installed `~/.cargo/bin/mev`
-//!   (a separate copy that does not auto-track locally-authored commits).
+//! - a wall-clock assertion on a representative real-sized file, measured against this
+//!   crate's own built binary (`CARGO_BIN_EXE_mev`), never the installed
+//!   `~/.cargo/bin/mev` (a separate copy that does not auto-track locally-authored
+//!   commits) and never through `cargo run`, whose per-invocation freshness scan used
+//!   to dominate the measurement — see the test's own doc comment.
 //!
 //! Before `diagnose_malformed_state_shape` existed, the incident fixture below still
 //! exited non-zero (a bare `E_STATE_MALFORMED_JSON` from the raw `serde_json::Error`),
@@ -150,13 +152,31 @@ fn missing_file_exits_nonzero() {
     );
 }
 
-/// Wall-clock assertion measured against the **release** build via `cargo run
-/// --release --`, per Task 5's un-gateable AC 11 — the installed `~/.cargo/bin/mev`
-/// is a separate copy that does not auto-track locally-authored commits, so it is
-/// never a valid stand-in for "does this repo's current source run fast enough".
+/// Wall-clock assertion measured against this crate's **own built binary**
+/// (`CARGO_BIN_EXE_mev`), per Task 5's un-gateable AC 11 — the installed
+/// `~/.cargo/bin/mev` is a separate copy that does not auto-track locally-authored
+/// commits, so it is never a valid stand-in for "does this repo's current source run
+/// fast enough".
 ///
-/// First invocation is untimed (lets `cargo run` build/link if the release artifact
-/// is stale or absent); the timed run is the second invocation only.
+/// **This used to shell out through `cargo run --release --manifest-path …`, and that
+/// measured the wrong thing.** Cargo re-scans the whole dependency graph for freshness
+/// on every `cargo run`, and that scan — not `mev validate-state` — dominated the
+/// number. Measured 2026-08-21 in a git worktree, with the release artifact already
+/// built and warm: the binary invoked directly returned in **0.00s**, while the same
+/// call through `cargo run --release` took **2.73 / 2.69 / 2.73s** — so the test failed
+/// its own 2s budget while reporting "mev validate-state took 2.7s", a claim wrong by
+/// three orders of magnitude. It passed in the main checkout and failed in every
+/// worktree, which made it read as a code defect and bailed two `/sdlc-flow` runs of
+/// `MV.17.A` that had nothing to do with it.
+///
+/// `CARGO_BIN_EXE_mev` is Cargo's own mechanism for this: it points at the binary built
+/// for the profile the test is running under, so `cargo nextest run --release` still
+/// measures the release build — the property this test was written to pin — with none
+/// of cargo's per-invocation overhead. It is also what every other test in this file
+/// already uses.
+///
+/// The first invocation stays untimed so first-touch page-cache cost lands outside the
+/// measurement; the timed run is the second invocation only.
 #[test]
 fn validate_state_completes_fast_on_a_representative_file_release_build() {
     let dir = temp_dir("wall-clock");
@@ -214,18 +234,11 @@ fn validate_state_completes_fast_on_a_representative_file_release_build() {
         }),
     );
 
-    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let run_release = |args: &[&str]| -> std::process::Output {
-        Command::new("cargo")
-            .arg("run")
-            .arg("--release")
-            .arg("--manifest-path")
-            .arg(&manifest_path)
-            .arg("--quiet")
-            .arg("--")
+        Command::new(env!("CARGO_BIN_EXE_mev"))
             .args(args)
             .output()
-            .expect("cargo run --release must run")
+            .expect("the built mev binary must run")
     };
 
     // Untimed warm-up: builds the release binary if it isn't already fresh.
