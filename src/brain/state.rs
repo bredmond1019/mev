@@ -9989,7 +9989,7 @@ mod check_epics_tests {
     #[test]
     fn check_epics_never_infers_kind_from_lane_files() {
         // Pins G3 (ratified 2026-08-14): the lane-file heuristic — "a program is
-        // an epic whose plan directory contains lane-*.txt" — was rejected
+        // an epic whose plan directory contains lane-<name>.json" — was rejected
         // outright and must never be reintroduced as a fallback for an unset
         // `kind`, even when the epic's own plan directory genuinely has lane
         // files sitting right beside it.
@@ -9997,7 +9997,11 @@ mod check_epics_tests {
         let plan_dir = dir.path().join("planning").join("roadmaps").join("w-prog");
         std::fs::create_dir_all(&plan_dir).unwrap();
         std::fs::write(plan_dir.join("roadmap.md"), "# W Program\n").unwrap();
-        std::fs::write(plan_dir.join("lane-substrate.txt"), "HQ.1.A\n").unwrap();
+        std::fs::write(
+            plan_dir.join("lane-substrate.json"),
+            r#"{"lane":"substrate","roadmap":"w-prog","blocks":[{"id":"HQ.1.A","origin_roadmap":"w-prog","repo":"hq"}]}"#,
+        )
+        .unwrap();
 
         let (src, file) = hq_with_epic(
             dir.path(),

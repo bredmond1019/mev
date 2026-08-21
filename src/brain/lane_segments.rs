@@ -1,22 +1,25 @@
-//! Lane file discovery and parsing — `MV.13.A` Task 1.
+//! Lane record discovery and parsing — `MV.13.A` Task 1, replaced for `lane.json` by
+//! `MV.17.A` Task 2.
 //!
-//! A "lane file" (`lane-*.txt`) is the authored, human-readable execution order for one
-//! roadmap's slice of work: an ordered list of block IDs, one per line, with `#` comments
-//! carrying binding context for the operator running it (`/begin-orchestration` Step 1F).
-//! No service reads that structure today — this module is the first thing that turns a
-//! lane file into a derived object another consumer (Task 2's segmentation, `emit-state`)
-//! can act on.
+//! A "lane record" (`lane-<name>.json`) is the authored execution order for one
+//! roadmap's slice of work: an ordered `blocks[]` array, each entry naming a block ID
+//! plus the repo it runs in and the roadmap that originally allocated it
+//! (`origin_roadmap`). It replaces the earlier line-oriented `.txt` lane-file format and
+//! its comment-directive grammar (`# ORIGIN:`, `# HELD-UNTIL:`, `# BUDGET:`,
+//! `# EXCLUSIVE-REPOS:`) entirely — there is no comment syntax to mis-read as a
+//! directive, and because every block carries its own authored `repo` and
+//! `origin_roadmap`, there is no unannotated double-claim to resolve. Both defect
+//! classes this module used to detect and diagnose (`E_LANE_DIRECTIVE_UNRECOGNISED`/
+//! `E_LANE_DIRECTIVE_MALFORMED`/`E_LANE_DOUBLE_CLAIM`) are unrepresentable in this
+//! format by construction, not merely fixed.
 //!
-//! # Comments are opaque, with one declared exception
-//!
-//! `#` comments are stripped when extracting the block-ID list and are never parsed for
-//! structure — they are prose for the human, not directives for this walker. The single
-//! exception is `# ORIGIN:` (MV.13.A Task 4, below): a fixed-prefix, declared
-//! machine-readable directive, not prose, and it attaches to exactly the one block-ID
-//! line that immediately follows it — never a run of blocks, however the human-facing
-//! text beside it reads. Any other comment, including one that reads like repo-boundary
-//! prose, changes nothing; see `parse_lane_blocks_repo_boundary_prose_in_comment_is_inert`
-//! below for the pinning test.
+//! Schema: `base-template/.claude/workflows/lane.schema.json`, governed by D71. This
+//! module's [`LaneDirectives`]/[`LaneBudget`] and the cross-repo derived artifact types
+//! ([`DerivedBlockPosition`], [`LaneSegmentsArtifact`]) keep their exact pre-existing
+//! shape — `core/engine-rs`'s `chain.rs` re-declares `LaneDirectives`/`LaneBudget` as
+//! `deny_unknown_fields` mirrors, and `emit-state`'s [`LANE_SEGMENTS_ARTIFACT`] is a
+//! frozen cross-repo contract. Do not change their field sets here without updating
+//! `engine-rs` too.
 //!
 //! # Both roadmap layouts
 //!
@@ -29,20 +32,8 @@
 //! # `deferred-blocks.txt` is out of scope on purpose
 //!
 //! It holds blocks cut by operator decision and is the *only* place that decision is
-//! encoded — nothing in `state.json` mirrors it. The `lane-*.txt` glob must never widen to
-//! catch it.
-//!
-//! # Structured directives (`MV.ticket.lane-file-structured-directives`)
-//!
-//! Three more fixed-prefix, comment-only header lines are machine-readable, mirroring the
-//! `# ORIGIN:` convention above rather than replacing it: `# HELD-UNTIL:`, `# BUDGET:` and
-//! `# EXCLUSIVE-REPOS:`. Unlike `# ORIGIN:`, which attaches to the one block-ID line that
-//! follows it, these three describe the *whole lane* — see [`LaneDirectives`] for the
-//! grammar and [`LaneFile::directives`] for where the parsed value lands. This is a
-//! cross-repo contract: `engine-rs:EN.10.B` enforces what this module only derives and
-//! reports, and `base-template:BT.ticket.generate-roadmap-lane-directives` emits this exact
-//! grammar from `/generate-roadmap`. Do not change the spelling or value shape here without
-//! updating both.
+//! encoded — nothing in `state.json` mirrors it. The `lane-<name>.json` glob must never
+//! widen to catch it.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -57,89 +48,68 @@ const ROADMAPS_DIR: &str = "roadmaps";
 /// `planning/` alongside legacy roadmap directories.
 const NON_ROADMAP_DIR_NAMES: &[&str] = &["archive", "decisions", "artifacts"];
 
-/// One block-ID reference inside a lane file: the raw ID text plus the 1-based line it
-/// came from, so a downstream diagnostic (Task 3's unresolvable-ID warning) can name a
-/// precise location.
+/// One block reference inside a lane record: the ID plus the authored ownership the
+/// record's `blocks[]` entry carries — the repo it runs in, and the roadmap it was
+/// originally allocated under (`origin_roadmap`), which retires `E_LANE_DOUBLE_CLAIM`
+/// by construction (see the module doc).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneBlockRef {
     pub id: String,
+    /// 1-based position of this block within the record's `blocks[]` array — array
+    /// order IS chain order, so this is also a usable diagnostic location even though
+    /// nothing here is a source *line* any more.
     pub line: usize,
-    /// The `# ORIGIN:` directive (Task 4, below) attached to this exact block-ID line,
-    /// if the immediately preceding comment line declared one. `None` for the ordinary
-    /// case — no annotation, not even an implicit "no origin".
-    pub origin: Option<Origin>,
+    /// The roadmap this block was originally allocated under, per the record's
+    /// authored, required `origin_roadmap` field. Always `Some(..)` for a
+    /// successfully-deserialized record — carried as `Option` to match
+    /// [`DerivedBlockPosition::origin_roadmap`], which this value flows into
+    /// unchanged.
+    pub origin_roadmap: Option<String>,
+    /// The repo slug this block runs in, authored per-block in the record — never
+    /// inherited from a lane-level default (a lane is not single-repo in this corpus).
+    pub repo: String,
 }
 
-/// One discovered, parsed `lane-*.txt` file.
+/// One discovered, parsed `lane-<name>.json` record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneFile {
     /// The owning roadmap's slug — the name of the directory directly containing this
-    /// lane file, whether that directory sits under `planning/roadmaps/` or legacy
+    /// lane record, whether that directory sits under `planning/roadmaps/` or legacy
     /// `planning/<slug>/`.
     pub roadmap: String,
-    /// The lane name: the filename with the `lane-` prefix and `.txt` suffix stripped
-    /// (`lane-substrate.txt` → `substrate`).
+    /// The lane name: the filename with the `lane-` prefix and `.json` suffix stripped
+    /// (`lane-substrate.json` → `substrate`).
     pub lane: String,
     /// Absolute path to the file on disk.
     pub path: PathBuf,
-    /// The ordered, comment-and-blank-stripped block-ID list. File order is execution
-    /// order and is preserved exactly — never sorted, deduped, or normalised.
+    /// The ordered block list, exactly as authored in the record's `blocks[]` array.
+    /// Array order is execution order and is preserved exactly — never sorted,
+    /// deduped, or normalised.
     pub blocks: Vec<LaneBlockRef>,
     /// This lane's structured directives (`MV.ticket.lane-file-structured-directives`
-    /// Task 1), or `None` when the file declares none of `HELD-UNTIL`, `BUDGET` or
-    /// `EXCLUSIVE-REPOS` — absence, never a defaulted or empty-but-present value. See
+    /// Task 1), or `None` when the record declares none of `held_until`, `budget` or
+    /// `exclusive_repos` — absence, never a defaulted or empty-but-present value. See
     /// [`LaneDirectives`] for the grammar.
     pub directives: Option<LaneDirectives>,
 }
 
 /// A lane's structured directives — machine-readable declarations of a hold, a heavy/light
-/// resource budget, and cross-lane repo exclusivity, in place of the English-in-a-comment
-/// header this replaces (`planning/operator-surface/lane-terminal.txt`'s retired prose:
-/// *"Nothing in the tooling enforces it — the roadmap and this comment are the only places
-/// it is stated."*).
+/// resource budget, and cross-lane repo exclusivity. Authored directly as JSON keys on the
+/// lane record (`held_until`, `budget`, `exclusive_repos`) per
+/// `base-template/.claude/workflows/lane.schema.json`.
 ///
-/// Every field is `Option`, absent unless the lane file declares it, and the whole struct
-/// is itself wrapped in `Option` on [`LaneFile::directives`]: a lane declaring **none** of
-/// the three directives produces `directives: None` there, never `Some(LaneDirectives {
-/// held_until: None, budget: None, exclusive_repos: None })`. Absence must read as
-/// "unspecified", never as "unconstrained" — a caller that only checks `is_some()` on the
-/// wrapping `Option` gets the right answer either way, but a caller that matches on
-/// individual fields must not be able to mistake "declared nothing" for "declared an empty
-/// constraint".
+/// Every field is `Option`, absent unless the lane record declares it, and the whole
+/// struct is itself wrapped in `Option` on [`LaneFile::directives`]: a lane declaring
+/// **none** of the three directives produces `directives: None` there, never
+/// `Some(LaneDirectives { held_until: None, budget: None, exclusive_repos: None })`.
+/// Absence must read as "unspecified", never as "unconstrained" — a caller that only
+/// checks `is_some()` on the wrapping `Option` gets the right answer either way, but a
+/// caller that matches on individual fields must not be able to mistake "declared
+/// nothing" for "declared an empty constraint".
 ///
-/// # Grammar
-///
-/// Each directive is a comment-only line (nothing but `#`, optional leading whitespace, and
-/// the directive itself precede the newline) whose body — after `#` and leading whitespace
-/// — starts with one of three fixed, case-sensitive, upper-case prefixes. This mirrors the
-/// existing `# ORIGIN:` convention (above): a fixed-prefix directive is structure, every
-/// other comment is prose, and a directive-looking string embedded in an ordinary sentence
-/// never parses as one because the prefix must be the first thing after `#`, not merely
-/// present somewhere in the line.
-///
-/// - **`# HELD-UNTIL: <token>`** — the block ID or operator-gate slug the *whole lane*
-///   waits on before any block in it may start. `<token>` is the first whitespace-delimited
-///   word after the prefix; this module carries it as opaque text and never resolves it
-///   against the corpus (that is `engine-rs:EN.10.B`'s job, not this parser's).
-/// - **`# BUDGET: <HEAVY|LIGHT> [NOT-WITH <repo>[,<repo>...]]`** — the lane's resource
-///   class, matched case-insensitively, plus an optional `NOT-WITH` clause naming repo
-///   slugs this lane's budget must not run concurrently beside. The clause is
-///   comma-separated with no required surrounding whitespace; when absent, the budget is
-///   still `Some(..)` (the level was declared) with an empty `not_with` list — an empty
-///   list here means "no additional exclusion beyond the budget class itself", which is
-///   different from `exclusive_repos` being absent entirely.
-/// - **`# EXCLUSIVE-REPOS: <repo>[,<repo>...]`** — repo slugs that this lane alone may
-///   drive while it is open; comma-separated, no other lane in any roadmap may touch them
-///   concurrently.
-///
-/// An unrecognised key or a malformed value for a recognised key produces a diagnostic
-/// (`MV.ticket.lane-file-structured-directives` Task 2) naming the file and line, and is
-/// otherwise left out of the returned struct — this parser recognises only the three
-/// well-formed shapes above; ordinary prose that does not even look like a directive key
-/// is left untouched, exactly as free prose always has been. A fixed allowlist of
-/// pre-existing header keys (`ORIGIN`, `ROADMAP`, `LOG`, `ISOLATION`, and others —
-/// see [`KNOWN_NON_DIRECTIVE_KEYS`]) is also exempt: these predate this grammar and are
-/// unrelated conventions, not directive attempts. See [`parse_lane_directives`].
+/// **Frozen contract**: this type's field set and serialized shape must not change
+/// without updating `core/engine-rs`'s `chain.rs`, which re-declares it as a
+/// `deny_unknown_fields` mirror.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct LaneDirectives {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -151,238 +121,100 @@ pub struct LaneDirectives {
 }
 
 impl LaneDirectives {
-    /// `true` iff none of the three fields is set — the signal [`parse_lane_directives`]
-    /// uses to collapse an all-absent result down to `None` rather than an empty `Some`.
+    /// `true` iff none of the three fields is set — the signal the record-to-struct
+    /// mapping in [`collect_lane_files_in`] uses to collapse an all-absent result down
+    /// to `None` rather than an empty `Some`.
     fn is_empty(&self) -> bool {
         self.held_until.is_none() && self.budget.is_none() && self.exclusive_repos.is_none()
     }
 }
 
-/// The `# BUDGET:` directive's parsed value — see [`LaneDirectives`] for the grammar.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+/// The `budget` directive's parsed value — see [`LaneDirectives`] for the grammar.
+///
+/// **Frozen contract**: this type's field set and serialized shape must not change
+/// without updating `core/engine-rs`'s `chain.rs`, which re-declares it as a
+/// `deny_unknown_fields` mirror. `not_with` defaults to empty when the JSON record
+/// omits it — an empty list here means "no additional exclusion beyond the budget
+/// class itself", which is different from [`LaneDirectives::exclusive_repos`] being
+/// absent entirely.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LaneBudget {
-    /// `true` for `HEAVY`, `false` for `LIGHT`.
+    /// `true` for a heavy lane, `false` for light.
     pub heavy: bool,
-    /// Repo slugs from an optional `NOT-WITH` clause. Empty when the directive declared
-    /// only a level — this is not the same as [`LaneDirectives::exclusive_repos`] being
-    /// absent; it is a property of the budget class, not a separate directive.
+    /// Repo slugs this lane's budget must not run concurrently beside.
+    #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub not_with: Vec<String>,
 }
 
-/// Fixed-prefix keys [`parse_lane_directives`] recognises. See [`LaneDirectives`] for the
-/// grammar each one parses under.
-const DIRECTIVE_HELD_UNTIL_PREFIX: &str = "HELD-UNTIL:";
-const DIRECTIVE_BUDGET_PREFIX: &str = "BUDGET:";
-const DIRECTIVE_EXCLUSIVE_REPOS_PREFIX: &str = "EXCLUSIVE-REPOS:";
-/// The optional clause inside a `# BUDGET:` value naming repos this lane's budget must not
-/// run concurrently beside.
-const BUDGET_NOT_WITH_MARKER: &str = "NOT-WITH";
+/// Error code on a diagnostic produced when a `lane-<name>.json` file fails to
+/// deserialize against `base-template/.claude/workflows/lane.schema.json` — an unknown
+/// top-level or block-level key (`deny_unknown_fields`), a missing required field, or
+/// invalid JSON. Named and never silently skipped: a malformed record still ends up
+/// nowhere in the derived output, so a diagnostic is the only way its author finds out.
+const E_LANE_RECORD_MALFORMED: &str = "E_LANE_RECORD_MALFORMED";
 
-/// Split a comma-separated repo list into trimmed, non-empty slugs. Used by both
-/// `# EXCLUSIVE-REPOS:` and `# BUDGET:`'s `NOT-WITH` clause — the same grammar in both
-/// places, one function.
-fn parse_repo_list(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
+/// Raw on-disk deserialize shape for one `lane-<name>.json` record, mirroring
+/// `base-template/.claude/workflows/lane.schema.json` field-for-field —
+/// `deny_unknown_fields` so an unrecognised key is a loud error rather than silently
+/// ignored. This is the authored shape only; [`collect_lane_files_in`] maps it onto
+/// [`LaneFile`]/[`LaneBlockRef`]/[`LaneDirectives`] before it leaves this module — no
+/// other code in the crate should ever see a [`LaneRecord`] directly.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LaneRecord {
+    #[allow(dead_code)]
+    // validated against the containing directory's slug at some future point; not required for Task 2's contract
+    lane: String,
+    #[allow(dead_code)]
+    // matches the containing directory's slug (`collect_lane_files_in` uses the directory, not this field)
+    roadmap: String,
+    /// Optional lane-level default repo — carries no meaning for `blocks[]` (each
+    /// block authors its own `repo` regardless), present only so a single-repo lane
+    /// can name itself once. Not otherwise consumed by this module.
+    #[serde(default)]
+    #[allow(dead_code)]
+    repo: Option<String>,
+    blocks: Vec<LaneRecordBlock>,
+    #[serde(default)]
+    budget: Option<LaneBudget>,
+    #[serde(default)]
+    held_until: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    // authored lane metadata with no state.json representation; not consumed by derivation
+    isolation: Option<String>,
+    #[serde(default)]
+    exclusive_repos: Option<Vec<String>>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    // authored lane metadata with no state.json representation; not consumed by derivation
+    spec_source: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    // authored lane metadata with no state.json representation; not consumed by derivation
+    cut_blocks: Option<Vec<String>>,
 }
 
-impl LaneBudget {
-    /// Parse the text after `# BUDGET:` (already trimmed of the prefix). Returns `None`
-    /// when the leading token is neither `HEAVY` nor `LIGHT` (case-insensitive); the
-    /// caller ([`parse_lane_directives`]) turns that into a diagnostic.
-    ///
-    /// The level is read as the **first run of ASCII letters** in `value`, not the whole
-    /// trimmed string — every `# BUDGET:` line already live across the fleet (predating
-    /// this grammar, `/generate-roadmap` never having emitted the strict form) states the
-    /// level and then explains itself in prose (`HEAVY (cargo build --release). May run
-    /// beside AT MOST ONE other heavy lane.`, `light. cargo fmt/clippy/test/build only.`),
-    /// so requiring the *entire* remainder to equal `HEAVY`/`LIGHT` verbatim would flag
-    /// every one of them malformed. A first-word match keeps the trailing prose as
-    /// human-only commentary this parser never inspects — exactly like an unset field, not
-    /// a new structured surface. A `# BUDGET:` line with no recognisable leading level at
-    /// all (e.g. `# BUDGET: never run this concurrently with...`) still correctly returns
-    /// `None`.
-    fn parse(value: &str) -> Option<Self> {
-        let (level_part, not_with_part) = match value.find(BUDGET_NOT_WITH_MARKER) {
-            Some(pos) => (
-                &value[..pos],
-                Some(&value[pos + BUDGET_NOT_WITH_MARKER.len()..]),
-            ),
-            None => (value, None),
-        };
-        let level_token = level_part
-            .split(|c: char| !c.is_ascii_alphabetic())
-            .find(|s| !s.is_empty())?;
-        let heavy = if level_token.eq_ignore_ascii_case("HEAVY") {
-            true
-        } else if level_token.eq_ignore_ascii_case("LIGHT") {
-            false
-        } else {
-            return None;
-        };
-        let not_with = not_with_part
-            .map(|rest| parse_repo_list(rest.trim_start().trim_start_matches(':').trim()))
-            .unwrap_or_default();
-        Some(LaneBudget { heavy, not_with })
-    }
+/// Raw on-disk deserialize shape for one `blocks[]` entry — see [`LaneRecord`].
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LaneRecordBlock {
+    id: String,
+    origin_roadmap: String,
+    repo: String,
 }
 
-/// Error code on a diagnostic produced when a comment-only line's key looks like a
-/// directive attempt (all-uppercase, hyphenated, immediately followed by `:`) but is
-/// none of the three recognised prefixes.
-const E_LANE_DIRECTIVE_UNRECOGNISED: &str = "E_LANE_DIRECTIVE_UNRECOGNISED";
-/// Error code on a diagnostic produced when a recognised directive key's value does not
-/// parse under its grammar (see [`LaneDirectives`]).
-const E_LANE_DIRECTIVE_MALFORMED: &str = "E_LANE_DIRECTIVE_MALFORMED";
-
-/// `true` iff `candidate` (the text before a `:` in a comment body) has the shape of a
-/// directive key under this module's convention: non-empty, starting with an
-/// upper-case letter, and containing only upper-case letters and hyphens thereafter.
-/// This is deliberately the same shape the three recognised prefixes already have
-/// (`HELD-UNTIL`, `BUDGET`, `EXCLUSIVE-REPOS`) — it is what lets Task 2 tell "an
-/// attempted directive with an unrecognised key" apart from ordinary prose that merely
-/// mentions a recognised key mid-sentence (lower/mixed case, or not immediately after
-/// `#`), without a false positive on the latter.
-fn looks_like_directive_key(candidate: &str) -> bool {
-    let mut chars = candidate.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_uppercase() => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_uppercase() || c == '-')
-}
-
-/// Header-comment keys already in wide use across the live fleet's lane files, predating
-/// this ticket's three structured directives, for purposes this module has no stake in —
-/// which roadmap/log a lane belongs to, worktree isolation notes, held-until prose,
-/// cross-references to a spec, free-standing warnings — plus `ORIGIN`, the pre-existing
-/// `MV.13.A` double-claim directive this module already parses separately (via
-/// `parse_lane_blocks`, scoped to the one block ID it precedes) and which this module's own
-/// doc comment says must keep coexisting unchanged. `looks_like_directive_key`'s shape check
-/// alone (upper-case-and-hyphens before a `:`) cannot distinguish a genuine future typo of
-/// one of the three canonical keys from an established, unrelated header convention — an
-/// unbounded diagnostic would otherwise red-gate the whole corpus (`MV.ticket
-/// .lane-file-structured-directives` close-out found 200 false-positive errors against the
-/// live `agentic-portfolio` fleet before this allowlist existed). Enumerated exhaustively
-/// against that fleet on 2026-08-17 rather than derived from a similarity heuristic; extend
-/// it if a new legitimate header convention is adopted, don't widen the shape check.
-const KNOWN_NON_DIRECTIVE_KEYS: &[&str] = &[
-    "ORIGIN",
-    "ROADMAP",
-    "LOG",
-    "ISOLATION",
-    "SPEC",
-    "TRAPS",
-    "TRAP",
-    "HELD",
-    "EXCEPTION",
-    "CONTEXT",
-    "BUT",
-    "SO",
-    "ALERTING",
-    "BACKUP",
-    "NOTE",
-    "CARE",
-    "SCOPE",
-    "RISK",
-];
-
-/// Scan every comment-only line of `content` for the three structured directives (see
-/// [`LaneDirectives`]) and collapse the result: `None` when the file declares none of them,
-/// `Some(..)` with only the declared fields set otherwise. A directive line may appear
-/// anywhere in the file — these describe the whole lane, not one block, so they are not
-/// scoped to a header region the way `# ORIGIN:` is scoped to the block that follows it.
+/// Discover every live `lane-<name>.json` record under `root/planning/roadmaps/<slug>/`
+/// and legacy `root/planning/<slug>/`, excluding anything under an `archive/` directory
+/// at any depth and any file or directory whose name starts with `_` (the corpus-wide
+/// ephemeral/debug convention). Symlinks are followed — every `planning/` in this
+/// fleet is itself a symlink into a `_planning/` vault, and a symlink-blind walk would
+/// silently return a subset while looking successful.
 ///
-/// Also returns a diagnostic per malformed or unrecognised directive attempt (Task 2):
-/// a comment-only line whose body has the shape of a directive key (see
-/// [`looks_like_directive_key`]) but is not one of the three recognised prefixes, or is
-/// one of them with a value that fails its grammar. Each diagnostic names `path` and the
-/// 1-based line. A bad directive is never fatal — it is simply left unrecorded in the
-/// returned [`LaneDirectives`], exactly as an absent field always has been; the caller
-/// carries on parsing the rest of this lane file and every other one.
-fn parse_lane_directives(content: &str, path: &Path) -> (Option<LaneDirectives>, Vec<Diagnostic>) {
-    let mut out = LaneDirectives::default();
-    let mut diags = Vec::new();
-    for (idx, raw_line) in content.lines().enumerate() {
-        let line = idx + 1;
-        let Some(hash_pos) = raw_line.find('#') else {
-            continue;
-        };
-        if !raw_line[..hash_pos].trim().is_empty() {
-            continue; // not a comment-only line — a trailing #comment on a block-ID line
-        }
-        let body = raw_line[hash_pos + 1..].trim_start();
-        if let Some(value) = body.strip_prefix(DIRECTIVE_HELD_UNTIL_PREFIX) {
-            match value.split_whitespace().next() {
-                Some(token) => out.held_until = Some(token.to_string()),
-                None => diags.push(Diagnostic::error(
-                    path,
-                    E_LANE_DIRECTIVE_MALFORMED,
-                    format!(
-                        "{}: line {line}: malformed HELD-UNTIL directive — missing a token after the prefix",
-                        path.display()
-                    ),
-                )),
-            }
-        } else if let Some(value) = body.strip_prefix(DIRECTIVE_BUDGET_PREFIX) {
-            match LaneBudget::parse(value.trim()) {
-                Some(budget) => out.budget = Some(budget),
-                None => diags.push(Diagnostic::error(
-                    path,
-                    E_LANE_DIRECTIVE_MALFORMED,
-                    format!(
-                        "{}: line {line}: malformed BUDGET directive — expected HEAVY or LIGHT, got '{}'",
-                        path.display(),
-                        value.trim()
-                    ),
-                )),
-            }
-        } else if let Some(value) = body.strip_prefix(DIRECTIVE_EXCLUSIVE_REPOS_PREFIX) {
-            let repos = parse_repo_list(value.trim());
-            if repos.is_empty() {
-                diags.push(Diagnostic::error(
-                    path,
-                    E_LANE_DIRECTIVE_MALFORMED,
-                    format!(
-                        "{}: line {line}: malformed EXCLUSIVE-REPOS directive — no repo slugs found",
-                        path.display()
-                    ),
-                ));
-            } else {
-                out.exclusive_repos = Some(repos);
-            }
-        } else if let Some(colon_pos) = body.find(':') {
-            let candidate = &body[..colon_pos];
-            if looks_like_directive_key(candidate) && !KNOWN_NON_DIRECTIVE_KEYS.contains(&candidate)
-            {
-                diags.push(Diagnostic::error(
-                    path,
-                    E_LANE_DIRECTIVE_UNRECOGNISED,
-                    format!(
-                        "{}: line {line}: unrecognised lane directive key '{candidate}'",
-                        path.display()
-                    ),
-                ));
-            }
-        }
-    }
-    (if out.is_empty() { None } else { Some(out) }, diags)
-}
-
-/// Discover every live `lane-*.txt` file under `root/planning/roadmaps/<slug>/` and legacy
-/// `root/planning/<slug>/`, excluding anything under an `archive/` directory at any depth
-/// and any file or directory whose name starts with `_` (the corpus-wide ephemeral/debug
-/// convention). Symlinks are followed — every `planning/` in this fleet is itself a
-/// symlink into a `_planning/` vault, and a symlink-blind walk would silently return a
-/// subset while looking successful.
-///
-/// Returns the discovered, parsed lane files plus diagnostics for structural problems.
-/// Today the only such diagnostic is a roadmap slug claimed by both layouts at once.
+/// Returns the discovered, parsed lane records plus diagnostics for structural
+/// problems: a roadmap slug claimed by both layouts at once, or a record that fails to
+/// deserialize (never silently skipped — see [`E_LANE_RECORD_MALFORMED`]).
 pub fn discover_lane_files(root: &Path) -> (Vec<LaneFile>, Vec<Diagnostic>) {
     let planning_dir = root.join("planning");
     let mut lane_files = Vec::new();
@@ -395,7 +227,7 @@ pub fn discover_lane_files(root: &Path) -> (Vec<LaneFile>, Vec<Diagnostic>) {
     let mut roadmaps_slugs: HashSet<String> = HashSet::new();
     let mut legacy_slugs: HashSet<String> = HashSet::new();
 
-    // Current layout: planning/roadmaps/<slug>/lane-*.txt
+    // Current layout: planning/roadmaps/<slug>/lane-<name>.json
     let roadmaps_dir = planning_dir.join(ROADMAPS_DIR);
     if roadmaps_dir.is_dir() {
         for (slug, slug_dir) in child_dirs(&roadmaps_dir) {
@@ -404,13 +236,14 @@ pub fn discover_lane_files(root: &Path) -> (Vec<LaneFile>, Vec<Diagnostic>) {
         }
     }
 
-    // Legacy layout: planning/<slug>/lane-*.txt — every direct child of planning/ except
-    // roadmaps/ itself and the non-roadmap directories that live alongside roadmap dirs.
+    // Legacy layout: planning/<slug>/lane-<name>.json — every direct child of
+    // planning/ except roadmaps/ itself and the non-roadmap directories that live
+    // alongside roadmap dirs.
     for (slug, slug_dir) in child_dirs(&planning_dir) {
         if slug == ROADMAPS_DIR || NON_ROADMAP_DIR_NAMES.contains(&slug.as_str()) {
             continue;
         }
-        // Only a directory that actually contains a lane file counts as a "legacy
+        // Only a directory that actually contains a lane record counts as a "legacy
         // roadmap directory" for the both-locations check below — many planning/
         // children (spec dirs, orchestration-run, etc.) are not roadmaps at all and
         // must not collide with a same-named roadmaps/ entry that has none either.
@@ -461,9 +294,10 @@ fn child_dirs(dir: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
-/// Walk `slug_dir` (following symlinks) for `lane-*.txt` files, excluding anything under
-/// an `archive` path segment and any `_`-prefixed file, parse each, and push a
-/// [`LaneFile`] per hit (plus a diagnostic on unreadable content).
+/// Walk `slug_dir` (following symlinks) for `lane-<name>.json` files, excluding
+/// anything under an `archive` path segment and any `_`-prefixed file, deserialize
+/// each against [`LaneRecord`], and push a [`LaneFile`] per hit (plus a diagnostic on
+/// unreadable content or a malformed record).
 fn collect_lane_files_in(
     slug_dir: &Path,
     slug: &str,
@@ -511,92 +345,89 @@ fn collect_lane_files_in(
                 diags.push(Diagnostic::error(
                     &path,
                     "",
-                    format!("could not read lane file: {e}"),
+                    format!("could not read lane record: {e}"),
                 ));
                 continue;
             }
         };
 
-        let (directives, directive_diags) = parse_lane_directives(&content, &path);
-        diags.extend(directive_diags);
+        let record: LaneRecord = match serde_json::from_str(&content) {
+            Ok(r) => r,
+            Err(e) => {
+                diags.push(Diagnostic::error(
+                    &path,
+                    E_LANE_RECORD_MALFORMED,
+                    format!("{}: malformed lane record: {e}", path.display()),
+                ));
+                continue;
+            }
+        };
+
+        let directives = {
+            let d = LaneDirectives {
+                held_until: record.held_until.clone(),
+                budget: record.budget.clone(),
+                exclusive_repos: record.exclusive_repos.clone(),
+            };
+            if d.is_empty() { None } else { Some(d) }
+        };
+
+        let blocks: Vec<LaneBlockRef> = record
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| LaneBlockRef {
+                id: b.id.clone(),
+                line: i + 1,
+                origin_roadmap: Some(b.origin_roadmap.clone()),
+                repo: b.repo.clone(),
+            })
+            .collect();
+
         lane_files.push(LaneFile {
             roadmap: slug.to_string(),
             lane,
             path,
-            blocks: parse_lane_blocks(&content),
+            blocks,
             directives,
         });
     }
 }
 
-/// `true` iff `file_name` matches the `lane-*.txt` glob and is not excluded by the
-/// leading-`_` debug-file convention. `deferred-blocks.txt` deliberately does not match
-/// this (no `lane-` prefix) — it is out of scope for this module by design.
+/// `true` iff `file_name` matches the `lane-<name>.json` glob and is not excluded by
+/// the leading-`_` debug-file convention. `deferred-blocks.txt` deliberately does not
+/// match this (no `lane-` prefix, and it stays `.txt`) — it is out of scope for this
+/// module by design.
 fn is_lane_file_name(file_name: &str) -> bool {
     !file_name.starts_with('_')
         && file_name.starts_with("lane-")
-        && file_name.ends_with(".txt")
-        && file_name.len() > "lane-".len() + ".txt".len()
+        && file_name.ends_with(".json")
+        && file_name.len() > "lane-".len() + ".json".len()
 }
 
-/// `lane-substrate.txt` → `substrate`.
+/// `lane-substrate.json` → `substrate`.
 fn lane_name_from_file(file_name: &str) -> String {
     file_name
         .strip_prefix("lane-")
-        .and_then(|s| s.strip_suffix(".txt"))
+        .and_then(|s| s.strip_suffix(".json"))
         .unwrap_or(file_name)
         .to_string()
 }
 
-/// Parse a lane file's raw content into an ordered block-ID list: `#` comments and blank
-/// lines are stripped, everything else is kept in file order with its 1-based line
-/// number. Never sorts, dedupes, or normalises — file order is execution order.
-///
-/// The one exception to "comments are stripped and ignored": a comment-only line whose
-/// body (after `#` and leading whitespace) starts with the fixed prefix `ORIGIN:` is
-/// parsed as an [`Origin`] directive (Task 4) and attached to the single next block-ID
-/// line. Any other comment — including further prose continuing the same `# ORIGIN:`
-/// annotation, or text that merely *reads* like a directive — is inert.
-pub fn parse_lane_blocks(content: &str) -> Vec<LaneBlockRef> {
-    let mut out = Vec::new();
-    let mut pending_origin: Option<Origin> = None;
-    for (idx, raw_line) in content.lines().enumerate() {
-        let line = idx + 1;
-        let before_comment = match raw_line.find('#') {
-            Some(pos) => &raw_line[..pos],
-            None => raw_line,
-        };
-        let id = before_comment.trim();
-        if id.is_empty() {
-            // Comment-only or blank line. The one thing worth looking at here is the
-            // `# ORIGIN:` directive; everything else is prose and is dropped.
-            if let Some(pos) = raw_line.find('#') {
-                let comment_body = raw_line[pos + 1..].trim_start();
-                if let Some(value) = comment_body.strip_prefix("ORIGIN:") {
-                    pending_origin = Some(Origin::parse(value.trim()));
-                }
-            }
-            continue;
-        }
-        out.push(LaneBlockRef {
-            id: id.to_string(),
-            line,
-            origin: pending_origin.take(),
-        });
-    }
-    out
-}
-
 // ---------------------------------------------------------------------------
-// Ownership resolution and segmentation — MV.13.A Task 2
+// Ownership and segmentation — MV.13.A Task 2, simplified by MV.17.A Task 2
 // ---------------------------------------------------------------------------
 
 /// Corpus-wide index from a literal block-ID string to every repo slug that owns a
 /// block by that exact ID, built from `state.json`'s `tracks[].blocks[]` across every
 /// loaded file. State-graph keys are `repo:id` (see [`crate::brain::block_graph`]), so
 /// this index groups by repo *before* collapsing to a single owner — a bare ID that
-/// happens to be authored under two repos is a legitimate corpus state, not a bug, and
-/// [`resolve_owner`] refuses to guess between them.
+/// happens to be authored under two repos is a legitimate corpus state, not a bug.
+///
+/// No longer used to resolve lane-block ownership (each block authors its own `repo`
+/// directly — see [`LaneBlockRef`]); kept for [`unresolved_owner_diagnostics`], which
+/// uses it to check an authored `repo` against the set of repos the corpus actually
+/// knows, and for any other consumer that needs a corpus-wide id→repo index.
 pub type OwnerIndex = HashMap<String, Vec<String>>;
 
 /// Build the corpus-wide [`OwnerIndex`] from every loaded `state.json`.
@@ -619,14 +450,12 @@ pub fn build_owner_index(files: &[(StateSource, StateFile)]) -> OwnerIndex {
     index
 }
 
-/// Resolve a bare lane-file block ID to its single owning repo slug via `index`.
+/// Resolve a bare block ID to its single owning repo slug via `index`.
 ///
 /// Returns `None` — never a guess — when the ID resolves to **zero** repos (unknown to
-/// the corpus; Task 3 turns this into a diagnostic) or to **more than one** (a bare ID
-/// legitimately reused across repos; resolving that ambiguity would require the actual
-/// `repo:id` graph key, which a lane file's bare ID does not carry). Nearest-neighbour,
-/// "the file's other blocks", or directory-based guessing are explicitly ruled out by
-/// the spec — this function embodies that by returning `None` rather than picking one.
+/// the corpus) or to **more than one** (a bare ID legitimately reused across repos).
+/// No longer used for lane-block ownership (see [`OwnerIndex`]'s doc); kept exported
+/// for other id→repo lookups.
 pub fn resolve_owner<'a>(index: &'a OwnerIndex, id: &str) -> Option<&'a str> {
     match index.get(id) {
         Some(repos) if repos.len() == 1 => Some(repos[0].as_str()),
@@ -638,18 +467,22 @@ pub fn resolve_owner<'a>(index: &'a OwnerIndex, id: &str) -> Option<&'a str> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneSegmentBlock {
     pub id: String,
-    /// 1-based source line, carried through from [`LaneBlockRef`].
+    /// 1-based position within the owning [`LaneFile`]'s `blocks[]` array, carried
+    /// through from [`LaneBlockRef::line`].
     pub line: usize,
     /// 0-based index of this block within its segment — the second half of the
     /// `{segment, position}` pair. Chosen zero-based to match [`LaneSegment::segment`]
     /// and every other zero-based index already in this derivation (`topo_index`,
     /// vec indices generally); documented once here, not re-chosen per call site.
     pub position: usize,
+    /// The block's authored `origin_roadmap`, carried through from
+    /// [`LaneBlockRef::origin_roadmap`] unchanged.
+    pub origin_roadmap: Option<String>,
 }
 
 /// One contiguous run of a lane's blocks all owned by the same repo — the `(repo,
 /// chain)` segment this task derives. **Derived at emit time; never authored** — a lane
-/// file stays the authoring surface and nothing here is written back into one.
+/// record stays the authoring surface and nothing here is written back into one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneSegment {
     pub repo: String,
@@ -660,47 +493,36 @@ pub struct LaneSegment {
     /// The owning lane's structured directives (see [`LaneDirectives`]), carried onto
     /// every segment of that lane unchanged — `None` when the lane declared none.
     /// [`segment_lane_blocks`] always produces `None` here (it has no [`LaneFile`] to read
-    /// them from); [`segment_lane_file`] fills this in from the lane file it segments.
+    /// them from); [`segment_lane_file_segments`] fills this in from the lane file it
+    /// segments.
     pub directives: Option<LaneDirectives>,
 }
 
 impl LaneSegment {
-    /// The segment's first block — the block `MV.13.B`'s (deferred) frontier
-    /// computation will read. Exposed cleanly now rather than foreclosed later;
-    /// `MV.13.A` itself does nothing with it beyond this accessor.
+    /// The segment's first block — the block the frontier computation reads.
     pub fn head(&self) -> Option<&LaneSegmentBlock> {
         self.blocks.first()
     }
 }
 
-/// Segment an ordered block-ID list into `(repo, chain)` runs by cutting a new segment
-/// at every ownership change, via `resolve` (typically [`resolve_owner`] over a
-/// corpus-wide [`OwnerIndex`]).
+/// Segment an ordered block list into `(repo, chain)` runs by cutting a new segment at
+/// every change in each block's own authored `repo` (see [`LaneBlockRef::repo`]) — no
+/// external resolver needed any more, since ownership is authored on the block itself
+/// rather than derived from the corpus.
 ///
 /// Order is preserved exactly, within and across segments — a repo appearing twice
 /// **non-contiguously** (e.g. `A, B, A`) yields **three** segments, never one merged
 /// segment; that non-contiguous case is what separates this from a plain `group_by`.
-///
-/// A block whose owner does not resolve (`resolve` returns `None`) is **omitted** from
-/// every segment — it contributes no cut and appears in no segment's `blocks`. Task 3
-/// turns each such omission into a diagnostic; this function only segments what it can
-/// attribute, and never guesses to keep a block in.
-pub fn segment_lane_blocks(
-    blocks: &[LaneBlockRef],
-    mut resolve: impl FnMut(&str) -> Option<String>,
-) -> Vec<LaneSegment> {
+pub fn segment_lane_blocks(blocks: &[LaneBlockRef]) -> Vec<LaneSegment> {
     let mut segments: Vec<LaneSegment> = Vec::new();
     for block in blocks {
-        let Some(repo) = resolve(&block.id) else {
-            continue;
-        };
         let starts_new_segment = match segments.last() {
-            Some(seg) => seg.repo != repo,
+            Some(seg) => seg.repo != block.repo,
             None => true,
         };
         if starts_new_segment {
             segments.push(LaneSegment {
-                repo,
+                repo: block.repo.clone(),
                 segment: segments.len(),
                 blocks: Vec::new(),
                 directives: None,
@@ -714,14 +536,16 @@ pub fn segment_lane_blocks(
             id: block.id.clone(),
             line: block.line,
             position,
+            origin_roadmap: block.origin_roadmap.clone(),
         });
     }
     segments
 }
 
 /// One block, positioned within its lane after ownership-based segmentation —
-/// `{roadmap, lane, segment, position}`, the per-block derived record this task
-/// produces. Derived at emit time; authored nowhere.
+/// `{roadmap, lane, segment, position}` plus its authored `origin_roadmap`, the
+/// per-block derived record this task produces. Derived at emit time; authored
+/// nowhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneBlockPosition {
     pub roadmap: String,
@@ -731,6 +555,7 @@ pub struct LaneBlockPosition {
     pub line: usize,
     pub segment: usize,
     pub position: usize,
+    pub origin_roadmap: Option<String>,
     /// The owning lane's structured directives (see [`LaneDirectives`]), carried through
     /// from the [`LaneSegment`] this block belonged to — `None` when the lane declared
     /// none.
@@ -741,11 +566,8 @@ pub struct LaneBlockPosition {
 /// structured directives (see [`LaneDirectives`]) onto every resulting [`LaneSegment`] —
 /// the directives describe the whole lane, so every segment of it carries the same value
 /// (`None` when the lane declared none), never a per-segment default.
-pub fn segment_lane_file_segments(
-    lane_file: &LaneFile,
-    resolve: impl FnMut(&str) -> Option<String>,
-) -> Vec<LaneSegment> {
-    let mut segments = segment_lane_blocks(&lane_file.blocks, resolve);
+pub fn segment_lane_file_segments(lane_file: &LaneFile) -> Vec<LaneSegment> {
+    let mut segments = segment_lane_blocks(&lane_file.blocks);
     for seg in &mut segments {
         seg.directives = lane_file.directives.clone();
     }
@@ -753,13 +575,10 @@ pub fn segment_lane_file_segments(
 }
 
 /// Segment one [`LaneFile`]'s blocks (via [`segment_lane_file_segments`]) and flatten the
-/// result into one [`LaneBlockPosition`] per resolvable block, each carrying its
-/// owning lane file's `roadmap`/`lane`.
-pub fn segment_lane_file(
-    lane_file: &LaneFile,
-    resolve: impl FnMut(&str) -> Option<String>,
-) -> Vec<LaneBlockPosition> {
-    segment_lane_file_segments(lane_file, resolve)
+/// result into one [`LaneBlockPosition`] per block, each carrying its owning lane
+/// file's `roadmap`/`lane`.
+pub fn segment_lane_file(lane_file: &LaneFile) -> Vec<LaneBlockPosition> {
+    segment_lane_file_segments(lane_file)
         .into_iter()
         .flat_map(|seg| {
             let LaneSegment {
@@ -778,6 +597,7 @@ pub fn segment_lane_file(
                 line: b.line,
                 segment,
                 position: b.position,
+                origin_roadmap: b.origin_roadmap,
                 directives: directives.clone(),
             })
         })
@@ -785,48 +605,36 @@ pub fn segment_lane_file(
 }
 
 // ---------------------------------------------------------------------------
-// Unresolvable IDs are a diagnostic, never a guess — MV.13.A Task 3
+// An authored repo the corpus does not know — never a silent miss
 // ---------------------------------------------------------------------------
 
-/// Emit a diagnostic for every block in `lane_file` whose owner does not resolve via
-/// `index`, naming the file, the 1-based line, and the ID.
-///
-/// Two distinct resolution failures both count here, and both get a diagnostic rather
-/// than a silent omission from every segment:
-/// - **unknown** — the ID matches zero repos in the corpus. A lane file may legitimately
-///   reference a block filed later than the lane file itself, so this is expected to
-///   happen in the ordinary course of authoring, not just on a typo.
-/// - **ambiguous** — the bare ID matches more than one repo (graph keys are `repo:id`;
-///   see [`build_owner_index`]). [`resolve_owner`] refuses to pick one, so this is
-///   surfaced too rather than resolved first-wins.
+/// Emit a diagnostic for every block in `lane_file` whose authored `repo` (see
+/// [`LaneBlockRef::repo`]) names a repo `index` has never seen own any block —
+/// i.e. a typo'd or retired repo slug in an authored lane record. Ownership itself is
+/// never resolved from `index` any more (see [`OwnerIndex`]'s doc); this is purely a
+/// sanity check on the authored value.
 ///
 /// **Warning, never error, and never aborts derivation.** A hard error here would
-/// red-gate the whole corpus for every concurrent lane over an authoring-order detail —
-/// segmentation ([`segment_lane_blocks`]) already proceeds over whatever *did* resolve,
-/// omitting the rest; this function only reports what got left out and why. Never
-/// guesses an owner — not by nearest neighbour, not by the file's other blocks, not by
-/// the containing directory.
+/// red-gate the whole corpus over a repo the local `state.json` set simply hasn't
+/// loaded yet (e.g. a partial checkout) — segmentation proceeds over every block
+/// regardless, this function only reports what looks wrong and why.
 pub fn unresolved_owner_diagnostics(lane_file: &LaneFile, index: &OwnerIndex) -> Vec<Diagnostic> {
+    let known_repos: HashSet<&str> = index
+        .values()
+        .flat_map(|repos| repos.iter().map(String::as_str))
+        .collect();
+
     let mut diags = Vec::new();
     for block in &lane_file.blocks {
-        let repos: &[String] = index.get(&block.id).map(|v| v.as_slice()).unwrap_or(&[]);
-        let reason = match repos.len() {
-            0 => {
-                Some("unknown to the corpus — no repo's state.json owns this block ID".to_string())
-            }
-            1 => None,
-            n => Some(format!(
-                "ambiguous — owned by {n} repos ({}), a bare ID cannot resolve to a single owner",
-                repos.join(", ")
-            )),
-        };
-        let Some(reason) = reason else { continue };
+        if known_repos.contains(block.repo.as_str()) {
+            continue;
+        }
         diags.push(Diagnostic::warning(
             &lane_file.path,
             block.line.to_string(),
             format!(
-                "lane block '{}' could not resolve an owner: {reason}",
-                block.id
+                "lane block '{}' names repo '{}', which the corpus does not know",
+                block.id, block.repo
             ),
         ));
     }
@@ -834,183 +642,16 @@ pub fn unresolved_owner_diagnostics(lane_file: &LaneFile, index: &OwnerIndex) ->
 }
 
 // ---------------------------------------------------------------------------
-// Double-claim validation and `# ORIGIN:` — MV.13.A Task 4
+// Derived positions — MV.13.A Task 4, simplified by MV.17.A Task 2
 // ---------------------------------------------------------------------------
 
-/// The `# ORIGIN:` directive's parsed value — the one comment this module treats as
-/// structure rather than prose. Honoured per base-template D57's two-axis rule: the
-/// block's `roadmap` (Task 2's derivation) is always the *executing* lane — the lane
-/// file the block-ID line physically lives in — and `origin_roadmap` (below) is the
-/// *owning* roadmap this annotation names. The two are never the same field, and a
-/// block is never rendered under both.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Origin {
-    /// `# ORIGIN: none` — declared explicitly: this block is not adopted from another
-    /// roadmap (e.g. a standalone chore folded into a lane for scheduling reasons).
-    None,
-    /// `# ORIGIN: <path-or-slug>` — the owning roadmap. The live corpus writes this as
-    /// an absolute path to that roadmap's `roadmap.md`; the slug is the path's parent
-    /// directory name. A bare slug (no `roadmap.md` suffix) is accepted as-is.
-    Roadmap(String),
-}
-
-impl Origin {
-    /// Parse the text after `# ORIGIN:` (already trimmed of the prefix). Only the first
-    /// whitespace-delimited token is machine data — the live corpus continues the
-    /// annotation onto further comment lines of human-facing prose (e.g. "the two
-    /// adopted blocks below — their run-record ledger rows carry..."), which this
-    /// module never reads.
-    fn parse(value: &str) -> Self {
-        let token = value.split_whitespace().next().unwrap_or(value);
-        if token.eq_ignore_ascii_case("none") {
-            Origin::None
-        } else {
-            Origin::Roadmap(roadmap_slug_from_origin_token(token))
-        }
-    }
-}
-
-/// Extract a roadmap slug from an `# ORIGIN:` token. `/path/to/planning/<slug>/roadmap.md`
-/// yields `<slug>`; anything else (already a bare slug, or a differently-shaped path) is
-/// returned trimmed of a trailing `/` and otherwise unchanged — this module does not
-/// require the corpus's one live shape to be the only one it can parse.
-fn roadmap_slug_from_origin_token(token: &str) -> String {
-    let trimmed = token.trim_end_matches('/');
-    let path = Path::new(trimmed);
-    if path.file_name().is_some_and(|f| f == "roadmap.md")
-        && let Some(slug) = path.parent().and_then(|p| p.file_name())
-    {
-        return slug.to_string_lossy().to_string();
-    }
-    trimmed.to_string()
-}
-
-/// One block ID's double-claim resolution: which lane file's claim renders, and the
-/// `origin_roadmap` it carries.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClaimResolution {
-    pub id: String,
-    /// The executing claim's roadmap — matches the [`LaneFile::roadmap`] of exactly one
-    /// of the claiming files.
-    pub roadmap: String,
-    pub lane: String,
-    pub line: usize,
-    /// The owning roadmap named by the executing claim's `# ORIGIN:` annotation.
-    /// `None` when the annotation was `# ORIGIN: none`.
-    pub origin_roadmap: Option<String>,
-}
-
-/// Resolve every block ID claimed by more than one **distinct roadmap** across
-/// `lane_files`, honouring `# ORIGIN:` per D57's two-axis rule.
+/// One block's final derived position, corpus-wide: `{roadmap, lane, segment,
+/// position}` plus `origin_roadmap` (the block's authored owning roadmap, if any).
 ///
-/// An ID claimed by only one roadmap — however many lane files or lines within that one
-/// roadmap repeat it — is not a double-claim and produces neither a resolution nor a
-/// diagnostic; this function only looks at cross-roadmap claims.
-///
-/// - **Unannotated double-claim** (no claiming instance of this ID carries `# ORIGIN:`):
-///   an `E_LANE_DOUBLE_CLAIM` error diagnostic naming every claiming file, line and
-///   roadmap, and **no** [`ClaimResolution`]. Never resolved first-wins — the roadmap's
-///   Q5 rule renders a block under exactly one executing roadmap, and guessing between
-///   two would silently misstate both lanes' remaining depth.
-/// - **Ambiguous double-claim** (more than one claiming instance carries `# ORIGIN:`):
-///   also an `E_LANE_DOUBLE_CLAIM` error — two "this is where it's adopted"
-///   declarations for one block is the same ambiguity, only authored instead of
-///   implicit, so it gets the same treatment: no resolution, never first-wins.
-/// - **Resolved double-claim** (exactly one claiming instance carries `# ORIGIN:`): one
-///   [`ClaimResolution`] naming that instance as executing, and no diagnostic.
-pub fn resolve_double_claims(lane_files: &[LaneFile]) -> (Vec<ClaimResolution>, Vec<Diagnostic>) {
-    let mut claims: HashMap<&str, Vec<(usize, &LaneBlockRef)>> = HashMap::new();
-    for (fi, lf) in lane_files.iter().enumerate() {
-        for b in &lf.blocks {
-            claims.entry(b.id.as_str()).or_default().push((fi, b));
-        }
-    }
-
-    let mut ids: Vec<&str> = claims.keys().copied().collect();
-    ids.sort_unstable(); // deterministic diagnostic/resolution order
-
-    let mut resolutions = Vec::new();
-    let mut diags = Vec::new();
-
-    for id in ids {
-        let refs = &claims[id];
-        let mut distinct_roadmaps: Vec<&str> = Vec::new();
-        for (fi, _) in refs {
-            let r = lane_files[*fi].roadmap.as_str();
-            if !distinct_roadmaps.contains(&r) {
-                distinct_roadmaps.push(r);
-            }
-        }
-        if distinct_roadmaps.len() <= 1 {
-            continue; // one roadmap owns every claim — not a double-claim.
-        }
-
-        let annotated: Vec<&(usize, &LaneBlockRef)> =
-            refs.iter().filter(|(_, b)| b.origin.is_some()).collect();
-
-        let describe = |claimants: &[&(usize, &LaneBlockRef)]| -> String {
-            claimants
-                .iter()
-                .map(|(fi, b)| {
-                    format!(
-                        "{} (roadmap '{}', line {})",
-                        lane_files[*fi].path.display(),
-                        lane_files[*fi].roadmap,
-                        b.line
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("; ")
-        };
-
-        match annotated.len() {
-            0 => {
-                let all: Vec<&(usize, &LaneBlockRef)> = refs.iter().collect();
-                diags.push(Diagnostic::error(
-                    &lane_files[refs[0].0].path,
-                    "E_LANE_DOUBLE_CLAIM",
-                    format!(
-                        "block '{id}' is claimed by {} different roadmaps with no '# ORIGIN:' \
-                         annotation resolving the ambiguity — never resolved first-wins: {}",
-                        distinct_roadmaps.len(),
-                        describe(&all)
-                    ),
-                ));
-            }
-            1 => {
-                let (fi, b) = *annotated[0];
-                let origin_roadmap = match b.origin.as_ref().expect("filtered on is_some") {
-                    Origin::None => None,
-                    Origin::Roadmap(slug) => Some(slug.clone()),
-                };
-                resolutions.push(ClaimResolution {
-                    id: id.to_string(),
-                    roadmap: lane_files[fi].roadmap.clone(),
-                    lane: lane_files[fi].lane.clone(),
-                    line: b.line,
-                    origin_roadmap,
-                });
-            }
-            _ => {
-                diags.push(Diagnostic::error(
-                    &lane_files[annotated[0].0].path,
-                    "E_LANE_DOUBLE_CLAIM",
-                    format!(
-                        "block '{id}' carries '# ORIGIN:' in more than one claiming lane file \
-                         — ambiguous which is executing, never resolved first-wins: {}",
-                        describe(&annotated)
-                    ),
-                ));
-            }
-        }
-    }
-
-    (resolutions, diags)
-}
-
-/// One block's final derived position, corpus-wide: Task 2's `{roadmap, lane, segment,
-/// position}` plus `origin_roadmap` (`None` unless this block was a resolved
-/// double-claim).
+/// **Frozen contract**: this type's field set and serialized shape must not change
+/// without updating `core/engine-rs`'s `chain.rs`, which links against this crate as a
+/// path dependency, and without checking `emit-state`'s
+/// [`LANE_SEGMENTS_ARTIFACT`] consumers.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DerivedBlockPosition {
     pub roadmap: String,
@@ -1024,73 +665,26 @@ pub struct DerivedBlockPosition {
     /// The owning lane's structured directives (`MV.ticket.lane-file-structured-directives`
     /// Task 3), widening the `{roadmap, lane, segment, position}` shape rather than
     /// replacing it. Omitted entirely (no key, never `null`) when the lane declared none —
-    /// this keeps [`LANE_SEGMENTS_ARTIFACT`] byte-identical for every lane that declares no
+    /// this keeps [`LaneSegmentsArtifact`] byte-identical for every lane that declares no
     /// directives.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directives: Option<LaneDirectives>,
 }
 
-/// Derive `{roadmap, lane, segment, position}` for every block across `lane_files`,
-/// resolving double-claims (via [`resolve_double_claims`]) before segmenting each file.
+/// Derive `{roadmap, lane, segment, position}` for every block across `lane_files`.
 ///
-/// A block ID that is an **unresolved** double-claim (unannotated or ambiguously
-/// annotated) is excluded from every claiming file's derivation entirely — Task 3's
-/// "never guess" rule extended to double-claims, since the diagnostic already explains
-/// why and silently picking one anyway would defeat it. A **resolved** double-claim
-/// renders only from its executing `(roadmap, lane)`; every other claiming file skips
-/// it, so it is never rendered — and never counted — twice.
+/// Every block in every discovered lane file renders — there is no double-claim
+/// exclusion any more (see the module doc: a required per-block `origin_roadmap` makes
+/// an unannotated double claim unrepresentable, so a block appearing in more than one
+/// lane file simply renders once per appearance, each with its own authored
+/// `origin_roadmap`). The `Vec<Diagnostic>` return is kept for API stability with
+/// [`plan_lane_segments`] and its sibling planners; it is always empty today.
 pub fn derive_lane_positions(
     lane_files: &[LaneFile],
-    mut resolve_owner: impl FnMut(&str) -> Option<String>,
 ) -> (Vec<DerivedBlockPosition>, Vec<Diagnostic>) {
-    let (resolutions, diags) = resolve_double_claims(lane_files);
-
-    // Distinct roadmaps per id across the whole corpus — matches resolve_double_claims'
-    // own computation, so a block excluded here is exactly a block that function saw as
-    // a double-claim.
-    let mut claim_roadmaps: HashMap<&str, Vec<&str>> = HashMap::new();
-    for lf in lane_files {
-        for b in &lf.blocks {
-            let v = claim_roadmaps.entry(b.id.as_str()).or_default();
-            if !v.contains(&lf.roadmap.as_str()) {
-                v.push(lf.roadmap.as_str());
-            }
-        }
-    }
-
-    let resolved_by_id: HashMap<&str, &ClaimResolution> =
-        resolutions.iter().map(|r| (r.id.as_str(), r)).collect();
-
     let mut out = Vec::new();
     for lf in lane_files {
-        let allowed: Vec<LaneBlockRef> = lf
-            .blocks
-            .iter()
-            .filter(|b| {
-                let distinct_roadmaps =
-                    claim_roadmaps.get(b.id.as_str()).map(Vec::len).unwrap_or(1);
-                if distinct_roadmaps <= 1 {
-                    return true; // not a double-claim at all
-                }
-                match resolved_by_id.get(b.id.as_str()) {
-                    Some(res) => res.roadmap == lf.roadmap && res.lane == lf.lane,
-                    None => false, // unresolved double-claim: excluded everywhere
-                }
-            })
-            .cloned()
-            .collect();
-
-        let filtered = LaneFile {
-            roadmap: lf.roadmap.clone(),
-            lane: lf.lane.clone(),
-            path: lf.path.clone(),
-            blocks: allowed,
-            directives: lf.directives.clone(),
-        };
-        for p in segment_lane_file(&filtered, &mut resolve_owner) {
-            let origin_roadmap = resolved_by_id
-                .get(p.id.as_str())
-                .and_then(|r| r.origin_roadmap.clone());
+        for p in segment_lane_file(lf) {
             out.push(DerivedBlockPosition {
                 roadmap: p.roadmap,
                 lane: p.lane,
@@ -1099,13 +693,12 @@ pub fn derive_lane_positions(
                 line: p.line,
                 segment: p.segment,
                 position: p.position,
-                origin_roadmap,
+                origin_roadmap: p.origin_roadmap,
                 directives: p.directives,
             });
         }
     }
-
-    (out, diags)
+    (out, Vec::new())
 }
 
 // ---------------------------------------------------------------------------
@@ -1121,6 +714,8 @@ pub const LANE_SEGMENTS_ARTIFACT: &str = "planning/lane-segments.json";
 
 /// The full corpus-wide derivation this module produces, serialized as-is —
 /// `mev emit-state`'s JSON artifact at [`LANE_SEGMENTS_ARTIFACT`].
+///
+/// **Frozen contract**: see [`DerivedBlockPosition`]'s doc.
 #[derive(Debug, Clone, serde::Serialize)]
 struct LaneSegmentsArtifact {
     /// Every lane file's derived block positions, corpus-wide, in the same order
@@ -1129,19 +724,15 @@ struct LaneSegmentsArtifact {
     blocks: Vec<DerivedBlockPosition>,
 }
 
-/// Plan the [`LANE_SEGMENTS_ARTIFACT`] write: discover every live lane file under
-/// `root`, resolve ownership from `loaded`'s corpus-wide `state.json` graph keys, and
-/// derive `{roadmap, lane, segment, position}` (plus double-claim resolution) for
-/// every block that resolves — Tasks 1 through 4, assembled into one [`EmitPlan`] for
-/// `emit_state` to apply alongside its other planners.
+/// Plan the [`LANE_SEGMENTS_ARTIFACT`] write: discover every live lane record under
+/// `root` and derive `{roadmap, lane, segment, position}` for every block — assembled
+/// into one [`EmitPlan`] for `emit_state` to apply alongside its other planners.
 ///
 /// Diagnostics carried on the returned plan are the union of:
 /// - [`discover_lane_files`]'s structural diagnostics (e.g. a slug claimed by both
-///   roadmap layouts at once);
-/// - [`unresolved_owner_diagnostics`] for every block in every lane file, run before
-///   double-claim exclusion so an ID that is both unresolvable *and* would have been a
-///   double-claim still gets the "unknown to the corpus" warning it deserves;
-/// - [`derive_lane_positions`]'s own `E_LANE_DOUBLE_CLAIM` errors.
+///   roadmap layouts at once, or a record that failed to deserialize);
+/// - [`unresolved_owner_diagnostics`] for every block in every lane file, naming an
+///   authored `repo` the corpus does not know.
 ///
 /// No `EmitAction` is planned when zero lane files are discovered (an empty corpus, or
 /// `root` has no `planning/` at all) — nothing to derive, nothing to write.
@@ -1166,10 +757,8 @@ pub fn plan_lane_segments(
             .extend(unresolved_owner_diagnostics(lf, &owner_index));
     }
 
-    let (blocks, double_claim_diags) = derive_lane_positions(&lane_files, |id| {
-        resolve_owner(&owner_index, id).map(str::to_string)
-    });
-    plan.diagnostics.extend(double_claim_diags);
+    let (blocks, derive_diags) = derive_lane_positions(&lane_files);
+    plan.diagnostics.extend(derive_diags);
 
     let block_count = blocks.len();
     let artifact = LaneSegmentsArtifact { blocks };
@@ -1220,7 +809,7 @@ pub fn roadmap_slug_from_plan_path(plan: &str) -> Option<String> {
     }
 }
 
-/// Derive every lane-file block's position, corpus-wide, grouped by its **executing**
+/// Derive every lane-file block's position, corpus-wide, grouped by its executing
 /// roadmap slug — the feed [`crate::brain::emit::epic_members_resolved`] (`MV.13.D`
 /// Task 3) consumes for `kind: program` epics.
 ///
@@ -1228,10 +817,7 @@ pub fn roadmap_slug_from_plan_path(plan: &str) -> Option<String> {
 /// (lane-file discovery order, then each file's segment/position order) — `segment` and
 /// `position` are indices local to one lane file, not a corpus-wide sort key, so
 /// re-sorting by them across lane files would silently interleave unrelated files'
-/// blocks. A block that is a resolved double-claim (`# ORIGIN:`) already appears only
-/// under its executing roadmap here, because [`derive_lane_positions`] excludes it from
-/// every other claiming file — the same `origin_roadmap` guarantee this function's
-/// caller relies on to never render a block under two programs.
+/// blocks.
 ///
 /// Independent derivation from [`plan_lane_segments`] (not a read of the
 /// [`LANE_SEGMENTS_ARTIFACT`] it writes) because `emit_state` plans epic boards and
@@ -1242,17 +828,14 @@ pub fn roadmap_slug_from_plan_path(plan: &str) -> Option<String> {
 /// diagnostic twice in one run would double-count it.
 pub fn derive_program_membership(
     root: &Path,
-    files: &[(StateSource, StateFile)],
+    _files: &[(StateSource, StateFile)],
 ) -> HashMap<String, Vec<DerivedBlockPosition>> {
     let (lane_files, _discover_diags) = discover_lane_files(root);
     if lane_files.is_empty() {
         return HashMap::new();
     }
 
-    let owner_index = build_owner_index(files);
-    let (blocks, _double_claim_diags) = derive_lane_positions(&lane_files, |id| {
-        resolve_owner(&owner_index, id).map(str::to_string)
-    });
+    let (blocks, _derive_diags) = derive_lane_positions(&lane_files);
 
     let mut by_roadmap: HashMap<String, Vec<DerivedBlockPosition>> = HashMap::new();
     for b in blocks {
@@ -1271,49 +854,105 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
-    #[test]
-    fn parse_lane_blocks_strips_comments_and_blanks_preserving_order() {
-        let content = "\
-# Lane SUBSTRATE — binding context for the operator
-# ROADMAP: /path/to/roadmap.md
-\n\
-MV.ticket.first
-# a comment-only line
-BT.ticket.second
-
-OK.ticket.third
-";
-        let blocks = parse_lane_blocks(content);
-        let ids: Vec<&str> = blocks.iter().map(|b| b.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec!["MV.ticket.first", "BT.ticket.second", "OK.ticket.third"]
-        );
-        // Line numbers point at the real source line, not a post-strip index.
-        assert_eq!(blocks[0].line, 4);
-        assert_eq!(blocks[1].line, 6);
-        assert_eq!(blocks[2].line, 8);
+    fn simple_lane_json(lane: &str, roadmap: &str, blocks: &[(&str, &str, &str)]) -> String {
+        // blocks: (id, origin_roadmap, repo)
+        let blocks_json: Vec<String> = blocks
+            .iter()
+            .map(|(id, origin_roadmap, repo)| {
+                format!(r#"{{"id":"{id}","origin_roadmap":"{origin_roadmap}","repo":"{repo}"}}"#)
+            })
+            .collect();
+        format!(
+            r#"{{"lane":"{lane}","roadmap":"{roadmap}","blocks":[{}]}}"#,
+            blocks_json.join(",")
+        )
     }
 
     #[test]
-    fn parse_lane_blocks_never_sorts_or_dedupes() {
-        // A repo appearing twice non-contiguously must survive as two entries in order —
-        // segmentation (Task 2) depends on this being preserved, not deduped here.
-        let content = "B.one\nA.one\nB.two\n";
-        let blocks = parse_lane_blocks(content);
-        let ids: Vec<&str> = blocks.iter().map(|b| b.id.as_str()).collect();
-        assert_eq!(ids, vec!["B.one", "A.one", "B.two"]);
+    fn discover_lane_files_reads_json_and_carries_authored_origin_and_repo_in_order() {
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-json-basic");
+        write(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &simple_lane_json(
+                "substrate",
+                "alpha",
+                &[
+                    ("MV.ticket.a", "alpha", "mev"),
+                    ("BT.ticket.b", "alpha", "base-template"),
+                ],
+            ),
+        );
+
+        let (files, diags) = discover_lane_files(&dir);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        assert_eq!(files.len(), 1, "expected one lane file, got {files:?}");
+
+        let f = &files[0];
+        assert_eq!(f.roadmap, "alpha");
+        assert_eq!(
+            f.lane, "substrate",
+            "lane_name_from_file must strip lane- and .json"
+        );
+        assert_eq!(f.blocks.len(), 2);
+        assert_eq!(f.blocks[0].id, "MV.ticket.a");
+        assert_eq!(f.blocks[0].repo, "mev");
+        assert_eq!(f.blocks[0].origin_roadmap, Some("alpha".to_string()));
+        assert_eq!(f.blocks[0].line, 1);
+        assert_eq!(f.blocks[1].id, "BT.ticket.b");
+        assert_eq!(f.blocks[1].repo, "base-template");
+        assert_eq!(f.blocks[1].line, 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_lane_files_unknown_top_level_key_is_a_loud_deserialization_error() {
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-unknown-key");
+        let fixture = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/lane_json/unknown_key_lane.json"),
+        )
+        .expect("fixture must exist");
+        write(
+            &dir,
+            "planning/roadmaps/alpha/lane-docs-sync.json",
+            &fixture,
+        );
+
+        let (files, diags) = discover_lane_files(&dir);
+        assert!(
+            files.is_empty(),
+            "a record with an unknown top-level key must never be silently accepted, got {files:?}"
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic, got {diags:?}"
+        );
+        assert_eq!(diags[0].severity, crate::Severity::Error);
+        assert_eq!(diags[0].locator, E_LANE_RECORD_MALFORMED);
+        assert!(
+            diags[0].message.contains("unexpected_top_level_key")
+                || diags[0].message.to_lowercase().contains("unknown field")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn discover_lane_files_finds_both_layouts() {
-        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-both-layouts");
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-both-layouts-json");
         write(
             &dir,
-            "planning/roadmaps/alpha/lane-substrate.txt",
-            "MV.ticket.a\nBT.ticket.b\n",
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &simple_lane_json("substrate", "alpha", &[("MV.ticket.a", "alpha", "mev")]),
         );
-        write(&dir, "planning/beta/lane-gtm.txt", "OK.ticket.c\n");
+        write(
+            &dir,
+            "planning/beta/lane-gtm.json",
+            &simple_lane_json("gtm", "beta", &[("OK.ticket.c", "beta", "okf-core")]),
+        );
 
         let (files, diags) = discover_lane_files(&dir);
         assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
@@ -1321,37 +960,40 @@ OK.ticket.third
 
         let alpha = files.iter().find(|f| f.roadmap == "alpha").unwrap();
         assert_eq!(alpha.lane, "substrate");
-        assert_eq!(alpha.blocks.len(), 2);
+        assert_eq!(alpha.blocks.len(), 1);
 
+        // 27 of 63 corpus lane files are legacy-layout — a single-layout test is not
+        // evidence, so this fixture pins the legacy `planning/<slug>/` shape too.
         let beta = files.iter().find(|f| f.roadmap == "beta").unwrap();
         assert_eq!(beta.lane, "gtm");
         assert_eq!(beta.blocks.len(), 1);
+        assert_eq!(beta.blocks[0].repo, "okf-core");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn discover_lane_files_excludes_archive_and_underscore_prefixed() {
-        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-exclusions");
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-exclusions-json");
         write(
             &dir,
-            "planning/roadmaps/alpha/archive/lane-old.txt",
-            "MV.ticket.old\n",
+            "planning/roadmaps/alpha/archive/lane-old.json",
+            &simple_lane_json("old", "alpha", &[("MV.ticket.old", "alpha", "mev")]),
         );
         write(
             &dir,
-            "planning/roadmaps/alpha/_scratch/lane-debug.txt",
-            "MV.ticket.debug\n",
+            "planning/roadmaps/alpha/_scratch/lane-debug.json",
+            &simple_lane_json("debug", "alpha", &[("MV.ticket.debug", "alpha", "mev")]),
         );
         write(
             &dir,
-            "planning/roadmaps/alpha/_lane-underscore.txt",
-            "MV.ticket.underscore\n",
+            "planning/roadmaps/alpha/_lane-underscore.json",
+            &simple_lane_json("underscore", "alpha", &[("MV.ticket.u", "alpha", "mev")]),
         );
         write(
             &dir,
-            "planning/roadmaps/alpha/lane-live.txt",
-            "MV.ticket.live\n",
+            "planning/roadmaps/alpha/lane-live.json",
+            &simple_lane_json("live", "alpha", &[("MV.ticket.live", "alpha", "mev")]),
         );
 
         let (files, diags) = discover_lane_files(&dir);
@@ -1368,16 +1010,16 @@ OK.ticket.third
 
     #[test]
     fn discover_lane_files_deferred_blocks_txt_never_matches() {
-        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-deferred");
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-deferred-json");
         write(
             &dir,
             "planning/roadmaps/alpha/deferred-blocks.txt",
-            "MV.ticket.deferred\n",
+            "not a lane record\n",
         );
         write(
             &dir,
-            "planning/roadmaps/alpha/lane-live.txt",
-            "MV.ticket.live\n",
+            "planning/roadmaps/alpha/lane-live.json",
+            &simple_lane_json("live", "alpha", &[("MV.ticket.live", "alpha", "mev")]),
         );
 
         let (files, _diags) = discover_lane_files(&dir);
@@ -1389,13 +1031,17 @@ OK.ticket.third
 
     #[test]
     fn discover_lane_files_both_layouts_same_slug_is_an_error() {
-        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-slug-collision");
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-slug-collision-json");
         write(
             &dir,
-            "planning/roadmaps/alpha/lane-substrate.txt",
-            "MV.ticket.a\n",
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &simple_lane_json("substrate", "alpha", &[("MV.ticket.a", "alpha", "mev")]),
         );
-        write(&dir, "planning/alpha/lane-gtm.txt", "OK.ticket.b\n");
+        write(
+            &dir,
+            "planning/alpha/lane-gtm.json",
+            &simple_lane_json("gtm", "alpha", &[("OK.ticket.b", "alpha", "okf-core")]),
+        );
 
         let (files, diags) = discover_lane_files(&dir);
         // Both files are still reported (never silently dropped) — the caller decides
@@ -1420,13 +1066,13 @@ OK.ticket.third
     fn discover_lane_files_legacy_dir_without_lane_file_does_not_collide() {
         // planning/<slug>/ directories that are not roadmaps at all (a spec dir, e.g.)
         // must not be mistaken for a legacy roadmap just because roadmaps/<slug>/ exists.
-        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-non-roadmap-legacy");
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-non-roadmap-legacy-json");
         write(
             &dir,
-            "planning/roadmaps/alpha/lane-substrate.txt",
-            "MV.ticket.a\n",
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &simple_lane_json("substrate", "alpha", &[("MV.ticket.a", "alpha", "mev")]),
         );
-        write(&dir, "planning/alpha/tasks.md", "not a lane file\n");
+        write(&dir, "planning/alpha/tasks.md", "not a lane record\n");
 
         let (files, diags) = discover_lane_files(&dir);
         assert_eq!(
@@ -1444,7 +1090,7 @@ OK.ticket.third
 
     #[test]
     fn discover_lane_files_empty_root_returns_nothing() {
-        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-empty");
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-empty-json");
         std::fs::create_dir_all(&dir).unwrap();
         let (files, diags) = discover_lane_files(&dir);
         assert!(files.is_empty());
@@ -1456,10 +1102,14 @@ OK.ticket.third
     fn discover_lane_files_follows_planning_symlink() {
         // Every `planning/` in the live fleet is a symlink into a `_planning/` vault —
         // a symlink-blind walk must not silently return an empty result here.
-        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-symlink-root");
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-symlink-root-json");
         let vault = dir.join("_vault_roadmaps_alpha");
         std::fs::create_dir_all(&vault).unwrap();
-        std::fs::write(vault.join("lane-substrate.txt"), "MV.ticket.a\n").unwrap();
+        std::fs::write(
+            vault.join("lane-substrate.json"),
+            simple_lane_json("substrate", "alpha", &[("MV.ticket.a", "alpha", "mev")]),
+        )
+        .unwrap();
 
         std::fs::create_dir_all(dir.join("planning/roadmaps")).unwrap();
         #[cfg(unix)]
@@ -1478,63 +1128,56 @@ OK.ticket.third
     }
 
     #[test]
-    fn parse_lane_blocks_on_real_multi_repo_fixture_matches_hand_checked_ids() {
-        // A hand-checked multi-repo fixture, in the spirit of the live
-        // close-the-loop/lane-substrate.txt file (base-template, mev, engine-rs, ...).
-        let content = "\
-# Lane SUBSTRATE
-BT.ticket.generate-tasks-json-on-ticket
-BT.ticket.compilable-task-boundaries
-MV.ticket.learn-link-mapping-masks-dead-links
-MV.ticket.close-stale-conformance-branch
-OK.ticket.conformance-field-count-floor
-CC.ticket.publish-to-crates-io
-EN.ticket.stale-generate-timeout-caveat
-BA.ticket.spawn-schedule-loop
-OR.ticket.publishable-eval-report
-";
-        let blocks = parse_lane_blocks(content);
-        let ids: Vec<&str> = blocks.iter().map(|b| b.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec![
-                "BT.ticket.generate-tasks-json-on-ticket",
-                "BT.ticket.compilable-task-boundaries",
-                "MV.ticket.learn-link-mapping-masks-dead-links",
-                "MV.ticket.close-stale-conformance-branch",
-                "OK.ticket.conformance-field-count-floor",
-                "CC.ticket.publish-to-crates-io",
-                "EN.ticket.stale-generate-timeout-caveat",
-                "BA.ticket.spawn-schedule-loop",
-                "OR.ticket.publishable-eval-report",
-            ]
+    fn discover_lane_files_malformed_record_is_an_error_never_silently_skipped() {
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-malformed-json");
+        write(
+            &dir,
+            "planning/roadmaps/alpha/lane-broken.json",
+            "{ this is not valid json",
         );
+        write(
+            &dir,
+            "planning/roadmaps/alpha/lane-live.json",
+            &simple_lane_json("live", "alpha", &[("MV.ticket.live", "alpha", "mev")]),
+        );
+
+        let (files, diags) = discover_lane_files(&dir);
+        assert_eq!(
+            files.len(),
+            1,
+            "the malformed record must never be silently skipped into a partial success, got {files:?}"
+        );
+        assert_eq!(files[0].lane, "live");
+
+        let malformed: Vec<&Diagnostic> = diags
+            .iter()
+            .filter(|d| d.locator == E_LANE_RECORD_MALFORMED)
+            .collect();
+        assert_eq!(
+            malformed.len(),
+            1,
+            "expected exactly one malformed-record diagnostic, got {diags:?}"
+        );
+        assert_eq!(malformed[0].severity, crate::Severity::Error);
+        assert!(malformed[0].file.ends_with("lane-broken.json"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // -- Task 2: ownership-based segmentation --------------------------------------
+    // -- Ownership and segmentation --------------------------------------------------
 
-    fn refs(ids: &[&str]) -> Vec<LaneBlockRef> {
-        ids.iter()
+    fn refs(entries: &[(&str, &str, &str)]) -> Vec<LaneBlockRef> {
+        // entries: (id, origin_roadmap, repo)
+        entries
+            .iter()
             .enumerate()
-            .map(|(i, id)| LaneBlockRef {
+            .map(|(i, (id, origin_roadmap, repo))| LaneBlockRef {
                 id: id.to_string(),
                 line: i + 1,
-                origin: None,
+                origin_roadmap: Some(origin_roadmap.to_string()),
+                repo: repo.to_string(),
             })
             .collect()
-    }
-
-    /// A resolver closure over a fixed `id -> repo` table, for tests that don't need
-    /// the full corpus-wide [`OwnerIndex`] machinery.
-    fn table_resolver(
-        table: &'static [(&'static str, &'static str)],
-    ) -> impl FnMut(&str) -> Option<String> {
-        move |id: &str| {
-            table
-                .iter()
-                .find(|(k, _)| *k == id)
-                .map(|(_, repo)| repo.to_string())
-        }
     }
 
     #[test]
@@ -1583,24 +1226,21 @@ OR.ticket.publishable-eval-report
         assert_eq!(resolve_owner(&index, "B.one"), Some("beta"));
         // Reused across two repos — never guessed, resolves to None.
         assert_eq!(resolve_owner(&index, "SHARED.id"), None);
-        // Unknown to the corpus entirely — also None (Task 3's diagnostic case).
+        // Unknown to the corpus entirely — also None.
         assert_eq!(resolve_owner(&index, "NOPE.id"), None);
     }
 
     #[test]
     fn segment_lane_blocks_cuts_at_every_ownership_change() {
-        let blocks = refs(&["A.1", "A.2", "B.1", "C.1", "C.2", "C.3"]);
-        let segments = segment_lane_blocks(
-            &blocks,
-            table_resolver(&[
-                ("A.1", "repoA"),
-                ("A.2", "repoA"),
-                ("B.1", "repoB"),
-                ("C.1", "repoC"),
-                ("C.2", "repoC"),
-                ("C.3", "repoC"),
-            ]),
-        );
+        let blocks = refs(&[
+            ("A.1", "alpha", "repoA"),
+            ("A.2", "alpha", "repoA"),
+            ("B.1", "alpha", "repoB"),
+            ("C.1", "alpha", "repoC"),
+            ("C.2", "alpha", "repoC"),
+            ("C.3", "alpha", "repoC"),
+        ]);
+        let segments = segment_lane_blocks(&blocks);
 
         assert_eq!(segments.len(), 3, "expected 3 segments, got {segments:?}");
         assert_eq!(segments[0].repo, "repoA");
@@ -1624,11 +1264,12 @@ OR.ticket.publishable-eval-report
     fn segment_lane_blocks_non_contiguous_repeat_is_two_segments_not_group_by() {
         // A, B, A must yield THREE segments — the case that separates this from a
         // plain group_by, which would merge both `A` runs into one.
-        let blocks = refs(&["A.1", "B.1", "A.2"]);
-        let segments = segment_lane_blocks(
-            &blocks,
-            table_resolver(&[("A.1", "repoA"), ("B.1", "repoB"), ("A.2", "repoA")]),
-        );
+        let blocks = refs(&[
+            ("A.1", "alpha", "repoA"),
+            ("B.1", "alpha", "repoB"),
+            ("A.2", "alpha", "repoA"),
+        ]);
+        let segments = segment_lane_blocks(&blocks);
 
         assert_eq!(segments.len(), 3, "expected 3 segments, got {segments:?}");
         assert_eq!(segments[0].repo, "repoA");
@@ -1644,34 +1285,19 @@ OR.ticket.publishable-eval-report
     }
 
     #[test]
-    fn segment_lane_blocks_omits_unresolvable_ids_without_aborting() {
-        let blocks = refs(&["A.1", "GHOST.id", "A.2"]);
-        let segments = segment_lane_blocks(
-            &blocks,
-            table_resolver(&[("A.1", "repoA"), ("A.2", "repoA")]),
-        );
-
-        // The unresolvable block contributes no cut and appears in no segment; the
-        // two resolvable blocks still land in one contiguous repoA segment.
-        assert_eq!(segments.len(), 1, "expected 1 segment, got {segments:?}");
-        assert_eq!(segments[0].blocks.len(), 2);
-        let ids: Vec<&str> = segments[0].blocks.iter().map(|b| b.id.as_str()).collect();
-        assert_eq!(ids, vec!["A.1", "A.2"]);
-    }
-
-    #[test]
     fn segment_lane_file_attaches_roadmap_and_lane_to_every_position() {
         let lane_file = LaneFile {
             roadmap: "close-the-loop".to_string(),
             lane: "substrate".to_string(),
-            path: PathBuf::from("planning/close-the-loop/lane-substrate.txt"),
-            blocks: refs(&["A.1", "B.1", "B.2"]),
+            path: PathBuf::from("planning/close-the-loop/lane-substrate.json"),
+            blocks: refs(&[
+                ("A.1", "close-the-loop", "repoA"),
+                ("B.1", "close-the-loop", "repoB"),
+                ("B.2", "close-the-loop", "repoB"),
+            ]),
             directives: None,
         };
-        let positions = segment_lane_file(
-            &lane_file,
-            table_resolver(&[("A.1", "repoA"), ("B.1", "repoB"), ("B.2", "repoB")]),
-        );
+        let positions = segment_lane_file(&lane_file);
 
         assert_eq!(positions.len(), 3);
         for p in &positions {
@@ -1689,7 +1315,7 @@ OR.ticket.publishable-eval-report
         assert_eq!(positions[2].position, 1);
     }
 
-    // -- Task 3: unresolvable IDs are a diagnostic, never a guess --------------------
+    // -- An authored repo the corpus does not know ------------------------------------
 
     fn owner_index_from(pairs: &[(&str, &[&str])]) -> OwnerIndex {
         let mut index: OwnerIndex = HashMap::new();
@@ -1703,12 +1329,16 @@ OR.ticket.publishable-eval-report
     }
 
     #[test]
-    fn unresolved_owner_diagnostics_fires_on_unknown_id_and_does_not_abort() {
+    fn unresolved_owner_diagnostics_fires_on_unknown_repo_and_does_not_abort() {
         let lane_file = LaneFile {
             roadmap: "close-the-loop".to_string(),
             lane: "substrate".to_string(),
-            path: PathBuf::from("planning/close-the-loop/lane-substrate.txt"),
-            blocks: refs(&["A.1", "GHOST.id", "A.2"]),
+            path: PathBuf::from("planning/close-the-loop/lane-substrate.json"),
+            blocks: refs(&[
+                ("A.1", "close-the-loop", "repoA"),
+                ("GHOST.id", "close-the-loop", "repoGhost"),
+                ("A.2", "close-the-loop", "repoA"),
+            ]),
             directives: None,
         };
         let index = owner_index_from(&[("A.1", &["repoA"]), ("A.2", &["repoA"])]);
@@ -1721,51 +1351,28 @@ OR.ticket.publishable-eval-report
         );
         assert_eq!(diags[0].severity, crate::Severity::Warning);
         assert_eq!(diags[0].file, lane_file.path);
-        assert_eq!(diags[0].locator, "2"); // GHOST.id is the second block, line 2
+        assert_eq!(diags[0].locator, "2"); // GHOST.id is the second block
         assert!(diags[0].message.contains("GHOST.id"));
-        assert!(diags[0].message.contains("unknown to the corpus"));
+        assert!(diags[0].message.contains("repoGhost"));
+        assert!(diags[0].message.contains("does not know"));
 
-        // Segmentation over the same data still proceeds, omitting the unresolvable
-        // block rather than aborting — the diagnostic and the derivation are separate
-        // concerns.
-        let positions = segment_lane_file(&lane_file, |id| {
-            index.get(id).filter(|r| r.len() == 1).map(|r| r[0].clone())
-        });
+        // Segmentation over the same data still proceeds — the block still renders
+        // under its authored (unknown) repo, it is never omitted.
+        let positions = segment_lane_file(&lane_file);
         let ids: Vec<&str> = positions.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, vec!["A.1", "A.2"]);
+        assert_eq!(ids, vec!["A.1", "GHOST.id", "A.2"]);
     }
 
     #[test]
-    fn unresolved_owner_diagnostics_fires_on_ambiguous_multi_repo_id() {
+    fn unresolved_owner_diagnostics_empty_when_every_repo_is_known() {
         let lane_file = LaneFile {
             roadmap: "close-the-loop".to_string(),
             lane: "substrate".to_string(),
-            path: PathBuf::from("planning/close-the-loop/lane-substrate.txt"),
-            blocks: refs(&["SHARED.id"]),
-            directives: None,
-        };
-        let index = owner_index_from(&[("SHARED.id", &["alpha", "beta"])]);
-
-        let diags = unresolved_owner_diagnostics(&lane_file, &index);
-        assert_eq!(
-            diags.len(),
-            1,
-            "expected exactly one diagnostic, got {diags:?}"
-        );
-        assert_eq!(diags[0].severity, crate::Severity::Warning);
-        assert!(diags[0].message.contains("SHARED.id"));
-        assert!(diags[0].message.contains("ambiguous"));
-        assert!(diags[0].message.contains("alpha"));
-        assert!(diags[0].message.contains("beta"));
-    }
-
-    #[test]
-    fn unresolved_owner_diagnostics_empty_when_everything_resolves() {
-        let lane_file = LaneFile {
-            roadmap: "close-the-loop".to_string(),
-            lane: "substrate".to_string(),
-            path: PathBuf::from("planning/close-the-loop/lane-substrate.txt"),
-            blocks: refs(&["A.1", "B.1"]),
+            path: PathBuf::from("planning/close-the-loop/lane-substrate.json"),
+            blocks: refs(&[
+                ("A.1", "close-the-loop", "repoA"),
+                ("B.1", "close-the-loop", "repoB"),
+            ]),
             directives: None,
         };
         let index = owner_index_from(&[("A.1", &["repoA"]), ("B.1", &["repoB"])]);
@@ -1774,639 +1381,82 @@ OR.ticket.publishable-eval-report
         assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
     }
 
-    // -- Task 4: double-claim validation error and `# ORIGIN:` -----------------------
+    // -- derive_lane_positions: every appearance renders, unrepresentable double-claim -
 
     #[test]
-    fn parse_lane_blocks_origin_none_attaches_to_next_block_only() {
-        let content = "\
-HQ.ticket.before
-
-# ORIGIN: none -- standalone chore, track \"Chores\" (wave 462), not a roadmap block.
-#   Adopted into this lane by the operator, sequenced here for scheduling reasons only.
-HQ.chore.adopted
-
-HQ.ticket.after
-";
-        let blocks = parse_lane_blocks(content);
-        assert_eq!(blocks.len(), 3);
-        assert_eq!(blocks[0].id, "HQ.ticket.before");
-        assert_eq!(blocks[0].origin, None);
-        assert_eq!(blocks[1].id, "HQ.chore.adopted");
-        assert_eq!(blocks[1].origin, Some(Origin::None));
-        // The annotation must not leak onto the block after the one it targets.
-        assert_eq!(blocks[2].id, "HQ.ticket.after");
-        assert_eq!(blocks[2].origin, None);
-    }
-
-    #[test]
-    fn parse_lane_blocks_origin_roadmap_path_extracts_slug() {
-        let content = "\
-# ORIGIN: /Users/brandon/Dev/agentic-portfolio/planning/operator-in-the-loop/roadmap.md
-#         (the adopted block below -- its run-record ledger row carries
-#          origin_roadmap: operator-in-the-loop per D57 section 3)
-OK.ticket.operator-edge-types
-
-MV.ticket.operator-edge-graph
-";
-        let blocks = parse_lane_blocks(content);
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(
-            blocks[0].origin,
-            Some(Origin::Roadmap("operator-in-the-loop".to_string()))
-        );
-        // Only the single next block gets it, even though the human-facing prose talks
-        // about it as if it could cover more.
-        assert_eq!(blocks[1].origin, None);
-    }
-
-    #[test]
-    fn parse_lane_blocks_repo_boundary_prose_in_comment_is_inert() {
-        // AC 4: no comment other than `# ORIGIN:` is parsed for structure. Prose that
-        // reads exactly like a directive must change nothing.
-        let content = "\
-# repo: fake-owner claims everything below this line
-# ROADMAP-BOUNDARY: treat the rest of this file as belonging to repoX
-MV.ticket.one
-BT.ticket.two
-";
-        let blocks = parse_lane_blocks(content);
-        let ids: Vec<&str> = blocks.iter().map(|b| b.id.as_str()).collect();
-        assert_eq!(ids, vec!["MV.ticket.one", "BT.ticket.two"]);
-        assert!(blocks.iter().all(|b| b.origin.is_none()));
-    }
-
-    // -- MV.ticket.lane-file-structured-directives Task 1: LaneDirectives -----------
-
-    #[test]
-    fn parse_lane_directives_all_three_declared_parses_onto_lane_file_and_every_segment() {
-        let content = "\
-# Lane SUBSTRATE
-# HELD-UNTIL: BA.19.C
-# BUDGET: HEAVY NOT-WITH engine-rs,bastion
-# EXCLUSIVE-REPOS: mev, base-template
-
-MV.ticket.one
-BT.ticket.two
-";
-        let (files, diags) = discover_and_parse_single(content);
-        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
-        let lf = &files[0];
-        let directives = lf
-            .directives
-            .as_ref()
-            .expect("lane declared all three directives");
-        assert_eq!(directives.held_until, Some("BA.19.C".to_string()));
-        let budget = directives.budget.as_ref().expect("budget declared");
-        assert!(budget.heavy);
-        assert_eq!(
-            budget.not_with,
-            vec!["engine-rs".to_string(), "bastion".to_string()]
-        );
-        assert_eq!(
-            directives.exclusive_repos,
-            Some(vec!["mev".to_string(), "base-template".to_string()])
-        );
-
-        // Carried onto every segment of the lane, not just the LaneFile itself.
-        let segments = segment_lane_file_segments(
-            lf,
-            table_resolver(&[("MV.ticket.one", "mev"), ("BT.ticket.two", "base-template")]),
-        );
-        assert_eq!(segments.len(), 2, "expected 2 segments, got {segments:?}");
-        for seg in &segments {
-            assert_eq!(seg.directives.as_ref(), Some(directives));
-        }
-    }
-
-    #[test]
-    fn parse_lane_directives_none_declared_is_absent_not_defaulted() {
-        let content = "\
-# Lane SUBSTRATE — no directives here, just ordinary prose
-MV.ticket.one
-";
-        let (files, _diags) = discover_and_parse_single(content);
-        assert_eq!(
-            files[0].directives, None,
-            "a lane declaring nothing must produce None, never a defaulted or empty Some"
-        );
-    }
-
-    #[test]
-    fn parse_lane_directives_partial_declaration_leaves_other_fields_absent() {
-        let content = "\
-# HELD-UNTIL: operator-tmux-lease-spike
-MV.ticket.one
-";
-        let (files, _diags) = discover_and_parse_single(content);
-        let directives = files[0].directives.as_ref().expect("held_until declared");
-        assert_eq!(
-            directives.held_until,
-            Some("operator-tmux-lease-spike".to_string())
-        );
-        // Declaring one directive must not default the other two — absence stays absence,
-        // never an empty-but-present Some or a defaulted heavy/light budget.
-        assert_eq!(directives.budget, None);
-        assert_eq!(directives.exclusive_repos, None);
-    }
-
-    #[test]
-    fn parse_lane_directives_prose_that_reads_like_a_directive_does_not_parse() {
-        // Free prose that merely mentions these words, or puts them mid-sentence, must not
-        // parse — only a comment-only line whose body starts with the exact fixed prefix
-        // right after `#` is a directive.
-        let content = "\
-# This lane's BUDGET: HEAVY is discussed below but not declared here.
-# See HELD-UNTIL: for context on why nothing blocks yet.
-# repo exclusivity (EXCLUSIVE-REPOS: mev) is explained in the roadmap doc, not asserted.
-MV.ticket.one
-";
-        let (files, _diags) = discover_and_parse_single(content);
-        assert_eq!(
-            files[0].directives, None,
-            "directive-looking prose must not parse as a directive"
-        );
-    }
-
-    #[test]
-    fn parse_lane_directives_budget_level_is_case_insensitive() {
-        let content = "\
-# BUDGET: light
-MV.ticket.one
-";
-        let (files, _diags) = discover_and_parse_single(content);
-        let budget = files[0]
-            .directives
-            .as_ref()
-            .expect("budget declared")
-            .budget
-            .as_ref()
-            .expect("budget field set");
-        assert!(!budget.heavy);
-        assert!(budget.not_with.is_empty());
-    }
-
-    #[test]
-    fn parse_lane_directives_budget_with_trailing_prose_still_parses_the_level() {
-        // Every `# BUDGET:` line already live across the fleet predates this grammar and
-        // explains itself in prose after the level — this must parse cleanly, not
-        // malformed, with the prose simply ignored.
-        let content = "\
-# BUDGET: HEAVY (cargo build --release). May run beside AT MOST ONE other heavy lane.
-MV.ticket.one
-";
-        let (files, diags) = discover_and_parse_single(content);
-        assert!(diags.is_empty(), "got {diags:?}");
-        let budget = files[0]
-            .directives
-            .as_ref()
-            .expect("budget declared")
-            .budget
-            .as_ref()
-            .expect("budget field set");
-        assert!(budget.heavy);
-        assert!(budget.not_with.is_empty());
-
-        let lowercase_with_period = "\
-# BUDGET: light. cargo fmt/clippy/test/build only.
-MV.ticket.one
-";
-        let (files, diags) = discover_and_parse_single(lowercase_with_period);
-        assert!(diags.is_empty(), "got {diags:?}");
-        assert!(
-            !files[0]
-                .directives
-                .as_ref()
-                .unwrap()
-                .budget
-                .as_ref()
-                .unwrap()
-                .heavy
-        );
-    }
-
-    #[test]
-    fn parse_lane_directives_budget_with_no_recognisable_level_is_still_malformed() {
-        // A `# BUDGET:` line that never states HEAVY/LIGHT at all is genuinely malformed
-        // under this grammar — tolerating trailing prose after a real level must not widen
-        // into accepting no level at all.
-        let content = "\
-# BUDGET: never run this concurrently with more than one other heavy repo.
-MV.ticket.one
-";
-        let (files, diags) = discover_and_parse_single(content);
-        assert_eq!(diags.len(), 1, "got {diags:?}");
-        assert_eq!(files[0].directives, None);
-    }
-
-    #[test]
-    fn parse_lane_directives_known_pre_existing_header_keys_do_not_diagnose() {
-        // ORIGIN (MV.13.A) plus the other header conventions already live across the fleet
-        // (ROADMAP/LOG/ISOLATION/etc.) must never be treated as an attempted directive —
-        // they predate this grammar and are unrelated conventions.
-        let content = "\
-# ROADMAP: /path/to/roadmap.md
-# LOG:     /path/to/lane-log.jsonl
-# ISOLATION: --no-worktree
-# ORIGIN: some-roadmap
-MV.ticket.one
-";
-        let (files, diags) = discover_and_parse_single(content);
-        assert!(diags.is_empty(), "got {diags:?}");
-        assert_eq!(
-            files[0].directives, None,
-            "none of these keys are real directives"
-        );
-    }
-
-    // -- MV.ticket.lane-file-structured-directives Task 2: diagnostics ---------------
-
-    #[test]
-    fn parse_lane_directives_unrecognised_key_produces_diagnostic_naming_file_and_line() {
-        let content = "\
-MV.ticket.one
-# STALE-AFTER: BA.19.C
-BT.ticket.two
-";
-        let (files, diags) = discover_and_parse_single(content);
-        assert_eq!(
-            diags.len(),
-            1,
-            "expected exactly one diagnostic, got {diags:?}"
-        );
-        assert!(
-            diags[0].message.contains("STALE-AFTER"),
-            "diagnostic must name the unrecognised key, got {:?}",
-            diags[0].message
-        );
-        assert!(
-            diags[0].message.contains("line 2"),
-            "diagnostic must name the line, got {:?}",
-            diags[0].message
-        );
-        assert!(
-            diags[0]
-                .message
-                .contains(files[0].path.display().to_string().as_str()),
-            "diagnostic must name the file, got {:?}",
-            diags[0].message
-        );
-        // The sweep must not lose the lane's block IDs over a bad directive.
-        assert_eq!(files[0].blocks.len(), 2);
-        assert_eq!(files[0].directives, None);
-    }
-
-    #[test]
-    fn parse_lane_directives_known_non_directive_risk_key_produces_no_diagnostic() {
-        // `# RISK:` is an established free-prose warning convention in lane files (e.g.
-        // planning/roadmaps/surfaces-e2e/lane-mobile.txt) — it must not collide with the
-        // directive grammar's "looks like a key" shape check.
-        let content = "\
-MV.ticket.one
-#   RISK: mounting the banner PER ROUTE re-creates the defect.
-";
-        let (files, diags) = discover_and_parse_single(content);
-        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
-        assert_eq!(files[0].directives, None);
-    }
-
-    #[test]
-    fn parse_lane_directives_malformed_budget_value_produces_diagnostic() {
-        let content = "\
-# BUDGET: MEDIUM
-MV.ticket.one
-";
-        let (files, diags) = discover_and_parse_single(content);
-        assert_eq!(diags.len(), 1, "got {diags:?}");
-        assert!(
-            diags[0].message.contains("BUDGET"),
-            "{:?}",
-            diags[0].message
-        );
-        assert!(
-            diags[0].message.contains("line 1"),
-            "{:?}",
-            diags[0].message
-        );
-        // A malformed value is left unrecorded, not defaulted to a guessed level.
-        assert_eq!(files[0].directives, None);
-        assert_eq!(files[0].blocks.len(), 1);
-    }
-
-    #[test]
-    fn parse_lane_directives_malformed_held_until_missing_token_produces_diagnostic() {
-        let content = "\
-# HELD-UNTIL:
-MV.ticket.one
-";
-        let (files, diags) = discover_and_parse_single(content);
-        assert_eq!(diags.len(), 1, "got {diags:?}");
-        assert!(
-            diags[0].message.contains("HELD-UNTIL"),
-            "{:?}",
-            diags[0].message
-        );
-        assert_eq!(files[0].directives, None);
-    }
-
-    #[test]
-    fn parse_lane_directives_malformed_exclusive_repos_empty_produces_diagnostic() {
-        let content = "\
-# EXCLUSIVE-REPOS: , ,
-MV.ticket.one
-";
-        let (files, diags) = discover_and_parse_single(content);
-        assert_eq!(diags.len(), 1, "got {diags:?}");
-        assert!(
-            diags[0].message.contains("EXCLUSIVE-REPOS"),
-            "{:?}",
-            diags[0].message
-        );
-        assert_eq!(files[0].directives, None);
-    }
-
-    #[test]
-    fn parse_lane_directives_one_bad_directive_does_not_abort_other_recognised_ones() {
-        let content = "\
-# HELD-UNTIL: BA.19.C
-# BUDGET: MEDIUM
-# EXCLUSIVE-REPOS: mev
-MV.ticket.one
-";
-        let (files, diags) = discover_and_parse_single(content);
-        assert_eq!(
-            diags.len(),
-            1,
-            "only the malformed BUDGET line should diagnose, got {diags:?}"
-        );
-        let directives = files[0]
-            .directives
-            .as_ref()
-            .expect("the two well-formed directives must still parse");
-        assert_eq!(directives.held_until, Some("BA.19.C".to_string()));
-        assert_eq!(directives.budget, None);
-        assert_eq!(directives.exclusive_repos, Some(vec!["mev".to_string()]));
-    }
-
-    #[test]
-    fn parse_lane_directives_prose_that_reads_like_a_directive_produces_no_diagnostic() {
-        // The existing "reads like a directive" prose test asserts `directives` stays
-        // `None`; this pins the companion property that it also raises no diagnostic —
-        // an unrecognised-key diagnostic on ordinary prose would be a false positive.
-        let content = "\
-# This lane's BUDGET: HEAVY is discussed below but not declared here.
-# See HELD-UNTIL: for context on why nothing blocks yet.
-MV.ticket.one
-";
-        let (_files, diags) = discover_and_parse_single(content);
-        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
-    }
-
-    #[test]
-    fn discover_lane_files_bad_directive_in_one_lane_does_not_drop_other_lanes() {
-        let dir = crate::testsupport::unique_temp_dir("mev-lane-directives-multi");
-        write(
-            &dir,
-            "planning/roadmaps/alpha/lane-broken.txt",
-            "# STALE-AFTER: x\nMV.ticket.one\n",
-        );
-        write(
-            &dir,
-            "planning/roadmaps/alpha/lane-clean.txt",
-            "BT.ticket.two\n",
-        );
-        let (files, diags) = discover_lane_files(&dir);
-        assert_eq!(diags.len(), 1, "got {diags:?}");
-        assert_eq!(files.len(), 2, "both lane files must still be discovered");
-        let all_ids: Vec<&str> = files
-            .iter()
-            .flat_map(|f| f.blocks.iter().map(|b| b.id.as_str()))
-            .collect();
-        assert!(all_ids.contains(&"MV.ticket.one"));
-        assert!(all_ids.contains(&"BT.ticket.two"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Write `content` as the sole lane file in a fresh temp corpus and discover it —
-    /// exercises the real `discover_lane_files` -> `parse_lane_directives` path rather
-    /// than calling the parser in isolation.
-    fn discover_and_parse_single(content: &str) -> (Vec<LaneFile>, Vec<Diagnostic>) {
-        let dir = crate::testsupport::unique_temp_dir("mev-lane-directives");
-        write(&dir, "planning/roadmaps/alpha/lane-substrate.txt", content);
-        let result = discover_lane_files(&dir);
-        let _ = std::fs::remove_dir_all(&dir);
-        result
-    }
-
-    fn lane_file(roadmap: &str, lane: &str, path: &str, blocks: Vec<LaneBlockRef>) -> LaneFile {
-        LaneFile {
-            roadmap: roadmap.to_string(),
-            lane: lane.to_string(),
-            path: PathBuf::from(path),
-            blocks,
+    fn derive_lane_positions_ordinary_blocks_render_with_their_authored_origin_roadmap() {
+        let files = vec![LaneFile {
+            roadmap: "close-the-loop".to_string(),
+            lane: "substrate".to_string(),
+            path: PathBuf::from("lane-substrate.json"),
+            blocks: refs(&[
+                ("MV.ticket.a", "close-the-loop", "mev"),
+                ("BT.ticket.b", "close-the-loop", "base-template"),
+            ]),
             directives: None,
-        }
-    }
-
-    #[test]
-    fn resolve_double_claims_single_roadmap_reuse_is_not_a_double_claim() {
-        // The same ID repeated across two lane files that both belong to ONE roadmap is
-        // ordinary reuse, not a double-claim — resolve_double_claims must ignore it.
-        let files = vec![
-            lane_file(
-                "close-the-loop",
-                "substrate",
-                "lane-substrate.txt",
-                refs(&["MV.ticket.shared"]),
-            ),
-            lane_file(
-                "close-the-loop",
-                "cockpit",
-                "lane-cockpit.txt",
-                refs(&["MV.ticket.shared"]),
-            ),
-        ];
-        let (resolutions, diags) = resolve_double_claims(&files);
+        }];
+        let (positions, diags) = derive_lane_positions(&files);
+        assert!(diags.is_empty());
+        assert_eq!(positions.len(), 2);
         assert!(
-            resolutions.is_empty(),
-            "expected no resolutions, got {resolutions:?}"
-        );
-        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
-    }
-
-    #[test]
-    fn resolve_double_claims_unannotated_cross_roadmap_claim_is_an_error() {
-        let files = vec![
-            lane_file(
-                "operator-surface",
-                "substrate",
-                "planning/operator-surface/lane-substrate.txt",
-                refs(&["OK.ticket.operator-edge-types"]),
-            ),
-            lane_file(
-                "operator-in-the-loop",
-                "brain",
-                "planning/operator-in-the-loop/lane-brain.txt",
-                refs(&["OK.ticket.operator-edge-types"]),
-            ),
-        ];
-        let (resolutions, diags) = resolve_double_claims(&files);
-        assert!(
-            resolutions.is_empty(),
-            "an unannotated double-claim must never resolve, got {resolutions:?}"
-        );
-        assert_eq!(
-            diags.len(),
-            1,
-            "expected exactly one diagnostic, got {diags:?}"
-        );
-        assert_eq!(diags[0].severity, crate::Severity::Error);
-        assert_eq!(diags[0].locator, "E_LANE_DOUBLE_CLAIM");
-        assert!(diags[0].message.contains("OK.ticket.operator-edge-types"));
-        assert!(diags[0].message.contains("operator-surface"));
-        assert!(diags[0].message.contains("operator-in-the-loop"));
-    }
-
-    #[test]
-    fn resolve_double_claims_origin_resolves_to_the_annotated_claim() {
-        let mut annotated = refs(&["OK.ticket.operator-edge-types"]);
-        annotated[0].origin = Some(Origin::Roadmap("operator-in-the-loop".to_string()));
-
-        let files = vec![
-            lane_file(
-                "operator-surface",
-                "substrate",
-                "planning/operator-surface/lane-substrate.txt",
-                annotated,
-            ),
-            lane_file(
-                "operator-in-the-loop",
-                "brain",
-                "planning/operator-in-the-loop/lane-brain.txt",
-                refs(&["OK.ticket.operator-edge-types"]),
-            ),
-        ];
-        let (resolutions, diags) = resolve_double_claims(&files);
-        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
-        assert_eq!(
-            resolutions.len(),
-            1,
-            "expected one resolution, got {resolutions:?}"
-        );
-        assert_eq!(resolutions[0].id, "OK.ticket.operator-edge-types");
-        // Executes under operator-surface (the annotated claim), not operator-in-the-loop.
-        assert_eq!(resolutions[0].roadmap, "operator-surface");
-        assert_eq!(resolutions[0].lane, "substrate");
-        assert_eq!(
-            resolutions[0].origin_roadmap,
-            Some("operator-in-the-loop".to_string())
+            positions
+                .iter()
+                .all(|p| p.origin_roadmap == Some("close-the-loop".to_string()))
         );
     }
 
     #[test]
-    fn resolve_double_claims_both_annotated_is_ambiguous_error() {
-        let mut a = refs(&["MV.ticket.shared"]);
-        a[0].origin = Some(Origin::Roadmap("roadmap-b".to_string()));
-        let mut b = refs(&["MV.ticket.shared"]);
-        b[0].origin = Some(Origin::Roadmap("roadmap-a".to_string()));
-
+    fn derive_lane_positions_same_block_in_two_lane_files_renders_once_per_appearance() {
+        // No cross-file double-claim exclusion any more: each lane record authors its
+        // own origin_roadmap per block, so a block claimed in two lane files is not an
+        // ambiguity — it renders under each executing lane, with its own authored
+        // origin_roadmap.
         let files = vec![
-            lane_file("roadmap-a", "lane-a", "lane-a.txt", a),
-            lane_file("roadmap-b", "lane-b", "lane-b.txt", b),
+            LaneFile {
+                roadmap: "operator-surface".to_string(),
+                lane: "substrate".to_string(),
+                path: PathBuf::from("planning/operator-surface/lane-substrate.json"),
+                blocks: refs(&[(
+                    "OK.ticket.operator-edge-types",
+                    "operator-in-the-loop",
+                    "okf-core",
+                )]),
+                directives: None,
+            },
+            LaneFile {
+                roadmap: "operator-in-the-loop".to_string(),
+                lane: "brain".to_string(),
+                path: PathBuf::from("planning/operator-in-the-loop/lane-brain.json"),
+                blocks: refs(&[(
+                    "OK.ticket.operator-edge-types",
+                    "operator-in-the-loop",
+                    "okf-core",
+                )]),
+                directives: None,
+            },
         ];
-        let (resolutions, diags) = resolve_double_claims(&files);
-        assert!(
-            resolutions.is_empty(),
-            "two competing ORIGIN annotations must never resolve, got {resolutions:?}"
-        );
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].severity, crate::Severity::Error);
-        assert_eq!(diags[0].locator, "E_LANE_DOUBLE_CLAIM");
-    }
-
-    #[test]
-    fn derive_lane_positions_resolved_double_claim_renders_once_with_origin_roadmap() {
-        let mut annotated = refs(&["OK.ticket.operator-edge-types"]);
-        annotated[0].origin = Some(Origin::Roadmap("operator-in-the-loop".to_string()));
-
-        let files = vec![
-            lane_file(
-                "operator-surface",
-                "substrate",
-                "planning/operator-surface/lane-substrate.txt",
-                annotated,
-            ),
-            lane_file(
-                "operator-in-the-loop",
-                "brain",
-                "planning/operator-in-the-loop/lane-brain.txt",
-                refs(&["OK.ticket.operator-edge-types"]),
-            ),
-        ];
-        let (positions, diags) = derive_lane_positions(&files, |_| Some("okf-core".to_string()));
+        let (positions, diags) = derive_lane_positions(&files);
         assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
         assert_eq!(
             positions.len(),
-            1,
-            "the block must render exactly once, got {positions:?}"
+            2,
+            "each appearance renders independently, got {positions:?}"
         );
-        assert_eq!(positions[0].roadmap, "operator-surface");
-        assert_eq!(positions[0].lane, "substrate");
-        assert_eq!(
-            positions[0].origin_roadmap,
-            Some("operator-in-the-loop".to_string())
-        );
-    }
-
-    #[test]
-    fn derive_lane_positions_unannotated_double_claim_renders_nowhere() {
-        let files = vec![
-            lane_file(
-                "operator-surface",
-                "substrate",
-                "planning/operator-surface/lane-substrate.txt",
-                refs(&["OK.ticket.operator-edge-types"]),
-            ),
-            lane_file(
-                "operator-in-the-loop",
-                "brain",
-                "planning/operator-in-the-loop/lane-brain.txt",
-                refs(&["OK.ticket.operator-edge-types"]),
-            ),
-        ];
-        let (positions, diags) = derive_lane_positions(&files, |_| Some("okf-core".to_string()));
-        assert_eq!(
-            diags.len(),
-            1,
-            "expected the double-claim error, got {diags:?}"
+        assert!(positions.iter().any(|p| p.roadmap == "operator-surface"));
+        assert!(
+            positions
+                .iter()
+                .any(|p| p.roadmap == "operator-in-the-loop")
         );
         assert!(
-            positions.is_empty(),
-            "an unresolved double-claim must render in neither lane, got {positions:?}"
+            positions
+                .iter()
+                .all(|p| p.origin_roadmap == Some("operator-in-the-loop".to_string()))
         );
-    }
-
-    #[test]
-    fn derive_lane_positions_ordinary_blocks_unaffected_by_double_claim_machinery() {
-        let files = vec![lane_file(
-            "close-the-loop",
-            "substrate",
-            "lane-substrate.txt",
-            refs(&["MV.ticket.a", "BT.ticket.b"]),
-        )];
-        let (positions, diags) = derive_lane_positions(&files, |id| {
-            if id.starts_with("MV") {
-                Some("mev".to_string())
-            } else {
-                Some("base-template".to_string())
-            }
-        });
-        assert!(diags.is_empty());
-        assert_eq!(positions.len(), 2);
-        assert!(positions.iter().all(|p| p.origin_roadmap.is_none()));
     }
 
     // -----------------------------------------------------------------------
-    // plan_lane_segments — MV.13.A Task 5
+    // plan_lane_segments
     // -----------------------------------------------------------------------
 
     fn state_file_fixture(repo: &str, id: &str) -> (StateSource, StateFile) {
@@ -2426,11 +1476,18 @@ MV.ticket.one
 
     #[test]
     fn plan_lane_segments_writes_artifact_with_derived_positions() {
-        let dir = crate::testsupport::unique_temp_dir("mev-plan-lane-segments-basic");
+        let dir = crate::testsupport::unique_temp_dir("mev-plan-lane-segments-basic-json");
         write(
             &dir,
-            "planning/roadmaps/alpha/lane-substrate.txt",
-            "MV.ticket.a\nBT.ticket.b\n",
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &simple_lane_json(
+                "substrate",
+                "alpha",
+                &[
+                    ("MV.ticket.a", "alpha", "mev"),
+                    ("BT.ticket.b", "alpha", "base-template"),
+                ],
+            ),
         );
         let loaded = vec![
             state_file_fixture("mev", "MV.ticket.a"),
@@ -2457,13 +1514,13 @@ MV.ticket.one
         assert_eq!(blocks[0]["repo"], "mev");
         assert_eq!(blocks[0]["segment"], 0);
         assert_eq!(blocks[0]["position"], 0);
+        assert_eq!(blocks[0]["origin_roadmap"], "alpha");
         assert_eq!(blocks[1]["repo"], "base-template");
         assert_eq!(blocks[1]["segment"], 1);
         assert_eq!(blocks[1]["position"], 0);
 
-        // MV.ticket.lane-file-structured-directives Task 3: a lane declaring no
-        // directives must serialise with NO "directives" key at all — absence, not a
-        // null — so the byte-identical guarantee for the 41 real lane files holds.
+        // A lane declaring no directives must serialise with NO "directives" key at
+        // all — absence, not a null.
         for b in blocks {
             assert!(
                 b.as_object().unwrap().get("directives").is_none(),
@@ -2476,11 +1533,11 @@ MV.ticket.one
 
     #[test]
     fn plan_lane_segments_carries_directives_into_the_emitted_artifact() {
-        let dir = crate::testsupport::unique_temp_dir("mev-plan-lane-segments-directives");
+        let dir = crate::testsupport::unique_temp_dir("mev-plan-lane-segments-directives-json");
         write(
             &dir,
-            "planning/roadmaps/alpha/lane-substrate.txt",
-            "# HELD-UNTIL: BA.19.C\n# BUDGET: HEAVY NOT-WITH other-repo\n# EXCLUSIVE-REPOS: mev,base-template\nMV.ticket.a\n",
+            "planning/roadmaps/alpha/lane-substrate.json",
+            r#"{"lane":"substrate","roadmap":"alpha","blocks":[{"id":"MV.ticket.a","origin_roadmap":"alpha","repo":"mev"}],"held_until":"BA.19.C","budget":{"heavy":true,"not_with":["other-repo"]},"exclusive_repos":["mev","base-template"]}"#,
         );
         let loaded = vec![state_file_fixture("mev", "MV.ticket.a")];
 
@@ -2513,7 +1570,7 @@ MV.ticket.one
 
     #[test]
     fn plan_lane_segments_no_lane_files_plans_nothing() {
-        let dir = crate::testsupport::unique_temp_dir("mev-plan-lane-segments-empty");
+        let dir = crate::testsupport::unique_temp_dir("mev-plan-lane-segments-empty-json");
         std::fs::create_dir_all(dir.join("planning")).unwrap();
 
         let plan = plan_lane_segments(&dir, &[]);
@@ -2524,33 +1581,39 @@ MV.ticket.one
     }
 
     #[test]
-    fn plan_lane_segments_unresolved_id_surfaces_a_diagnostic() {
-        let dir = crate::testsupport::unique_temp_dir("mev-plan-lane-segments-unresolved");
+    fn plan_lane_segments_unknown_repo_surfaces_a_diagnostic_but_still_writes() {
+        let dir = crate::testsupport::unique_temp_dir("mev-plan-lane-segments-unknown-repo-json");
         write(
             &dir,
-            "planning/roadmaps/alpha/lane-substrate.txt",
-            "MV.ticket.unknown\n",
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &simple_lane_json(
+                "substrate",
+                "alpha",
+                &[("MV.ticket.unknown", "alpha", "ghost-repo")],
+            ),
         );
 
         let plan = plan_lane_segments(&dir, &[]);
         assert!(
             plan.diagnostics
                 .iter()
-                .any(|d| d.message.contains("could not resolve an owner")),
-            "expected an unresolved-owner diagnostic, got {:?}",
+                .any(|d| d.message.contains("does not know")),
+            "expected an unknown-repo diagnostic, got {:?}",
             plan.diagnostics
         );
-        // Still writes the artifact — a diagnostic is not an abort.
+        // The block still renders — an authored repo is never omitted, only flagged.
         assert_eq!(plan.actions.len(), 1);
         let artifact: serde_json::Value =
             serde_json::from_str(&plan.actions[0].new_content).unwrap();
-        assert!(artifact["blocks"].as_array().unwrap().is_empty());
+        let blocks = artifact["blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["repo"], "ghost-repo");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------------
-    // roadmap_slug_from_plan_path / derive_program_membership — MV.13.D Task 3
+    // roadmap_slug_from_plan_path / derive_program_membership
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2577,18 +1640,21 @@ MV.ticket.one
 
     #[test]
     fn derive_program_membership_groups_by_executing_roadmap_in_derivation_order() {
-        let dir = crate::testsupport::unique_temp_dir("mev-derive-program-membership-basic");
+        let dir = crate::testsupport::unique_temp_dir("mev-derive-program-membership-basic-json");
         write(
             &dir,
-            "planning/roadmaps/alpha/lane-substrate.txt",
-            "MV.ticket.a\nBT.ticket.b\n",
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &simple_lane_json(
+                "substrate",
+                "alpha",
+                &[
+                    ("MV.ticket.a", "alpha", "mev"),
+                    ("BT.ticket.b", "alpha", "base-template"),
+                ],
+            ),
         );
-        let loaded = vec![
-            state_file_fixture("mev", "MV.ticket.a"),
-            state_file_fixture("base-template", "BT.ticket.b"),
-        ];
 
-        let by_roadmap = derive_program_membership(&dir, &loaded);
+        let by_roadmap = derive_program_membership(&dir, &[]);
         let alpha = by_roadmap
             .get("alpha")
             .expect("alpha roadmap must have derived positions");
@@ -2601,7 +1667,7 @@ MV.ticket.one
 
     #[test]
     fn derive_program_membership_is_empty_with_no_lane_files() {
-        let dir = crate::testsupport::unique_temp_dir("mev-derive-program-membership-empty");
+        let dir = crate::testsupport::unique_temp_dir("mev-derive-program-membership-empty-json");
         std::fs::create_dir_all(dir.join("planning")).unwrap();
 
         let by_roadmap = derive_program_membership(&dir, &[]);
@@ -2610,74 +1676,11 @@ MV.ticket.one
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // -----------------------------------------------------------------------
-    // Fixture coverage + real-corpus regression — MV.ticket.lane-file-structured-directives
-    // Task 4
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_lane_directives_fixture_all_five_cases_agree_with_grammar() {
-        // The five fixture cases named in the ticket's acceptance criteria, gathered in
-        // one place: all three directives; none; a malformed value; an unknown key; and a
-        // directive-looking string inside prose that must not parse. Each individual case
-        // already has its own pinning test above (Task 1/2); this test is the single place
-        // that asserts all five together, so a future edit that breaks one case's
-        // interaction with another is caught here even if the isolated tests keep passing.
-        let all_three = "\
-# HELD-UNTIL: BA.19.C
-# BUDGET: HEAVY NOT-WITH engine-rs,bastion
-# EXCLUSIVE-REPOS: mev,base-template
-MV.ticket.one
-";
-        let (files, diags) = discover_and_parse_single(all_three);
-        assert!(diags.is_empty(), "got {diags:?}");
-        let d = files[0].directives.as_ref().expect("all three declared");
-        assert_eq!(d.held_until, Some("BA.19.C".to_string()));
-        assert_eq!(
-            d.budget,
-            Some(LaneBudget {
-                heavy: true,
-                not_with: vec!["engine-rs".to_string(), "bastion".to_string()],
-            })
-        );
-        assert_eq!(
-            d.exclusive_repos,
-            Some(vec!["mev".to_string(), "base-template".to_string()])
-        );
-
-        let none = "MV.ticket.one\nBT.ticket.two\n";
-        let (files, diags) = discover_and_parse_single(none);
-        assert!(diags.is_empty(), "got {diags:?}");
-        assert_eq!(files[0].directives, None);
-
-        let malformed = "# BUDGET: SLOW\nMV.ticket.one\n";
-        let (files, diags) = discover_and_parse_single(malformed);
-        assert_eq!(diags.len(), 1, "got {diags:?}");
-        assert_eq!(files[0].directives, None);
-
-        let unknown_key = "# STALE-AFTER: BA.1\nMV.ticket.one\n";
-        let (files, diags) = discover_and_parse_single(unknown_key);
-        assert_eq!(diags.len(), 1, "got {diags:?}");
-        assert_eq!(files[0].directives, None);
-
-        let prose = "\
-# This lane runs after BUDGET: HEAVY work lands elsewhere.
-MV.ticket.one
-";
-        let (files, diags) = discover_and_parse_single(prose);
-        assert!(diags.is_empty(), "prose must not diagnose, got {diags:?}");
-        assert_eq!(
-            files[0].directives, None,
-            "a directive-looking string inside prose must not parse"
-        );
-    }
-
     #[test]
     fn lane_directives_absent_is_distinguishable_from_empty_but_present() {
         // The whole safety property this ticket exists for: a lane declaring nothing
         // must never be mistaken for a lane that declared an empty constraint. `None`
-        // vs. `Some(LaneDirectives::default())` are distinct values, and the parser must
-        // only ever produce the former for an undeclared lane — never collapse the two.
+        // vs. `Some(LaneDirectives::default())` are distinct values.
         let absent: Option<LaneDirectives> = None;
         let empty_but_present = Some(LaneDirectives::default());
         assert_ne!(
@@ -2685,10 +1688,13 @@ MV.ticket.one
             "absence and an empty-but-present constraint must not compare equal"
         );
 
-        // The real parser path: a lane declaring nothing must land on `None`, not on the
-        // empty-but-present shape, even though both would report zero active constraints
-        // to a caller that only inspects individual fields.
-        let (files, diags) = discover_and_parse_single("MV.ticket.one\n");
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-directives-absent-json");
+        write(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &simple_lane_json("substrate", "alpha", &[("MV.ticket.a", "alpha", "mev")]),
+        );
+        let (files, diags) = discover_lane_files(&dir);
         assert!(diags.is_empty());
         assert_eq!(
             files[0].directives, absent,
@@ -2699,11 +1705,6 @@ MV.ticket.one
             "a lane declaring nothing must not equal an empty-but-present constraint"
         );
 
-        // EXCLUSIVE-REPOS specifically distinguishes "not declared" (`None`) from "declared
-        // with an empty list" — the parser never produces the latter (an empty value is a
-        // malformed directive, see parse_lane_directives_malformed_exclusive_repos_empty_
-        // produces_diagnostic above), but the type itself must keep the two representable
-        // and distinct so a downstream consumer (engine-rs:EN.10.B) cannot conflate them.
         let none_repos = LaneDirectives {
             held_until: None,
             budget: None,
@@ -2718,121 +1719,7 @@ MV.ticket.one
             none_repos, empty_repos,
             "absent exclusive_repos must not equal an empty-but-present list"
         );
-    }
 
-    /// The real brain root this crate is checked out under — two levels up from
-    /// `CARGO_MANIFEST_DIR` (`core/mev` -> the HQ root, `agentic-portfolio/`). `None`
-    /// when `brain.toml` is not found there (e.g. mev built outside the full portfolio
-    /// checkout) so this regression test can skip rather than fail in that environment.
-    fn real_brain_root() -> Option<PathBuf> {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let root = manifest_dir.parent()?.parent()?.to_path_buf();
-        if root.join("brain.toml").is_file() {
-            Some(root)
-        } else {
-            None
-        }
-    }
-
-    #[test]
-    fn real_corpus_lane_sweep_resolves_the_same_block_sets_as_before_this_block() {
-        // Smoke-checks the real fleet sweep. This block only widens `LaneFile`/
-        // `LaneSegment` with an optional directives field carried alongside the existing
-        // derivation — it must not change *what* the sweep resolves.
-        //
-        // Deliberately NOT an exact-count pin. The live corpus grows: an earlier revision
-        // asserted `42 lane files / 174 blocks` and went red the moment HQ gained one
-        // roadmap block, failing for a reason unrelated to any change in this crate. What
-        // is pinned instead are the invariants a regression in this code would actually
-        // break — a non-trivial sweep, every derived block traceable to a discovered lane
-        // file, and each block id resolved exactly once (double-claims collapsed). Skips
-        // (rather than fails) when this crate is not checked out inside the full
-        // `agentic-portfolio` corpus, since the sweep is only meaningful against the real
-        // fleet.
-        let Some(root) = real_brain_root() else {
-            eprintln!(
-                "skipping real_corpus_lane_sweep_resolves_the_same_block_sets_as_before_this_block: \
-                 no brain.toml found above CARGO_MANIFEST_DIR (not running inside the full \
-                 agentic-portfolio checkout)"
-            );
-            return;
-        };
-
-        let config = match crate::brain::config::find_brain_config(&root) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                eprintln!("skipping: brain.toml failed to load: {e}");
-                return;
-            }
-        };
-        let (sources, _discovery_diags) = crate::brain::state::discover_state_files(&root, &config);
-        let mut loaded: Vec<(StateSource, StateFile)> = Vec::new();
-        for src in &sources {
-            if let Ok(file) = crate::brain::state::load_state(&src.abs_path) {
-                loaded.push((src.clone(), file));
-            }
-        }
-
-        // Discovery diagnostics (e.g. E_LANE_DIRECTIVE_UNRECOGNISED on this corpus's
-        // pre-existing all-caps header prose like `# ROADMAP:`/`# LOG:`/`# CONTEXT:`,
-        // which predates this ticket's directive grammar and is a known false-positive
-        // gap in Task 1/2's `looks_like_directive_key` heuristic — out of Task 4's
-        // scope to fix) are deliberately not asserted empty here: the AC this test pins
-        // is the resolved *block set*, which a diagnostic never shrinks. This block only
-        // widens the payload; it must not drop or add a block.
-        let (lane_files, _discover_diags) = discover_lane_files(&root);
-        assert!(
-            lane_files.len() >= 40,
-            "expected the real corpus sweep to still find a non-trivial set of lane files \
-             (>= 40), got {} ({:?}) — a collapse here means discovery broke, not that the \
-             fleet shrank",
-            lane_files.len(),
-            lane_files
-                .iter()
-                .map(|f| format!("{}/{}", f.roadmap, f.lane))
-                .collect::<Vec<_>>()
-        );
-
-        let owner_index = build_owner_index(&loaded);
-        let (blocks, _double_claim_diags) = derive_lane_positions(&lane_files, |id| {
-            resolve_owner(&owner_index, id).map(str::to_string)
-        });
-        assert!(
-            blocks.len() >= 150,
-            "expected the real lane files to still resolve a non-trivial block set \
-             (>= 150), got {}",
-            blocks.len()
-        );
-
-        // Every derived block must trace back to a lane file discovery actually found.
-        let discovered: std::collections::HashSet<(&str, &str)> = lane_files
-            .iter()
-            .map(|f| (f.roadmap.as_str(), f.lane.as_str()))
-            .collect();
-        for b in &blocks {
-            assert!(
-                discovered.contains(&(b.roadmap.as_str(), b.lane.as_str())),
-                "derived block {} claims lane {}/{}, which discovery never returned",
-                b.id,
-                b.roadmap,
-                b.lane
-            );
-        }
-
-        // Double-claims are resolved, so each block id renders exactly once across the
-        // whole sweep.
-        let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        for b in &blocks {
-            *seen.entry(b.id.as_str()).or_default() += 1;
-        }
-        let dupes: Vec<&str> = seen
-            .iter()
-            .filter(|(_, n)| **n > 1)
-            .map(|(id, _)| *id)
-            .collect();
-        assert!(
-            dupes.is_empty(),
-            "each block id must resolve exactly once across the corpus; duplicated: {dupes:?}"
-        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

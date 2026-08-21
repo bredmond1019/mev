@@ -44,7 +44,7 @@ use crate::brain::emit::{EmitAction, EmitPlan};
 use crate::brain::frontier::{Frontier, FrontierEntry, compute_frontier, ensure_untruncated};
 use crate::brain::lane_segments::{
     DerivedBlockPosition, build_owner_index, derive_lane_positions, discover_lane_files,
-    resolve_owner, unresolved_owner_diagnostics,
+    unresolved_owner_diagnostics,
 };
 use crate::brain::lock::pid_is_alive;
 use crate::brain::state::{
@@ -1019,10 +1019,8 @@ pub fn plan_availability(root: &Path, loaded: &[(StateSource, StateFile)]) -> Em
             .extend(unresolved_owner_diagnostics(lf, &owner_index));
     }
 
-    let (lane_positions, double_claim_diags) = derive_lane_positions(&lane_files, |id| {
-        resolve_owner(&owner_index, id).map(str::to_string)
-    });
-    plan.diagnostics.extend(double_claim_diags);
+    let (lane_positions, derive_diags) = derive_lane_positions(&lane_files);
+    plan.diagnostics.extend(derive_diags);
 
     // `config` feeds both the block-graph export's TIER stage (a no-op here,
     // `TierScope::All`, no `--repo`/`--epic` filter) and the `repos[]` list this
@@ -2021,8 +2019,8 @@ mod tests {
         let dir = crate::testsupport::unique_temp_dir("mev-plan-availability-basic");
         write_file(
             &dir,
-            "planning/roadmaps/alpha/lane-substrate.txt",
-            "MV.ticket.a\n",
+            "planning/roadmaps/alpha/lane-substrate.json",
+            r#"{"lane":"substrate","roadmap":"alpha","blocks":[{"id":"MV.ticket.a","origin_roadmap":"alpha","repo":"mev"}]}"#,
         );
         let loaded = vec![availability_state_file_fixture("mev", "MV.ticket.a")];
 

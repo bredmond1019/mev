@@ -401,8 +401,7 @@ pub fn plan_frontier(root: &Path, loaded: &[(StateSource, StateFile)]) -> EmitPl
     use crate::brain::block_graph::{BlockGraphScope, build_block_graph_export};
     use crate::brain::config::load_brain_config;
     use crate::brain::lane_segments::{
-        build_owner_index, derive_lane_positions, discover_lane_files, resolve_owner,
-        unresolved_owner_diagnostics,
+        build_owner_index, derive_lane_positions, discover_lane_files, unresolved_owner_diagnostics,
     };
     use crate::brain::state::{TierScope, build_state_graph};
 
@@ -421,10 +420,8 @@ pub fn plan_frontier(root: &Path, loaded: &[(StateSource, StateFile)]) -> EmitPl
             .extend(unresolved_owner_diagnostics(lf, &owner_index));
     }
 
-    let (lane_positions, double_claim_diags) = derive_lane_positions(&lane_files, |id| {
-        resolve_owner(&owner_index, id).map(str::to_string)
-    });
-    plan.diagnostics.extend(double_claim_diags);
+    let (lane_positions, derive_diags) = derive_lane_positions(&lane_files);
+    plan.diagnostics.extend(derive_diags);
 
     // `config` only feeds the block-graph export's TIER stage, which is a no-op here
     // (`TierScope::All`, no `--repo`/`--epic` filter) — a missing/unreadable
@@ -829,8 +826,8 @@ mod tests {
         let dir = crate::testsupport::unique_temp_dir("mev-plan-frontier-basic");
         write(
             &dir,
-            "planning/roadmaps/alpha/lane-substrate.txt",
-            "MV.ticket.a\n",
+            "planning/roadmaps/alpha/lane-substrate.json",
+            r#"{"lane":"substrate","roadmap":"alpha","blocks":[{"id":"MV.ticket.a","origin_roadmap":"alpha","repo":"mev"}]}"#,
         );
         let loaded = vec![plan_state_file_fixture("mev", "MV.ticket.a")];
 

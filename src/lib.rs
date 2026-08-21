@@ -2135,9 +2135,7 @@ pub fn frontier_brain(root: &std::path::Path) -> anyhow::Result<brain::frontier:
     use brain::block_graph::{BlockGraphScope, build_block_graph_export};
     use brain::config::find_brain_config;
     use brain::frontier::{compute_frontier, ensure_untruncated};
-    use brain::lane_segments::{
-        build_owner_index, derive_lane_positions, discover_lane_files, resolve_owner,
-    };
+    use brain::lane_segments::{derive_lane_positions, discover_lane_files};
     use brain::state::{TierScope, build_state_graph, discover_state_files, load_state};
 
     let config = find_brain_config(root)
@@ -2152,10 +2150,7 @@ pub fn frontier_brain(root: &std::path::Path) -> anyhow::Result<brain::frontier:
     }
 
     let (lane_files, _discover_diags) = discover_lane_files(root);
-    let owner_index = build_owner_index(&loaded);
-    let (lane_positions, _double_claim_diags) = derive_lane_positions(&lane_files, |id| {
-        resolve_owner(&owner_index, id).map(str::to_string)
-    });
+    let (lane_positions, _derive_diags) = derive_lane_positions(&lane_files);
 
     let graph = build_state_graph(&loaded);
     let scope = BlockGraphScope {
@@ -2204,9 +2199,7 @@ pub fn lanes_brain(
     use brain::block_graph::{BlockGraphScope, build_block_graph_export};
     use brain::config::find_brain_config;
     use brain::frontier::{compute_frontier, ensure_untruncated};
-    use brain::lane_segments::{
-        build_owner_index, derive_lane_positions, discover_lane_files, resolve_owner,
-    };
+    use brain::lane_segments::{derive_lane_positions, discover_lane_files};
     use brain::state::{TierScope, build_state_graph, discover_state_files, load_state};
 
     let config = find_brain_config(root)
@@ -2221,10 +2214,7 @@ pub fn lanes_brain(
     }
 
     let (lane_files, _discover_diags) = discover_lane_files(root);
-    let owner_index = build_owner_index(&loaded);
-    let (lane_positions, _double_claim_diags) = derive_lane_positions(&lane_files, |id| {
-        resolve_owner(&owner_index, id).map(str::to_string)
-    });
+    let (lane_positions, _derive_diags) = derive_lane_positions(&lane_files);
 
     let graph = build_state_graph(&loaded);
     let scope = BlockGraphScope {

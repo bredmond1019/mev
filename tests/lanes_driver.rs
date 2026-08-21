@@ -115,15 +115,18 @@ fn write_corpus(root: &Path) {
     );
 
     // Ownership changes between AL.1.B and BE.1.A, so this is two segments, not one.
-    write_file(
+    write_json(
         root,
-        "planning/roadmaps/fixture/lane-only.txt",
-        "# Lane ONLY — fixture\n\
-         # ROADMAP: planning/roadmaps/fixture/roadmap.md\n\
-         \n\
-         AL.1.A\n\
-         AL.1.B\n\
-         BE.1.A\n",
+        "planning/roadmaps/fixture/lane-only.json",
+        &serde_json::json!({
+            "lane": "only",
+            "roadmap": "fixture",
+            "blocks": [
+                { "id": "AL.1.A", "origin_roadmap": "fixture", "repo": "alpha" },
+                { "id": "AL.1.B", "origin_roadmap": "fixture", "repo": "alpha" },
+                { "id": "BE.1.A", "origin_roadmap": "fixture", "repo": "beta" }
+            ]
+        }),
     );
 }
 

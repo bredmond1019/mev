@@ -8650,10 +8650,29 @@ mod epic_emit {
         e
     }
 
-    fn write_lane_file(root: &std::path::Path, roadmap: &str, lane: &str, content: &str) {
+    /// Write a `lane-<lane>.json` record under `planning/roadmaps/<roadmap>/`.
+    /// `blocks` is `(id, repo)` pairs; `origin_roadmap` is authored as `roadmap` for
+    /// every block (the ordinary, non-adopted case every call site here needs).
+    fn write_lane_json_blocks(
+        root: &std::path::Path,
+        roadmap: &str,
+        lane: &str,
+        blocks: &[(&str, &str)],
+    ) {
         let dir = root.join("planning/roadmaps").join(roadmap);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(format!("lane-{lane}.txt")), content).unwrap();
+        let blocks_json: Vec<serde_json::Value> = blocks
+            .iter()
+            .map(|(id, repo)| {
+                serde_json::json!({ "id": id, "origin_roadmap": roadmap, "repo": repo })
+            })
+            .collect();
+        let record = serde_json::json!({ "lane": lane, "roadmap": roadmap, "blocks": blocks_json });
+        std::fs::write(
+            dir.join(format!("lane-{lane}.json")),
+            serde_json::to_string_pretty(&record).unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -8707,7 +8726,12 @@ mod epic_emit {
         ));
         let graph = build_state_graph(&files);
 
-        write_lane_file(tmp.path(), "conflict-prog", "main", "BW.1\nAM.1\n");
+        write_lane_json_blocks(
+            tmp.path(),
+            "conflict-prog",
+            "main",
+            &[("BW.1", "bastion-web"), ("AM.1", "amistad")],
+        );
 
         let epic = files
             .iter()
@@ -8773,11 +8797,15 @@ mod epic_emit {
     }
 
     #[test]
-    fn epic_members_resolved_origin_roadmap_adoption_renders_once_under_executing_roadmap() {
-        // BA.9 is claimed by both prog-a's and prog-b's lane files. Only prog-b's
-        // claim carries `# ORIGIN:`, so per D57's two-axis rule it is the
-        // executing roadmap: BA.9 must render under prog-b only, never prog-a,
-        // and never both.
+    fn epic_members_resolved_block_claimed_by_two_lane_files_renders_under_both_executing_roadmaps()
+    {
+        // BA.9 is claimed by both prog-a's and prog-b's lane records. Unlike the
+        // retired `# ORIGIN:`-annotated double-claim resolution (`E_LANE_DOUBLE_CLAIM`),
+        // a required per-block `origin_roadmap` makes this representable without
+        // ambiguity — MV.17.A Task 2 made the double-claim concept unrepresentable by
+        // construction, not merely resolved. Each record's claim is independently
+        // authored, so the block renders under both executing roadmaps rather than
+        // being suppressed in one.
         let tmp = tempfile::tempdir().unwrap();
         let mut files = vec![leaf(
             tmp.path(),
@@ -8794,14 +8822,8 @@ mod epic_emit {
         ));
         let graph = build_state_graph(&files);
 
-        write_lane_file(tmp.path(), "prog-a", "main", "BA.9\n");
-        let origin_path = tmp.path().join("planning/roadmaps/prog-a/roadmap.md");
-        write_lane_file(
-            tmp.path(),
-            "prog-b",
-            "main",
-            &format!("# ORIGIN: {}\nBA.9\n", origin_path.display()),
-        );
+        write_lane_json_blocks(tmp.path(), "prog-a", "main", &[("BA.9", "bastion")]);
+        write_lane_json_blocks(tmp.path(), "prog-b", "main", &[("BA.9", "bastion")]);
 
         let hq_epics = &files
             .iter()
@@ -8817,14 +8839,15 @@ mod epic_emit {
         let a_ids: Vec<&str> = a_members.iter().map(|(_, blk)| blk.id.as_str()).collect();
         let b_ids: Vec<&str> = b_members.iter().map(|(_, blk)| blk.id.as_str()).collect();
 
-        assert!(
-            a_ids.is_empty(),
-            "unannotated claim loses to the annotated one; got {a_ids:?}"
+        assert_eq!(
+            a_ids,
+            vec!["BA.9"],
+            "prog-a's own lane claim renders; got {a_ids:?}"
         );
         assert_eq!(
             b_ids,
             vec!["BA.9"],
-            "adopted block renders under its executing roadmap only; got {b_ids:?}"
+            "prog-b's own lane claim renders too — no cross-file exclusion any more; got {b_ids:?}"
         );
     }
 }
