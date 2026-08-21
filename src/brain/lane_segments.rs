@@ -1722,4 +1722,130 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // -----------------------------------------------------------------------
+    // Frozen-contract golden tests — MV.17.A Task 3
+    //
+    // `core/engine-rs`'s `crates/engine-core/src/workflows/orchestration/chain.rs`
+    // deserializes `planning/lane-segments.json` with `#[serde(deny_unknown_fields)]`
+    // mirrors of `LaneDirectives`, `LaneBudget` and `DerivedBlockPosition`. A
+    // round-trip test (serialize then deserialize back into the same Rust type)
+    // would pass happily even after a field is added on both sides of that mirror —
+    // it can only ever catch a mismatch this crate already knows about. Asserting
+    // against a LITERAL expected JSON string is what actually fails the moment this
+    // crate's serialized shape drifts from what engine-rs expects, whether or not
+    // engine-rs's mirror was updated to match. Each pair below pins both the
+    // fully-populated shape and the fully-absent shape, because `skip_serializing_if`
+    // behaviour (a key omitted entirely, never emitted as `null`) is as much a part
+    // of the frozen contract as the field names are.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn golden_lane_directives_all_fields_present() {
+        let directives = LaneDirectives {
+            held_until: Some("2026-09-01".to_string()),
+            budget: Some(LaneBudget {
+                heavy: true,
+                not_with: vec!["other-repo".to_string()],
+            }),
+            exclusive_repos: Some(vec!["mev".to_string(), "base-template".to_string()]),
+        };
+        let got = serde_json::to_string(&directives).unwrap();
+        let expected = r#"{"held_until":"2026-09-01","budget":{"heavy":true,"not_with":["other-repo"]},"exclusive_repos":["mev","base-template"]}"#;
+        assert_eq!(
+            got, expected,
+            "LaneDirectives serialized shape drifted from the frozen contract engine-rs's chain.rs mirrors"
+        );
+    }
+
+    #[test]
+    fn golden_lane_directives_all_fields_absent() {
+        let directives = LaneDirectives {
+            held_until: None,
+            budget: None,
+            exclusive_repos: None,
+        };
+        let got = serde_json::to_string(&directives).unwrap();
+        assert_eq!(
+            got, "{}",
+            "an all-absent LaneDirectives must serialize to an empty object — no key present as null"
+        );
+    }
+
+    #[test]
+    fn golden_lane_budget_all_fields_present() {
+        let budget = LaneBudget {
+            heavy: false,
+            not_with: vec!["repo-a".to_string(), "repo-b".to_string()],
+        };
+        let got = serde_json::to_string(&budget).unwrap();
+        let expected = r#"{"heavy":false,"not_with":["repo-a","repo-b"]}"#;
+        assert_eq!(
+            got, expected,
+            "LaneBudget serialized shape drifted from the frozen contract engine-rs's chain.rs mirrors"
+        );
+    }
+
+    #[test]
+    fn golden_lane_budget_not_with_absent() {
+        let budget = LaneBudget {
+            heavy: true,
+            not_with: Vec::new(),
+        };
+        let got = serde_json::to_string(&budget).unwrap();
+        assert_eq!(
+            got, r#"{"heavy":true}"#,
+            "an empty not_with must be omitted entirely, not emitted as an empty array"
+        );
+    }
+
+    #[test]
+    fn golden_derived_block_position_all_fields_present() {
+        let pos = DerivedBlockPosition {
+            roadmap: "alpha".to_string(),
+            lane: "substrate".to_string(),
+            repo: "mev".to_string(),
+            id: "MV.ticket.a".to_string(),
+            line: 12,
+            segment: 0,
+            position: 1,
+            origin_roadmap: Some("alpha".to_string()),
+            directives: Some(LaneDirectives {
+                held_until: Some("2026-09-01".to_string()),
+                budget: Some(LaneBudget {
+                    heavy: true,
+                    not_with: vec!["other-repo".to_string()],
+                }),
+                exclusive_repos: Some(vec!["mev".to_string()]),
+            }),
+        };
+        let got = serde_json::to_string(&pos).unwrap();
+        let expected = r#"{"roadmap":"alpha","lane":"substrate","repo":"mev","id":"MV.ticket.a","line":12,"segment":0,"position":1,"origin_roadmap":"alpha","directives":{"held_until":"2026-09-01","budget":{"heavy":true,"not_with":["other-repo"]},"exclusive_repos":["mev"]}}"#;
+        assert_eq!(
+            got, expected,
+            "DerivedBlockPosition serialized shape drifted from the frozen contract engine-rs's chain.rs mirrors"
+        );
+    }
+
+    #[test]
+    fn golden_derived_block_position_all_fields_absent() {
+        let pos = DerivedBlockPosition {
+            roadmap: "alpha".to_string(),
+            lane: "substrate".to_string(),
+            repo: "mev".to_string(),
+            id: "MV.ticket.a".to_string(),
+            line: 12,
+            segment: 0,
+            position: 1,
+            origin_roadmap: None,
+            directives: None,
+        };
+        let got = serde_json::to_string(&pos).unwrap();
+        let expected = r#"{"roadmap":"alpha","lane":"substrate","repo":"mev","id":"MV.ticket.a","line":12,"segment":0,"position":1,"origin_roadmap":null}"#;
+        assert_eq!(
+            got, expected,
+            "origin_roadmap has no skip_serializing_if — it must serialize as null when absent; \
+             directives DOES have skip_serializing_if — it must be omitted entirely, not emitted as null"
+        );
+    }
 }
