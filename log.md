@@ -8,7 +8,7 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-21T07:20:00-03:00"
+timestamp: "2026-08-21T16:05:00-03:00"
 ---
 
 # Log — mev
@@ -86,6 +86,12 @@ d5c05c4 feat: warn on a roadmap dir with no lane record (MV.17.A task 4)
 
 
 ## [2026-08-21]
+
+### mev lane paused after MV.17.A; cross-repo breakage prevention filed
+- **What:** Closed and merged `MV.17.A` (mev `main` `897a163`). Found and fixed two mev defects on the branch — a wall-clock gate that measured `cargo run`'s freshness scan rather than the binary, and a P0 in which an inherited `GIT_DIR` let a test fixture run `git init`/`commit`/`worktree add` against the real `core/mev` repo. Adapted to okf-core's new `StateEdgeKind::CarryoverBlocks` (`27fadeb`) after it broke the build. Filed `OK.5.A`/`OK.5.B`/`OK.5.C`/`MV.18.A` to stop the pattern, and stopped the lane-file conversion on measuring that `lane.schema.json` has nowhere to put 4,382 lines of per-lane briefing.
+- **Why:** `MV.17.A` is the head of the mev lane and gates `BT.5.B`/`HQ.8.A`. The two defects surfaced because the block's PR was blocked by gates unrelated to the branch; both were real. The okf-core break was the third of its kind, so the mechanism got filed rather than a fourth reactive chore. The conversion stopped because a schema-valid run would have deleted every briefing while `check_lane_records.py` passed.
+- **Refs:** `planning/orchestration-run/autonomous-foundation/notes.md`, `planning/handoff.md`, `base-template:BT.ticket.lane-schema-has-no-home-for-the-briefing`
+
 
 ### MV.17.A — lane.json parser lands; two mev defects found and fixed in passing
 - **What:** Closed and merged `MV.17.A` (mev `main` at `94b5720`, ff, 11 commits). `lane_segments.rs` now reads the D71 `lane-<name>.json` record with `deny_unknown_fields` across both discovery layouts; the `.txt` directive grammar, the `Origin` enum, `parse_lane_blocks` and the three `E_LANE_*` diagnostics are deleted, and `W_LANE_DIR_NO_RECORD` makes a roadmap dir with no lane record impossible to miss. Literal-JSON goldens pin the frozen `LaneDirectives`/`LaneBudget`/`DerivedBlockPosition` contract that `engine-rs`'s `chain.rs` mirrors with `deny_unknown_fields`. Two defects surfaced and were fixed on the branch: the wall-clock gate measured `cargo run`'s freshness scan rather than the binary (0.00s direct vs 2.73s via cargo — now `CARGO_BIN_EXE_mev`), and, **P0**, inherited `GIT_DIR` overrode both `-C` and `current_dir`, letting a `brain_emit` fixture run `git init`/`commit`/`worktree add` against the real `core/mev` repo and move `main` onto a junk commit (recovered to `2701bda`, nothing lost; fixed via `shared::git_command()` across five `src/` sites plus `testsupport`). Also reversed `MV.ticket.carryover-dispose` to archive-not-delete per operator decision, which adds an `okf-core:OK.4.A` dependency and holds it.
