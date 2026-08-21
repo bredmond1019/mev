@@ -13,6 +13,42 @@ timestamp: "2026-08-18T14:20:00-03:00"
 
 # Log — mev
 
+## [run: 2026-08-21]
+
+MV.17.A ("Parse lane.json; delete the lane-file directive grammar") resumed at task 7 and
+finished PASS across all 7 tasks via `/sdlc-flow` on a worktree branch. Tasks 1-6 (prior run)
+replaced mev's lane-*.txt directive grammar with a deny_unknown_fields `lane-<name>.json` reader
+across both current (`planning/roadmaps/<slug>/`) and legacy (`planning/<slug>/`) layouts:
+deleted `parse_lane_directives`, the `Origin` enum, `resolve_double_claims`, and the
+`E_LANE_DIRECTIVE_*`/`E_LANE_DOUBLE_CLAIM` diagnostics (now unrepresentable, not merely fixed);
+added the new serde record type with per-block authored `repo`/`origin_roadmap`; updated all
+in-crate consumers (frontier.rs, availability.rs, state.rs) and fixtures; added golden-string
+tests pinning the frozen `LaneDirectives`/`LaneBudget`/`DerivedBlockPosition` serialized shape
+(engine-rs compat); added a `W_LANE_DIR_NO_RECORD` warning for a roadmap directory with no lane
+record; rewrote `docs/architecture.md`'s lane-subsystem section; and recorded D64 fixture-evidence
+for the spec's three un-gateable acceptance criteria. Task 7 had previously bailed on
+`validate_state_completes_fast_on_a_representative_file_release_build`, which measured
+`cargo run --release`'s per-invocation freshness-scan overhead rather than the binary itself and
+blew its 2s budget in every worktree; fixed by switching to `CARGO_BIN_EXE_mev` (commit
+`0e6cb7c`), same pattern every other test in the file already uses. Full release suite then ran
+1613/1613 clean (fmt, clippy, `cargo test`, release build). Docs patched (`docs/cli.md`). Binary
+deliberately left un-installed per the spec's own operational constraint — HQ.8.A owns the
+atomic corpus-convert + install step. Unblocks HQ.8.A.
+
+Next: HQ.8.A — convert the corpus's lane-*.txt files to lane-<name>.json and install the mev
+binary atomically with that conversion.
+
+```
+77410e7 docs: update docs for MV.17.A
+0e6cb7c fix(test): measure the mev binary, not cargo's freshness scan
+23b5f0b chore: wrap up MV.17.A
+2729ab6 docs: rewrite lane-subsystem section of architecture.md for lane.json
+d5c05c4 feat: warn on a roadmap dir with no lane record (MV.17.A task 4)
+8087b08 test: golden-string tests pin the frozen LaneDirectives/LaneBudget/DerivedBlockPosition contract
+1e3f43b feat: implement MV.17.A-task2
+59f1fdb test: add lane.json fixtures for MV.17.A task 1
+```
+
 ## [run: 2026-08-20]
 
 MV.17.A ("Parse lane.json; delete the lane-file directive grammar") ran tasks 1-6 to completion
