@@ -16,8 +16,9 @@
 //! live-corpus sweep this test replaces, without depending on file conversion work
 //! that hasn't landed yet.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use mev::brain::config::find_brain_root;
 use mev::brain::lane_segments::{discover_lane_files, segment_lane_blocks};
 
 #[test]
@@ -87,6 +88,92 @@ fn close_the_loop_lane_substrate_segments_into_seven_contiguous_repo_runs() {
             "segment index must equal its position in the lane"
         );
     }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// MV.17.A Task 4: the honest post-flip state of the live-corpus half this test file
+/// used to carry (see the module doc above — that half was replaced by the fixture
+/// test because, pre-`HQ.8.A`, every real roadmap directory is still `.txt` and
+/// asserting zero-files-zero-diagnostics against that would be worthless as a
+/// regression gate). What *is* worth asserting against the live corpus right now is
+/// the silent-miss diagnostic Task 4 adds: discovery must find zero lane records
+/// (still true — nothing has converted yet) but must not do so *silently* — it must
+/// emit the `W_LANE_DIR_NO_RECORD` warning for the real roadmap directories, and it
+/// must never emit an ERROR doing so. This re-arms automatically: as `HQ.8.A`
+/// converts files one by one, the warning count for that directory drops to zero and
+/// a lane record appears instead, with no test edit required here.
+#[test]
+fn live_corpus_discovery_warns_on_every_lane_less_roadmap_dir_and_errors_on_none() {
+    // mev's own integration test binaries run with cwd == the mev crate root
+    // (`core/mev`, or a worktree under it); the HQ brain root (where `brain.toml`
+    // lives) is found by walking up — see `discover_lane_files_fleet_...` in the
+    // module tests for the same pattern applied to `find_brain_config`. Walking up
+    // rather than hard-coding a relative depth keeps this passing from a worktree
+    // (one extra path segment deep) as well as a plain checkout, and lets it skip
+    // cleanly on a standalone `mev` clone with no sibling HQ checkout at all.
+    let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let live_root = match find_brain_root(&start) {
+        Ok(root) => root,
+        Err(_) => {
+            eprintln!(
+                "skipping live_corpus_discovery_warns_on_every_lane_less_roadmap_dir_and_errors_on_none: \
+                 no brain.toml found walking up from {} (standalone mev checkout or CI runner \
+                 without the sibling HQ checkout)",
+                start.display()
+            );
+            return;
+        }
+    };
+
+    let (lane_files, diags) = discover_lane_files(&live_root);
+
+    assert!(
+        lane_files.is_empty(),
+        "lane_segments_fleet: expected zero live lane records pre-HQ.8.A, got {} \
+         — if this now fails, HQ.8.A has started converting the fleet's legacy .txt \
+         lane substrates and this assertion should be relaxed accordingly: {lane_files:?}",
+        lane_files.len()
+    );
+
+    let errors: Vec<&mev::Diagnostic> = diags
+        .iter()
+        .filter(|d| d.severity == mev::Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "lane_segments_fleet: expected no ERROR diagnostics discovering the live corpus, \
+         got {errors:?}"
+    );
+
+    let no_record_warnings: Vec<&mev::Diagnostic> = diags
+        .iter()
+        .filter(|d| d.severity == mev::Severity::Warning && d.locator == "W_LANE_DIR_NO_RECORD")
+        .collect();
+    assert!(
+        !no_record_warnings.is_empty(),
+        "lane_segments_fleet: expected at least one W_LANE_DIR_NO_RECORD warning against \
+         the live corpus (every real roadmap directory is lane-less pre-HQ.8.A) — the \
+         silent-miss diagnostic did not fire, got diagnostics: {diags:?}"
+    );
+}
+
+/// Sanity check for the skip path above: a directory with no `brain.toml` anywhere in
+/// its ancestry must not panic and must be reported as skippable, not treated as a
+/// pass. This does not re-run the live-corpus assertions (that would defeat the
+/// point) — it only pins that `find_brain_root` genuinely fails closed outside any
+/// HQ checkout, which is what the skip branch above depends on.
+#[test]
+fn find_brain_root_fails_closed_outside_any_hq_checkout() {
+    let dir = mev::testsupport::unique_temp_dir("mev-lane-segments-fleet-no-brain-toml");
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+
+    let result = find_brain_root(Path::new(&dir));
+    assert!(
+        result.is_err(),
+        "find_brain_root must fail when no brain.toml exists anywhere up the tree \
+         from a throwaway temp dir, got {result:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

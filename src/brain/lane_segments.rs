@@ -154,6 +154,16 @@ pub struct LaneBudget {
 /// nowhere in the derived output, so a diagnostic is the only way its author finds out.
 const E_LANE_RECORD_MALFORMED: &str = "E_LANE_RECORD_MALFORMED";
 
+/// Warning code on a diagnostic produced when a roadmap directory (identified by a
+/// `roadmap.md` at its top level) has no `lane-<name>.json` record at all. This is the
+/// silent-miss case this whole initiative exists to catch: a directory in this shape
+/// contributes zero blocks to segmentation, and without this diagnostic that is
+/// indistinguishable from "this roadmap has no lanes worth reporting" — until
+/// `HQ.8.A` converts the fleet's legacy `.txt` lane substrates, this is true of every
+/// roadmap directory, so it is a warning, never an error (an error would red-gate the
+/// whole fleet on day one).
+const W_LANE_DIR_NO_RECORD: &str = "W_LANE_DIR_NO_RECORD";
+
 /// Raw on-disk deserialize shape for one `lane-<name>.json` record, mirroring
 /// `base-template/.claude/workflows/lane.schema.json` field-for-field —
 /// `deny_unknown_fields` so an unrecognised key is a loud error rather than silently
@@ -232,7 +242,11 @@ pub fn discover_lane_files(root: &Path) -> (Vec<LaneFile>, Vec<Diagnostic>) {
     if roadmaps_dir.is_dir() {
         for (slug, slug_dir) in child_dirs(&roadmaps_dir) {
             roadmaps_slugs.insert(slug.clone());
+            let found_before = lane_files.len();
             collect_lane_files_in(&slug_dir, &slug, &mut lane_files, &mut diags);
+            if lane_files.len() == found_before {
+                warn_if_roadmap_dir_has_no_lane_record(&slug_dir, &mut diags);
+            }
         }
     }
 
@@ -251,6 +265,8 @@ pub fn discover_lane_files(root: &Path) -> (Vec<LaneFile>, Vec<Diagnostic>) {
         collect_lane_files_in(&slug_dir, &slug, &mut lane_files, &mut diags);
         if lane_files.len() > found_before {
             legacy_slugs.insert(slug);
+        } else {
+            warn_if_roadmap_dir_has_no_lane_record(&slug_dir, &mut diags);
         }
     }
 
@@ -267,6 +283,27 @@ pub fn discover_lane_files(root: &Path) -> (Vec<LaneFile>, Vec<Diagnostic>) {
     }
 
     (lane_files, diags)
+}
+
+/// If `slug_dir` (a roadmap directory that yielded zero lane records) contains a
+/// `roadmap.md` at its top level, push a [`W_LANE_DIR_NO_RECORD`] warning naming the
+/// path. Called only when the caller has already confirmed no lane record was found
+/// under `slug_dir` — this just decides whether that emptiness is worth flagging (a
+/// directory with no `roadmap.md` either is not a roadmap directory at all, e.g. an
+/// unrelated `planning/` child, and stays silent).
+fn warn_if_roadmap_dir_has_no_lane_record(slug_dir: &Path, diags: &mut Vec<Diagnostic>) {
+    if !slug_dir.join("roadmap.md").is_file() {
+        return;
+    }
+    diags.push(Diagnostic::warning(
+        slug_dir,
+        W_LANE_DIR_NO_RECORD,
+        format!(
+            "{} has a roadmap.md but no lane-*.json record — its blocks cannot be \
+             lane-segmented until one is authored",
+            slug_dir.display()
+        ),
+    ));
 }
 
 /// Direct subdirectories of `dir`, as `(name, path)`, excluding any whose name starts
@@ -1084,6 +1121,87 @@ mod tests {
             diags.is_empty(),
             "expected no collision diagnostic, got {diags:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_lane_files_roadmap_dir_with_no_lane_record_warns_naming_the_path() {
+        // Task 4's silent-miss case: `roadmap.md` with no `lane-*.json` sibling must
+        // not pass through discovery as a quiet zero — the exact mechanism by which
+        // 27 legacy-layout lane files could disappear behind a green gate.
+        let dir =
+            crate::testsupport::unique_temp_dir("mev-lane-discover-no-record-warns-current-json");
+        write(&dir, "planning/roadmaps/alpha/roadmap.md", "# Alpha\n");
+
+        let (files, diags) = discover_lane_files(&dir);
+        assert!(
+            files.is_empty(),
+            "expected zero lane records, got {files:?}"
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one no-record warning, got {diags:?}"
+        );
+        assert_eq!(diags[0].severity, crate::Severity::Warning);
+        assert_eq!(diags[0].locator, W_LANE_DIR_NO_RECORD);
+        let expected_path = dir.join("planning/roadmaps/alpha");
+        assert!(
+            diags[0]
+                .message
+                .contains(&expected_path.display().to_string())
+                || diags[0].file == expected_path,
+            "expected the warning to name {}, got {diags:?}",
+            expected_path.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_lane_files_roadmap_dir_with_lane_record_does_not_warn() {
+        let dir = crate::testsupport::unique_temp_dir(
+            "mev-lane-discover-no-record-warns-has-record-json",
+        );
+        write(&dir, "planning/roadmaps/alpha/roadmap.md", "# Alpha\n");
+        write(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &simple_lane_json("substrate", "alpha", &[("MV.ticket.a", "alpha", "mev")]),
+        );
+
+        let (files, diags) = discover_lane_files(&dir);
+        assert_eq!(files.len(), 1, "expected the one lane file, got {files:?}");
+        assert!(
+            diags.is_empty(),
+            "expected no no-record warning when a lane record exists, got {diags:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_lane_files_legacy_roadmap_dir_with_no_lane_record_also_warns() {
+        // Legacy layout `planning/<slug>/roadmap.md` must trip the same warning as the
+        // current `planning/roadmaps/<slug>/` layout — the silent-miss risk is
+        // layout-agnostic.
+        let dir =
+            crate::testsupport::unique_temp_dir("mev-lane-discover-no-record-warns-legacy-json");
+        write(&dir, "planning/beta/roadmap.md", "# Beta\n");
+
+        let (files, diags) = discover_lane_files(&dir);
+        assert!(
+            files.is_empty(),
+            "expected zero lane records, got {files:?}"
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one no-record warning, got {diags:?}"
+        );
+        assert_eq!(diags[0].severity, crate::Severity::Warning);
+        assert_eq!(diags[0].locator, W_LANE_DIR_NO_RECORD);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
