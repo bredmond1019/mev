@@ -1797,15 +1797,33 @@ pub fn check_state_graph(
                     ));
                 }
             }
+
+            // Deliberately checked nowhere in this loop. A `CarryoverBlocks` edge's
+            // `to_ref` names a CARRYOVER (`"carryover:<repo>/<slug>"`), not a node —
+            // okf-core's own `StateEdgeKind` doc says so and instructs consumers doing
+            // "dangling, cycle, or topological work" to skip it. Running the
+            // node-existence checks above on one would raise a false
+            // `E_STATE_DANGLING_BLOCKED_BY` for every carryover gating edge in the
+            // corpus. This is a skip with coverage, not a hole: section 6 below already
+            // validates the same `carryover[].blocks[]` targets straight from the files,
+            // so nothing goes unchecked and nothing is reported twice.
+            //
+            // Written as an explicit arm rather than a `_ =>` catch-all on purpose: the
+            // next variant okf-core adds must fail this match and force a decision here,
+            // which is exactly how this one surfaced (`OK.4.B`, 2026-08-21).
+            StateEdgeKind::CarryoverBlocks => {}
         }
     }
 
     // --- 6. Carryover blocks[] dangling targets ---
     //
-    // `blocks[]` is not part of `okf_core::build_state_graph`'s edges (that graph
-    // only covers `tracks[].blocks[].depends_on` and brain `cross_repo[]`), so it
-    // gets its own pass here rather than a `graph.edges` entry. Reuses the same
-    // `node_set` the edge-integrity checks above already built — no second index.
+    // Checked here, against the files, rather than off `graph.edges`. Since `OK.4.B`
+    // (2026-08-21) `okf_core::build_state_graph` DOES emit these as
+    // `StateEdgeKind::CarryoverBlocks` edges — but their `to_ref` names a carryover
+    // rather than a node, so the edge-integrity loop above skips them (see that arm)
+    // and this pass remains the one that resolves the real `{type:"block"}` targets.
+    // Reuses the same `node_set` the edge-integrity checks above already built — no
+    // second index.
     for (src, file) in files {
         let path = &src.abs_path;
         for item in &file.carryover {
@@ -5038,6 +5056,54 @@ mod tests {
         assert!(dangling[0].message.contains("waiting-on-alpha"));
         assert!(dangling[0].message.contains("alpha:AL.1.GHOST"));
         assert!(dangling[0].message.contains("blocks[]"));
+    }
+
+    /// The companion to the test above, and the regression guard for `OK.4.B`
+    /// (okf-core, 2026-08-21), which started emitting `carryover[].blocks[]` entries
+    /// as `StateEdgeKind::CarryoverBlocks` edges in `build_state_graph`.
+    ///
+    /// Such an edge's `to_ref` names a **carryover** (`"carryover:<repo>/<slug>"`),
+    /// not a node. If `check_state_graph`'s edge-integrity loop treated it like a
+    /// `BlockedBy` edge it would split that `to_ref` on `:`, fail to find a repo
+    /// called `carryover`, and raise `E_STATE_UNKNOWN_REPO` against a perfectly
+    /// valid entry — once per carryover gating edge in the corpus. So this asserts
+    /// the **absence** of a diagnostic, which is only meaningful next to the ghost
+    /// test above proving the same fixture shape does still report a real dangling
+    /// target. Together they pin: valid edge silent, ghost edge reported exactly once.
+    #[test]
+    fn carryover_blocks_valid_target_emits_no_diagnostic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let pair_a = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        // Same fixture as the ghost test, but pointed at the block that really exists.
+        let pair_b = beta_with_carryover_blocks(dir.path(), "alpha", "AL.1.A");
+
+        let files = vec![pair_a, pair_b];
+        let graph = build_state_graph(&files);
+
+        // Guard the guard: if okf-core ever stops emitting this edge kind, the
+        // assertions below would pass for the wrong reason.
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|e| e.kind == StateEdgeKind::CarryoverBlocks),
+            "fixture no longer produces a CarryoverBlocks edge — this test would then              prove nothing about how they are handled: {:?}",
+            graph.edges
+        );
+
+        let diags = check_state_graph(&graph, &files);
+
+        let noise: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                d.locator == "E_STATE_DANGLING_BLOCKED_BY" || d.locator == "E_STATE_UNKNOWN_REPO"
+            })
+            .collect();
+        assert!(
+            noise.is_empty(),
+            "a carryover blocks[] edge with a real target must raise nothing; got: {noise:?}"
+        );
     }
 
     #[test]
