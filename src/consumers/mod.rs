@@ -176,7 +176,7 @@ pub struct SpawnOutcome {
 /// Errors (git unavailable, not a repo, etc.) are surfaced rather than silently treated as
 /// clean — a consumer we cannot ask about is not evidence either way.
 fn git_is_dirty(consumer_path: &Path) -> io::Result<bool> {
-    let output = Command::new("git")
+    let output = crate::shared::git_command()
         .arg("-C")
         .arg(consumer_path)
         .args(["status", "--porcelain"])
@@ -491,7 +491,7 @@ Caused by:
     // -----------------------------------------------------------------
 
     fn run_git(path: &std::path::Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
+        let status = crate::shared::git_command()
             .arg("-C")
             .arg(path)
             .args(args)

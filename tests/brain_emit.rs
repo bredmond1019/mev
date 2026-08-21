@@ -5621,7 +5621,7 @@ heading = "Alpha"
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = mev::testsupport::git_command()
             .arg("-C")
             .arg(dir)
             .args(args)

@@ -11,7 +11,6 @@
 //! [`verdict`] — so it is unit-tested directly without shelling out to git.
 
 use std::path::Path;
-use std::process::Command;
 
 use super::{CheckOutcome, CheckStatus, ConformanceCtx, FactSide};
 
@@ -94,7 +93,7 @@ fn live_head(source_dir: &str) -> Option<String> {
     if !Path::new(source_dir).exists() {
         return None;
     }
-    let output = Command::new("git")
+    let output = crate::shared::git_command()
         .args(["rev-parse", "HEAD"])
         .current_dir(source_dir)
         .output()

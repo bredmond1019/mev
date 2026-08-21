@@ -30,7 +30,7 @@ fn temp_dir(suffix: &str) -> PathBuf {
 }
 
 fn run_git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
+    let status = mev::testsupport::git_command()
         .arg("-C")
         .arg(dir)
         .args(args)

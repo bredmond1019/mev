@@ -520,7 +520,7 @@ pub fn is_linked_worktree(path: &Path) -> bool {
 /// Run `git -C <path> rev-parse <arg>` and return its trimmed stdout, or `None`
 /// if git could not be invoked or exited non-zero.
 fn run_git_rev_parse(path: &Path, arg: &str) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let output = crate::shared::git_command()
         .arg("-C")
         .arg(path)
         .arg("rev-parse")
@@ -683,7 +683,7 @@ keep = 25
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
+        let status = crate::shared::git_command()
             .arg("-C")
             .arg(dir)
             .args(args)

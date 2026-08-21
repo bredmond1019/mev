@@ -33,6 +33,20 @@ pub fn unique_temp_dir(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}-{nanos}-{seq}", std::process::id()))
 }
 
+/// A `git` [`std::process::Command`] with every inherited `GIT_*` repository variable removed
+/// — the integration-test face of the same helper `src/` uses internally.
+///
+/// **Every `git` spawn in `tests/` must go through this.** Git exports `GIT_DIR` (and friends)
+/// to the hooks it runs, and those variables **override `-C`**, so a fixture helper that calls
+/// `Command::new("git")` operates on the hook's repository instead of its own tempdir. Because
+/// `hooks/pre-push` stage 2 runs `cargo test`, that made mev's suite structurally unable to
+/// pass from inside a push: measured 2026-08-21, ten tests across `brain::config`,
+/// `consumers` and `brain_emit`'s worktree guard failed with `git ["init"] failed` and
+/// wrong-tree answers, and they blocked `MV.17.A`'s PR with failures unrelated to the branch.
+pub fn git_command() -> std::process::Command {
+    crate::shared::git_command()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
