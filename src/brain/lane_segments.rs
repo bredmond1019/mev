@@ -204,6 +204,27 @@ struct LaneRecord {
     #[allow(dead_code)]
     // authored lane metadata with no state.json representation; not consumed by derivation
     cut_blocks: Option<Vec<String>>,
+    /// The lane's authored briefing — the prose that used to live in the `lane-*.txt`
+    /// header comments.
+    ///
+    /// **This field exists so that prose survives conversion, and its absence was a P0.**
+    /// `LaneRecord` is `deny_unknown_fields`, so before this field existed a record
+    /// carrying `notes` failed to deserialize and contributed to no derived artifact —
+    /// silently. Measured 2026-08-21 against the installed binary, same record, one key
+    /// different: with `notes`, `mev lanes --json` printed `{"segments": []}` and exited
+    /// **0**; without it, one segment. A converter that moved 70 lane files' briefings
+    /// into this field would therefore have produced a clean-looking, zero-exit, entirely
+    /// empty lane surface — indistinguishable from "this corpus has no lanes".
+    ///
+    /// Authored lane metadata with no `state.json` representation and not consumed by
+    /// derivation; it is carried so the briefing has a home, per D71 and base-template's
+    /// `BT.ticket.lane-schema-has-no-home-for-the-briefing`. Deliberately lane-level only:
+    /// per-block prose belongs in `planning/blocks/<ID>.json`, because no SDLC engine has
+    /// ever opened a lane file, and two per-block prose homes means the next author picks
+    /// the wrong one half the time.
+    #[serde(default)]
+    #[allow(dead_code)]
+    notes: Option<String>,
 }
 
 /// Raw on-disk deserialize shape for one `blocks[]` entry — see [`LaneRecord`].
@@ -973,6 +994,67 @@ mod tests {
             diags[0].message.contains("unexpected_top_level_key")
                 || diags[0].message.to_lowercase().contains("unknown field")
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression for the P0 found 2026-08-21, when base-template's schema ticket added a
+    /// top-level `notes` field and mev's `deny_unknown_fields` reader had no such field.
+    ///
+    /// The failure mode is what makes this worth a dedicated test: it is SILENT. The record
+    /// is rejected, `discover_lane_files` returns nothing for it, and the CLI still exits 0
+    /// printing a well-formed empty result. Verified against the installed binary before the
+    /// fix — same record, one key different: with `notes`, `mev lanes --json` gave
+    /// `{"segments": []}` and exit 0; without it, one segment. So the assertion that matters
+    /// here is not just "parses" but "yields its blocks AND raises no diagnostic".
+    #[test]
+    fn discover_lane_files_accepts_a_record_carrying_a_briefing() {
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-record-notes");
+        write(
+            &dir,
+            "planning/roadmaps/alpha/lane-probe.json",
+            r#"{
+  "lane": "probe",
+  "roadmap": "alpha",
+  "notes": "MERGE, DO NOT INSTALL — the class of briefing this field exists to carry.",
+  "blocks": [ { "id": "MV.17.A", "origin_roadmap": "alpha", "repo": "mev" } ]
+}"#,
+        );
+
+        let (files, diags) = discover_lane_files(&dir);
+        assert!(
+            diags.is_empty(),
+            "a record carrying a briefing must raise nothing, got {diags:?}"
+        );
+        assert_eq!(files.len(), 1, "expected the record to be discovered");
+        assert_eq!(files[0].blocks.len(), 1);
+        assert_eq!(files[0].blocks[0].id, "MV.17.A");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The control for the test above. `notes` is now accepted, so this pins that the field
+    /// was ADDED rather than `deny_unknown_fields` being loosened — which would have made
+    /// every future schema drift silent instead of loud.
+    #[test]
+    fn a_genuinely_unknown_key_is_still_rejected_after_notes_was_added() {
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-record-still-strict");
+        write(
+            &dir,
+            "planning/roadmaps/alpha/lane-probe.json",
+            r#"{
+  "lane": "probe",
+  "roadmap": "alpha",
+  "notes": "a legitimate briefing",
+  "not_a_real_field": "should still be refused",
+  "blocks": [ { "id": "MV.17.A", "origin_roadmap": "alpha", "repo": "mev" } ]
+}"#,
+        );
+
+        let (files, diags) = discover_lane_files(&dir);
+        assert!(files.is_empty(), "deny_unknown_fields must still bite");
+        assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+        assert_eq!(diags[0].locator, E_LANE_RECORD_MALFORMED);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
