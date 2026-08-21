@@ -13,6 +13,42 @@ timestamp: "2026-08-18T14:20:00-03:00"
 
 # Log — mev
 
+## [run: 2026-08-20]
+
+MV.17.A ("Parse lane.json; delete the lane-file directive grammar") ran tasks 1-6 to completion
+via `/sdlc-flow` on a worktree branch, then BAILED at task 7 (Validate). Tasks 1-6 replaced
+mev's lane-*.txt directive grammar with a deny_unknown_fields `lane-<name>.json` reader across
+both current (`planning/roadmaps/<slug>/`) and legacy (`planning/<slug>/`) layouts: deleted
+`parse_lane_directives`, the `Origin` enum, `resolve_double_claims`, and the
+`E_LANE_DIRECTIVE_*`/`E_LANE_DOUBLE_CLAIM` diagnostics; added the new serde record type with
+per-block authored `repo`/`origin_roadmap`; updated all in-crate consumers (frontier.rs,
+availability.rs, state.rs) and fixtures; added golden-string tests pinning the frozen
+`LaneDirectives`/`LaneBudget`/`DerivedBlockPosition` serialized shape; added a
+`W_LANE_DIR_NO_RECORD` warning for a roadmap directory with no lane record; rewrote
+`docs/architecture.md`'s lane-subsystem section; and recorded D64 fixture-evidence for the
+spec's three un-gateable acceptance criteria (sibling compile, engine-rs deserialization,
+installed-binary untouched — the binary is deliberately left un-installed per the spec, owned by
+HQ.8.A). Task 7's full-suite validate step then hit
+`validate_state_completes_fast_on_a_representative_file_release_build`, which panicked at 2.899s
+(expected well under 2s) in the MV.17.A-flow worktree. Confirmed via a base-state re-run this
+turn: the identical test passes in 0.44s on the main tree (`core/mev`) — over 4x faster and well
+under threshold — so this is worktree-specific build/disk latency (IMMEDIATE-BAIL reason 3:
+environment failure), not a defect introduced by MV.17.A's changes. HEAD stays at task 6's
+commit; no task-7 commit was made.
+
+Next: re-run task 7's validation on a fresh worktree (or in-place) to get a clean timing sample,
+then resume the spec at task 7 to finish the review/docs/PR stages.
+
+```
+2729ab6 docs: rewrite lane-subsystem section of architecture.md for lane.json
+d5c05c4 feat: warn on a roadmap dir with no lane record (MV.17.A task 4)
+8087b08 test: golden-string tests pin the frozen LaneDirectives/LaneBudget/DerivedBlockPosition contract
+1e3f43b feat: implement MV.17.A-task2
+59f1fdb test: add lane.json fixtures for MV.17.A task 1
+74d0051 chore: init worktree MV.17.A-flow
+```
+
+
 ## [2026-08-18]
 
 ### MV.ticket.master-plan-generator shipped (5 tasks, PASS)
