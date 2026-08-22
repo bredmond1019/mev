@@ -263,12 +263,11 @@ fn worst_status(a: CheckStatus, b: CheckStatus) -> CheckStatus {
     }
 }
 
-/// Run the `toolchain-freshness` check across every registered writer: `mev` itself
-/// (the compiled-in stamp, as before) plus every binary named in
-/// [`CROSS_BINARY_WRITERS`], queried via `--build-stamp`. The overall status is
-/// worst-wins; `findings` names every writer's individual verdict so a reader can see
-/// exactly which binary drifted or could not be evaluated, not just an aggregate.
-pub fn run(_ctx: &ConformanceCtx) -> CheckOutcome {
+/// Compute the per-writer outcomes (`self` + every [`CROSS_BINARY_WRITERS`] entry)
+/// alongside the worst-wins overall status, without needing a [`ConformanceCtx`] —
+/// [`run`] ignores its `ctx` entirely, so this is the seam callers outside the
+/// `mev conformance` registry (e.g. `emit_state`'s `--write` path) use directly.
+pub fn writer_outcomes() -> (CheckStatus, Vec<WriterOutcome>) {
     let mut outcomes = vec![writer_outcome(
         "self",
         STAMPED_SHA,
@@ -278,6 +277,20 @@ pub fn run(_ctx: &ConformanceCtx) -> CheckOutcome {
     for name in CROSS_BINARY_WRITERS {
         outcomes.push(cross_binary_outcome(name));
     }
+    let mut overall_status = CheckStatus::Pass;
+    for outcome in &outcomes {
+        overall_status = worst_status(overall_status, outcome.status);
+    }
+    (overall_status, outcomes)
+}
+
+/// Run the `toolchain-freshness` check across every registered writer: `mev` itself
+/// (the compiled-in stamp, as before) plus every binary named in
+/// [`CROSS_BINARY_WRITERS`], queried via `--build-stamp`. The overall status is
+/// worst-wins; `findings` names every writer's individual verdict so a reader can see
+/// exactly which binary drifted or could not be evaluated, not just an aggregate.
+pub fn run(_ctx: &ConformanceCtx) -> CheckOutcome {
+    let (_, outcomes) = writer_outcomes();
 
     let left = FactSide {
         label: "compiled-in build stamp (self)".to_string(),

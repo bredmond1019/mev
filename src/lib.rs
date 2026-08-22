@@ -1326,6 +1326,27 @@ pub fn reject(root: &std::path::Path, slug: &str) -> anyhow::Result<Report> {
     Ok(report)
 }
 
+/// The `MEV_REQUIRE_FRESH` env var name — set by `mev emit-state --write --require-fresh`
+/// as a convenience alias (see `src/main.rs`) rather than threading a new parameter
+/// through [`emit_state`]'s signature, which already has many existing callers
+/// (`set_block_status`, `defer_epic`/`resume_epic`/`complete_epic`, `close_operator_gate`,
+/// `approve`/`reject`) that must not need touching.
+pub const MEV_REQUIRE_FRESH_ENV: &str = "MEV_REQUIRE_FRESH";
+
+/// Whether `MEV_REQUIRE_FRESH` is set to a truthy value. Accepted values: `"1"` or
+/// `"true"`, matched case-insensitively; anything else (including unset, empty, or `"0"`)
+/// is not-set. This is the only boolean-env-var convention in this crate today, so it is
+/// documented here rather than following an established one.
+fn require_fresh_env_set() -> bool {
+    match std::env::var(MEV_REQUIRE_FRESH_ENV) {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true"
+        }
+        Err(_) => false,
+    }
+}
+
 /// Generate derived views for the Bastion Brain repo.
 ///
 /// `scope`, when `Some`, restricts every planner's *writes* (not its
@@ -1365,6 +1386,50 @@ pub fn emit_state(
     };
 
     let mut report = Report::default();
+
+    // 0. Toolchain freshness: every --write path chains through this function (see the
+    //    doc comment above), so this is the single choke point where a stale binary gets
+    //    caught before it silently no-ops or destroys authored state. `NotEvaluable`
+    //    never warns or blocks — only a genuine `Drift` does. Interactive default: warn
+    //    loudly on stderr and proceed. `MEV_REQUIRE_FRESH` (any of "1"/"true", matched
+    //    case-insensitively): promote Drift to a hard failure, checked here, before any
+    //    plan is computed or applied, so no write happens.
+    if write {
+        let (status, outcomes) = brain::conformance::toolchain::writer_outcomes();
+        if status == CheckStatus::Drift {
+            let drifted: Vec<String> = outcomes
+                .iter()
+                .filter(|o| o.status == CheckStatus::Drift)
+                .flat_map(|o| o.findings.clone())
+                .collect();
+            let banner = format!(
+                "\n\
+                 ================ TOOLCHAIN DRIFT ================\n\
+                 mev emit-state --write: at least one registered writer's binary does \
+                 not match its source tree.\n\
+                 {}\n\
+                 Rebuild/reinstall the stale binary before trusting this write. Set \
+                 MEV_REQUIRE_FRESH=1 (or pass --require-fresh to `mev emit-state`) to make \
+                 this a hard failure instead of a warning.\n\
+                 ===================================================\n",
+                drifted.join("\n")
+            );
+            eprintln!("{banner}");
+
+            if require_fresh_env_set() {
+                report.diagnostics.push(Diagnostic::error(
+                    root,
+                    "E_TOOLCHAIN_STALE",
+                    format!(
+                        "refusing to write: toolchain-freshness reported Drift and \
+                         MEV_REQUIRE_FRESH is set. {}",
+                        drifted.join("; ")
+                    ),
+                ));
+                return Ok(report);
+            }
+        }
+    }
 
     // 1. Discovery: find all planning/state.json files.
     let (sources, discovery_diags) = discover_state_files(root, &config);

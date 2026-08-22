@@ -217,6 +217,12 @@ enum Command {
         /// is today's default behaviour and stays byte-for-byte unchanged.
         #[arg(long, value_name = "REPO")]
         scope: Option<String>,
+        /// Promote a `toolchain-freshness` Drift verdict from a warning to a hard
+        /// failure: no write performed, non-zero exit. Convenience alias for setting the
+        /// `MEV_REQUIRE_FRESH` env var before this write runs — see `mev::emit_state`'s
+        /// doc comment. `NotEvaluable` never triggers this; only a genuine Drift does.
+        #[arg(long)]
+        require_fresh: bool,
     },
     /// List (or restore) the append-only revision history `apply_plan()` records for
     /// one file every time it overwrites existing content (see `emit-state`'s
@@ -2035,7 +2041,22 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Command::EmitState { path, write, scope } => {
+        Command::EmitState {
+            path,
+            write,
+            scope,
+            require_fresh,
+        } => {
+            // Convenience alias: --require-fresh sets the same env var `emit_state`
+            // reads, rather than threading a new parameter through its signature (see
+            // `mev::MEV_REQUIRE_FRESH_ENV`'s doc comment) — set before emit_state runs.
+            if require_fresh {
+                // SAFETY: single-threaded at this point in `main` — no other thread
+                // reads or writes the process environment concurrently.
+                unsafe {
+                    std::env::set_var(mev::MEV_REQUIRE_FRESH_ENV, "1");
+                }
+            }
             if write && mev::brain::config::is_linked_worktree(&path) {
                 eprintln!(
                     "error: refusing to run emit-state --write from inside a linked git worktree ({}) — emit-state resolves every repo's derived-file paths from brain.toml, not CWD, so writing from a worktree would silently regenerate the MAIN checkout's files instead of the worktree's own copy. Run `mev emit-state --write` from the main working tree instead.",
