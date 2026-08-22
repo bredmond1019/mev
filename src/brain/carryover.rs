@@ -1206,6 +1206,218 @@ pub fn describe_clearing_evidence(verdict: &CarryoverVerdict) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Dispose write path — `mev carryover --dispose` (`MV.ticket.carryover-dispose`
+// task 2)
+// ---------------------------------------------------------------------------
+
+/// Build the archive record (okf-core `OK.4.A`) for one disposal candidate.
+///
+/// The disposed entry is embedded verbatim via `CarryoverArchiveRow`'s own
+/// `#[serde(flatten)]` on `entry` — nothing here re-derives or re-shapes it.
+/// `reason` is always [`okf_core::DisposalReason::Cleared`]: this write path
+/// only ever disposes entries the sweep already landed in
+/// [`CarryoverLane::Cleared`] (see [`compute_disposal_plan`], task 1) —
+/// `superseded`/`promoted`/`withdrawn` disposals are a different call site
+/// this block does not add. `reconstructed` is always `false` — this is a
+/// disposal written at the moment it happens, never a historical backfill
+/// (that is `MV.16.B`, explicitly out of scope).
+pub fn build_archive_row(
+    candidate: &DisposalCandidate,
+    disposed_at: &str,
+) -> okf_core::CarryoverArchiveRow {
+    okf_core::CarryoverArchiveRow {
+        entry: candidate.entry.clone(),
+        disposed_at: disposed_at.to_string(),
+        reason: okf_core::DisposalReason::Cleared,
+        reconstructed: false,
+        evidence: Some(candidate.evidence.clone()),
+        amends: None,
+    }
+}
+
+/// One repo's disposal, written to disk (or, under `--dry-run`, computed but
+/// not written) — what task 3's reporting layer prints per repo.
+#[derive(Debug, Clone)]
+pub struct RepoDisposalWrite {
+    /// Owning repo slug.
+    pub repo: String,
+    /// Absolute path of the repo's `planning/state.json`.
+    pub state_path: PathBuf,
+    /// Absolute path of the repo's `planning/carryover-archive.jsonl`.
+    pub archive_path: PathBuf,
+    /// The disposed entries, full record, in the order they were archived —
+    /// constraint (5) needs the whole text, not just the slug.
+    pub disposed: Vec<DisposalCandidate>,
+    /// Whether disk was actually touched (`false` under `--dry-run`, or when
+    /// `disposed` is empty and there was nothing to write).
+    pub written: bool,
+}
+
+/// One repo's disposal failed partway through — which repo, and why, so
+/// constraint (3)'s reporting can name it without aborting the whole run.
+#[derive(Debug, Clone)]
+pub struct RepoDisposalError {
+    pub repo: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for RepoDisposalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.repo, self.message)
+    }
+}
+
+impl std::error::Error for RepoDisposalError {}
+
+/// Serialize a mutated [`StateFile`] byte-faithfully: `to_string_pretty` plus
+/// a trailing newline — the exact shape [`crate::brain::epics::action_for`]
+/// and `plan_state_json` already write, so an edit that touches nothing but
+/// the `carryover[]` array produces a diff of exactly the removed elements
+/// (constraint (2)): no re-indentation, no key reordering, and `serde_json`
+/// never escapes non-ASCII (em dashes and friends) by default, so this needs
+/// no `ensure_ascii` equivalent — it already behaves as `ensure_ascii=False`.
+fn serialize_state_file_pretty(file: &StateFile) -> anyhow::Result<String> {
+    let mut content = serde_json::to_string_pretty(file)?;
+    content.push('\n');
+    Ok(content)
+}
+
+/// Apply one repo's disposal: remove every `candidates` entry from
+/// `state_file`'s `carryover[]`, append one [`okf_core::CarryoverArchiveRow`]
+/// per candidate to `archive_path`, and write both to disk — or, when
+/// `dry_run` is `true`, compute the identical result without touching either
+/// file (task 3's `--dispose --dry-run` reuses this same function; there is
+/// no second code path).
+///
+/// Empty `candidates` is a no-op that still returns `Ok` with `written:
+/// false` — constraint (6) needs a per-repo summary even when nothing moved,
+/// and a repo with zero candidates must never attempt (or fail) a write.
+///
+/// # Ordering — why archive writes before state.json (constraint (1))
+///
+/// The two writes are staged as complete in-memory strings before either
+/// touches disk, then committed **archive first, state.json second**. An
+/// archived-but-not-yet-removed entry is merely redundant — it is still
+/// correctly present in `carryover[]`. A removed-but-unarchived entry is the
+/// data loss this block exists to prevent. Writing the archive first means
+/// the only way to reach the dangerous state is for the *second* write (a
+/// same-filesystem rename over a file `write_atomic` just staged) to fail
+/// after the first already succeeded; on that path this function best-effort
+/// reverts the archive file to its original bytes and returns
+/// [`RepoDisposalError`] — the repo is reported failed and both files must be
+/// checked against their pre-run contents by the caller's tests, never
+/// assumed intact from the `Err` alone.
+pub fn dispose_repo(
+    state_source: &StateSource,
+    state_file: &StateFile,
+    candidates: &[DisposalCandidate],
+    archive_path: &Path,
+    disposed_at: &str,
+    dry_run: bool,
+) -> Result<RepoDisposalWrite, RepoDisposalError> {
+    let repo = state_source.repo_slug.clone();
+
+    if candidates.is_empty() {
+        return Ok(RepoDisposalWrite {
+            repo,
+            state_path: state_source.abs_path.clone(),
+            archive_path: archive_path.to_path_buf(),
+            disposed: Vec::new(),
+            written: false,
+        });
+    }
+
+    let slugs: HashSet<&str> = candidates.iter().map(|c| c.slug.as_str()).collect();
+
+    let mut new_state = state_file.clone();
+    new_state
+        .carryover
+        .retain(|c| !slugs.contains(c.slug.as_str()));
+    let new_state_content =
+        serialize_state_file_pretty(&new_state).map_err(|e| RepoDisposalError {
+            repo: repo.clone(),
+            message: format!(
+                "failed to serialize {}: {e}",
+                state_source.abs_path.display()
+            ),
+        })?;
+
+    let archive_existed = archive_path.exists();
+    let original_archive_content = if archive_existed {
+        std::fs::read_to_string(archive_path).map_err(|e| RepoDisposalError {
+            repo: repo.clone(),
+            message: format!("failed to read {}: {e}", archive_path.display()),
+        })?
+    } else {
+        String::new()
+    };
+
+    let mut new_archive_content = original_archive_content.clone();
+    for candidate in candidates {
+        let row = build_archive_row(candidate, disposed_at);
+        let line = serde_json::to_string(&row).map_err(|e| RepoDisposalError {
+            repo: repo.clone(),
+            message: format!(
+                "failed to serialize archive row for '{}': {e}",
+                candidate.slug
+            ),
+        })?;
+        new_archive_content.push_str(&line);
+        new_archive_content.push('\n');
+    }
+
+    if dry_run {
+        return Ok(RepoDisposalWrite {
+            repo,
+            state_path: state_source.abs_path.clone(),
+            archive_path: archive_path.to_path_buf(),
+            disposed: candidates.to_vec(),
+            written: false,
+        });
+    }
+
+    // Archive first — see the ordering rationale above.
+    crate::brain::emit::write_atomic(archive_path, new_archive_content.as_bytes()).map_err(
+        |e| RepoDisposalError {
+            repo: repo.clone(),
+            message: format!("failed to write {}: {e}", archive_path.display()),
+        },
+    )?;
+
+    if let Err(e) =
+        crate::brain::emit::write_atomic(&state_source.abs_path, new_state_content.as_bytes())
+    {
+        // Best-effort revert of the archive write so a failed run never
+        // leaves a disposed entry duplicated between both files.
+        let revert_result = if archive_existed {
+            crate::brain::emit::write_atomic(archive_path, original_archive_content.as_bytes())
+        } else {
+            std::fs::remove_file(archive_path)
+        };
+        let revert_note = if revert_result.is_err() {
+            " (archive revert ALSO FAILED — manual check required)"
+        } else {
+            " (archive write reverted)"
+        };
+        return Err(RepoDisposalError {
+            repo: repo.clone(),
+            message: format!(
+                "failed to write {}: {e}{revert_note}",
+                state_source.abs_path.display()
+            ),
+        });
+    }
+
+    Ok(RepoDisposalWrite {
+        repo,
+        state_path: state_source.abs_path.clone(),
+        archive_path: archive_path.to_path_buf(),
+        disposed: candidates.to_vec(),
+        written: true,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Audit — `mev carryover --audit` (`MV.ticket.reference-container-validation`
 // task 4)
 // ---------------------------------------------------------------------------
@@ -5089,5 +5301,279 @@ mod tests {
             describe_clearing_evidence(&verdict),
             "block repo-a:MV.1.A closed; path docs/x.md exists"
         );
+    }
+
+    // -- dispose write path (task 2) --------------------------------------------
+
+    fn candidate(slug: &str, evidence: &str, entry: Carryover) -> DisposalCandidate {
+        DisposalCandidate {
+            repo: "repo-a".to_string(),
+            slug: slug.to_string(),
+            entry,
+            evidence: evidence.to_string(),
+        }
+    }
+
+    /// A scratch repo dir with a real `planning/state.json` on disk, mirroring
+    /// what `dispose_repo` is actually pointed at in production.
+    fn scratch_repo(tag: &str, file: &StateFile) -> (PathBuf, StateSource, PathBuf) {
+        let dir = crate::testsupport::unique_temp_dir(&format!("mev-carryover-dispose-{tag}"));
+        let planning = dir.join("planning");
+        std::fs::create_dir_all(&planning).unwrap();
+        let state_path = planning.join("state.json");
+        let mut content = serde_json::to_string_pretty(file).unwrap();
+        content.push('\n');
+        std::fs::write(&state_path, &content).unwrap();
+        let archive_path = planning.join("carryover-archive.jsonl");
+        let source = StateSource {
+            repo_slug: file.repo.clone(),
+            abs_path: state_path,
+            expected_kind: "project",
+        };
+        (dir, source, archive_path)
+    }
+
+    #[test]
+    fn build_archive_row_flattens_entry_verbatim_with_cleared_reason() {
+        let entry = item(
+            "cleared-one",
+            "deferred",
+            Some("MV.3.A lands"),
+            vec![],
+            "2020-01-01",
+            None,
+            None,
+        );
+        let candidate = candidate("cleared-one", "block repo-a:MV.3.A closed", entry.clone());
+        let row = build_archive_row(&candidate, "2026-08-21");
+
+        assert_eq!(row.entry.slug, entry.slug);
+        assert_eq!(row.entry.clears_when, entry.clears_when);
+        assert_eq!(row.disposed_at, "2026-08-21");
+        assert_eq!(row.reason, okf_core::DisposalReason::Cleared);
+        assert!(!row.reconstructed);
+        assert_eq!(row.evidence.as_deref(), Some("block repo-a:MV.3.A closed"));
+        assert!(row.amends.is_none());
+    }
+
+    #[test]
+    fn dispose_repo_removes_cleared_entry_and_leaves_rest_of_state_byte_identical() {
+        let survivor = item(
+            "still-actionable",
+            "deferred",
+            Some("MV.9.A lands"),
+            vec![],
+            "2020-01-01",
+            None,
+            None,
+        );
+        let cleared_entry = item(
+            "cleared-one",
+            "deferred",
+            Some("MV.3.A lands"),
+            vec![],
+            "2020-01-01",
+            None,
+            None,
+        );
+        let file = state_file(
+            "repo-a",
+            vec![],
+            vec![survivor.clone(), cleared_entry.clone()],
+        );
+        let (dir, source, archive_path) = scratch_repo("removes-cleared", &file);
+        let original_content = std::fs::read_to_string(&source.abs_path).unwrap();
+
+        let candidates = vec![candidate(
+            "cleared-one",
+            "block repo-a:MV.3.A closed",
+            cleared_entry,
+        )];
+        let result = dispose_repo(
+            &source,
+            &file,
+            &candidates,
+            &archive_path,
+            "2026-08-21",
+            false,
+        )
+        .expect("dispose_repo should succeed");
+        assert!(result.written);
+        assert_eq!(result.disposed.len(), 1);
+
+        let new_content = std::fs::read_to_string(&source.abs_path).unwrap();
+        let new_file: StateFile = serde_json::from_str(&new_content).unwrap();
+        assert_eq!(new_file.carryover.len(), 1);
+        assert_eq!(new_file.carryover[0].slug, "still-actionable");
+
+        // Byte-faithful apart from the removed element: re-serializing what
+        // should remain must match on-disk bytes exactly.
+        let mut expected_survivor_only = file.clone();
+        expected_survivor_only.carryover = vec![survivor];
+        let mut expected_content = serde_json::to_string_pretty(&expected_survivor_only).unwrap();
+        expected_content.push('\n');
+        assert_eq!(new_content, expected_content);
+        assert_ne!(new_content, original_content);
+
+        let archive_content = std::fs::read_to_string(&archive_path).unwrap();
+        let lines: Vec<&str> = archive_content.lines().collect();
+        assert_eq!(lines.len(), 1);
+        let row: okf_core::CarryoverArchiveRow = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(row.entry.slug, "cleared-one");
+        assert_eq!(row.reason, okf_core::DisposalReason::Cleared);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dispose_repo_appends_to_existing_archive_without_disturbing_prior_lines() {
+        let cleared_entry = item(
+            "cleared-two",
+            "deferred",
+            Some("MV.4.A lands"),
+            vec![],
+            "2020-01-01",
+            None,
+            None,
+        );
+        let file = state_file("repo-a", vec![], vec![cleared_entry.clone()]);
+        let (dir, source, archive_path) = scratch_repo("appends-archive", &file);
+        let existing_line = r#"{"slug":"already-disposed","kind":"deferred","text":"old","related":[],"created":"2020-01-01","disposed_at":"2026-08-01","reason":"cleared","reconstructed":false}"#;
+        std::fs::write(&archive_path, format!("{existing_line}\n")).unwrap();
+
+        let candidates = vec![candidate(
+            "cleared-two",
+            "block repo-a:MV.4.A closed",
+            cleared_entry,
+        )];
+        dispose_repo(
+            &source,
+            &file,
+            &candidates,
+            &archive_path,
+            "2026-08-21",
+            false,
+        )
+        .expect("dispose_repo should succeed");
+
+        let archive_content = std::fs::read_to_string(&archive_path).unwrap();
+        let lines: Vec<&str> = archive_content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], existing_line);
+        let row: okf_core::CarryoverArchiveRow = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(row.entry.slug, "cleared-two");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dispose_repo_dry_run_writes_nothing_but_returns_the_same_disposal_list() {
+        let cleared_entry = item(
+            "cleared-three",
+            "deferred",
+            Some("MV.5.A lands"),
+            vec![],
+            "2020-01-01",
+            None,
+            None,
+        );
+        let file = state_file("repo-a", vec![], vec![cleared_entry.clone()]);
+        let (dir, source, archive_path) = scratch_repo("dry-run", &file);
+        let original_content = std::fs::read_to_string(&source.abs_path).unwrap();
+
+        let candidates = vec![candidate(
+            "cleared-three",
+            "block repo-a:MV.5.A closed",
+            cleared_entry,
+        )];
+        let result = dispose_repo(
+            &source,
+            &file,
+            &candidates,
+            &archive_path,
+            "2026-08-21",
+            true,
+        )
+        .expect("dry-run should succeed without writing");
+        assert!(!result.written);
+        assert_eq!(result.disposed.len(), 1);
+
+        let after_content = std::fs::read_to_string(&source.abs_path).unwrap();
+        assert_eq!(
+            after_content, original_content,
+            "dry-run must not touch state.json"
+        );
+        assert!(
+            !archive_path.exists(),
+            "dry-run must not create the archive file"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dispose_repo_with_no_candidates_is_a_no_op_and_reports_unwritten() {
+        let file = state_file("repo-a", vec![], vec![]);
+        let (dir, source, archive_path) = scratch_repo("no-candidates", &file);
+
+        let result = dispose_repo(&source, &file, &[], &archive_path, "2026-08-21", false)
+            .expect("empty candidates must succeed as a no-op");
+        assert!(!result.written);
+        assert!(result.disposed.is_empty());
+        assert!(
+            !archive_path.exists(),
+            "a no-op dispose must never create the archive file"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dispose_repo_fails_atomically_when_archive_write_is_impossible() {
+        // Constraint (1), shown failing: force the archive write to fail (its
+        // parent directory does not exist and cannot be created because a
+        // file occupies that path) and assert state.json is left byte-
+        // identical — the entry must never end up removed-but-unarchived.
+        let cleared_entry = item(
+            "cleared-four",
+            "deferred",
+            Some("MV.6.A lands"),
+            vec![],
+            "2020-01-01",
+            None,
+            None,
+        );
+        let file = state_file("repo-a", vec![], vec![cleared_entry.clone()]);
+        let (dir, source, _unused_archive) = scratch_repo("archive-fails", &file);
+        let original_content = std::fs::read_to_string(&source.abs_path).unwrap();
+
+        // Make the archive's parent path unusable: a plain file where a
+        // directory would need to exist for the archive path to be writable.
+        let blocker_dir = dir.join("blocked");
+        std::fs::write(&blocker_dir, b"not a directory").unwrap();
+        let impossible_archive_path = blocker_dir.join("carryover-archive.jsonl");
+
+        let candidates = vec![candidate(
+            "cleared-four",
+            "block repo-a:MV.6.A closed",
+            cleared_entry,
+        )];
+        let result = dispose_repo(
+            &source,
+            &file,
+            &candidates,
+            &impossible_archive_path,
+            "2026-08-21",
+            false,
+        );
+        assert!(result.is_err(), "archive write must fail here");
+
+        let after_content = std::fs::read_to_string(&source.abs_path).unwrap();
+        assert_eq!(
+            after_content, original_content,
+            "state.json must be untouched when the archive write fails"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
