@@ -1874,3 +1874,347 @@ fn check_operator_staleness_under_threshold_emits_nothing() {
         "operator gate under threshold must emit no W_STATE_OPERATOR_STALE, got: {diags:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `mev::set_block_status` scoped-closure coverage (MV.14.A, task 2).
+//
+// Builds its own fixture (distinct from `write_clean_fixture` above) because
+// `set_block_status`'s `--write` path chains into `emit_state`, which needs
+// an HQ root repo (`repo_path = "."`, required by `scope_dependencies` for
+// the HQ board target) plus real `status.md`/cache-doc sentinel files for
+// every repo it might rewrite — none of which the `validate_brain_state`
+// fixtures above need. Mirrors `tests/emit_state_scope.rs`'s fixture shape.
+// ---------------------------------------------------------------------------
+
+/// `brain.toml`: an HQ root ("brain") plus two leaf project repos ("gamma",
+/// "delta"), matching `scope_dependencies`'s expectations (an HQ root entry
+/// with `repo_path = "."`).
+fn write_scope_brain_toml(root: &Path) {
+    let toml = r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "brain"
+tier = "_root"
+repo_path = "."
+status_file = "planning/status.md"
+cache_doc = "README.md"
+heading = "Company Brain"
+
+[[repos]]
+slug = "gamma"
+tier = "primary"
+repo_path = "repos/gamma"
+status_file = "repos/gamma/planning/status.md"
+cache_doc = "docs/projects/gamma.md"
+heading = "Gamma"
+
+[[repos]]
+slug = "delta"
+tier = "primary"
+repo_path = "repos/delta"
+status_file = "repos/delta/planning/status.md"
+cache_doc = "docs/projects/delta.md"
+heading = "Delta"
+"#;
+    fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
+}
+
+/// HQ `planning/state.json` (kind:"brain"), rolling up gamma and delta directly
+/// (no tier sub-brains — mirrors this file's existing `write_hq_brain_state`
+/// shape rather than `tests/emit_state_scope.rs`'s tiered one).
+fn write_scope_hq_state(root: &Path) {
+    let state = serde_json::json!({
+        "repo": "brain",
+        "kind": "brain",
+        "updated": "2026-08-19",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "repos": [
+            {
+                "repo": "gamma",
+                "now": [{ "id": "GA.1.A", "title": "Gamma block A", "status": "in_progress" }],
+                "next": [],
+                "blocked": []
+            },
+            {
+                "repo": "delta",
+                "now": [{ "id": "DE.1.A", "title": "Delta block A", "status": "in_progress" }],
+                "next": [],
+                "blocked": []
+            }
+        ],
+        "cross_repo": []
+    });
+    write_json(root, "planning/state.json", &state);
+}
+
+/// HQ `planning/status.md` carrying the generated HQ-board sentinel.
+fn write_scope_hq_status_md(root: &Path) {
+    let doc = "---\n\
+                type: ProjectStatus\n\
+                title: HQ status\n\
+                description: HQ operating board fixture for scoped set-block-status coverage.\n\
+                ---\n\n\
+                # HQ Status\n\n\
+                <!-- BEGIN generated:hq-board -->\n\
+                <!-- END generated:hq-board -->\n";
+    write_file(root, "planning/status.md", doc);
+}
+
+/// A leaf project repo's `planning/state.json`, carrying one `tracks[]` block
+/// (`block_id`) with authored status `"in_progress"` — the target
+/// `set_block_status` closes. `focus.now` is deliberately left empty
+/// (stale relative to `tracks[]`) so that *any* visit — even one where the
+/// authored status itself does not change — still forces the emitter to
+/// rewrite this file, matching `tests/emit_state_scope.rs`'s staleness
+/// pattern and avoiding a false "byte-identical" reading on an already
+/// fixed-point fixture.
+fn write_scope_leaf_state(root: &Path, repo_path: &str, repo_slug: &str, block_id: &str) {
+    let state = serde_json::json!({
+        "repo": repo_slug,
+        "kind": "project",
+        "updated": "2026-08-19",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "tracks": [
+            {
+                "title": "Phase 1",
+                "blocks": [
+                    { "id": block_id, "title": format!("{repo_slug} block A"), "status": "in_progress" }
+                ]
+            }
+        ]
+    });
+    write_json(root, &format!("{repo_path}/planning/state.json"), &state);
+}
+
+/// A leaf project repo's own `planning/status.md`, carrying the OKF
+/// `timestamp` watermark the cache-doc sync reconciles against.
+fn write_scope_leaf_status_md(root: &Path, repo_path: &str, repo_slug: &str) {
+    let doc = format!(
+        "---\n\
+         type: ProjectStatus\n\
+         title: {repo_slug} status\n\
+         description: Status fixture for {repo_slug}.\n\
+         timestamp: \"2026-08-19T12:00:00Z\"\n\
+         ---\n\n\
+         # Status\n"
+    );
+    write_file(root, &format!("{repo_path}/planning/status.md"), &doc);
+}
+
+/// A leaf project repo's brain cache doc, carrying the project-cache
+/// sentinel, empty so a visit produces an observable splice.
+fn write_scope_project_cache_doc(root: &Path, repo_slug: &str) {
+    let doc = format!(
+        "---\n\
+         type: ProjectStatus\n\
+         title: {repo_slug} cache\n\
+         description: Project cache fixture for {repo_slug}.\n\
+         ---\n\n\
+         # {repo_slug}\n\n\
+         <!-- BEGIN generated:project-cache -->\n\
+         <!-- END generated:project-cache -->\n"
+    );
+    write_file(root, &format!("docs/projects/{repo_slug}.md"), &doc);
+}
+
+/// Every derived/authored file path this fixture's `set_block_status` calls
+/// might touch, relative to `root` — used to snapshot both repos before/after
+/// a scoped run for the byte-identical assertion.
+fn scope_fixture_files() -> Vec<&'static str> {
+    vec![
+        "planning/state.json",
+        "planning/status.md",
+        "repos/gamma/planning/state.json",
+        "repos/gamma/planning/status.md",
+        "docs/projects/gamma.md",
+        "repos/delta/planning/state.json",
+        "repos/delta/planning/status.md",
+        "docs/projects/delta.md",
+    ]
+}
+
+/// Build the full fixture: HQ root + two leaf repos ("gamma" owning block
+/// `GA.1.A`, "delta" owning block `DE.1.A`), both `in_progress` and closable.
+fn write_scope_fixture(root: &Path) {
+    write_scope_brain_toml(root);
+
+    write_scope_hq_state(root);
+    write_scope_hq_status_md(root);
+
+    write_scope_leaf_state(root, "repos/gamma", "gamma", "GA.1.A");
+    write_scope_leaf_status_md(root, "repos/gamma", "gamma");
+    write_scope_project_cache_doc(root, "gamma");
+
+    write_scope_leaf_state(root, "repos/delta", "delta", "DE.1.A");
+    write_scope_leaf_status_md(root, "repos/delta", "delta");
+    write_scope_project_cache_doc(root, "delta");
+}
+
+fn scope_snapshot(root: &Path) -> std::collections::HashMap<String, Vec<u8>> {
+    scope_fixture_files()
+        .into_iter()
+        .map(|rel| (rel.to_string(), fs::read(root.join(rel)).unwrap()))
+        .collect()
+}
+
+fn resolve_gamma_scope(root: &Path) -> mev::brain::config::ScopeDependencySet {
+    let config = mev::brain::config::load_brain_config(&root.join("brain.toml")).unwrap();
+    config
+        .scope_dependencies("gamma")
+        .expect("gamma is registered")
+}
+
+// ---------------------------------------------------------------------------
+// (1) A scoped `--write` closure regenerates only the named repo's derived
+//     files — delta's files must stay byte-identical.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_block_status_scoped_write_touches_only_the_scoped_repo() {
+    let dir = temp_dir("set-block-status-scoped");
+    write_scope_fixture(&dir);
+
+    let before = scope_snapshot(&dir);
+
+    let scope = resolve_gamma_scope(&dir);
+    let report = mev::set_block_status(&dir, "gamma:GA.1.A", "closed", true, Some(&scope))
+        .expect("scoped set_block_status should not error");
+    let errors: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == mev::Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "scoped closure should have no errors; got: {errors:#?}"
+    );
+
+    let after = scope_snapshot(&dir);
+
+    // gamma's own authored + derived surfaces must have changed: the status
+    // was written, and the chained scoped emit regenerated gamma's cache doc
+    // and the HQ board gamma feeds.
+    for rel in [
+        "repos/gamma/planning/state.json",
+        "docs/projects/gamma.md",
+        "planning/status.md",
+    ] {
+        assert_ne!(
+            before[rel], after[rel],
+            "'{rel}' is one of gamma's scope surfaces and must have changed"
+        );
+    }
+    let gamma_state: serde_json::Value = serde_json::from_str(
+        &std::str::from_utf8(&after["repos/gamma/planning/state.json"]).unwrap(),
+    )
+    .unwrap();
+    let closed_status = gamma_state["tracks"][0]["blocks"][0]["status"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        closed_status, "closed",
+        "gamma's GA.1.A must be authored closed"
+    );
+
+    // delta was never named in `--scope gamma` and must be byte-identical —
+    // the core assertion of this task.
+    for rel in [
+        "repos/delta/planning/state.json",
+        "repos/delta/planning/status.md",
+        "docs/projects/delta.md",
+    ] {
+        assert_eq!(
+            before[rel], after[rel],
+            "'{rel}' is NOT in gamma's scope and must be byte-identical before/after \
+             a `--scope gamma` closure, but it changed"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// (2) The same closure with `scope: None` regenerates fleet-wide — both
+//     repos' derived surfaces change, unchanged from pre-existing behaviour.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_block_status_unscoped_write_still_regenerates_every_repo() {
+    let dir = temp_dir("set-block-status-unscoped");
+    write_scope_fixture(&dir);
+
+    let before = scope_snapshot(&dir);
+
+    let report = mev::set_block_status(&dir, "delta:DE.1.A", "closed", true, None)
+        .expect("unscoped set_block_status should not error");
+    let errors: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == mev::Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "unscoped closure should have no errors; got: {errors:#?}"
+    );
+
+    let after = scope_snapshot(&dir);
+
+    // Both repos' own state + cache docs, and the HQ board, must all have
+    // moved — an unscoped write is fleet-wide exactly as before this flag
+    // existed.
+    for rel in [
+        "repos/delta/planning/state.json",
+        "docs/projects/delta.md",
+        "repos/gamma/planning/state.json",
+        "docs/projects/gamma.md",
+        "planning/status.md",
+    ] {
+        assert_ne!(
+            before[rel], after[rel],
+            "'{rel}' must be regenerated by an unscoped write, but is byte-identical"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// (3) An unknown `--scope` slug is rejected before any write is attempted —
+//     matches `emit-state`'s own `E_EMIT_UNKNOWN_SCOPE` resolution path,
+//     since both verbs share `BrainConfig::scope_dependencies`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_block_status_unknown_scope_slug_is_rejected_with_valid_slugs() {
+    let dir = temp_dir("set-block-status-unknown-scope");
+    write_scope_fixture(&dir);
+
+    let config = mev::brain::config::load_brain_config(&dir.join("brain.toml")).unwrap();
+    let err = config
+        .scope_dependencies("nonexistent")
+        .expect_err("nonexistent must not resolve");
+
+    match err {
+        mev::brain::config::ScopeError::UnknownSlug { slug, valid_slugs } => {
+            assert_eq!(slug, "nonexistent");
+            assert_eq!(valid_slugs, vec!["brain", "gamma", "delta"]);
+        }
+        other => panic!("expected ScopeError::UnknownSlug, got {other:?}"),
+    }
+
+    // Confirm no fixture file was touched by the rejected resolution — the
+    // failure happens entirely before `set_block_status` is ever called.
+    let before = scope_snapshot(&dir);
+    assert_eq!(
+        before,
+        scope_snapshot(&dir),
+        "an unknown --scope slug must not mutate the fixture"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
