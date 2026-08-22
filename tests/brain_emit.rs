@@ -9113,7 +9113,7 @@ mod task5_shared_identity_dedup {
         assert!(item.contains("core:A.1"), "{item}");
         assert!(item.contains("core:A.2"), "{item}");
         assert!(item.contains("bastion:B.1"), "{item}");
-        assert!(item.contains("operator:gate-x"), "{item}");
+        assert!(item.contains("OP.gate-x"), "{item}");
     }
 
     #[test]
@@ -9148,7 +9148,7 @@ mod task5_shared_identity_dedup {
         assert!(item.contains("core:A.1"), "{item}");
         assert!(item.contains("core:A.2"), "{item}");
         assert!(item.contains("bastion:B.1"), "{item}");
-        assert!(item.contains("operator:gate-x"), "{item}");
+        assert!(item.contains("OP.gate-x"), "{item}");
     }
 
     #[test]
@@ -9185,7 +9185,7 @@ mod task5_shared_identity_dedup {
         let bullets = section_bullets(&rendered, "BLOCKED");
 
         assert_eq!(bullets.len(), 1, "shared approval slug must dedup too");
-        assert!(bullets[0].contains("approval:ship-v2"));
+        assert!(bullets[0].contains("OP.ship-v2"));
         assert!(bullets[0].contains("core:A.1"));
         assert!(bullets[0].contains("bastion:B.1"));
     }

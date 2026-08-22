@@ -490,8 +490,8 @@ pub fn render_wave_table(
                 .map(|dep| match dep {
                     BlockedBy::Block(BlockDep { repo, id, .. }) => format!("{repo}:{id}"),
                     BlockedBy::External(ExternalDep { what }) => format!("external:{what}"),
-                    BlockedBy::Operator(OperatorDep { slug, .. }) => format!("operator:{slug}"),
-                    BlockedBy::Approval(ApprovalDep { slug, .. }) => format!("approval:{slug}"),
+                    BlockedBy::Operator(OperatorDep { slug, .. }) => okf_core::op_id(slug),
+                    BlockedBy::Approval(ApprovalDep { slug, .. }) => okf_core::op_id(slug),
                 })
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -798,7 +798,7 @@ fn render_hq_board_line(block: &Block, edges: &[CrossRepoEdge]) -> String {
 /// its Operating Board annotation.
 ///
 /// `Operator` and `Approval` entries render in full rather than as a bare
-/// `operator:<slug>`/`approval:<slug>` gloss (Task 6, `ticket-operator-edge-graph`):
+/// `OP.<slug>` gloss (Task 6, `ticket-operator-edge-graph`):
 /// an operator gate shows its `exit` condition and paste-ready `start` command —
 /// the two things a reader needs to actually clear it — and an approval shows
 /// its `what` explicitly labeled `decision:` so it reads as a one-decision item
@@ -814,9 +814,9 @@ fn render_hq_board_blocker(
         BlockedBy::External(ExternalDep { what }) => format!("external:{what}"),
         BlockedBy::Operator(OperatorDep {
             slug, exit, start, ..
-        }) => format!("operator:{slug} — exit: {exit}; start: `{start}`"),
+        }) => format!("{} — exit: {exit}; start: `{start}`", okf_core::op_id(slug)),
         BlockedBy::Approval(ApprovalDep { slug, what, .. }) => {
-            format!("approval:{slug} — decision: {what}")
+            format!("{} — decision: {what}", okf_core::op_id(slug))
         }
         BlockedBy::Block(BlockDep {
             repo: dep_repo,
@@ -1499,9 +1499,9 @@ pub fn render_epic_sequence_table(
                 // table and the NOW/NEXT/BLOCKED boards read consistently.
                 BlockedBy::Operator(OperatorDep {
                     slug, exit, start, ..
-                }) => format!("operator:{slug} — exit: {exit}; start: `{start}`"),
+                }) => format!("{} — exit: {exit}; start: `{start}`", okf_core::op_id(slug)),
                 BlockedBy::Approval(ApprovalDep { slug, what, .. }) => {
-                    format!("approval:{slug} — decision: {what}")
+                    format!("{} — decision: {what}", okf_core::op_id(slug))
                 }
             })
             .collect();

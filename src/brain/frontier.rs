@@ -46,7 +46,8 @@ pub struct FrontierEntry {
     /// Every unmet `BlockedBy::Block` dependency, rendered `"repo:id"`.
     pub unmet_blocks: Vec<String>,
     /// Every unmet `BlockedBy::Operator`/`Approval`/`External` dependency, rendered
-    /// `"operator:<slug>"` / `"approval:<slug>"` / `"external:<what>"`.
+    /// `"OP.<slug>"` (D76, both operator and approval edges — see
+    /// [`okf_core::op_id`]) / `"external:<what>"`.
     pub unmet_gates: Vec<String>,
     /// `true` iff both `unmet_blocks` and `unmet_gates` are empty.
     pub startable: bool,
@@ -252,10 +253,10 @@ pub fn compute_frontier(
                         }
                     }
                     BlockedBy::Operator(OperatorDep { slug, .. }) => {
-                        unmet_gates.push(format!("operator:{slug}"));
+                        unmet_gates.push(okf_core::op_id(slug));
                     }
                     BlockedBy::Approval(ApprovalDep { slug, .. }) => {
-                        unmet_gates.push(format!("approval:{slug}"));
+                        unmet_gates.push(okf_core::op_id(slug));
                     }
                     BlockedBy::External(ExternalDep { what }) => {
                         unmet_gates.push(format!("external:{what}"));
@@ -663,7 +664,7 @@ mod tests {
         let entry = &frontier.entries[0];
         assert!(!entry.startable);
         assert!(entry.unmet_blocks.is_empty());
-        assert_eq!(entry.unmet_gates, vec!["operator:review-plan".to_string()]);
+        assert_eq!(entry.unmet_gates, vec!["OP.review-plan".to_string()]);
     }
 
     fn track_block_with_priority(
@@ -904,7 +905,7 @@ mod tests {
                     title: "Lanes endpoint".to_string(),
                     status: "open".to_string(),
                     unmet_blocks: vec!["mev:MV.13.B".to_string()],
-                    unmet_gates: vec!["operator:review-plan".to_string()],
+                    unmet_gates: vec!["OP.review-plan".to_string()],
                     startable: false,
                 },
             ],
@@ -917,7 +918,7 @@ mod tests {
         assert_eq!(lines[0], "alpha/derive#0 mev:MV.13.A — startable");
         assert_eq!(
             lines[1],
-            "alpha/console#1 bastion:BA.19.C — blocked by mev:MV.13.B, operator:review-plan"
+            "alpha/console#1 bastion:BA.19.C — blocked by mev:MV.13.B, OP.review-plan"
         );
     }
 

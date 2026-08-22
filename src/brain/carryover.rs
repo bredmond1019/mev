@@ -2340,8 +2340,8 @@ fn unmet_carryover_block_keys(
         .iter()
         .filter_map(|edge| match edge {
             BlockedBy::External(ExternalDep { what }) => Some(format!("external:{what}")),
-            BlockedBy::Operator(OperatorDep { slug, .. }) => Some(format!("operator:{slug}")),
-            BlockedBy::Approval(ApprovalDep { slug, .. }) => Some(format!("approval:{slug}")),
+            BlockedBy::Operator(OperatorDep { slug, .. }) => Some(okf_core::op_id(slug)),
+            BlockedBy::Approval(ApprovalDep { slug, .. }) => Some(okf_core::op_id(slug)),
             BlockedBy::Block(BlockDep { repo, id, .. }) => {
                 let target_repo = if repo.is_empty() {
                     entry.repo.as_str()

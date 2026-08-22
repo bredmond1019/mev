@@ -187,14 +187,15 @@ fn render_block_line(block: &TrackBlock) -> String {
 }
 
 /// Render one dependency edge to its `"{repo}:{id}"` / `"external:{what}"` /
-/// `"operator:{slug}"` / `"approval:{slug}"` label, matching
+/// `"OP.<slug>"` (D76, both operator and approval edges — see
+/// [`okf_core::op_id`]) label, matching
 /// [`crate::brain::emit::render_wave_table`]'s existing convention.
 fn dep_label(dep: &BlockedBy) -> String {
     match dep {
         BlockedBy::Block(b) => format!("{}:{}", b.repo, b.id),
         BlockedBy::External(e) => format!("external:{}", e.what),
-        BlockedBy::Operator(o) => format!("operator:{}", o.slug),
-        BlockedBy::Approval(a) => format!("approval:{}", a.slug),
+        BlockedBy::Operator(o) => okf_core::op_id(&o.slug),
+        BlockedBy::Approval(a) => okf_core::op_id(&a.slug),
     }
 }
 
