@@ -17,7 +17,7 @@ pub(crate) mod consumers;
 mod epics_index;
 mod project_cache;
 mod sibling;
-mod toolchain;
+pub mod toolchain;
 
 use serde::Serialize;
 use std::path::PathBuf;

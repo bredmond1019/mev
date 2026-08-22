@@ -87,6 +87,32 @@ fn verdict(
     (CheckStatus::Pass, Vec::new(), None)
 }
 
+/// Build the `--build-stamp` JSON payload from raw stamp values, pure and testable without
+/// touching the compiled-in consts.
+///
+/// This is a pinned cross-repo contract with bastion's `src/buildstamp.rs` (see
+/// `MV.ticket.toolchain-freshness-covers-the-writer`) — the key set
+/// (`git_sha`, `dirty`, `source_dir`) must never gain, lose, or rename a key. `dirty` is a
+/// JSON boolean when the raw stamp is the literal `"0"`/`"1"`, and the JSON string
+/// `"unknown"` for anything else — never guessed.
+pub fn stamp_json_from(git_sha: &str, dirty: &str, source_dir: &str) -> serde_json::Value {
+    let dirty_value = match dirty {
+        "0" => serde_json::Value::Bool(false),
+        "1" => serde_json::Value::Bool(true),
+        _ => serde_json::Value::String("unknown".to_string()),
+    };
+    serde_json::json!({
+        "git_sha": git_sha,
+        "dirty": dirty_value,
+        "source_dir": source_dir,
+    })
+}
+
+/// The `--build-stamp` JSON payload for this compiled binary.
+pub fn stamp_json() -> serde_json::Value {
+    stamp_json_from(STAMPED_SHA, STAMPED_DIRTY, STAMPED_SOURCE_DIR)
+}
+
 /// Run `git rev-parse HEAD` in `source_dir` now, returning `None` if git or the command
 /// is unavailable.
 fn live_head(source_dir: &str) -> Option<String> {
@@ -222,6 +248,43 @@ mod tests {
         assert_eq!(status, CheckStatus::Pass);
         assert!(findings.is_empty());
         assert!(reason.is_none());
+    }
+
+    #[test]
+    fn stamp_json_from_reports_clean_boolean_dirty() {
+        let v = stamp_json_from("abc123", "0", "/tmp/src");
+        assert_eq!(v["git_sha"], serde_json::json!("abc123"));
+        assert_eq!(v["dirty"], serde_json::json!(false));
+        assert_eq!(v["source_dir"], serde_json::json!("/tmp/src"));
+    }
+
+    #[test]
+    fn stamp_json_from_reports_dirty_boolean_true() {
+        let v = stamp_json_from("abc123", "1", "/tmp/src");
+        assert_eq!(v["dirty"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn stamp_json_from_reports_unknown_dirty_as_string_not_guessed() {
+        let v = stamp_json_from("unknown", "unknown", "/tmp/src");
+        assert_eq!(v["dirty"], serde_json::json!("unknown"));
+    }
+
+    #[test]
+    fn stamp_json_from_has_exactly_three_keys() {
+        let v = stamp_json_from("abc123", "0", "/tmp/src");
+        let obj = v.as_object().expect("stamp json must be an object");
+        assert_eq!(obj.len(), 3);
+        assert!(obj.contains_key("git_sha"));
+        assert!(obj.contains_key("dirty"));
+        assert!(obj.contains_key("source_dir"));
+    }
+
+    #[test]
+    fn stamp_json_uses_compiled_in_consts() {
+        let v = stamp_json();
+        assert_eq!(v["git_sha"], serde_json::json!(STAMPED_SHA));
+        assert_eq!(v["source_dir"], serde_json::json!(STAMPED_SOURCE_DIR));
     }
 
     #[test]

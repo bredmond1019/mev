@@ -33,8 +33,19 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Print this binary's build provenance (git_sha, dirty, source_dir) as one JSON line
+    /// to stdout and exit immediately — before any subcommand runs. This is the
+    /// cross-binary contract `toolchain-freshness` uses to query other registered corpus
+    /// writers (see `MV.ticket.toolchain-freshness-covers-the-writer`); do not add, rename,
+    /// or drop a key from the emitted shape.
+    #[arg(long, global = true)]
+    build_stamp: bool,
+
+    /// Optional so `mev --build-stamp` can run with no subcommand at all; every other
+    /// invocation still requires one (enforced in `main()`, since clap can't express
+    /// "required unless --build-stamp" declaratively here).
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -1859,7 +1870,24 @@ fn print_conformance_report(report: &mev::ConformanceReport) {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match cli.command {
+
+    if cli.build_stamp {
+        match serde_json::to_string(&mev::brain::conformance::toolchain::stamp_json()) {
+            Ok(s) => println!("{s}"),
+            Err(err) => {
+                eprintln!("error serializing build stamp: {err:#}");
+                return ExitCode::FAILURE;
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    let Some(command) = cli.command else {
+        eprintln!("error: a subcommand is required (or pass --build-stamp)");
+        return ExitCode::FAILURE;
+    };
+
+    match command {
         Command::Validate { path, blog, lint } => {
             // The positional's default is resolved here rather than in the derive so it can
             // depend on --blog: leaving the clap default off the blog case keeps the existing
