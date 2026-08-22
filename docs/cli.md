@@ -1478,7 +1478,7 @@ held (`E_EMIT_LOCK_HELD` on `--write`), or a write failure.
 
 ---
 
-### `set-block-status <repo:id> <status> [path] [--write] [--force-operator-gate]`
+### `set-block-status <repo:id> <status> [path] [--write] [--force-operator-gate] [--scope <slug>]`
 
 Set **one** block's authored `status` in its repo's `planning/state.json`. The
 block-level counterpart to the epic commands above: those move a whole initiative,
@@ -1534,6 +1534,15 @@ whenever stdin is not a TTY — there is no other bypass, and no priority
 threshold exempts a block from the gate. The gate only guards *starting*; moving
 an operator-gated block to any other status needs no override.
 
+**`--scope <slug>` narrows only the chained `emit-state` regeneration, not the write itself** —
+the authored status flip is always exactly one block in its own repo's `state.json`, scope or not.
+Resolved identically to [`emit-state`'s `--scope`](#emit-state---write-path) via
+`BrainConfig::scope_dependencies` — same `E_EMIT_UNKNOWN_SCOPE` error and message on an unknown or
+blank slug, so the two commands can never drift on what a slug resolves to. Omitting `--scope`
+regenerates every derived surface fleet-wide, byte-identical to this command's behavior before
+`--scope` existed. Reach for it the same way `emit-state --scope` recommends: when closing a block
+in one repo's own workflow and only that repo's derived surfaces need to agree with the new status.
+
 ```bash
 # What would closing MV.10.A change? (dry run — writes nothing)
 mev set-block-status mev:MV.10.A closed ~/Dev/agentic-portfolio
@@ -1552,6 +1561,9 @@ mev set-block-status mev:MV.10.C in_progress ~/Dev/agentic-portfolio --write --f
 
 # Machine-readable
 mev --json set-block-status mev:MV.10.A in_progress --write
+
+# Close a block, regenerating only that repo's own derived surfaces
+mev set-block-status mev:MV.10.A closed ~/Dev/agentic-portfolio --write --scope mev
 ```
 
 Exit codes: `0` planned (dry-run), applied, or already at the target status · `1`
@@ -1566,6 +1578,7 @@ any error-severity diagnostic or a write failure.
 | `E_EMIT_LOCK_HELD` | another mev write holds the brain-root advisory lock |
 | `E_BLOCK_OPERATOR_GATED` | `--write`ing a block to `in_progress` while it carries an unmet `Operator` `depends_on` edge, without `--force-operator-gate` |
 | `E_FORCE_OPERATOR_GATE_NOT_TTY` | `--force-operator-gate` was passed but stdin is not a TTY |
+| `E_EMIT_UNKNOWN_SCOPE` | `--scope` names a slug with no matching `[[repos]]` entry in `brain.toml`; the message names every valid slug |
 
 ---
 
