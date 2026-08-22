@@ -2150,7 +2150,7 @@ pub fn frontier_brain(root: &std::path::Path) -> anyhow::Result<brain::frontier:
     }
 
     let (lane_files, _discover_diags) = discover_lane_files(root);
-    let (lane_positions, _derive_diags) = derive_lane_positions(&lane_files);
+    let (lane_positions, _derive_diags) = derive_lane_positions(&lane_files, &loaded);
 
     let graph = build_state_graph(&loaded);
     let scope = BlockGraphScope {
@@ -2214,7 +2214,7 @@ pub fn lanes_brain(
     }
 
     let (lane_files, _discover_diags) = discover_lane_files(root);
-    let (lane_positions, _derive_diags) = derive_lane_positions(&lane_files);
+    let (lane_positions, _derive_diags) = derive_lane_positions(&lane_files, &loaded);
 
     let graph = build_state_graph(&loaded);
     let scope = BlockGraphScope {

@@ -39,7 +39,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::Diagnostic;
-use crate::brain::state::{StateFile, StateSource};
+use crate::brain::state::{BlockDep, BlockedBy, StateFile, StateSource, TrackBlock};
 
 /// Name of the directory holding roadmaps under the current (non-legacy) layout.
 const ROADMAPS_DIR: &str = "roadmaps";
@@ -620,14 +620,135 @@ pub struct LaneBlockPosition {
     pub directives: Option<LaneDirectives>,
 }
 
-/// Segment one [`LaneFile`]'s blocks (via [`segment_lane_blocks`]) and stamp the lane's
-/// structured directives (see [`LaneDirectives`]) onto every resulting [`LaneSegment`] —
-/// the directives describe the whole lane, so every segment of it carries the same value
-/// (`None` when the lane declared none), never a per-segment default.
-pub fn segment_lane_file_segments(lane_file: &LaneFile) -> Vec<LaneSegment> {
-    let mut segments = segment_lane_blocks(&lane_file.blocks);
-    for seg in &mut segments {
+/// Build a `"repo:id"` -> [`TrackBlock`] index across every loaded `state.json`, the
+/// local equivalent of `frontier.rs`'s private `track_block_index` — kept as a separate
+/// copy rather than made `pub` there, per this task's scope.
+fn dependency_block_index(files: &[(StateSource, StateFile)]) -> HashMap<String, &TrackBlock> {
+    let mut index = HashMap::new();
+    for (src, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let key = format!("{}:{}", src.repo_slug, block.id);
+                index.insert(key, block);
+            }
+        }
+    }
+    index
+}
+
+/// Further split one repo-grouped [`LaneSegment`] at every block (other than the
+/// first) that carries a real, unmet dependency — an `Operator`/`Approval`/`External`
+/// edge, a `Block` edge to an open target in a different repo, or a `Block` edge to an
+/// open target present in no lane file anywhere. This is what makes a long same-repo
+/// run report its real internal barriers instead of hiding them behind one segment
+/// (see this task's spec).
+///
+/// A `Block` edge whose target is already `closed`, or whose target already appears
+/// **earlier in the sub-segment currently being built**, never splits — lane order is
+/// load-bearing: a dependency the lane itself will have already closed by the time
+/// execution reaches this block is not a real blocker. `seen` resets to empty at the
+/// start of each new sub-segment for exactly this reason.
+///
+/// **Documented non-split case, deliberately out of scope**: a same-repo, not-yet-closed
+/// dependency whose target appears in *some* lane file (just not earlier in this one)
+/// does not split here — the correct behaviour for that case is unspecified by this
+/// task, so this function does not guess at it.
+pub fn split_segment_on_unmet_dependencies(
+    seg: LaneSegment,
+    loaded: &[(StateSource, StateFile)],
+    all_lane_files: &[LaneFile],
+) -> Vec<LaneSegment> {
+    if seg.blocks.len() <= 1 {
+        return vec![seg];
+    }
+
+    let block_index = dependency_block_index(loaded);
+    let global_status = crate::brain::emit::global_status_map(loaded);
+    let known_lane_keys: HashSet<String> = all_lane_files
+        .iter()
+        .flat_map(|lf| lf.blocks.iter().map(|b| format!("{}:{}", b.repo, b.id)))
+        .collect();
+
+    let mut out: Vec<LaneSegment> = Vec::new();
+    let mut current: Vec<LaneSegmentBlock> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for (i, block) in seg.blocks.into_iter().enumerate() {
+        let block_key = format!("{}:{}", seg.repo, block.id);
+
+        let should_split = i > 0
+            && block_index.get(&block_key).is_some_and(|tb| {
+                tb.depends_on.iter().any(|dep| match dep {
+                    BlockedBy::Operator(_) | BlockedBy::Approval(_) | BlockedBy::External(_) => {
+                        true
+                    }
+                    BlockedBy::Block(BlockDep { repo, id, .. }) => {
+                        let target_key = format!("{repo}:{id}");
+                        let target_status = global_status
+                            .get(&target_key)
+                            .cloned()
+                            .flatten()
+                            .unwrap_or_else(|| "open".to_string());
+                        if target_status == "closed" || seen.contains(&target_key) {
+                            false
+                        } else if repo != &seg.repo {
+                            true
+                        } else {
+                            !known_lane_keys.contains(&target_key)
+                        }
+                    }
+                })
+            });
+
+        if should_split && !current.is_empty() {
+            out.push(LaneSegment {
+                repo: seg.repo.clone(),
+                segment: 0, // renumbered by the caller once every split is known
+                blocks: std::mem::take(&mut current),
+                directives: seg.directives.clone(),
+            });
+            seen.clear();
+        }
+
+        seen.insert(block_key);
+        current.push(block);
+    }
+
+    if !current.is_empty() {
+        out.push(LaneSegment {
+            repo: seg.repo.clone(),
+            segment: 0,
+            blocks: current,
+            directives: seg.directives,
+        });
+    }
+
+    out
+}
+
+/// Segment one [`LaneFile`]'s blocks (via [`segment_lane_blocks`]), further split each
+/// resulting repo-grouped segment at every mid-run unmet dependency (via
+/// [`split_segment_on_unmet_dependencies`]), then stamp the lane's structured
+/// directives (see [`LaneDirectives`]) onto every resulting [`LaneSegment`] and
+/// renumber `segment`/`position` sequentially, 0-based — the directives describe the
+/// whole lane, so every segment of it carries the same value (`None` when the lane
+/// declared none), never a per-segment default.
+pub fn segment_lane_file_segments(
+    lane_file: &LaneFile,
+    loaded: &[(StateSource, StateFile)],
+    all_lane_files: &[LaneFile],
+) -> Vec<LaneSegment> {
+    let mut segments: Vec<LaneSegment> = segment_lane_blocks(&lane_file.blocks)
+        .into_iter()
+        .flat_map(|seg| split_segment_on_unmet_dependencies(seg, loaded, all_lane_files))
+        .collect();
+
+    for (seg_idx, seg) in segments.iter_mut().enumerate() {
+        seg.segment = seg_idx;
         seg.directives = lane_file.directives.clone();
+        for (pos_idx, block) in seg.blocks.iter_mut().enumerate() {
+            block.position = pos_idx;
+        }
     }
     segments
 }
@@ -635,8 +756,12 @@ pub fn segment_lane_file_segments(lane_file: &LaneFile) -> Vec<LaneSegment> {
 /// Segment one [`LaneFile`]'s blocks (via [`segment_lane_file_segments`]) and flatten the
 /// result into one [`LaneBlockPosition`] per block, each carrying its owning lane
 /// file's `roadmap`/`lane`.
-pub fn segment_lane_file(lane_file: &LaneFile) -> Vec<LaneBlockPosition> {
-    segment_lane_file_segments(lane_file)
+pub fn segment_lane_file(
+    lane_file: &LaneFile,
+    loaded: &[(StateSource, StateFile)],
+    all_lane_files: &[LaneFile],
+) -> Vec<LaneBlockPosition> {
+    segment_lane_file_segments(lane_file, loaded, all_lane_files)
         .into_iter()
         .flat_map(|seg| {
             let LaneSegment {
@@ -739,10 +864,11 @@ pub struct DerivedBlockPosition {
 /// [`plan_lane_segments`] and its sibling planners; it is always empty today.
 pub fn derive_lane_positions(
     lane_files: &[LaneFile],
+    loaded: &[(StateSource, StateFile)],
 ) -> (Vec<DerivedBlockPosition>, Vec<Diagnostic>) {
     let mut out = Vec::new();
     for lf in lane_files {
-        for p in segment_lane_file(lf) {
+        for p in segment_lane_file(lf, loaded, lane_files) {
             out.push(DerivedBlockPosition {
                 roadmap: p.roadmap,
                 lane: p.lane,
@@ -815,7 +941,7 @@ pub fn plan_lane_segments(
             .extend(unresolved_owner_diagnostics(lf, &owner_index));
     }
 
-    let (blocks, derive_diags) = derive_lane_positions(&lane_files);
+    let (blocks, derive_diags) = derive_lane_positions(&lane_files, loaded);
     plan.diagnostics.extend(derive_diags);
 
     let block_count = blocks.len();
@@ -886,14 +1012,14 @@ pub fn roadmap_slug_from_plan_path(plan: &str) -> Option<String> {
 /// diagnostic twice in one run would double-count it.
 pub fn derive_program_membership(
     root: &Path,
-    _files: &[(StateSource, StateFile)],
+    files: &[(StateSource, StateFile)],
 ) -> HashMap<String, Vec<DerivedBlockPosition>> {
     let (lane_files, _discover_diags) = discover_lane_files(root);
     if lane_files.is_empty() {
         return HashMap::new();
     }
 
-    let (blocks, _derive_diags) = derive_lane_positions(&lane_files);
+    let (blocks, _derive_diags) = derive_lane_positions(&lane_files, files);
 
     let mut by_roadmap: HashMap<String, Vec<DerivedBlockPosition>> = HashMap::new();
     for b in blocks {
@@ -1497,7 +1623,7 @@ mod tests {
             ]),
             directives: None,
         };
-        let positions = segment_lane_file(&lane_file);
+        let positions = segment_lane_file(&lane_file, &[], &[]);
 
         assert_eq!(positions.len(), 3);
         for p in &positions {
@@ -1513,6 +1639,219 @@ mod tests {
         assert_eq!(positions[2].repo, "repoB");
         assert_eq!(positions[2].segment, 1);
         assert_eq!(positions[2].position, 1);
+    }
+
+    // -- split_segment_on_unmet_dependencies: dependency-aware sub-segmentation -------
+
+    /// Build one loaded `state.json` entry for repo `repo`, carrying a single
+    /// `TrackBlock` `id` with authored `status` and raw JSON `depends_on` array.
+    fn state_file_with_block(
+        repo: &str,
+        id: &str,
+        status: &str,
+        depends_on_json: &str,
+    ) -> (StateSource, StateFile) {
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: PathBuf::from(format!("{repo}/planning/state.json")),
+            expected_kind: "project",
+        };
+        let file: StateFile = serde_json::from_str(&format!(
+            r#"{{"repo":"{repo}","kind":"project","updated":"2026-08-14","tracks":[
+                {{"title":"t","blocks":[{{"id":"{id}","title":"x","status":"{status}","depends_on":{depends_on_json}}}]}}
+            ]}}"#
+        ))
+        .unwrap();
+        (src, file)
+    }
+
+    /// The one repo-grouped segment `split_segment_on_unmet_dependencies` splits, in
+    /// every test below: three same-repo blocks, `A.1`, `A.2`, `A.3`.
+    fn three_block_mev_segment() -> LaneSegment {
+        let blocks = refs(&[
+            ("A.1", "alpha", "mev"),
+            ("A.2", "alpha", "mev"),
+            ("A.3", "alpha", "mev"),
+        ]);
+        segment_lane_blocks(&blocks).into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn split_on_unmet_dependencies_operator_edge_splits_mid_run() {
+        let seg = three_block_mev_segment();
+        let loaded = vec![state_file_with_block(
+            "mev",
+            "A.2",
+            "open",
+            r#"[{"type":"operator","slug":"s","exit":"e","start":"c"}]"#,
+        )];
+
+        let out = split_segment_on_unmet_dependencies(seg, &loaded, &[]);
+        assert_eq!(out.len(), 2, "expected a split at A.2, got {out:?}");
+        assert_eq!(
+            out[0].blocks.iter().map(|b| &b.id).collect::<Vec<_>>(),
+            ["A.1"]
+        );
+        assert_eq!(
+            out[1].blocks.iter().map(|b| &b.id).collect::<Vec<_>>(),
+            ["A.2", "A.3"]
+        );
+    }
+
+    #[test]
+    fn split_on_unmet_dependencies_approval_edge_splits_mid_run() {
+        let seg = three_block_mev_segment();
+        let loaded = vec![state_file_with_block(
+            "mev",
+            "A.2",
+            "open",
+            r#"[{"type":"approval","slug":"s","what":"decide","digest":"d"}]"#,
+        )];
+
+        let out = split_segment_on_unmet_dependencies(seg, &loaded, &[]);
+        assert_eq!(out.len(), 2, "expected a split at A.2, got {out:?}");
+    }
+
+    #[test]
+    fn split_on_unmet_dependencies_external_edge_splits_mid_run() {
+        let seg = three_block_mev_segment();
+        let loaded = vec![state_file_with_block(
+            "mev",
+            "A.2",
+            "open",
+            r#"[{"type":"external","what":"waiting on a vendor"}]"#,
+        )];
+
+        let out = split_segment_on_unmet_dependencies(seg, &loaded, &[]);
+        assert_eq!(out.len(), 2, "expected a split at A.2, got {out:?}");
+    }
+
+    #[test]
+    fn split_on_unmet_dependencies_open_cross_repo_block_edge_splits() {
+        let seg = three_block_mev_segment();
+        let loaded = vec![
+            state_file_with_block(
+                "mev",
+                "A.2",
+                "open",
+                r#"[{"type":"block","repo":"other","id":"X"}]"#,
+            ),
+            state_file_with_block("other", "X", "open", "[]"),
+        ];
+
+        let out = split_segment_on_unmet_dependencies(seg, &loaded, &[]);
+        assert_eq!(
+            out.len(),
+            2,
+            "expected a split on an open cross-repo target, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn split_on_unmet_dependencies_closed_cross_repo_block_edge_does_not_split() {
+        // Identical fixture to the test above, except the target is closed.
+        let seg = three_block_mev_segment();
+        let loaded = vec![
+            state_file_with_block(
+                "mev",
+                "A.2",
+                "open",
+                r#"[{"type":"block","repo":"other","id":"X"}]"#,
+            ),
+            state_file_with_block("other", "X", "closed", "[]"),
+        ];
+
+        let out = split_segment_on_unmet_dependencies(seg, &loaded, &[]);
+        assert_eq!(
+            out.len(),
+            1,
+            "a closed target must never split, got {out:?}"
+        );
+        assert_eq!(out[0].blocks.len(), 3);
+    }
+
+    #[test]
+    fn split_on_unmet_dependencies_same_repo_target_earlier_in_subsegment_does_not_split() {
+        // A.2 depends on A.1 (open, same repo) — but A.1 already precedes A.2 in the
+        // same sub-segment being built, so lane order already satisfies it.
+        let seg = three_block_mev_segment();
+        let loaded = vec![
+            state_file_with_block(
+                "mev",
+                "A.2",
+                "open",
+                r#"[{"type":"block","repo":"mev","id":"A.1"}]"#,
+            ),
+            state_file_with_block("mev", "A.1", "open", "[]"),
+        ];
+
+        let out = split_segment_on_unmet_dependencies(seg, &loaded, &[]);
+        assert_eq!(
+            out.len(),
+            1,
+            "an order-satisfied same-segment dependency must not split, got {out:?}"
+        );
+        assert_eq!(out[0].blocks.len(), 3);
+    }
+
+    #[test]
+    fn split_on_unmet_dependencies_open_target_absent_from_every_lane_file_splits() {
+        // A.2 depends on mev:GHOST, open, same repo, not earlier in this sub-segment,
+        // and absent from every lane file in the corpus — a real, invisible-to-any-lane
+        // blocker.
+        let seg = three_block_mev_segment();
+        let loaded = vec![state_file_with_block(
+            "mev",
+            "A.2",
+            "open",
+            r#"[{"type":"block","repo":"mev","id":"GHOST"}]"#,
+        )];
+
+        let out = split_segment_on_unmet_dependencies(seg, &loaded, &[]);
+        assert_eq!(
+            out.len(),
+            2,
+            "an open target present in no lane file must split, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn segment_lane_file_segments_renumbers_segment_and_position_after_a_split() {
+        let lane_file = LaneFile {
+            roadmap: "alpha".to_string(),
+            lane: "substrate".to_string(),
+            path: PathBuf::from("planning/roadmaps/alpha/lane-substrate.json"),
+            blocks: refs(&[
+                ("A.1", "alpha", "mev"),
+                ("A.2", "alpha", "mev"),
+                ("A.3", "alpha", "mev"),
+            ]),
+            directives: None,
+        };
+        let loaded = vec![state_file_with_block(
+            "mev",
+            "A.2",
+            "open",
+            r#"[{"type":"operator","slug":"s","exit":"e","start":"c"}]"#,
+        )];
+
+        let segments = segment_lane_file_segments(&lane_file, &loaded, &[lane_file.clone()]);
+
+        assert_eq!(segments.len(), 2, "expected 2 segments, got {segments:?}");
+
+        assert_eq!(segments[0].segment, 0);
+        assert_eq!(segments[0].repo, "mev");
+        assert_eq!(segments[0].blocks.len(), 1);
+        assert_eq!(segments[0].blocks[0].id, "A.1");
+        assert_eq!(segments[0].blocks[0].position, 0);
+
+        assert_eq!(segments[1].segment, 1);
+        assert_eq!(segments[1].repo, "mev");
+        assert_eq!(segments[1].blocks.len(), 2);
+        assert_eq!(segments[1].blocks[0].id, "A.2");
+        assert_eq!(segments[1].blocks[0].position, 0);
+        assert_eq!(segments[1].blocks[1].id, "A.3");
+        assert_eq!(segments[1].blocks[1].position, 1);
     }
 
     // -- An authored repo the corpus does not know ------------------------------------
@@ -1558,7 +1897,7 @@ mod tests {
 
         // Segmentation over the same data still proceeds — the block still renders
         // under its authored (unknown) repo, it is never omitted.
-        let positions = segment_lane_file(&lane_file);
+        let positions = segment_lane_file(&lane_file, &[], &[]);
         let ids: Vec<&str> = positions.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["A.1", "GHOST.id", "A.2"]);
     }
@@ -1595,7 +1934,7 @@ mod tests {
             ]),
             directives: None,
         }];
-        let (positions, diags) = derive_lane_positions(&files);
+        let (positions, diags) = derive_lane_positions(&files, &[]);
         assert!(diags.is_empty());
         assert_eq!(positions.len(), 2);
         assert!(
@@ -1635,7 +1974,7 @@ mod tests {
                 directives: None,
             },
         ];
-        let (positions, diags) = derive_lane_positions(&files);
+        let (positions, diags) = derive_lane_positions(&files, &[]);
         assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
         assert_eq!(
             positions.len(),

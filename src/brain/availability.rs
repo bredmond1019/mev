@@ -1019,7 +1019,7 @@ pub fn plan_availability(root: &Path, loaded: &[(StateSource, StateFile)]) -> Em
             .extend(unresolved_owner_diagnostics(lf, &owner_index));
     }
 
-    let (lane_positions, derive_diags) = derive_lane_positions(&lane_files);
+    let (lane_positions, derive_diags) = derive_lane_positions(&lane_files, loaded);
     plan.diagnostics.extend(derive_diags);
 
     // `config` feeds both the block-graph export's TIER stage (a no-op here,

@@ -420,7 +420,7 @@ pub fn plan_frontier(root: &Path, loaded: &[(StateSource, StateFile)]) -> EmitPl
             .extend(unresolved_owner_diagnostics(lf, &owner_index));
     }
 
-    let (lane_positions, derive_diags) = derive_lane_positions(&lane_files);
+    let (lane_positions, derive_diags) = derive_lane_positions(&lane_files, loaded);
     plan.diagnostics.extend(derive_diags);
 
     // `config` only feeds the block-graph export's TIER stage, which is a no-op here
