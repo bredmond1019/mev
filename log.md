@@ -15,6 +15,44 @@ timestamp: "2026-08-21T16:05:00-03:00"
 
 ## [run: 2026-08-22]
 
+`MV.ticket.op-slug-rendering-and-sweep` ran tasks 1-6 via `/sdlc-flow` on a worktree branch and
+BAILED at task 6. Task 1 replaced every hand-rolled `operator:`/`approval:` prefix render at the
+gate call sites in `src/brain/frontier.rs`, `emit.rs`, `master_plan.rs`, and `carryover.rs` with
+`okf_core::op_id(slug)` (D76's `OP.<slug>` form), fully-qualified rather than newly imported, to
+match those files' existing style. Task 2 added `check_op_slug_stutter` in `src/brain/state.rs`
+(wired into `src/lib.rs`'s per-file diagnostic loop), emitting a warning-only
+`W_STATE_OP_SLUG_STUTTER` for every operator/approval `depends_on` edge whose slug stutters per
+`okf_core::op_slug_stutters`. Task 3 added `mev normalize-op-slugs [--write]`: a fleet-wide,
+per-slug atomic rename of stuttering operator/approval slugs with two-case collision detection
+(two stuttering slugs colliding on one target, and a stuttering slug's target colliding with an
+existing untouched slug), dry-run by default, wired through the standard lock/worktree-guard/
+emit-state chain. Task 4 added `tests/normalize_op_slugs.rs`, a 5-case CLI integration suite
+covering dry-run, multi-repo atomic `--write` + emit-state chain, collision abort (with a
+byte-identical rollback proof), and linked-worktree refusal. Task 5 documented the new subcommand
+in `docs/cli.md`, alongside the `OP.<slug>` rendering change. Task 6, the spec's designated
+full-suite validation task, made no code changes: fmt, clippy `-D warnings`, `cargo test`, the
+release build, and `normalize-op-slugs --help` all passed, but
+`tests/fleet_regression.rs::fleet_readiness_is_unchanged_for_blocks_without_a_new_edge` failed —
+environmental drift in base-template's/brain's live `state.json`
+(`BT.ticket.engine-docs-drift-tripwire` missing from derived `focus.next`), independent of this
+task's code changes. Reconfirmed in this triage turn by running `cargo nextest run --test
+fleet_regression fleet_readiness_is_unchanged_for_blocks_without_a_new_edge` directly on base
+commit `ecf32fb` (HEAD of the main mev tree, no `op-slug-rendering-and-sweep` changes present),
+which produced the identical drift failure. BAILED rather than expanding scope into fixing the
+fleet's live drift. Next: the fleet's live `state.json` needs `BT.ticket.engine-docs-drift-
+tripwire` reconciled into `focus.next` (or the regression fixture needs to be re-pinned to
+tolerate this class of drift) before `fleet_regression`'s full suite can pass clean again; once
+that lands, MV.ticket.op-slug-rendering-and-sweep can re-run task 6 to close.
+
+```
+2a45079 feat: implement MV.ticket.op-slug-rendering-and-sweep-task5
+40373c2 feat: implement MV.ticket.op-slug-rendering-and-sweep-task4
+a0f10ca feat: implement MV.ticket.op-slug-rendering-and-sweep-task3
+8230c06 feat: implement MV.ticket.op-slug-rendering-and-sweep-task2
+f1da46d feat: implement MV.ticket.op-slug-rendering-and-sweep-task1
+03d92f3 chore: init worktree MV.ticket.op-slug-rendering-and-sweep-flow
+```
+
 `MV.ticket.lane-segmentation-ignores-dependencies` ran tasks 1-3 via `/sdlc-flow` on a worktree
 branch and BAILED at task 3. Task 1 extended `segment_lane_file_segments` (`src/brain/lane_segments.rs`)
 to further split a repo-grouped run at any mid-run block carrying an unmet operator/approval/external
