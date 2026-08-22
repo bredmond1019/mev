@@ -1328,6 +1328,52 @@ pub fn reject(root: &std::path::Path, slug: &str) -> anyhow::Result<Report> {
     Ok(report)
 }
 
+/// Normalize every stuttering operator/approval slug in the corpus
+/// (`mev normalize-op-slugs [--write]`).
+///
+/// Renames every `depends_on` `operator`/`approval` edge carrying a stuttering
+/// slug ([`okf_core::op_slug_stutters`]) to its normalized target
+/// ([`okf_core::normalize_op_slug`]), fleet-wide, atomically per slug — see
+/// [`brain::operator::plan_normalize_op_slugs`] for the collision-detection and
+/// atomicity contract.
+///
+/// Dry-run by default: without `write` the full computed plan is reported (one
+/// [`brain::operator::I_NORMALIZE_OP_SLUG_PLAN`] diagnostic per distinct rename,
+/// plus `apply_plan`'s per-file `W_EMIT_DRY_RUN` notes) and nothing on disk is
+/// touched. On `--write`, re-runs [`emit_state`] afterward so rendered boards
+/// (`OP.<slug>`) reflect the renamed slugs immediately.
+///
+/// Diagnostics:
+/// - [`brain::operator::E_NORMALIZE_OP_SLUG_COLLISION`] — two distinct slugs
+///   would normalize to the same target; the ENTIRE run aborts with no writes,
+///   even for the non-colliding renames in the same corpus.
+/// - `E_STATE_MALFORMED_JSON` / `E_EMIT_INCOMPLETE_CORPUS` — same
+///   corpus-completeness guard as [`close_operator_gate`].
+pub fn normalize_op_slugs(root: &std::path::Path, write: bool) -> anyhow::Result<Report> {
+    use brain::emit::apply_plan;
+    use brain::operator::plan_normalize_op_slugs;
+
+    let mut report = Report::default();
+
+    let Some((_config, loaded)) = load_corpus_for_gate_write(root, &mut report)? else {
+        return Ok(report);
+    };
+
+    let plan = plan_normalize_op_slugs(&loaded);
+
+    let had_actions = !plan.actions.is_empty();
+    report.diagnostics.extend(apply_plan(&plan, write));
+
+    // Regenerate derived views so OP.<slug> boards reflect the rename, only on a
+    // real --write with actions actually applied and no collision/failure.
+    if write && had_actions && !report.is_failure() {
+        let emit = emit_state(root, true, None)?;
+        report.diagnostics.extend(emit.diagnostics);
+    }
+
+    Ok(report)
+}
+
 /// The `MEV_REQUIRE_FRESH` env var name — set by `mev emit-state --write --require-fresh`
 /// as a convenience alias (see `src/main.rs`) rather than threading a new parameter
 /// through [`emit_state`]'s signature, which already has many existing callers

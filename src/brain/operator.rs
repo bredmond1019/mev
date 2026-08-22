@@ -53,6 +53,219 @@ pub const E_APPROVAL_UNKNOWN: &str = "E_APPROVAL_UNKNOWN";
 /// the stored `digest` on (any of) the matching edge(s) — the alarm, per D71.
 pub const E_APPROVAL_DIGEST_MISMATCH: &str = "E_APPROVAL_DIGEST_MISMATCH";
 
+/// Diagnostic code for `mev normalize-op-slugs` refusing the entire run because two
+/// distinct current slugs would normalize onto the same target — merging two
+/// separate gates into one identity is worse than leaving both stuttering, so the
+/// whole run aborts with no writes on either side of the collision.
+pub const E_NORMALIZE_OP_SLUG_COLLISION: &str = "E_NORMALIZE_OP_SLUG_COLLISION";
+
+/// Diagnostic code reporting one entry of the computed `normalize-op-slugs` rename
+/// plan — old slug, normalized target, edge count, and the repos touched. Pushed
+/// once per distinct stuttering slug found in the corpus, dry-run or `--write`
+/// alike, so a dry-run caller sees the whole plan up front rather than having to
+/// reconstruct it from `apply_plan`'s per-file `W_EMIT_DRY_RUN` notes.
+pub const I_NORMALIZE_OP_SLUG_PLAN: &str = "I_NORMALIZE_OP_SLUG_PLAN";
+
+/// Plan `mev normalize-op-slugs [--write]`: rename every `depends_on`
+/// `operator`/`approval` edge carrying a stuttering slug
+/// ([`okf_core::op_slug_stutters`]) to its normalized target
+/// ([`okf_core::normalize_op_slug`]), fleet-wide, atomically per slug.
+///
+/// Structurally this is [`plan_close_operator_gate`]'s discover-corpus-wide,
+/// group-by-slug, mutate-a-working-copy shape, aimed at a rename instead of a
+/// removal — see that function's doc comment for why "atomic per slug" matters:
+/// one slug can gate several blocks across several repos, and renaming some of
+/// its edges but not others would split one gate into two.
+///
+/// # Collision detection runs before any mutation
+///
+/// The full rename plan (every distinct stuttering slug found in the corpus,
+/// mapped to its normalized target) is computed first. If two *different*
+/// current slugs would normalize to the same target, the entire run aborts with
+/// [`E_NORMALIZE_OP_SLUG_COLLISION`] and **no action is planned at all** — not
+/// even for the non-colliding slugs in the same corpus. Silently merging two
+/// distinct gates into one shared identity is a worse outcome than leaving every
+/// stuttering slug exactly as it was; a fleet-wide, all-or-nothing refusal is the
+/// only behavior a caller can safely rely on.
+///
+/// A slug carrying a doubled prefix (`operator-operator-x`) normalizes to
+/// `operator-x` in one pass, which itself still stutters (see
+/// `okf_core::normalize_op_slug`'s doc comment) — that is a legitimate,
+/// non-colliding rename here, cleaned up fully by a second `normalize-op-slugs`
+/// run rather than being treated as a collision with any other `operator-x`-shaped
+/// slug that already exists.
+///
+/// # Reporting
+///
+/// One [`I_NORMALIZE_OP_SLUG_PLAN`] diagnostic is pushed per distinct rename,
+/// naming the old slug, its target, the total edge count, and the repos touched —
+/// this is what makes the plan visible on a dry run, before `apply_plan`'s own
+/// per-file `W_EMIT_DRY_RUN` notes.
+pub fn plan_normalize_op_slugs(files: &[(StateSource, StateFile)]) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+    let here = std::path::Path::new(".");
+
+    fn slug_of(dep: &BlockedBy) -> Option<&str> {
+        match dep {
+            BlockedBy::Operator(OperatorDep { slug, .. }) => Some(slug.as_str()),
+            BlockedBy::Approval(ApprovalDep { slug, .. }) => Some(slug.as_str()),
+            _ => None,
+        }
+    }
+
+    // Step 1: discover every distinct stuttering slug in the corpus and its
+    // normalized target — read-only pass, nothing mutated yet.
+    let mut renames: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for (_, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                for dep in &block.depends_on {
+                    let Some(slug) = slug_of(dep) else { continue };
+                    if okf_core::op_slug_stutters(slug) {
+                        renames
+                            .entry(slug.to_string())
+                            .or_insert_with(|| okf_core::normalize_op_slug(slug).to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if renames.is_empty() {
+        return plan;
+    }
+
+    // Step 2: collision check. Group the distinct OLD slugs by their normalized
+    // target; more than one distinct old slug landing on the same target is the
+    // collision this refuses on, before anything is written.
+    let mut by_target: std::collections::BTreeMap<&str, Vec<&str>> =
+        std::collections::BTreeMap::new();
+    for (old, new) in &renames {
+        by_target
+            .entry(new.as_str())
+            .or_default()
+            .push(old.as_str());
+    }
+    let mut collided = false;
+    for (target, olds) in &by_target {
+        if olds.len() > 1 {
+            collided = true;
+            plan.diagnostics.push(Diagnostic::error(
+                here,
+                E_NORMALIZE_OP_SLUG_COLLISION,
+                format!(
+                    "slugs {olds:?} all normalize to '{target}' — aborting the entire \
+                     normalize-op-slugs run with no writes rather than silently merging \
+                     distinct gates into one shared identity. Rename one of them by hand first."
+                ),
+            ));
+        }
+    }
+
+    // A rename target can also collide with a slug that is NOT itself being
+    // renamed (a non-stuttering slug already in use, identifying an unrelated,
+    // untouched gate) — e.g. "operator-team-a" and "team-a" both present in the
+    // corpus: "operator-team-a" -> "team-a" would silently merge into the
+    // existing "team-a" gate. `renames.contains_key(slug)` excludes any slug that
+    // is itself scheduled to be renamed away in this same pass (the legitimate
+    // double-stutter chain, e.g. "operator-x" existing alongside
+    // "operator-operator-x" — "operator-x" is not "untouched", it renames to "x"
+    // in this same call, so it is not a collision).
+    let mut untouched_slugs: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for (_, file) in files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                for dep in &block.depends_on {
+                    if let Some(slug) = slug_of(dep)
+                        && !renames.contains_key(slug)
+                    {
+                        untouched_slugs.insert(slug);
+                    }
+                }
+            }
+        }
+    }
+    for (old, target) in &renames {
+        if untouched_slugs.contains(target.as_str()) {
+            collided = true;
+            plan.diagnostics.push(Diagnostic::error(
+                here,
+                E_NORMALIZE_OP_SLUG_COLLISION,
+                format!(
+                    "'{old}' normalizes to '{target}', which already identifies a distinct, \
+                     untouched gate in the corpus — aborting the entire normalize-op-slugs run \
+                     with no writes rather than merging them into one shared identity."
+                ),
+            ));
+        }
+    }
+
+    if collided {
+        return plan;
+    }
+
+    // Step 3: mutate a working copy — mirrors plan_close_operator_gate's
+    // "work on a copy" contract, so a caller that never applies the plan cannot
+    // mutate its own corpus. One pass both rewrites the matching slugs and tallies
+    // per-file and per-slug counts for the report below.
+    let mut work: Vec<(StateSource, StateFile)> = files.to_vec();
+    let mut touched_files: std::collections::BTreeMap<usize, usize> =
+        std::collections::BTreeMap::new();
+    let mut per_slug: std::collections::BTreeMap<
+        String,
+        (usize, std::collections::BTreeSet<String>),
+    > = std::collections::BTreeMap::new();
+
+    for (fi, (src, file)) in work.iter_mut().enumerate() {
+        for track in file.tracks.iter_mut() {
+            for block in track.blocks.iter_mut() {
+                for dep in block.depends_on.iter_mut() {
+                    let slug_field: &mut String = match dep {
+                        BlockedBy::Operator(OperatorDep { slug, .. }) => slug,
+                        BlockedBy::Approval(ApprovalDep { slug, .. }) => slug,
+                        _ => continue,
+                    };
+                    let Some(target) = renames.get(slug_field.as_str()) else {
+                        continue;
+                    };
+                    let old = slug_field.clone();
+                    *slug_field = target.clone();
+                    *touched_files.entry(fi).or_insert(0) += 1;
+                    let entry = per_slug
+                        .entry(old)
+                        .or_insert_with(|| (0, std::collections::BTreeSet::new()));
+                    entry.0 += 1;
+                    entry.1.insert(src.repo_slug.clone());
+                }
+            }
+        }
+    }
+
+    // Step 4: report the full plan up front, one diagnostic per distinct rename.
+    for (old, target) in &renames {
+        let (count, repos) = per_slug
+            .get(old)
+            .cloned()
+            .unwrap_or_else(|| (0, std::collections::BTreeSet::new()));
+        let repos_str = repos.into_iter().collect::<Vec<_>>().join(", ");
+        plan.diagnostics.push(Diagnostic::warning(
+            here,
+            I_NORMALIZE_OP_SLUG_PLAN,
+            format!("'{old}' -> '{target}' ({count} edge(s) across: {repos_str})"),
+        ));
+    }
+
+    // Step 5: one EmitAction per touched file, mirroring plan_close_operator_gate.
+    for (fi, count) in touched_files {
+        let note = format!("normalize-op-slugs ({count} edge(s) renamed)");
+        if let Some(a) = action_for(&work[fi].0, &work[fi].1, note) {
+            plan.actions.push(a);
+        }
+    }
+
+    plan
+}
+
 /// Plan the removal of every `{type:"operator", slug: <slug>}` `depends_on` entry
 /// across every loaded file.
 ///
@@ -426,5 +639,191 @@ mod tests {
         assert_eq!(plan.actions.len(), 1);
         assert!(plan.actions[0].new_content.contains("session-other"));
         assert!(!plan.actions[0].new_content.contains("session-mac-mini"));
+    }
+
+    // -- plan_normalize_op_slugs ---------------------------------------------
+
+    #[test]
+    fn normalize_renames_a_stuttering_slug_in_one_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(
+            dir.path(),
+            "mev",
+            &[("MV.1.A", &["operator-mac-mini-visit"])],
+        )];
+        let plan = plan_normalize_op_slugs(&files);
+        assert!(
+            plan.diagnostics
+                .iter()
+                .all(|d| d.severity != crate::Severity::Error),
+            "{:?}",
+            plan.diagnostics
+        );
+        assert!(
+            plan.diagnostics
+                .iter()
+                .any(|d| d.locator == I_NORMALIZE_OP_SLUG_PLAN
+                    && d.message
+                        .contains("'operator-mac-mini-visit' -> 'mac-mini-visit'")),
+            "expected a plan diagnostic naming the rename: {:?}",
+            plan.diagnostics
+        );
+        assert_eq!(plan.actions.len(), 1, "expected one action: {plan:?}");
+        assert!(
+            plan.actions[0]
+                .new_content
+                .contains("\"slug\": \"mac-mini-visit\""),
+            "{}",
+            plan.actions[0].new_content
+        );
+        assert!(
+            !plan.actions[0]
+                .new_content
+                .contains("\"slug\": \"operator-mac-mini-visit\"")
+        );
+    }
+
+    #[test]
+    fn normalize_renames_the_same_slug_across_two_repos_in_one_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![
+            file_for(
+                dir.path(),
+                "mev",
+                &[
+                    ("MV.1.A", &["operator-mac-mini-visit"]),
+                    ("MV.1.B", &["operator-mac-mini-visit"]),
+                ],
+            ),
+            file_for(
+                dir.path(),
+                "bastion",
+                &[("BA.1.A", &["operator-mac-mini-visit"])],
+            ),
+        ];
+        let plan = plan_normalize_op_slugs(&files);
+        assert!(
+            plan.diagnostics
+                .iter()
+                .all(|d| d.severity != crate::Severity::Error),
+            "{:?}",
+            plan.diagnostics
+        );
+        assert_eq!(
+            plan.actions.len(),
+            2,
+            "one action per touched file (2 files): {plan:?}"
+        );
+        for action in &plan.actions {
+            assert!(
+                !action
+                    .new_content
+                    .contains("\"slug\": \"operator-mac-mini-visit\"")
+            );
+            assert!(action.new_content.contains("\"slug\": \"mac-mini-visit\""));
+        }
+        let mev_action = plan
+            .actions
+            .iter()
+            .find(|a| a.path == files[0].0.abs_path)
+            .expect("mev file's action present");
+        assert_eq!(
+            mev_action
+                .new_content
+                .matches("\"slug\": \"mac-mini-visit\"")
+                .count(),
+            2,
+            "both MV.1.A and MV.1.B edges renamed in the same file: {}",
+            mev_action.new_content
+        );
+    }
+
+    #[test]
+    fn normalize_leaves_a_non_stuttering_slug_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(
+            dir.path(),
+            "mev",
+            &[("MV.1.A", &["mac-mini-visit"])],
+        )];
+        let plan = plan_normalize_op_slugs(&files);
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+        assert!(plan.actions.is_empty(), "expected no actions: {plan:?}");
+    }
+
+    #[test]
+    fn normalize_aborts_the_whole_run_when_a_target_collides_with_an_existing_untouched_slug() {
+        // "operator-team-a" and "team-a" differ only in the operator- prefix --
+        // renaming the first would silently merge it into the second's identity.
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![
+            file_for(dir.path(), "mev", &[("MV.1.A", &["operator-team-a"])]),
+            file_for(dir.path(), "bastion", &[("BA.1.A", &["team-a"])]),
+        ];
+        let before: Vec<String> = files
+            .iter()
+            .map(|(src, _)| std::fs::read_to_string(&src.abs_path).unwrap())
+            .collect();
+
+        let plan = plan_normalize_op_slugs(&files);
+
+        assert!(
+            plan.actions.is_empty(),
+            "collision must plan no writes at all: {plan:?}"
+        );
+        assert_eq!(
+            plan.diagnostics
+                .iter()
+                .filter(|d| d.locator == E_NORMALIZE_OP_SLUG_COLLISION)
+                .count(),
+            1,
+            "{:?}",
+            plan.diagnostics
+        );
+
+        // No file was ever touched by apply_plan (nothing to apply since actions
+        // is empty), but also confirm the on-disk bytes are still exactly what
+        // they were before planning -- planning must not itself mutate the corpus.
+        for ((src, _), before) in files.iter().zip(before.iter()) {
+            let after = std::fs::read_to_string(&src.abs_path).unwrap();
+            assert_eq!(
+                &after, before,
+                "file must be byte-identical: {:?}",
+                src.abs_path
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_does_not_treat_a_double_stutter_chain_as_a_collision() {
+        // "operator-operator-x" normalizes in one pass to "operator-x", which
+        // itself still stutters (and would be renamed again on a second call).
+        // "operator-x" existing in the same corpus is not an untouched slug it
+        // merges into -- it is itself being renamed away in this same pass, to
+        // "x" -- so this must proceed, not abort.
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(
+            dir.path(),
+            "mev",
+            &[
+                ("MV.1.A", &["operator-operator-x"]),
+                ("MV.1.B", &["operator-x"]),
+            ],
+        )];
+        let plan = plan_normalize_op_slugs(&files);
+        assert!(
+            plan.diagnostics
+                .iter()
+                .all(|d| d.locator != E_NORMALIZE_OP_SLUG_COLLISION),
+            "double-stutter chain must not be treated as a collision: {:?}",
+            plan.diagnostics
+        );
+        assert_eq!(plan.actions.len(), 1, "{plan:?}");
+        assert!(
+            plan.actions[0]
+                .new_content
+                .contains("\"slug\": \"operator-x\"")
+        );
+        assert!(plan.actions[0].new_content.contains("\"slug\": \"x\""));
     }
 }

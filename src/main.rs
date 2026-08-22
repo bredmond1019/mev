@@ -557,6 +557,50 @@ enum Command {
         #[arg(long = "exit-verified")]
         exit_verified: bool,
     },
+    /// Normalize every stuttering operator/approval slug (D76) fleet-wide:
+    /// `mev normalize-op-slugs [--write]`.
+    ///
+    /// A slug carrying a redundant `operator-` prefix (e.g.
+    /// `operator-mac-mini-visit`) stutters when rendered as `OP.<slug>`. This
+    /// command finds every such slug anywhere in the loaded corpus, groups ALL
+    /// `operator`/`approval` `depends_on` edges carrying that exact slug —
+    /// across every file, every repo — and renames every one of them to its
+    /// normalized target in one atomic pass per slug. One slug can gate several
+    /// blocks across several repos; renaming some of its edges but not others
+    /// would split one gate into two, so a shared slug is always renamed
+    /// everywhere at once or not at all.
+    ///
+    /// **Collision detection runs before any write.** The full rename plan
+    /// (every distinct stuttering slug found, mapped to its normalized target)
+    /// is computed first. If two distinct slugs would normalize to the same
+    /// target — including a stuttering slug colliding with an untouched,
+    /// already-existing non-stuttering slug — the ENTIRE run aborts with no
+    /// writes at all, even for the non-colliding renames in the same corpus.
+    /// Silently merging two distinct gates into one shared identity is worse
+    /// than leaving both stuttering.
+    ///
+    /// Dry-run by default: without `--write`, prints the full computed plan
+    /// (old slug, new slug, edge count, repos touched) and writes nothing.
+    /// `--write` applies it under the same `<root>/.mev-emit.lock` advisory
+    /// lock every other authored-state writer takes (E_EMIT_LOCK_HELD on
+    /// contention), then re-runs `emit-state --write` on success so rendered
+    /// boards (`OP.<slug>`) reflect the renamed slugs immediately. Refused the
+    /// same way as its siblings when run from inside a linked git worktree.
+    ///
+    /// Exit codes:
+    ///   0 — planned (dry-run) or applied cleanly
+    ///   1 — a collision, a write failure, E_EMIT_LOCK_HELD, or a
+    ///       linked-worktree refusal
+    NormalizeOpSlugs {
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Apply the rename. Without this the command prints the computed plan
+        /// (which slugs rename to what, how many edges/files each touches)
+        /// without touching any files.
+        #[arg(long)]
+        write: bool,
+    },
     /// Approve a pending decision gate: `mev approve <slug> --digest <d>`.
     ///
     /// Removes every `depends_on` `{type:"approval", slug: <slug>}` entry across
@@ -2361,6 +2405,61 @@ fn main() -> ExitCode {
                 true,
                 cli.json,
                 mev::close_operator_gate(&root, &slug, exit_verified),
+            )
+        }
+        Command::NormalizeOpSlugs { path, write } => {
+            // Same worktree guard as set-block-status/emit-state: a --write here
+            // chains into emit-state, which resolves every repo's paths from
+            // brain.toml rather than CWD.
+            if write && mev::brain::config::is_linked_worktree(&path) {
+                eprintln!(
+                    "error: refusing to write from inside a linked git worktree ({}) — \
+                     normalize-op-slugs chains into emit-state, which resolves derived-file \
+                     paths from brain.toml, not CWD, so this would regenerate the MAIN \
+                     checkout's files. Run from the main working tree instead.",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // Advisory lock, same contract as set-block-status: only --write
+            // mutates the corpus, so only --write needs mutual exclusion.
+            // Released via Drop on every exit path below.
+            let _lock_guard = if write {
+                match mev::brain::lock::acquire_lock(&root, mev::brain::lock::DEFAULT_LOCK_TIMEOUT)
+                {
+                    Ok(guard) => Some(guard),
+                    Err(mev::brain::lock::LockError::Held {
+                        holder_pid,
+                        lock_path,
+                        waited_secs,
+                    }) => {
+                        eprintln!(
+                            "error [E_EMIT_LOCK_HELD] another write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
+                            lock_path.display()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                    Err(e) => {
+                        eprintln!("error [E_EMIT_LOCK_HELD] {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                None
+            };
+            report_doc(
+                "normalize-op-slugs",
+                &root,
+                write,
+                cli.json,
+                mev::normalize_op_slugs(&root, write),
             )
         }
         Command::Approve { slug, digest, path } => {
