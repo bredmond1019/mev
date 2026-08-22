@@ -1418,6 +1418,187 @@ pub fn dispose_repo(
 }
 
 // ---------------------------------------------------------------------------
+// Disposal reporting, commit pathspec, and `--dry-run` orchestration —
+// `mev carryover --dispose` (`MV.ticket.carryover-dispose` task 3)
+// ---------------------------------------------------------------------------
+
+/// Derive a repo's `planning/carryover-archive.jsonl` path from its
+/// `planning/state.json` path — the two files always live side by side.
+pub fn archive_path_for(state_path: &Path) -> PathBuf {
+    state_path.with_file_name("carryover-archive.jsonl")
+}
+
+/// The full result of one `mev carryover --dispose` (or `--dispose
+/// --dry-run`) run: one [`RepoDisposalWrite`] per successfully-loaded repo
+/// [`run_dispose`] reached (even when nothing was disposed there — constraint
+/// (6)), any repo whose write failed partway through, and every repo the
+/// sweep itself could never reach (`skipped`, carried over from
+/// [`DisposalPlan::skipped`] unchanged).
+#[derive(Debug, Clone, Default)]
+pub struct DisposeRunReport {
+    pub writes: Vec<RepoDisposalWrite>,
+    pub failures: Vec<RepoDisposalError>,
+    pub skipped: Vec<SkippedRepo>,
+    pub dry_run: bool,
+}
+
+impl DisposeRunReport {
+    /// Whether this run is clean enough for `mev carryover --dispose` to
+    /// exit 0: a repo the sweep never reached (`skipped`) is reported, not
+    /// fatal, but a repo whose write itself failed partway through is.
+    pub fn succeeded(&self) -> bool {
+        self.failures.is_empty()
+    }
+}
+
+/// Run (or, under `dry_run`, simulate) the write half of `mev carryover
+/// --dispose` over every repo [`compute_disposal_plan`] evaluated.
+///
+/// This is the single code path for both a real run and `--dispose
+/// --dry-run` — see [`dispose_repo`]'s own `dry_run` parameter, which this
+/// simply threads through unchanged for every repo in `files`. A repo is
+/// visited once per entry in `files` (the already-successfully-loaded
+/// corpus [`compute_disposal_plan`] was given), so a repo that contributed
+/// zero `Cleared` entries still gets a [`RepoDisposalWrite`] with
+/// `disposed: []` — constraint (6) needs a summary line for that repo too,
+/// distinguishing "reached, nothing to dispose" from "never reached"
+/// (`skipped`). A repo named in `plan.skipped` is never visited here at all:
+/// it has no entry in `files`, so both of its files are left byte-identical
+/// by construction, not by a special case.
+pub fn run_dispose(
+    plan: &DisposalPlan,
+    files: &[(StateSource, StateFile)],
+    disposed_at: &str,
+    dry_run: bool,
+) -> DisposeRunReport {
+    let mut writes = Vec::new();
+    let mut failures = Vec::new();
+
+    for (source, file) in files {
+        let candidates: Vec<DisposalCandidate> = plan
+            .candidates
+            .iter()
+            .filter(|c| c.repo == source.repo_slug)
+            .cloned()
+            .collect();
+        let archive_path = archive_path_for(&source.abs_path);
+
+        match dispose_repo(
+            source,
+            file,
+            &candidates,
+            &archive_path,
+            disposed_at,
+            dry_run,
+        ) {
+            Ok(write) => writes.push(write),
+            Err(err) => failures.push(err),
+        }
+    }
+
+    DisposeRunReport {
+        writes,
+        failures,
+        skipped: plan.skipped.clone(),
+        dry_run,
+    }
+}
+
+/// Render one disposal candidate's FULL text — constraint (5): the whole
+/// entry, not its slug or a truncated note, so a run whose output scrolled
+/// past the terminal's scrollback is still fully readable from this block
+/// alone. Pretty-printed JSON of the raw [`Carryover`] record is the
+/// unambiguous choice: every field the entry carries (including whatever
+/// landed in `extra`) is present verbatim, with nothing summarized or
+/// elided.
+pub fn render_disposal_candidate_full_text(candidate: &DisposalCandidate) -> String {
+    let json = serde_json::to_string_pretty(&candidate.entry)
+        .unwrap_or_else(|e| format!("<failed to render entry: {e}>"));
+    format!(
+        "[{}] disposing '{}' — evidence: {}\n{}",
+        candidate.repo, candidate.slug, candidate.evidence, json
+    )
+}
+
+/// Render every disposal candidate's full text, in plan order, as the
+/// preamble a caller prints BEFORE calling [`run_dispose`] — so the full
+/// text is on the terminal ahead of the write that moves the entry
+/// (constraint (5) is about print ordering relative to the move, not just
+/// content). Empty when the plan has no candidates.
+pub fn render_dispose_preamble(plan: &DisposalPlan) -> String {
+    plan.candidates
+        .iter()
+        .map(render_disposal_candidate_full_text)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Render the exact `git commit -o <pathspec>` line covering every file this
+/// run wrote (or, under `--dry-run`, would have written) — constraint (1)'s
+/// "both writes land in one commit", made mechanical rather than a
+/// remembered follow-up step. A repo with nothing disposed contributes no
+/// paths (there is nothing to commit for it); `None` when no repo in the run
+/// disposed anything, so a no-op run never prints an empty `git commit -o`
+/// with no arguments.
+pub fn render_commit_pathspec(report: &DisposeRunReport) -> Option<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for write in &report.writes {
+        if write.disposed.is_empty() {
+            continue;
+        }
+        paths.push(write.state_path.display().to_string());
+        paths.push(write.archive_path.display().to_string());
+    }
+
+    if paths.is_empty() {
+        None
+    } else {
+        Some(format!("git commit -o {}", paths.join(" ")))
+    }
+}
+
+/// Render the per-repo summary + commit pathspec block a caller prints AFTER
+/// [`run_dispose`] returns — constraint (6): one line for every repo
+/// `run_dispose` reached (`0 disposed` included) plus one for every repo
+/// `--dispose` could never reach (`SKIPPED`) and every repo whose write
+/// itself failed (`FAILED`), so a no-op run is distinguishable from a run
+/// that never got there. Identical under `--dry-run` apart from the
+/// "(dry-run, not written)" suffix on a repo that had something to dispose —
+/// same code path, same content, nothing written.
+pub fn render_dispose_summary(report: &DisposeRunReport) -> String {
+    let mut lines = Vec::new();
+
+    for write in &report.writes {
+        let suffix = if report.dry_run && !write.disposed.is_empty() {
+            " (dry-run, not written)"
+        } else {
+            ""
+        };
+        lines.push(format!(
+            "{}: {} disposed{}",
+            write.repo,
+            write.disposed.len(),
+            suffix
+        ));
+    }
+
+    for skipped in &report.skipped {
+        lines.push(format!("{}: SKIPPED — {}", skipped.repo, skipped.error));
+    }
+
+    for failure in &report.failures {
+        lines.push(format!("{}: FAILED — {}", failure.repo, failure.message));
+    }
+
+    if let Some(pathspec) = render_commit_pathspec(report) {
+        lines.push(String::new());
+        lines.push(pathspec);
+    }
+
+    lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
 // Audit — `mev carryover --audit` (`MV.ticket.reference-container-validation`
 // task 4)
 // ---------------------------------------------------------------------------
@@ -5575,5 +5756,282 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // -- disposal reporting + orchestration (task 3) ----------------------------
+
+    #[test]
+    fn archive_path_for_derives_sibling_of_state_json() {
+        let state_path = PathBuf::from("/fake/repo-a/planning/state.json");
+        assert_eq!(
+            archive_path_for(&state_path),
+            PathBuf::from("/fake/repo-a/planning/carryover-archive.jsonl")
+        );
+    }
+
+    #[test]
+    fn render_disposal_candidate_full_text_contains_the_whole_entry_not_just_the_slug() {
+        let entry = item(
+            "cleared-one",
+            "deferred",
+            Some("MV.3.A lands"),
+            vec![],
+            "2020-01-01",
+            None,
+            None,
+        );
+        let c = candidate("cleared-one", "block repo-a:MV.3.A closed", entry);
+        let rendered = render_disposal_candidate_full_text(&c);
+
+        assert!(rendered.contains("repo-a"));
+        assert!(rendered.contains("cleared-one"));
+        assert!(rendered.contains("block repo-a:MV.3.A closed"));
+        // The full entry text, not merely the slug/evidence line above.
+        assert!(rendered.contains("some carryover text"));
+        assert!(rendered.contains("2020-01-01"));
+        assert!(rendered.contains("MV.3.A lands"));
+    }
+
+    #[test]
+    fn render_dispose_preamble_joins_every_candidate_in_plan_order() {
+        let plan = DisposalPlan {
+            candidates: vec![
+                candidate(
+                    "first",
+                    "block a closed",
+                    item("first", "deferred", None, vec![], "2020-01-01", None, None),
+                ),
+                candidate(
+                    "second",
+                    "block b closed",
+                    item("second", "deferred", None, vec![], "2020-01-02", None, None),
+                ),
+            ],
+            skipped: vec![],
+        };
+        let rendered = render_dispose_preamble(&plan);
+        let first_idx = rendered.find("'first'").expect("first candidate present");
+        let second_idx = rendered.find("'second'").expect("second candidate present");
+        assert!(
+            first_idx < second_idx,
+            "candidates must render in plan order"
+        );
+    }
+
+    #[test]
+    fn render_dispose_preamble_is_empty_for_an_empty_plan() {
+        let plan = DisposalPlan::default();
+        assert_eq!(render_dispose_preamble(&plan), "");
+    }
+
+    #[test]
+    fn run_dispose_covers_every_loaded_repo_even_with_zero_candidates() {
+        // Constraint (6): a repo the sweep reached with nothing to dispose
+        // must still produce a RepoDisposalWrite (0 disposed), distinct from
+        // a repo `run_dispose` never visited at all.
+        let file_a = state_file(
+            "repo-a",
+            vec![],
+            vec![item(
+                "cleared-one",
+                "deferred",
+                Some("MV.3.A lands"),
+                vec![],
+                "2020-01-01",
+                None,
+                None,
+            )],
+        );
+        let file_b = state_file("repo-b", vec![], vec![]);
+        let (dir_a, source_a, _archive_a) = scratch_repo("run-dispose-a", &file_a);
+        let (dir_b, source_b, _archive_b) = scratch_repo("run-dispose-b", &file_b);
+        let files = vec![
+            (source_a.clone(), file_a),
+            (source_b.clone(), file_b.clone()),
+        ];
+
+        let plan = DisposalPlan {
+            candidates: vec![candidate(
+                "cleared-one",
+                "block repo-a:MV.3.A closed",
+                item(
+                    "cleared-one",
+                    "deferred",
+                    Some("MV.3.A lands"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                ),
+            )],
+            skipped: vec![SkippedRepo {
+                repo: "repo-broken".to_string(),
+                error: "invalid JSON".to_string(),
+            }],
+        };
+
+        let report = run_dispose(&plan, &files, "2026-08-21", false);
+
+        assert_eq!(report.writes.len(), 2);
+        let write_a = report
+            .writes
+            .iter()
+            .find(|w| w.repo == "repo-a")
+            .expect("repo-a written");
+        assert_eq!(write_a.disposed.len(), 1);
+        assert!(write_a.written);
+        let write_b = report
+            .writes
+            .iter()
+            .find(|w| w.repo == "repo-b")
+            .expect("repo-b written");
+        assert!(write_b.disposed.is_empty());
+        assert!(!write_b.written, "zero-candidate repo writes nothing");
+
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].repo, "repo-broken");
+        assert!(report.failures.is_empty());
+        assert!(report.succeeded());
+
+        let _ = std::fs::remove_dir_all(dir_a);
+        let _ = std::fs::remove_dir_all(dir_b);
+    }
+
+    #[test]
+    fn render_dispose_summary_reports_zero_disposed_skipped_and_failed_repos() {
+        let report = DisposeRunReport {
+            writes: vec![
+                RepoDisposalWrite {
+                    repo: "repo-a".to_string(),
+                    state_path: PathBuf::from("/fake/repo-a/planning/state.json"),
+                    archive_path: PathBuf::from("/fake/repo-a/planning/carryover-archive.jsonl"),
+                    disposed: vec![candidate(
+                        "cleared-one",
+                        "block a closed",
+                        item(
+                            "cleared-one",
+                            "deferred",
+                            None,
+                            vec![],
+                            "2020-01-01",
+                            None,
+                            None,
+                        ),
+                    )],
+                    written: true,
+                },
+                RepoDisposalWrite {
+                    repo: "repo-b".to_string(),
+                    state_path: PathBuf::from("/fake/repo-b/planning/state.json"),
+                    archive_path: PathBuf::from("/fake/repo-b/planning/carryover-archive.jsonl"),
+                    disposed: vec![],
+                    written: false,
+                },
+            ],
+            failures: vec![RepoDisposalError {
+                repo: "repo-c".to_string(),
+                message: "disk full".to_string(),
+            }],
+            skipped: vec![SkippedRepo {
+                repo: "repo-broken".to_string(),
+                error: "invalid JSON".to_string(),
+            }],
+            dry_run: false,
+        };
+
+        let summary = render_dispose_summary(&report);
+        assert!(summary.contains("repo-a: 1 disposed"));
+        assert!(summary.contains("repo-b: 0 disposed"));
+        assert!(summary.contains("repo-broken: SKIPPED"));
+        assert!(summary.contains("invalid JSON"));
+        assert!(summary.contains("repo-c: FAILED"));
+        assert!(summary.contains("disk full"));
+        assert!(summary.contains("git commit -o"));
+        assert!(summary.contains("/fake/repo-a/planning/state.json"));
+        assert!(summary.contains("/fake/repo-a/planning/carryover-archive.jsonl"));
+        // repo-b disposed nothing — its paths must not appear in the pathspec.
+        assert!(!summary.contains("/fake/repo-b/planning/state.json"));
+    }
+
+    #[test]
+    fn render_commit_pathspec_is_none_when_nothing_was_disposed_anywhere() {
+        let report = DisposeRunReport {
+            writes: vec![RepoDisposalWrite {
+                repo: "repo-a".to_string(),
+                state_path: PathBuf::from("/fake/repo-a/planning/state.json"),
+                archive_path: PathBuf::from("/fake/repo-a/planning/carryover-archive.jsonl"),
+                disposed: vec![],
+                written: false,
+            }],
+            failures: vec![],
+            skipped: vec![],
+            dry_run: false,
+        };
+        assert_eq!(render_commit_pathspec(&report), None);
+    }
+
+    #[test]
+    fn dry_run_summary_marks_disposed_repos_as_not_written_but_keeps_the_pathspec() {
+        // `--dispose --dry-run` reuses the same rendering: the pathspec
+        // preview is identical, only the suffix on a disposing repo differs.
+        let report = DisposeRunReport {
+            writes: vec![RepoDisposalWrite {
+                repo: "repo-a".to_string(),
+                state_path: PathBuf::from("/fake/repo-a/planning/state.json"),
+                archive_path: PathBuf::from("/fake/repo-a/planning/carryover-archive.jsonl"),
+                disposed: vec![candidate(
+                    "cleared-one",
+                    "block a closed",
+                    item(
+                        "cleared-one",
+                        "deferred",
+                        None,
+                        vec![],
+                        "2020-01-01",
+                        None,
+                        None,
+                    ),
+                )],
+                written: false,
+            }],
+            failures: vec![],
+            skipped: vec![],
+            dry_run: true,
+        };
+
+        let summary = render_dispose_summary(&report);
+        assert!(summary.contains("repo-a: 1 disposed (dry-run, not written)"));
+        assert!(
+            render_commit_pathspec(&report).is_some(),
+            "dry-run must still preview the commit pathspec"
+        );
+    }
+
+    #[test]
+    fn dispose_run_report_fails_only_on_write_failures_not_on_skipped_repos() {
+        let clean_skip_only = DisposeRunReport {
+            writes: vec![],
+            failures: vec![],
+            skipped: vec![SkippedRepo {
+                repo: "repo-broken".to_string(),
+                error: "invalid JSON".to_string(),
+            }],
+            dry_run: false,
+        };
+        assert!(
+            clean_skip_only.succeeded(),
+            "a skipped repo is reported, not fatal"
+        );
+
+        let with_failure = DisposeRunReport {
+            writes: vec![],
+            failures: vec![RepoDisposalError {
+                repo: "repo-c".to_string(),
+                message: "disk full".to_string(),
+            }],
+            skipped: vec![],
+            dry_run: false,
+        };
+        assert!(!with_failure.succeeded());
     }
 }
