@@ -468,8 +468,15 @@ enum Command {
     /// Exit codes:
     ///   0 — planned (dry-run), applied, or already at the target status
     ///   1 — bad key, unauthorable status, unknown block, a write failure,
-    ///       an unmet operator gate without --force-operator-gate, or
-    ///       --force-operator-gate on non-TTY stdin
+    ///       an unmet operator gate without --force-operator-gate,
+    ///       --force-operator-gate on non-TTY stdin, or E_EMIT_UNKNOWN_SCOPE
+    ///
+    /// **Fleet coupling (unchanged by `--scope`).** `E_EMIT_INCOMPLETE_CORPUS` still
+    /// aborts the whole write whenever ANY state.json fleet-wide fails to load — the
+    /// completeness guard runs before the plan is built, regardless of `--scope`.
+    /// `--scope` only narrows which derived surfaces the *chained emit* regenerates
+    /// once the authored write has already succeeded; it does not narrow which
+    /// repos' state.json files must load cleanly for that write to be allowed at all.
     SetBlockStatus {
         /// Block key in `repo:id` form, e.g. `mev:MV.10.A`.
         key: String,
@@ -487,6 +494,14 @@ enum Command {
         /// own gate.
         #[arg(long = "force-operator-gate")]
         force_operator_gate: bool,
+        /// Limit the chained emit's regeneration to one repo's derived surfaces (its
+        /// own leaf state.json, cache_doc, tier rollup, and the HQ board) plus
+        /// nothing else — every other repo's files are left untouched. Omit to
+        /// regenerate the whole corpus, which is today's default behaviour and
+        /// stays byte-for-byte unchanged. Resolved the same way as `emit-state
+        /// --scope`; an unknown or blank slug exits with `E_EMIT_UNKNOWN_SCOPE`.
+        #[arg(long, value_name = "REPO")]
+        scope: Option<String>,
     },
     /// Close an operator gate fleet-wide: remove every `depends_on` `{type:"operator"}`
     /// entry carrying SLUG, across every loaded `state.json`.
@@ -2116,6 +2131,7 @@ fn main() -> ExitCode {
             path,
             write,
             force_operator_gate,
+            scope,
         } => {
             // --force-operator-gate is the only override that starts a block with an
             // unmet operator edge, and per D71 it is human-only. Refuse it outright
@@ -2193,12 +2209,42 @@ fn main() -> ExitCode {
             } else {
                 None
             };
+            // Resolve --scope the same way Command::EmitState does: one resolution
+            // path serves both verbs, and config.scope_dependencies() is the only
+            // implementation of it in the diff.
+            let scope_deps = match &scope {
+                Some(slug) => {
+                    let config =
+                        match mev::brain::config::load_brain_config(&root.join("brain.toml")) {
+                            Ok(cfg) => cfg,
+                            Err(e) => {
+                                eprintln!("error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                    match config.scope_dependencies(slug) {
+                        Ok(deps) => Some(deps),
+                        Err(mev::brain::config::ScopeError::UnknownSlug { slug, valid_slugs }) => {
+                            eprintln!(
+                                "error [E_EMIT_UNKNOWN_SCOPE] unknown --scope slug '{slug}'; valid slugs: {}",
+                                valid_slugs.join(", ")
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                        Err(e) => {
+                            eprintln!("error [E_EMIT_UNKNOWN_SCOPE] {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+                None => None,
+            };
             report_doc(
                 "set-block-status",
                 &root,
                 write,
                 cli.json,
-                mev::set_block_status(&root, &key, &status, write),
+                mev::set_block_status(&root, &key, &status, write, scope_deps.as_ref()),
             )
         }
         Command::CloseOperatorGate {

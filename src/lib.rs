@@ -979,6 +979,7 @@ pub fn set_block_status(
     key: &str,
     status: &str,
     write: bool,
+    scope: Option<&brain::config::ScopeDependencySet>,
 ) -> anyhow::Result<Report> {
     use brain::blocks::plan_set_block_status;
     use brain::config::find_brain_config;
@@ -1048,8 +1049,10 @@ pub fn set_block_status(
     report.diagnostics.extend(apply_plan(&plan, write));
 
     // Regenerate derived views so focus/boards agree with the authored edit.
+    // `scope` narrows which repo's derived surfaces the chained emit regenerates;
+    // unscoped (None) stays byte-identical to the fleet-wide default.
     if write && had_actions && !report.is_failure() {
-        let emit = emit_state(root, true, None)?;
+        let emit = emit_state(root, true, scope)?;
         report.diagnostics.extend(emit.diagnostics);
     }
 
