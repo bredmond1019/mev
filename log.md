@@ -8,10 +8,28 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-21T16:05:00-03:00"
+timestamp: "2026-08-22T16:30:00-03:00"
 ---
 
 # Log — mev
+
+## [orchestration: 2026-08-22]
+
+### Autonomous-foundation lane driven end-to-end via `/begin-orchestration`
+- **What:** Closed five blocks in sequence — `MV.ticket.carryover-dispose`,
+  `MV.ticket.lane-segmentation-ignores-dependencies`, `MV.14.A`,
+  `MV.ticket.toolchain-freshness-covers-the-writer`, `MV.ticket.op-slug-rendering-and-sweep` —
+  plus ran the resulting `mev normalize-op-slugs --write` for real against the live corpus (40
+  slugs, 12 repos, 0 collisions). Fixed the same stale-`focus.next`-cache class of drift 3 times at
+  different blocks' final gates (reinstall + `emit-state --write`, never a code change). Found and
+  worked around a real defect (`normalize-op-slugs --write` doesn't auto-commit), filed as
+  carryover. Patched a docs gap `MV.14.A`'s own task missed (`set-block-status --scope`
+  undocumented). Resolved a cross-repo build break in `engine-rs` from `MV.14.A`'s signature
+  change (their fix: pass `None`, confirmed correct, not a stopgap).
+- **Why:** Operator directive to drive the lane autonomously, deciding what could be decided and
+  escalating only true operator-only items (the fleet push decision, still open at session end).
+- **Refs:** `planning/orchestration-run/autonomous-foundation/notes.md` (full record),
+  `planning/handoff.md`.
 
 ## [run: 2026-08-22]
 
