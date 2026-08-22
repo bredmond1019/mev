@@ -1594,6 +1594,68 @@ Exit codes: `0` applied · `1` refused or a write failure.
 
 ---
 
+### `normalize-op-slugs [--write] [path]`
+
+Renames every **stuttering** operator/approval slug (D76) fleet-wide, in one
+atomic pass per slug. A slug carrying a redundant `operator-` prefix (e.g.
+`operator-mac-mini-visit`) stutters when rendered as `OP.<slug>` (see the
+rendering note below) — this is the fix. It finds every stuttering slug
+anywhere in the loaded corpus, groups **all** `operator`/`approval`
+`depends_on` edges carrying that exact slug — across every file, every repo —
+and renames every one of them to `okf_core::normalize_op_slug`'s target in one
+pass. One slug can gate several blocks across several repos; renaming some of
+its edges but not others would split one shared gate into two, so a slug is
+always renamed everywhere at once or not at all.
+
+**Collision detection runs before any write.** The full rename plan (every
+distinct stuttering slug found, mapped to its normalized target) is computed
+first. If two distinct slugs would normalize to the same target — including a
+stuttering slug colliding with an already-existing non-stuttering slug — the
+**entire run aborts with no writes at all**, even for the renames in the same
+corpus that did not collide. Silently merging two distinct gates into one
+shared identity is worse than leaving both stuttering.
+
+**Dry-run by default**, exactly like the epic commands and `set-block-status`:
+without `--write` the plan prints as an `I_NORMALIZE_OP_SLUG_PLAN` diagnostic
+per distinct rename (old slug, new slug, edge count, repos touched) plus a
+`W_EMIT_DRY_RUN` note per file, and not a byte is touched. A successful
+`--write` takes the same advisory lock `emit-state --write` takes, refuses to
+run against an incomplete corpus, and then runs `emit-state --write` so
+`focus`, the boards and the rollups — including the `OP.<slug>` rendering
+below — reflect the renamed slugs in the same invocation. Refused the same way
+as `set-block-status` when run from inside a linked git worktree.
+
+```bash
+# What would normalizing every stuttering slug change? (dry run — writes nothing)
+mev normalize-op-slugs ~/Dev/agentic-portfolio
+
+# Apply it fleet-wide, and regenerate every derived view
+mev normalize-op-slugs ~/Dev/agentic-portfolio --write
+```
+
+| Diagnostic | Cause |
+|---|---|
+| `E_NORMALIZE_OP_SLUG_COLLISION` | two distinct slugs would normalize to the same target — aborts the whole run, nothing written |
+| `E_EMIT_INCOMPLETE_CORPUS` | `--write` attempted while at least one `state.json` failed to load |
+| `E_EMIT_LOCK_HELD` | another mev write holds the brain-root advisory lock |
+
+Exit codes: `0` planned (dry-run) or applied cleanly · `1` a collision, a
+write failure, `E_EMIT_LOCK_HELD`, or a linked-worktree refusal.
+
+**Rendering note (D76).** Operator and approval `depends_on` edges now render
+as `OP.<slug>` everywhere mev prints them (boards, `frontier`, `carryover`,
+etc.) instead of the old hand-rolled `operator:<slug>`/`approval:<slug>`
+prefixes — both edge kinds share one flat `OP.<slug>` identity; surrounding
+context (an `exit`/`start` pair vs. a `decision`) already disambiguates which
+kind it is. Rendering is faithful, not normalizing: a stuttering slug still
+renders stuttered (`OP.operator-mac-mini-visit`) until `normalize-op-slugs`
+renames it. `validate-brain --state` also warns `W_STATE_OP_SLUG_STUTTER` on
+any stuttering slug it finds — a warning only, it never flips the exit code.
+See `docs/decisions/D76-operator-sessions-get-a-flat-op-id.md` (in the company
+brain) for the full rationale.
+
+---
+
 ### `approve <slug> --digest <digest> [path] [--write]` · `reject <slug> [path] [--write]`
 
 Remove every `Approval` `depends_on` edge carrying `slug`, fleet-wide, under the
