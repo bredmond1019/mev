@@ -1875,6 +1875,121 @@ fn check_operator_staleness_under_threshold_emits_nothing() {
     );
 }
 
+fn approval_dep_tracks(slug: &str) -> serde_json::Value {
+    serde_json::json!([{
+        "title": "Phase 1",
+        "blocks": [{
+            "id": "AL.1.A",
+            "title": "Gated on an approval step",
+            "status": "open",
+            "depends_on": [{
+                "type": "approval",
+                "slug": slug,
+                "what": "example decision",
+                "digest": "sha256:example"
+            }]
+        }]
+    }])
+}
+
+#[test]
+fn check_op_slug_stutter_emits_warning_for_stuttering_operator_slug() {
+    use mev::brain::state::check_op_slug_stutter;
+
+    let (src, file) = make_leaf_pair_with_updated(
+        "alpha",
+        "2026-08-10",
+        operator_dep_tracks("operator-mac-mini-visit"),
+    );
+
+    let diags = check_op_slug_stutter(&src, &file);
+
+    assert!(
+        has_locator(&diags, "W_STATE_OP_SLUG_STUTTER"),
+        "expected W_STATE_OP_SLUG_STUTTER for a stuttering operator slug, got: {diags:?}"
+    );
+}
+
+#[test]
+fn check_op_slug_stutter_emits_warning_for_stuttering_approval_slug() {
+    use mev::brain::state::check_op_slug_stutter;
+
+    let (src, file) = make_leaf_pair_with_updated(
+        "alpha",
+        "2026-08-10",
+        approval_dep_tracks("operator-ship-it"),
+    );
+
+    let diags = check_op_slug_stutter(&src, &file);
+
+    assert!(
+        has_locator(&diags, "W_STATE_OP_SLUG_STUTTER"),
+        "expected W_STATE_OP_SLUG_STUTTER for a stuttering approval slug, got: {diags:?}"
+    );
+}
+
+/// Non-stuttering boundary cases — same table as okf-core's own
+/// `op_slug_cases` (`operator-mac-mini-visit` is the only stuttering
+/// example there; these are its non-stuttering neighbours), reused here
+/// rather than re-derived so this check's boundary agrees with the
+/// primitive it delegates to.
+#[test]
+fn check_op_slug_stutter_emits_nothing_for_non_stuttering_slugs() {
+    use mev::brain::state::check_op_slug_stutter;
+
+    for slug in ["mac-mini-visit", "operator", "operator-", "operators-guild"] {
+        let (src, file) =
+            make_leaf_pair_with_updated("alpha", "2026-08-10", operator_dep_tracks(slug));
+
+        let diags = check_op_slug_stutter(&src, &file);
+
+        assert!(
+            diags.is_empty(),
+            "slug {slug:?} must not stutter, got: {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn check_op_slug_stutter_emits_one_warning_per_stuttering_edge() {
+    use mev::brain::state::check_op_slug_stutter;
+
+    let tracks = serde_json::json!([{
+        "title": "Phase 1",
+        "blocks": [{
+            "id": "AL.1.A",
+            "title": "Gated on two operator steps",
+            "status": "open",
+            "depends_on": [
+                {
+                    "type": "operator",
+                    "slug": "operator-mac-mini-visit",
+                    "exit": "planning/handoff.md",
+                    "start": "/begin-session operator-mac-mini-visit"
+                },
+                {
+                    "type": "operator",
+                    "slug": "operator-ship-it",
+                    "exit": "planning/handoff.md",
+                    "start": "/begin-session operator-ship-it"
+                }
+            ]
+        }]
+    }]);
+    let (src, file) = make_leaf_pair_with_updated("alpha", "2026-08-10", tracks);
+
+    let diags = check_op_slug_stutter(&src, &file);
+
+    let stutter_count = diags
+        .iter()
+        .filter(|d| d.locator == "W_STATE_OP_SLUG_STUTTER")
+        .count();
+    assert_eq!(
+        stutter_count, 2,
+        "expected one W_STATE_OP_SLUG_STUTTER per stuttering edge, got: {diags:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // `mev::set_block_status` scoped-closure coverage (MV.14.A, task 2).
 //

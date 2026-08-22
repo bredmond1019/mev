@@ -621,6 +621,49 @@ pub fn check_operator_staleness(
     diags
 }
 
+/// Stutter warnings for `depends_on` `operator`/`approval` edges whose slug
+/// carries a redundant `operator-` prefix (D76) — one
+/// [`okf_core::W_STATE_OP_SLUG_STUTTER`] per stuttering edge, naming the raw
+/// slug, its faithful [`okf_core::op_id`] rendering (still stuttering — this
+/// check never normalizes), and the `mev normalize-op-slugs --write` fix.
+///
+/// Same iterate-every-block's-`depends_on` shape as
+/// [`check_operator_staleness`], but with no date/threshold gate: whether a
+/// slug stutters is a property of the slug itself, not of how long the gate
+/// has sat unmet. WARNING severity only — never flips the exit code, matching
+/// every sibling check in `lib.rs`'s validation loop.
+pub fn check_op_slug_stutter(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let path = &src.abs_path;
+
+    for track in &file.tracks {
+        for block in &track.blocks {
+            for dep in &block.depends_on {
+                let slug = match dep {
+                    BlockedBy::Operator(OperatorDep { slug, .. }) => Some(slug),
+                    BlockedBy::Approval(ApprovalDep { slug, .. }) => Some(slug),
+                    _ => None,
+                };
+                let Some(slug) = slug else { continue };
+                if !okf_core::op_slug_stutters(slug) {
+                    continue;
+                }
+                diags.push(Diagnostic::warning(
+                    path,
+                    okf_core::W_STATE_OP_SLUG_STUTTER,
+                    format!(
+                        "operator/approval slug '{slug}' on track block '{}' stutters \
+                         (renders as '{}') — fix with `mev normalize-op-slugs --write`",
+                        block.id,
+                        okf_core::op_id(slug)
+                    ),
+                ));
+            }
+        }
+    }
+    diags
+}
+
 /// Validate the schema-ring constraints for a successfully-deserialized
 /// [`StateFile`].
 ///
