@@ -215,10 +215,29 @@ effective(c) = min(own(c), min{ effective(t) : t in c.blocks })
    differing local impact, not a conflict to average or overwrite. Dedup merges the *claim* (via
    `FindingCluster`), never the *priority*.
 4. **Suggestions are never auto-merged.** `CarryoverReport.suggestions` (heuristic
-   candidate-duplicate pairs) and `FindingCluster` are read-only signal for a human; nothing in this
-   contract deletes, snoozes, or merges an entry automatically.
+   candidate-duplicate pairs) and `FindingCluster` are read-only signal for a human; nothing the
+   *ranking* this contract defines deletes, snoozes, or merges an entry automatically. (The
+   separate `mev carryover --dispose` write path — §6a below — acts on the CLEARED lane this
+   ranking produces, but it neither ranks nor reconciles anything itself.)
 5. **Board membership passes the full entry set**, not a staleness-pre-filtered subset — see §2.
 6. **`stale` is read only from `carryover_stale_age`**, never reimplemented downstream.
+
+---
+
+## 6a. `--dispose` — the one write path over this ranking
+
+`mev carryover` (plain sweep and `--audit`) is read-only. `mev carryover --dispose`
+(`MV.ticket.carryover-dispose`) is the one exception: it re-runs the sweep this contract's
+ranking is built from and **moves** every entry the CLEARED lane lands on out of its owning
+repo's `carryover[]` and into that repo's `planning/carryover-archive.jsonl` as a
+`CarryoverArchiveRow` (okf-core `OK.4.A`) — never a delete; the entry is kept as data, verbatim,
+plus `disposed_at`/`reason: cleared`/`reconstructed: false`/`evidence`. A repo whose sweep failed
+to evaluate is skipped, not silently disposed as if it had nothing CLEARED. `--dispose` never
+implies `--allow-exec`. Both the `state.json` removal and the archive append are written
+together as one atomic step, and the command prints the exact `git commit -o <pathspec>`
+covering both files so an operator commits them together. `--dispose --dry-run` runs the
+identical code path with both writes suppressed. Full flag reference and examples: the
+`carryover` entry in [`docs/cli.md`](cli.md), `--dispose` subsection.
 
 ---
 

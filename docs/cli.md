@@ -1724,16 +1724,18 @@ mev --json doc opportunity ingest --input company-brief.json
 
 ---
 
-### `carryover [--repo <slug>] [--json] [--allow-exec] [--audit] [--window <days>] [path]`
+### `carryover [--repo <slug>] [--json] [--allow-exec] [--audit] [--window <days>] [--dispose] [--dry-run] [path]`
 
-Fleet-wide, **read-only** sweep of every discovered `planning/state.json`'s `carryover[]`
-array. Evaluates each entry's `clears_when` predicate where it is machine-checkable and sorts
-the fleet into three lanes. `--audit` switches to a census over both triage containers instead
-(see [`--audit` — the `carryover[]`/`reference[]` census](#--audit--the-carryover-reference-census)
-below).
+Fleet-wide sweep of every discovered `planning/state.json`'s `carryover[]` array. By default
+this is **read-only**: it evaluates each entry's `clears_when` predicate where it is
+machine-checkable and sorts the fleet into three lanes. `--audit` switches to a census over both
+triage containers instead (see [`--audit` — the `carryover[]`/`reference[]`
+census](#--audit--the-carryover-reference-census) below). `--dispose` switches to the one write
+path this subcommand has — see [`--dispose` — archiving CLEARED
+entries](#--dispose--archiving-cleared-entries) below.
 
 ```bash
-mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>] [path]
+mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>] [--dispose] [--dry-run] [path]
 ```
 
 | Argument / Flag | Default | Description |
@@ -1741,17 +1743,19 @@ mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>
 | `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
 | `--repo <SLUG>` | unset | Restrict the sweep to one repo's `carryover[]` entries. An unknown slug is a hard error naming the valid slugs |
 | `--json` | off | Emit the `CarryoverReport` (or, under `--audit`, the `CarryoverAudit`) as compact JSON instead of the human summary |
-| `--allow-exec` | off | Opt in to running `command_exits_zero` predicates. Without it, every such entry reports `not-evaluable` (reason `execution-not-allowed`) and **no command is ever run** |
+| `--allow-exec` | off | Opt in to running `command_exits_zero` predicates. Without it, every such entry reports `not-evaluable` (reason `execution-not-allowed`) and **no command is ever run**. **`--dispose` does not imply this** — passing `--dispose` never turns on command execution, so a `command_exits_zero` entry that is `not-evaluable` for lack of `--allow-exec` is never disposal-eligible either |
 | `--audit` | off | Report a fleet-wide `carryover[]`/`reference[]` census instead of the per-entry sweep — total, per-container and per-kind/per-class counts, typed-predicate coverage, and inflow/outflow over `--window` days. Composed entirely from the same loaded corpus and `CarryoverReport` the ordinary sweep already produces — no second corpus walk |
 | `--window <DAYS>` | `30` | Window, in days, `--audit`'s inflow/outflow figures are measured over. Ignored without `--audit` |
+| `--dispose` | off | Move every CLEARED-lane entry out of its owning repo's `state.json` and into that repo's `planning/carryover-archive.jsonl`. The one write path this subcommand has — see below |
+| `--dry-run` | off | Only meaningful together with `--dispose`: compute and print the identical disposal plan without writing anything. Passed without `--dispose`, `mev carryover` reports the misuse and exits non-zero rather than silently ignoring it |
 
 Resolves `brain.toml` by walking up from `path`, discovers and loads every repo's
 `planning/state.json` (individual load failures are skipped, not fatal), and evaluates every
 `carryover[]` entry against the corpus.
 
-**`mev carryover` never writes anything.** No `--write` flag exists for this subcommand. The
-`cleared` lane is a recommendation for a human (or a later, separately specced mutation
-command) to act on — it is never an automatic deletion.
+**Without `--dispose`, `mev carryover` writes nothing.** The `cleared` lane is a recommendation
+— a human, or a `--dispose` run, acts on it; the plain sweep and `--audit` never delete or
+rewrite anything themselves.
 
 #### The three lanes
 
@@ -1900,8 +1904,8 @@ behaviour, and none of them affects the exit code.
 the fleet's triage material actually look like", as opposed to the per-entry sweep above, which
 answers "what should a human act on right now". It is composed entirely from the same loaded
 corpus (`files`) and `CarryoverReport` the ordinary sweep already produced — no new filesystem
-read, no second discovery walk — and, like every other `carryover` invocation, it is
-**read-only**: the audit recommends, a human disposes; nothing is ever deleted or rewritten.
+read, no second discovery walk — and, like the plain sweep, it is **read-only**: the audit
+recommends; `--dispose` is the only invocation of this subcommand that writes anything.
 
 | Figure | Meaning |
 |---|---|
@@ -1942,7 +1946,65 @@ mev carryover --audit
 
 # Census over a 90-day inflow/outflow window, as JSON
 mev carryover --audit --window 90 --json
+
+# Move every CLEARED entry to the archive (real write)
+mev carryover --dispose
+
+# Inspect what a real --dispose run would move, without writing anything
+mev carryover --dispose --dry-run
+
+# Restrict disposal to one repo
+mev carryover --dispose --repo mev
 ```
+
+#### `--dispose` — archiving CLEARED entries
+
+`mev carryover --dispose` (`MV.ticket.carryover-dispose`) is the missing outflow half of the
+sweep: without it, nothing in the fleet ever acts on a `cleared` verdict, so resolved entries
+accumulate in `carryover[]` forever. It re-runs the exact same sweep as the plain command, then
+acts on the `cleared` lane only:
+
+- **A disposal is a MOVE, never a delete.** Each CLEARED entry is removed from its owning
+  repo's `planning/state.json` `carryover[]` array and appended, verbatim plus four extra
+  fields, to that repo's `planning/carryover-archive.jsonl` as a `CarryoverArchiveRow`
+  (okf-core `OK.4.A`, via `serde(flatten)`):
+  - `disposed_at` — the date of the run
+  - `reason` — always `"cleared"` for this write path (the other `DisposalReason` values are
+    for other, not-yet-built disposal routes)
+  - `reconstructed` — always `false` (this row was produced live from a real sweep, not
+    rebuilt from git history)
+  - `evidence` — the clearing predicate that landed the entry in CLEARED, so the archive line
+    is self-explaining without cross-referencing the original `clears_when`
+  - Carryover entries are kept as data for history and analysis — the archive file is
+    append-only and nothing is ever discarded.
+- **Both writes land together.** The `state.json` removal and the `carryover-archive.jsonl`
+  append for a given repo are staged and committed as one atomic step; if either side cannot be
+  completed, neither is applied and the repo is reported failed rather than left with an entry
+  removed-but-unarchived or a malformed `state.json`. `mev carryover --dispose` prints the exact
+  `git commit -o <pathspec>` covering both files for every repo it wrote, so the operator commits
+  both halves together.
+- **A repo whose sweep failed to evaluate is skipped, not silently treated as clean.** If a
+  repo's `state.json` fails to load or parse, it is named in the output and both of its files
+  are left untouched; sibling repos in the same run are still disposed normally.
+- **`--dispose` never implies `--allow-exec`.** A `command_exits_zero` predicate that is
+  `not-evaluable` for lack of `--allow-exec` stays `not-evaluable` and is therefore never
+  disposal-eligible — only an entry whose command was actually run (with `--allow-exec` passed)
+  and exited `0` can land in CLEARED here.
+- **Full text before removal.** Each disposed entry's complete text is printed before it is
+  moved, so a run whose output has scrolled past the terminal buffer is still fully readable.
+- **A per-repo summary line is always printed**, including repos where nothing moved
+  (`0 disposed`) and repos that were skipped — so a no-op run is distinguishable from a run that
+  never reached that repo.
+- **Byte-faithful `state.json` round-trip.** The rewritten file differs from the original by
+  exactly the removed array elements — same indentation, same key order, non-ASCII (em dashes,
+  etc.) left unescaped, trailing newline preserved.
+- **`--dispose --dry-run` is the same code path with both writes suppressed** — identical
+  disposal list, identical per-repo summaries and commit-pathspec preview, zero bytes written.
+  There is no separate dry-run implementation to drift from the real one.
+
+Exit code `0` on a successful run, including one where some repos were skipped (reported, not
+fatal); non-zero if `--dry-run` is passed without `--dispose`, or on the same `brain.toml`/
+`--repo`/serialization failures the plain sweep can hit.
 
 ---
 
