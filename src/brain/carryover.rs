@@ -1054,6 +1054,158 @@ pub fn evaluate_carryover_with_dedup(
 }
 
 // ---------------------------------------------------------------------------
+// Dispose plan — `mev carryover --dispose` (`MV.ticket.carryover-dispose`
+// task 1)
+// ---------------------------------------------------------------------------
+
+/// One `carryover[]` entry selected for disposal by `mev carryover --dispose`.
+///
+/// Pairs a `Cleared`-lane [`CarryoverVerdict`] with the raw [`Carryover`] item
+/// it was computed from (kept verbatim so a later write path can
+/// `serde(flatten)` it straight into a `CarryoverArchiveRow` — task 2) and a
+/// human-readable description of the predicate(s) that cleared it (that
+/// row's `evidence` field — task 2).
+#[derive(Debug, Clone)]
+pub struct DisposalCandidate {
+    /// Owning repo slug (`StateSource::repo_slug` / `CarryoverVerdict::repo`).
+    pub repo: String,
+    /// Stable node key, unique within the owning repo's `carryover[]`.
+    pub slug: String,
+    /// The raw entry, verbatim, as loaded from the owning repo's `state.json`.
+    pub entry: Carryover,
+    /// Human-readable description of the predicate(s) that cleared this
+    /// entry — see [`describe_clearing_evidence`].
+    pub evidence: String,
+}
+
+/// One repo the disposal plan could not evaluate at all: its `state.json`
+/// failed to load or parse.
+///
+/// Kept distinct from "loaded, contributed zero disposal candidates" per
+/// guard (3) on `MV.ticket.carryover-dispose` — a repo that never evaluated
+/// must never be silently treated as having nothing to dispose.
+#[derive(Debug, Clone)]
+pub struct SkippedRepo {
+    /// The repo slug this failure is reported against.
+    pub repo: String,
+    /// The load/parse error, verbatim, for the disposal run's output.
+    pub error: String,
+}
+
+/// The read-only plan `mev carryover --dispose` computes before writing
+/// anything: which entries it would move (`candidates`) and which repos it
+/// could not evaluate at all (`skipped`).
+#[derive(Debug, Clone, Default)]
+pub struct DisposalPlan {
+    pub candidates: Vec<DisposalCandidate>,
+    pub skipped: Vec<SkippedRepo>,
+}
+
+/// Compute the disposal plan for `mev carryover --dispose` over an
+/// already-evaluated sweep.
+///
+/// `report` is the [`CarryoverReport`] produced by [`evaluate_carryover`] (or
+/// [`evaluate_carryover_with_dedup`]) against `files` — the same
+/// successfully-loaded corpus. `load_errors` names every repo whose
+/// `state.json` failed to load/parse and therefore contributed nothing to
+/// either `report` or `files`; each becomes one [`SkippedRepo`] with zero
+/// disposal candidates, per guard (3).
+///
+/// Pure and read-only — touches no filesystem, and decides nothing new about
+/// what counts as `Cleared`. It only:
+/// 1. Selects the entries `report` already assigned [`CarryoverLane::Cleared`].
+/// 2. Looks up each one's raw [`Carryover`] record in `files` by
+///    `(repo, slug)` — unique within one state file's `carryover[]` — so the
+///    write path (task 2) has the full record to archive verbatim. A verdict
+///    with no matching raw entry is skipped defensively (unreachable in
+///    practice: every verdict in `report.entries` was produced from exactly
+///    one entry in `files` by [`evaluate_carryover_with_dedup`]) rather than
+///    panicking or fabricating a record.
+/// 3. Renders the evidence string via [`describe_clearing_evidence`].
+///
+/// **Guard (4) — `--dispose` never implies `--allow-exec` — needs no special
+/// case here.** `evaluate_carryover_with_dedup` already refuses to mark a
+/// `command_exits_zero` predicate `Cleared` unless it was actually run (with
+/// `allow_exec: true`) and exited 0; without that opt-in the entry lands in
+/// `NotEvaluable` with [`NotEvaluableReason::ExecutionNotAllowed`] instead
+/// (see that function's `CommandExitsZero` match arm). So an entry whose
+/// command was never run can never appear in `report.entries` with
+/// `lane == Cleared` in the first place — selecting on that lane alone is
+/// sufficient, and passing `--dispose` without `--allow-exec` naturally
+/// yields a report with no `Cleared` `CommandExitsZero` candidates at all.
+pub fn compute_disposal_plan(
+    report: &CarryoverReport,
+    files: &[(StateSource, StateFile)],
+    load_errors: &[(String, String)],
+) -> DisposalPlan {
+    let mut candidates = Vec::new();
+
+    for verdict in &report.entries {
+        if verdict.lane != CarryoverLane::Cleared {
+            continue;
+        }
+
+        let Some(entry) = files
+            .iter()
+            .find(|(src, _)| src.repo_slug == verdict.repo)
+            .and_then(|(_, file)| file.carryover.iter().find(|c| c.slug == verdict.slug))
+        else {
+            continue;
+        };
+
+        candidates.push(DisposalCandidate {
+            repo: verdict.repo.clone(),
+            slug: verdict.slug.clone(),
+            entry: entry.clone(),
+            evidence: describe_clearing_evidence(verdict),
+        });
+    }
+
+    let skipped = load_errors
+        .iter()
+        .map(|(repo, error)| SkippedRepo {
+            repo: repo.clone(),
+            error: error.clone(),
+        })
+        .collect();
+
+    DisposalPlan {
+        candidates,
+        skipped,
+    }
+}
+
+/// Render the predicate(s) that cleared one `Cleared`-lane verdict as a
+/// single human-readable line — the disposal candidate's `evidence` and,
+/// downstream, the archive row's `evidence` field (task 2).
+///
+/// Every satisfied [`CarryoverRef`] in `verdict.refs` contributes one clause,
+/// joined with `"; "`. A `Cleared` verdict always has at least one ref — an
+/// empty `refs` list can never reach `Cleared` (see
+/// `evaluate_carryover_with_dedup`'s lane assignment: the `Cleared`/
+/// `Actionable` split is only reached when `!refs.is_empty()`) — so this
+/// never returns an empty string for a genuine disposal candidate.
+pub fn describe_clearing_evidence(verdict: &CarryoverVerdict) -> String {
+    verdict
+        .refs
+        .iter()
+        .map(|r| match r {
+            CarryoverRef::Block { key, .. } => format!("block {key} closed"),
+            CarryoverRef::Path { path, .. } => format!("path {path} exists"),
+            CarryoverRef::PathAbsent { path, .. } => format!("path {path} absent"),
+            CarryoverRef::UnresolvedBlock { key } => format!("block {key} unresolved"),
+            CarryoverRef::FileContains { path, pattern, .. } => {
+                format!("{path} contains \"{pattern}\"")
+            }
+            CarryoverRef::CommandExitsZero { command, .. } => {
+                format!("command `{command}` exited 0")
+            }
+        })
+        .collect::<Vec<String>>()
+        .join("; ")
+}
+
+// ---------------------------------------------------------------------------
 // Audit — `mev carryover --audit` (`MV.ticket.reference-container-validation`
 // task 4)
 // ---------------------------------------------------------------------------
@@ -4736,6 +4888,206 @@ mod tests {
         assert_eq!(
             block_priorities, before,
             "block_priorities must be untouched"
+        );
+    }
+
+    // -- compute_disposal_plan --------------------------------------------------
+
+    #[test]
+    fn compute_disposal_plan_selects_only_cleared_entries_with_raw_record_and_evidence() {
+        let files = vec![
+            (
+                src("repo-a"),
+                state_file(
+                    "repo-a",
+                    vec![("MV.3.A", "closed")],
+                    vec![item(
+                        "cleared-one",
+                        "deferred",
+                        Some("MV.3.A lands"),
+                        vec![],
+                        "2020-01-01",
+                        None,
+                        None,
+                    )],
+                ),
+            ),
+            (
+                src("repo-b"),
+                state_file(
+                    "repo-b",
+                    vec![("MV.9.A", "open")],
+                    vec![item(
+                        "still-actionable",
+                        "deferred",
+                        Some("MV.9.A lands"),
+                        vec![],
+                        "2020-01-01",
+                        None,
+                        None,
+                    )],
+                ),
+            ),
+        ];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.cleared, 1);
+        assert_eq!(report.actionable, 1);
+
+        let plan = compute_disposal_plan(&report, &files, &[]);
+        assert_eq!(plan.candidates.len(), 1);
+        assert!(plan.skipped.is_empty());
+
+        let candidate = &plan.candidates[0];
+        assert_eq!(candidate.repo, "repo-a");
+        assert_eq!(candidate.slug, "cleared-one");
+        // The raw entry is carried verbatim (not just re-derived fields).
+        assert_eq!(candidate.entry.slug, "cleared-one");
+        assert_eq!(
+            candidate.entry.clears_when,
+            Some(ClearsWhen::Prose("MV.3.A lands".to_string()))
+        );
+        assert_eq!(candidate.evidence, "block repo-a:MV.3.A closed");
+    }
+
+    #[test]
+    fn compute_disposal_plan_reports_load_errors_as_skipped_with_zero_candidates() {
+        // A repo with no entries in `files`/`report` at all (as if its
+        // state.json failed to load) must still surface as SKIPPED, distinct
+        // from a repo that loaded and legitimately cleared nothing.
+        let files = vec![(
+            src("repo-a"),
+            state_file(
+                "repo-a",
+                vec![("MV.3.A", "closed")],
+                vec![item(
+                    "cleared-one",
+                    "deferred",
+                    Some("MV.3.A lands"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+            false,
+        );
+
+        let load_errors = vec![(
+            "repo-broken".to_string(),
+            "invalid type: string, expected a boolean at line 4 column 12".to_string(),
+        )];
+        let plan = compute_disposal_plan(&report, &files, &load_errors);
+
+        assert_eq!(plan.candidates.len(), 1);
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(plan.skipped[0].repo, "repo-broken");
+        assert!(plan.skipped[0].error.contains("expected a boolean"));
+    }
+
+    #[test]
+    fn compute_disposal_plan_excludes_command_exits_zero_without_allow_exec() {
+        // Guard (4): `--dispose` without `--allow-exec` must never make a
+        // `command_exits_zero` entry disposal-eligible. Since `allow_exec:
+        // false` keeps the entry out of the `Cleared` lane entirely (it lands
+        // `NotEvaluable` with `ExecutionNotAllowed`), selecting on `Cleared`
+        // alone is sufficient — assert exactly that here.
+        let files = vec![(
+            src("repo-a"),
+            state_file(
+                "repo-a",
+                vec![],
+                vec![Carryover {
+                    slug: "needs-exec".to_string(),
+                    scope: CarryoverScope {
+                        repo: None,
+                        tier: None,
+                        cross_repo: None,
+                    },
+                    kind: carryover_kind_from_str("deferred"),
+                    text: "some carryover text".to_string(),
+                    related: vec![],
+                    clears_when: Some(ClearsWhen::Predicate(
+                        ClearsWhenPredicate::CommandExitsZero {
+                            command: "true".to_string(),
+                            note: None,
+                        },
+                    )),
+                    created: "2020-01-01".to_string(),
+                    ..Default::default()
+                }],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+            false, // allow_exec: false, as --dispose alone must leave it
+        );
+        assert_eq!(report.cleared, 0);
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::ExecutionNotAllowed)
+        );
+
+        let plan = compute_disposal_plan(&report, &files, &[]);
+        assert!(plan.candidates.is_empty());
+    }
+
+    #[test]
+    fn describe_clearing_evidence_joins_every_satisfied_ref_as_one_line() {
+        let verdict = CarryoverVerdict {
+            repo: "repo-a".to_string(),
+            slug: "multi-ref".to_string(),
+            kind: "deferred".to_string(),
+            text: "text".to_string(),
+            clears_when: Some("MV.1.A lands and docs/x.md exists".to_string()),
+            created: "2020-01-01".to_string(),
+            age_days: None,
+            stale: false,
+            lane: CarryoverLane::Cleared,
+            refs: vec![
+                CarryoverRef::Block {
+                    key: "repo-a:MV.1.A".to_string(),
+                    satisfied: true,
+                },
+                CarryoverRef::Path {
+                    path: "docs/x.md".to_string(),
+                    satisfied: true,
+                },
+            ],
+            reason: None,
+            priority: None,
+            finding_id: None,
+            blocks: vec![],
+        };
+        assert_eq!(
+            describe_clearing_evidence(&verdict),
+            "block repo-a:MV.1.A closed; path docs/x.md exists"
         );
     }
 }
