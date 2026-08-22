@@ -733,6 +733,21 @@ enum Command {
         /// Ignored without `--audit`.
         #[arg(long, default_value_t = 30)]
         window: i64,
+        /// Move every CLEARED-lane `carryover[]` entry into its owning repo's
+        /// `planning/carryover-archive.jsonl` and remove it from `state.json`
+        /// (`MV.ticket.carryover-dispose`). A disposal is a MOVE, never a
+        /// delete. Independent of `--allow-exec`: passing `--dispose` never
+        /// implies command execution — a `command_exits_zero` predicate that
+        /// is NotEvaluable for lack of `--allow-exec` is never disposal-eligible.
+        #[arg(long)]
+        dispose: bool,
+        /// Compute and print the identical disposal plan `--dispose` would
+        /// act on, without writing either `state.json` or
+        /// `carryover-archive.jsonl`. Only meaningful together with
+        /// `--dispose`; passed alone, `mev carryover` reports the misuse and
+        /// exits non-zero rather than silently ignoring it.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Run the registry of named drift checks over facts kept in two places
     /// (`MV.ticket.conformance-check-registry`).
@@ -1405,6 +1420,150 @@ fn print_diagnostic(d: &mev::Diagnostic) {
         d.file.display(),
         theme::message(&d.message),
     );
+}
+
+/// Discover, load, and evaluate the fleet's `carryover[]` corpus the same way
+/// [`mev::carryover_sweep`] does, but — unlike that driver — also capture
+/// every individual `state.json` load failure as a `(repo_slug, error text)`
+/// pair rather than silently skipping it. `mev carryover --dispose`'s guard
+/// (3) needs that text: a repo whose sweep produced an evaluation error must
+/// be reported and skipped, never silently treated as having zero cleared
+/// entries (`compute_disposal_plan`'s `load_errors` parameter).
+///
+/// Duplicated from `load_and_evaluate_carryover_corpus`'s discovery/load/
+/// evaluate steps rather than reusing that private function directly, since
+/// this task's scope is `src/main.rs` only and that function does not thread
+/// individual load errors through.
+#[allow(clippy::type_complexity)]
+fn load_and_evaluate_carryover_corpus_for_dispose(
+    root: &std::path::Path,
+    repo_filter: Option<&str>,
+    allow_exec: bool,
+) -> anyhow::Result<(
+    Vec<(mev::brain::state::StateSource, mev::brain::state::StateFile)>,
+    Vec<(String, String)>,
+    mev::CarryoverReport,
+)> {
+    use mev::brain::config::find_brain_config;
+    use mev::brain::state::{discover_state_files, load_state};
+
+    let config = find_brain_config(root)
+        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
+
+    let (sources, _discovery_diags) = discover_state_files(root, &config);
+
+    let mut loaded: Vec<(mev::brain::state::StateSource, mev::brain::state::StateFile)> =
+        Vec::new();
+    let mut load_errors: Vec<(String, String)> = Vec::new();
+    for src in &sources {
+        match load_state(&src.abs_path) {
+            Ok(file) => loaded.push((src.clone(), file)),
+            Err(e) => load_errors.push((src.repo_slug.clone(), e.to_string())),
+        }
+    }
+
+    if let Some(slug) = repo_filter
+        && !sources.iter().any(|s| s.repo_slug == slug)
+    {
+        let mut valid_slugs: Vec<&str> = sources.iter().map(|s| s.repo_slug.as_str()).collect();
+        valid_slugs.sort_unstable();
+        valid_slugs.dedup();
+        return Err(anyhow::anyhow!(
+            "unknown --repo slug '{slug}'; valid slugs: {}",
+            valid_slugs.join(", ")
+        ));
+    }
+
+    let mut status_map: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    for (src, file) in &loaded {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let key = format!("{}:{}", src.repo_slug, block.id);
+                status_map.insert(key, block.status.clone());
+            }
+        }
+    }
+
+    let mut repo_paths: std::collections::HashMap<String, PathBuf> =
+        std::collections::HashMap::new();
+    for repo in &config.repos {
+        let repo_root = if repo.repo_path == "." || repo.repo_path.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(&repo.repo_path)
+        };
+        repo_paths.insert(repo.slug.clone(), repo_root);
+    }
+
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let report = mev::evaluate_carryover(
+        &loaded,
+        &status_map,
+        root,
+        &repo_paths,
+        &today,
+        &config.attention,
+        repo_filter,
+        allow_exec,
+    );
+
+    Ok((loaded, load_errors, report))
+}
+
+/// Drive `mev carryover --dispose` (and `--dispose --dry-run`, same code
+/// path — see [`mev::brain::carryover::dispose_repo`]'s own `dry_run`
+/// parameter): re-run the sweep with load errors captured, compute the
+/// disposal plan (task 1), print each candidate's full text before it is
+/// moved (constraint (5)), write (or simulate) the move (task 2), then print
+/// the per-repo summary and commit pathspec (task 3, constraints (1) and
+/// (6)).
+///
+/// Exit code follows [`mev::brain::carryover::DisposeRunReport::succeeded`]:
+/// a repo the sweep never reached (`skipped`) is reported, not fatal: a repo
+/// whose write itself failed partway through is.
+fn run_carryover_dispose(
+    root: &std::path::Path,
+    repo_filter: Option<&str>,
+    allow_exec: bool,
+    dry_run: bool,
+) -> ExitCode {
+    use mev::brain::carryover::{
+        compute_disposal_plan, render_dispose_preamble, render_dispose_summary, run_dispose,
+    };
+
+    let (loaded, load_errors, report) =
+        match load_and_evaluate_carryover_corpus_for_dispose(root, repo_filter, allow_exec) {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!("error: {err:#}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+    let plan = compute_disposal_plan(&report, &loaded, &load_errors);
+
+    let preamble = render_dispose_preamble(&plan);
+    if !preamble.is_empty() {
+        println!("{preamble}\n");
+    }
+
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let dispose_report = run_dispose(&plan, &loaded, &today, dry_run);
+
+    println!("{}", render_dispose_summary(&dispose_report));
+
+    if dispose_report.succeeded() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 /// Human-readable, lane-grouped summary for `mev carryover`'s default (non-`--json`) output.
@@ -2541,6 +2700,8 @@ fn main() -> ExitCode {
             allow_exec,
             audit,
             window,
+            dispose,
+            dry_run,
         } => {
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,
@@ -2549,7 +2710,15 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            if audit {
+            if dry_run && !dispose {
+                eprintln!(
+                    "error: --dry-run has no effect without --dispose; pass --dispose --dry-run"
+                );
+                return ExitCode::FAILURE;
+            }
+            if dispose {
+                run_carryover_dispose(&root, repo.as_deref(), allow_exec, dry_run)
+            } else if audit {
                 match mev::carryover_audit(&root, repo.as_deref(), allow_exec, window) {
                     Ok((_report, audit)) => {
                         if json || cli.json {
