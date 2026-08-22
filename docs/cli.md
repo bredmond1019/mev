@@ -23,6 +23,12 @@ mev [--json] <subcommand> [args]
 | Flag | Description |
 |---|---|
 | `--json` | Emit a machine-readable JSON envelope to stdout instead of the human summary. Exit code behaviour is unchanged — exit 1 on any error-severity diagnostic. |
+| `--build-stamp` | Print this binary's build provenance — `{"git_sha": <string>, "dirty": <bool \| "unknown">, "source_dir": <string>}` — as one JSON line to stdout, then exit immediately, before tracing init and before any subcommand runs. `dirty` is a JSON boolean when the compiled-in stamp is `"0"`/`"1"`, or the literal string `"unknown"` otherwise — never guessed. This is the cross-binary contract `toolchain-freshness` uses to query every registered writer named in `toolchain::CROSS_BINARY_WRITERS` (today: `bastion`, whose `src/buildstamp.rs` implements the same shape) — do not add, rename, or drop a key from this output. |
+
+```bash
+$ mev --build-stamp
+{"git_sha":"a1b2c3d","dirty":false,"source_dir":"/Users/brandon/Dev/agentic-portfolio/core/mev"}
+```
 
 ## Subcommands
 
@@ -1074,7 +1080,7 @@ Regenerate all derived views in the Brain corpus from the authored `tracks[]` DA
 `mev emit-state` is the **single derivation engine** that `/log-work` shells out to for regenerating leaf `focus` fields, the brain `repos[]` / `cross_repo[]` rollup, brain `focus`, the master-plan wave/dependency tables, the per-project cache docs (focus line + `synced_from` watermark), the tier sub-brain rollup tables, the HQ Operating Board, the HQ unified priority board, and (MV.13.A, record format updated MV.17.A) the cross-repo `planning/lane-segments.json` artifact — every discovered `lane-<name>.json` record's blocks segmented into `{roadmap, lane, segment, position}` runs by each block's *authored* `repo`/`origin_roadmap` fields (ownership is no longer resolved via an `OwnerIndex`, and a block claimed by two lane files renders once per appearance under its own `origin_roadmap` rather than being suppressed). Because the validator's `check_focus_drift` and `check_rollup` share the same `derive_focus` / `derive_rollup` functions, running `mev emit-state --write` followed by `mev validate-brain --state` on the same corpus will report zero `W_STATE_FOCUS_DRIFT` and zero `W_STATE_ROLLUP_DRIFT` — the emit is, by construction, the fixed point of the drift check across every generated surface.
 
 ```bash
-mev emit-state [--write] [--scope <repo>] [path]
+mev emit-state [--write] [--scope <repo>] [--require-fresh] [path]
 ```
 
 | Argument / Flag | Default | Description |
@@ -1082,6 +1088,49 @@ mev emit-state [--write] [--scope <repo>] [path]
 | `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
 | `--write` | off | Write the derived views in place. Without this flag the command is a dry-run |
 | `--scope <repo>` | unset (whole corpus) | Limit regeneration to one repo's own derived surfaces plus the rollups it feeds — nothing else. Omit for today's default full-corpus behaviour, byte-for-byte unchanged. |
+| `--require-fresh` | off | Promote a `toolchain-freshness` `Drift` verdict from a warning to a hard failure: no write performed, non-zero exit. Convenience alias for setting the `MEV_REQUIRE_FRESH` env var before the write runs — see [Toolchain freshness check](#toolchain-freshness-check-on-write) below. `NotEvaluable` never triggers this, only a genuine `Drift` does. |
+
+#### Toolchain freshness check on `--write`
+
+Every `--write` path chains through the same `emit_state` function (`set_block_status`,
+`defer-epic`/`resume-epic`/`complete-epic`, `close-operator-gate`, `approve`/`reject` all call it
+internally), so the toolchain-freshness verdict is checked once, at the top of that function,
+before any plan is computed — this is the single choke point that covers every writer named above,
+not just `emit-state` itself.
+
+The check queries **every registered corpus writer** — `self` (this binary, compiled-in stamp) plus
+every entry in `toolchain::CROSS_BINARY_WRITERS` (today: `bastion`, queried via `bastion
+--build-stamp`) — and aggregates worst-wins: any writer `Drift` makes the overall verdict `Drift`. A
+writer that does not implement `--build-stamp` (not found on `PATH`, non-zero exit, or malformed
+JSON) reports `NotEvaluable` and is named as such — **never silently `Pass`**. `NotEvaluable` never
+warns or blocks; only a genuine `Drift` does.
+
+- **Default (interactive) path** — a `Drift` verdict prints a loud stderr banner naming the stale
+  binary(ies) and their stamped-vs-live SHAs, then the write proceeds exactly as before:
+
+  ```
+  ================ TOOLCHAIN DRIFT ================
+  mev emit-state --write: at least one registered writer's binary does not match its source tree.
+  bastion: stamped a1b2c3d, live head 9f8e7d6
+  Rebuild/reinstall the stale binary before trusting this write. Set MEV_REQUIRE_FRESH=1 (or pass
+  --require-fresh to `mev emit-state`) to make this a hard failure instead of a warning.
+  ===================================================
+  ```
+
+- **Unattended path** — set `MEV_REQUIRE_FRESH` to `1` or `true` (matched case-insensitively; any
+  other value, including unset, empty, or `0`, is not-set) or pass `--require-fresh` to `mev
+  emit-state` (a convenience alias that sets the same env var before the write runs, so
+  `emit_state`'s own signature — and its many existing callers — needs no new parameter). A `Drift`
+  verdict then returns `E_TOOLCHAIN_STALE` before any plan is computed or applied: no write
+  performed, non-zero exit.
+
+  ```bash
+  MEV_REQUIRE_FRESH=1 mev emit-state --write
+  # or
+  mev emit-state --write --require-fresh
+  ```
+
+On a fresh binary (no drift), behaviour is byte-identical to before this check existed.
 
 #### `--scope <repo>` — per-repo regeneration
 
@@ -1213,6 +1262,7 @@ The other planners use their own markers in the same document types: `project-ca
 | `E_EMIT_INCOMPLETE_CORPUS` | Error | `--write` refused because one or more discovered `state.json` files failed to load; causes exit 1 |
 | `E_EMIT_UNKNOWN_SCOPE` | Error | `--scope` names a slug with no matching `[[repos]]` entry in `brain.toml`; the message names every valid slug; causes exit 1 |
 | `E_EMIT_LOCK_HELD` | Error | `--write` could not acquire the advisory lock at `<root>/.mev-emit.lock` within the timeout because another live process already holds it (names the holder pid); causes exit 1. A lockfile whose owning process is no longer alive is reclaimed automatically instead of blocking forever. Dry-run never takes the lock. |
+| `E_TOOLCHAIN_STALE` | Error | `--write` refused because `toolchain-freshness` reported `Drift` and `MEV_REQUIRE_FRESH`/`--require-fresh` is set; causes exit 1, no write performed. Checked before any plan is computed or applied. See [Toolchain freshness check on `--write`](#toolchain-freshness-check-on-write). |
 
 `--write` refuses to run when `path` resolves to a linked git worktree (e.g. `trees/<slug>/` under a
 repo that already has its own main working tree) — `emit-state` resolves every repo's derived-file

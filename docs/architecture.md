@@ -1055,3 +1055,81 @@ write half — no new codes were needed there.
 the appropriate `src/doc/` planner, applies with `apply_plan(&plan, write)`, and folds the
 diagnostics into a `Report`. Invoked by `mev doc materialize` and the `mev doc opportunity ...`
 subcommands respectively.
+
+## The writer-stamp contract (`src/brain/conformance/toolchain.rs`) — `MV.ticket.toolchain-freshness-covers-the-writer`
+
+### Why this exists
+
+`toolchain-freshness` (the pure `verdict()` function, unit-tested against synthetic stamps) has
+existed since the incident its module header documents: a `mev` binary built two days stale
+destroyed 29 authored block notes in one `--write` session. But it only ran inside `mev
+conformance`, which every repo's `harness.json` deliberately marks `gates: false` (staleness drifts
+mid-flight, so gating on it would redden suites for reasons unrelated to the change under test) —
+and nobody invokes `mev conformance` by hand. So on 2026-08-17 the mirror-image failure ran
+unnoticed for a full day: the *installed* `mev` (11:46) and `bastion` (12:02) both predated that
+day's work, so every `emit-state --write` invocation silently ran **without** that day's new
+lane-frontier and lane-availability planners. No artifact was written, no error was raised, and a
+downstream lane (`bastion:BA.19.C`) read the resulting absence as "the artifact does not exist"
+while its own board showed the work startable. Silent no-op and silent destruction are the same
+defect with opposite symptoms — a check that only runs when a human remembers to run it does not
+exist in practice.
+
+Two gaps had to close for the existing verdict logic to actually catch this class of incident:
+
+1. **Move the check to where a write actually happens.** `emit_state` (`src/lib.rs`) is the single
+   choke point every authored-state writer chains through — `set_block_status`,
+   `defer_epic`/`resume_epic`/`complete_epic`, `close_operator_gate`, `approve`/`reject` all call it
+   internally — so the freshness verdict is computed once, at the top of that function, before any
+   plan is built, rather than scattered per-command in `main.rs`. See `emit-state --write`'s
+   [toolchain freshness section](cli.md#toolchain-freshness-check-on-write) in the CLI reference for
+   the banner text, the `MEV_REQUIRE_FRESH` env var, and `--require-fresh`.
+2. **See past this binary.** The original check could only compare `mev`'s own compiled-in stamp
+   (`MEV_BUILD_GIT_SHA`/`MEV_BUILD_DIRTY`/`MEV_BUILD_SOURCE_DIR`, stamped by `build.rs` from `env!`)
+   against live HEAD — but `bastion`, not `mev`, is what actually runs `emit-state --write` on the
+   Mac Mini (`scripts/routine.sh`, `scripts/emit_state_write.sh`) and it carried no stamp at all, so
+   it was invisible to the check that existed to catch exactly this.
+
+### The `--build-stamp` contract
+
+Every registered corpus writer exposes a `--build-stamp` flag that prints exactly one JSON line to
+stdout and exits immediately, before any subcommand logic or tracing init runs (so its output is
+never interleaved with log lines):
+
+```json
+{"git_sha": "<string>", "dirty": <bool | "unknown">, "source_dir": "<string>"}
+```
+
+`dirty` is a JSON boolean when the compiled-in stamp is `"0"`/`"1"`, or the literal string
+`"unknown"` for anything else — never guessed. This shape is a **pinned cross-repo contract**: mev's
+own implementation (`toolchain::stamp_json`/`stamp_json_from`, wired to `mev --build-stamp` in
+`src/main.rs`) mirrors bastion's `src/buildstamp.rs` exactly (that module's doc comment pins the
+same shape from the bastion side) — neither side may add, rename, or drop a key without
+coordinating the other.
+
+`toolchain::CROSS_BINARY_WRITERS` (`&["bastion"]`) is the list of writers `toolchain-freshness`
+queries beyond `self`. It is **hardcoded, not driven by `brain.toml`**, because `brain.toml` carries
+no writer-registry field yet and bastion is, today, the only other binary in the fleet that runs
+`emit-state --write`. Widening it to a config-driven registry is future work if a third writer
+appears — out of scope for this ticket. For each name in the list, `toolchain.rs` spawns `<name>
+--build-stamp` (resolved via `PATH`), and:
+
+- a successful, well-shaped response is run through the same pure `verdict()` function used for
+  `self`, comparing the writer's stamped SHA against this tree's live HEAD;
+- a spawn failure (binary not on `PATH`), a non-zero exit, or unparseable/wrong-shaped JSON all
+  produce `NotEvaluable`, named for that specific binary — **never silently `Pass`**. A writer that
+  cannot be evaluated must never be reported as fresh.
+
+The overall status aggregates worst-wins across every writer (`Drift` > `NotEvaluable` > `Pass`),
+and the per-writer outcomes are all named in the report — a reader can see exactly which binary
+drifted or could not be evaluated, not just an aggregate verdict. `NotEvaluable` never triggers the
+`--write` banner or `--require-fresh`'s hard failure; only a genuine `Drift` does.
+
+### Operational surfacing
+
+`scripts/health_check.sh` — the Mac Mini's standalone "can this system do its job right now" probe
+— is the other place binary staleness needs to surface (a Mini-side "`routine.sh` built but the
+install step failed" shows up there). That script is **HQ-owned**, lives outside this repo's git
+tree, and is out of scope for this spec; it is handled as a separate direct edit in the HQ repo
+after this block closes. `mev conformance`'s own gate remains deliberately non-gating in every
+repo's `harness.json` for the reason above — this check is loud where it matters (a live `--write`)
+without redening CI for drift that is normal mid-flight.
