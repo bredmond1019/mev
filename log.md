@@ -13,6 +13,39 @@ timestamp: "2026-08-21T16:05:00-03:00"
 
 # Log — mev
 
+## [run: 2026-08-22]
+
+`MV.ticket.lane-segmentation-ignores-dependencies` ran tasks 1-3 via `/sdlc-flow` on a worktree
+branch and BAILED at task 3. Task 1 extended `segment_lane_file_segments` (`src/brain/lane_segments.rs`)
+to further split a repo-grouped run at any mid-run block carrying an unmet operator/approval/external
+gate or an open cross-repo/nowhere-else-authored block dependency, while a dependency already
+satisfied earlier in the same segment (or already closed) never splits it — renumbering of
+segment/position after a split is centralized in `segment_lane_file_segments` rather than in the
+split helper itself, since the latter only sees its own sub-segments. A local
+`dependency_block_index()` was added rather than exposing `frontier.rs`'s private
+`track_block_index`, per the task's explicit instruction. Task 2 added
+`tests/lane_segments_dependency_split.rs`, a fixture-evidence integration test built through the same
+public seam (`find_brain_config` + `discover_state_files` + `load_state` + `discover_lane_files` +
+`derive_lane_positions`) proving the split: an open cross-repo dependency yields 2 segments with
+exact renumbered segment/position values, a closed one yields 1. Both tasks passed clean
+(`fb2693d`, `349a7f3`). Task 3, the spec's designated full-suite validation task, made no code
+changes — fmt, clippy `-D warnings`, release build, and a frontier/lanes live-corpus smoke test all
+passed clean, but `cargo test` failed on one pre-existing, out-of-scope case:
+`tests/lane_segments_fleet.rs::live_corpus_discovery_warns_on_every_lane_less_roadmap_dir_and_errors_on_none`
+asserts 0 lane records against a live corpus that now holds 70 (HQ.8.A's legacy-.txt-to-JSON lane
+conversion). Confirmed unrelated to this ticket: the failure reproduces identically on the base
+main working tree, `git diff` shows zero changes to that test file across either of this spec's
+commits, and the test's own doc comment and panic message explicitly anticipate this exact drift
+("no test edit required here... re-arms automatically"). BAILED rather than expanding scope into
+HQ.8.A's follow-up. Next: HQ.8.A's lane conversion needs to land (or the assertion needs to be
+relaxed per its own doc comment) before task 3 can pass; then re-run `/sdlc-flow` from task 3.
+
+```
+349a7f3 feat: implement MV.ticket.lane-segmentation-ignores-dependencies-task2
+fb2693d feat: implement MV.ticket.lane-segmentation-ignores-dependencies-task1
+fcc05df chore: init worktree MV.ticket.lane-segmentation-ignores-dependencies-flow
+```
+
 ## [run: 2026-08-21]
 
 MV.17.A ("Parse lane.json; delete the lane-file directive grammar") resumed at task 7 and
