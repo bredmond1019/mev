@@ -11,6 +11,22 @@ related: [status]
 timestamp: "2026-08-23T09:17:53-03:00"
 ---
 
+## [run: 2026-08-23]
+
+Ran `MV.ticket.graph-findings-path-resolution` (tasks 1–7) via `/sdlc-flow` on a fresh continuation of the branch. Task 1 (already committed from an earlier partial run) implemented fleet-wide `ResolutionRoot` resolution for `referenced-path-absent`. Task 2 (already committed) added the resolver test suite including the load-bearing positive control. Task 3 made both detectors emit a typed, not-already-satisfied `clears_when` (`FileContains` for `unregistered-lane-block`, `FileExists` for `referenced-path-absent`) and wired `carryover_entry_for_finding` to propagate it instead of always writing `None`. Task 4 added end-to-end predicate tests through the real `evaluate_carryover` evaluator plus an idempotent-rewrite test over real fixtures. Task 5 documented the resolution order and predicates in `docs/cli.md`. Task 6 reconciled all 37 surviving live carryover entries fleet-wide — 6 `referenced-path-absent` entries re-verified genuinely absent (0 removed) and given a `file_exists` `clears_when`; 31 `unregistered-lane-block` entries given a `file_contains` `clears_when` anchored to `"id": "<block>"` (not task 3's bare-id spelling, which a self-match trap makes vacuously satisfied) — and flagged a residual leading-slash path-join defect in the resolver as a follow-up, left unfixed as out of scope. Task 7 confirmed all four full-suite gates green with no code changes.
+
+The consolidated review returned **PARTIAL after 3 attempts**: AC #3 ("each emitted entry carries a typed `clears_when` that is NOT satisfied at the moment it is written") fails for the `unregistered-lane-block` detector class specifically — `src/brain/graph_findings.rs:288` still emits the bare-id `ClearsWhenPredicate::FileContains { path, pattern: block_ref.id }` that task 3 wrote and task 6 explicitly worked around on disk rather than fixed in code, so the entry's own written `text` (which quotes the block id verbatim) satisfies its own predicate the instant `--write` runs. The guard test at line 1597 does not catch this because its fixture state.json has no `carryover` array, so it never reproduces the real write path. Notable decision: task 6 deliberately left the detector code unfixed (out of its own scope as corpus reconciliation, not detector logic) and flagged it as a named follow-up, which the review then surfaced as the blocking gap. Next: fix `unregistered_lane_block_findings`'s predicate to anchor `"id": "<block_id>"` (matching the on-disk workaround already applied fleet-wide by task 6) instead of the bare id, and rewrite the line-1597 guard test against a fixture that already contains the just-written entry so it actually exercises the self-satisfaction trap.
+
+```
+fd110c3 fix: review pass 1 for MV.ticket.graph-findings-path-resolution
+35be7d5 feat: implement MV.ticket.graph-findings-path-resolution-task5
+cb00782 feat: implement MV.ticket.graph-findings-path-resolution-task4
+142c123 feat: implement MV.ticket.graph-findings-path-resolution-task3
+56f4436 chore: wrap up MV.ticket.graph-findings-path-resolution
+4c0b578 feat: implement MV.ticket.graph-findings-path-resolution-task2
+f01a6bc feat: implement MV.ticket.graph-findings-path-resolution-task1
+```
+
 # Log — mev
 
 ## [run: 2026-08-23]
