@@ -17,8 +17,16 @@
 //! convention: a header/summary struct, a flat `Vec` of typed rows, and per-class
 //! counts alongside the total.
 
+use std::collections::HashSet;
+use std::path::Path;
+
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
+
+use crate::Diagnostic;
+use crate::brain::config::BrainConfig;
+use crate::brain::lane_segments::{LaneFile, discover_lane_files};
+use crate::brain::state::{StateFile, StateSource, discover_state_files, load_state};
 
 // ---------------------------------------------------------------------------
 // Detector classes
@@ -178,6 +186,100 @@ impl GraphFindingsReport {
 }
 
 // ---------------------------------------------------------------------------
+// Detector 1: unregistered-lane-block
+// ---------------------------------------------------------------------------
+
+/// Detector 1 — `unregistered-lane-block`, over already-discovered/loaded corpus
+/// data. Pure with respect to disk: callers do the I/O (see
+/// [`detect_unregistered_lane_blocks`] for the disk-facing wrapper task 4's CLI
+/// subcommand uses), which keeps this half unit-testable without a fixture
+/// directory per case.
+///
+/// For every `blocks[]` entry in every discovered lane record, reports a finding
+/// when the entry's OWN authored `repo` (never the lane's or the lane file's
+/// location — a lane is not single-repo in this corpus, per
+/// [`crate::brain::lane_segments::LaneBlockRef::repo`]) has no `state.json` with a
+/// matching `tracks[].blocks[].id`. An id registered under a *different* repo than
+/// the one the lane entry names still produces a finding — registration is keyed
+/// on `(repo, id)`, not `id` alone.
+///
+/// `lane_diags` (the diagnostics [`discover_lane_files`] returned alongside
+/// `lane_files`) are carried through verbatim into the returned diagnostics — a
+/// lane record that failed to parse must surface as an error here too, never
+/// silently contribute zero findings (standing rule 11: a clean-looking empty
+/// result from a detector that could not read its input is the exact failure mode
+/// this exists to avoid).
+#[must_use]
+pub fn unregistered_lane_block_findings(
+    lane_files: &[LaneFile],
+    lane_diags: &[Diagnostic],
+    state_files: &[(StateSource, StateFile)],
+) -> (Vec<GraphFinding>, Vec<Diagnostic>) {
+    let mut registered: HashSet<(&str, &str)> = HashSet::new();
+    for (src, file) in state_files {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                registered.insert((src.repo_slug.as_str(), block.id.as_str()));
+            }
+        }
+    }
+
+    let mut findings = Vec::new();
+    for lane_file in lane_files {
+        for block_ref in &lane_file.blocks {
+            if registered.contains(&(block_ref.repo.as_str(), block_ref.id.as_str())) {
+                continue;
+            }
+            let subject = format!("{}:{}", block_ref.repo, block_ref.id);
+            let message = format!(
+                "lane '{}' (roadmap '{}', {}) names block '{}' owned by repo '{}', which has \
+                 no matching tracks[].blocks[].id in {}'s planning/state.json",
+                lane_file.lane,
+                lane_file.roadmap,
+                lane_file.path.display(),
+                block_ref.id,
+                block_ref.repo,
+                block_ref.repo,
+            );
+            findings.push(GraphFinding {
+                detector: DetectorClass::UnregisteredLaneBlock,
+                repo: block_ref.repo.clone(),
+                subject: subject.clone(),
+                message,
+                finding_id: finding_id(DetectorClass::UnregisteredLaneBlock, &subject),
+            });
+        }
+    }
+
+    (findings, lane_diags.to_vec())
+}
+
+/// Disk-facing wrapper for [`unregistered_lane_block_findings`]: discovers every
+/// lane record and every `planning/state.json` under `root` and reduces them
+/// through the pure detector above. This is what task 4's `mev graph-findings`
+/// subcommand calls; a `state.json` that fails to load is skipped (matching
+/// [`crate::block_graph_brain`]'s posture — an individual malformed file is not
+/// fatal to the run), while a lane record that fails to parse is surfaced as an
+/// error diagnostic via `lane_diags`, never silently dropped.
+#[must_use]
+pub fn detect_unregistered_lane_blocks(
+    root: &Path,
+    config: &BrainConfig,
+) -> (Vec<GraphFinding>, Vec<Diagnostic>) {
+    let (lane_files, lane_diags) = discover_lane_files(root);
+    let (sources, _state_discovery_diags) = discover_state_files(root, config);
+
+    let mut loaded: Vec<(StateSource, StateFile)> = Vec::new();
+    for src in &sources {
+        if let Ok(file) = load_state(&src.abs_path) {
+            loaded.push((src.clone(), file));
+        }
+    }
+
+    unregistered_lane_block_findings(&lane_files, &lane_diags, &loaded)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -326,5 +428,175 @@ mod tests {
         assert_eq!(report.unregistered_lane_block, 0);
         assert_eq!(report.referenced_path_absent, 0);
         assert!(report.findings.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Detector 1: unregistered-lane-block
+    // -----------------------------------------------------------------
+
+    use crate::brain::lane_segments::LaneBlockRef;
+    use crate::brain::state::{Focus, Track, TrackBlock};
+    use std::path::PathBuf;
+
+    fn lane_block_ref(id: &str, repo: &str) -> LaneBlockRef {
+        LaneBlockRef {
+            id: id.to_string(),
+            line: 1,
+            origin_roadmap: Some("alpha".to_string()),
+            repo: repo.to_string(),
+        }
+    }
+
+    fn lane_file(lane: &str, roadmap: &str, blocks: Vec<LaneBlockRef>) -> LaneFile {
+        LaneFile {
+            roadmap: roadmap.to_string(),
+            lane: lane.to_string(),
+            path: PathBuf::from(format!("planning/roadmaps/{roadmap}/lane-{lane}.json")),
+            blocks,
+            directives: None,
+        }
+    }
+
+    fn state_source(repo: &str) -> StateSource {
+        StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: PathBuf::from(format!("/{repo}/planning/state.json")),
+            expected_kind: "project",
+        }
+    }
+
+    fn track_block(id: &str) -> TrackBlock {
+        TrackBlock {
+            id: id.to_string(),
+            title: format!("Block {id}"),
+            status: None,
+            depends_on: Vec::new(),
+            ..Default::default()
+        }
+    }
+
+    fn project_file(repo: &str, blocks: Vec<TrackBlock>) -> StateFile {
+        StateFile {
+            repo: repo.to_string(),
+            kind: "project".to_string(),
+            updated: "2026-01-01".to_string(),
+            focus: Focus::default(),
+            tracks: vec![Track {
+                title: "Phase 1".to_string(),
+                blocks,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn registered_lane_block_produces_no_finding() {
+        let lane = lane_file("substrate", "alpha", vec![lane_block_ref("MV.1.A", "mev")]);
+        let state_files = vec![(
+            state_source("mev"),
+            project_file("mev", vec![track_block("MV.1.A")]),
+        )];
+
+        let (findings, diags) = unregistered_lane_block_findings(&[lane], &[], &state_files);
+        assert!(
+            findings.is_empty(),
+            "expected no findings, got {findings:?}"
+        );
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn unregistered_lane_block_produces_exactly_one_finding() {
+        let lane = lane_file("substrate", "alpha", vec![lane_block_ref("MV.1.A", "mev")]);
+        // The registered id is a DIFFERENT id in the same repo -- MV.1.A itself is
+        // never registered.
+        let state_files = vec![(
+            state_source("mev"),
+            project_file("mev", vec![track_block("MV.9.Z")]),
+        )];
+
+        let (findings, diags) = unregistered_lane_block_findings(&[lane], &[], &state_files);
+        assert_eq!(
+            findings.len(),
+            1,
+            "expected exactly one finding, got {findings:?}"
+        );
+        assert!(diags.is_empty());
+
+        let f = &findings[0];
+        assert_eq!(f.detector, DetectorClass::UnregisteredLaneBlock);
+        assert_eq!(f.repo, "mev");
+        assert_eq!(f.subject, "mev:MV.1.A");
+        assert_eq!(
+            f.finding_id,
+            finding_id(DetectorClass::UnregisteredLaneBlock, "mev:MV.1.A")
+        );
+    }
+
+    #[test]
+    fn id_registered_in_a_different_repo_still_produces_a_finding() {
+        // The lane entry names repo "mev", but the ONLY state.json registering
+        // "MV.1.A" belongs to "base-template". Ownership resolves against the
+        // lane entry's own authored `repo`, never against wherever the id
+        // happens to be registered -- so this must still fire.
+        let lane = lane_file("substrate", "alpha", vec![lane_block_ref("MV.1.A", "mev")]);
+        let state_files = vec![(
+            state_source("base-template"),
+            project_file("base-template", vec![track_block("MV.1.A")]),
+        )];
+
+        let (findings, _diags) = unregistered_lane_block_findings(&[lane], &[], &state_files);
+        assert_eq!(
+            findings.len(),
+            1,
+            "expected exactly one finding, got {findings:?}"
+        );
+        assert_eq!(findings[0].repo, "mev");
+        assert_eq!(findings[0].subject, "mev:MV.1.A");
+    }
+
+    #[test]
+    fn unparseable_lane_record_surfaces_an_error_not_a_clean_empty_result() {
+        // Reuse the existing malformed-record fixture (lane_segments.rs's own
+        // "unknown top-level key" regression) rather than duplicating one: run
+        // real discovery over it, then feed the diagnostics it returns through
+        // the detector and assert they survive -- this is standing rule 11's
+        // positive control applied to this detector specifically. A detector
+        // that silently swallowed discover_lane_files' diagnostics would report
+        // zero findings here for exactly the wrong reason (it could not read
+        // its input, not because the corpus is clean).
+        let dir = crate::testsupport::unique_temp_dir("mev-graph-findings-malformed-lane");
+        let fixture = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/lane_json/unknown_key_lane.json"),
+        )
+        .expect("fixture must exist");
+        let target = dir.join("planning/roadmaps/alpha/lane-docs-sync.json");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, fixture).unwrap();
+
+        let (lane_files, lane_diags) = discover_lane_files(&dir);
+        assert!(
+            lane_files.is_empty(),
+            "the malformed record must not be parsed into a usable LaneFile"
+        );
+        assert!(
+            !lane_diags.is_empty(),
+            "discover_lane_files must surface a diagnostic for the malformed record"
+        );
+
+        let (findings, diags) = unregistered_lane_block_findings(&lane_files, &lane_diags, &[]);
+        assert!(
+            findings.is_empty(),
+            "no lane blocks were discoverable, so there is nothing to report as unregistered"
+        );
+        assert!(
+            diags.iter().any(|d| d.severity == crate::Severity::Error),
+            "the parse failure must surface as an error diagnostic, not silently \
+             produce a clean-looking empty result: {diags:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
