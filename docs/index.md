@@ -14,7 +14,7 @@ related: [mev-readme, cli-reference, architecture, brain-toml-config, okf-schema
 
 | Doc | What it covers |
 |---|---|
-| [CLI reference](cli.md) | Subcommands (including `state-history` list/restore, `attention-queue` operator payload delivery, `check-consumers` post-merge consumer compile gate, `frontier` corpus-wide startable-block frontier + gate_rank, `lanes` six-state segment availability + lane-level unblock leverage), flags, defaults, exit codes, examples |
+| [CLI reference](cli.md) | Subcommands (including `state-history` list/restore, `attention-queue` operator payload delivery, `check-consumers` post-merge consumer compile gate, `frontier` corpus-wide startable-block frontier + gate_rank, `lanes` six-state segment availability + lane-level unblock leverage, `graph-findings` mechanically-detectable carryover findings), flags, defaults, exit codes, examples |
 | [Architecture](architecture.md) | Module map, `ContentValidator` trait, core types (`Diagnostic`, `Report`, `JsonReport`) |
 | [brain.toml config](brain-toml.md) | Full `brain.toml` schema — `[vocab]`, `[crawl]`, `[[repos]]` |
 | [OKF schema](okf-schema.md) | OKF frontmatter fields, required vs optional, validation rules |

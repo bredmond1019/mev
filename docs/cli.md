@@ -2133,6 +2133,96 @@ fatal); non-zero if `--dry-run` is passed without `--dispose`, or on the same `b
 
 ---
 
+### `graph-findings [--json] [--write] [path]`
+
+`mev graph-findings` (`MV.ticket.graph-derived-carryover-findings`) closes a class of carryover
+entries that were previously found only by an agent reading files: some findings are
+**mechanically derivable from the corpus itself** — a lane file naming a block no `state.json`
+registers, or a doc naming a script that exists nowhere in the fleet. This verb scans for those
+deterministically, reusing the existing lane and graph readers rather than re-walking the
+corpus, and can optionally write them straight into `carryover[]`.
+
+```bash
+mev graph-findings [--json] [--write] [path]
+```
+
+| Argument / Flag | Default | Description |
+|---|---|---|
+| `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
+| `--json` | off | Emit the `GraphFindingsReport` as compact JSON instead of the human, detector-class-grouped summary |
+| `--write` | off | Append each finding to its owning repo's `state.json` `carryover[]` as a typed entry (see **`--write`** below). Without this flag, `mev graph-findings` never modifies anything on disk — a `--json` run and a plain run are both read-only |
+
+#### The two detectors
+
+| Class | Meaning |
+|---|---|
+| `unregistered-lane-block` | An id in some `lane-*.json`'s `blocks[]` with no matching `tracks[].blocks[].id` in **that entry's own `repo`** field's `state.json` — a lane is not single-repo in this corpus, so ownership is resolved per-entry, never against the lane file's own location. Reuses `discover_lane_files` (`src/brain/lane_segments.rs`) and the existing state/block-graph readers (`src/brain/block_graph.rs`, `src/brain/state.rs`); a lane record that fails to parse is surfaced as an error diagnostic, never silently swallowed into a clean-looking zero |
+| `referenced-path-absent` | A path named as a script or generator in a command or spec that resolves nowhere in the fleet. Scanned sources are deliberately narrow: every `.md` under `<repo>/.claude/commands/` and every `.json` under `<repo>/planning/blocks/` — not READMEs, plans, decisions, or other prose, which would bury real findings under narrative mentions. A candidate reference is a `/`-containing path token ending in `.py` or `.sh` (the fleet's own generator/script extensions); bare filenames, URLs, and every other extension are excluded by design, not oversight. Resolution follows symlinks (`Path::exists` already does; the corpus walk sets `.follow_links(true)` explicitly), so a path that exists only through a `planning/` symlink into its `_planning/` vault is correctly reported present, never a false `absent` |
+
+#### `finding_id` — why the same finding correlates across repos
+
+Each finding carries a `finding_id`: a digest over **`(detector class, normalized subject)` and
+nothing else** — never the owning repo, the file it was found in, a timestamp, or an index. This
+is what makes the *same* finding, independently filed by several repos, correlate to one id: the
+motivating case is `render-spec.py`, referenced (and missing) from `mev`, `base-template`, and
+`engine-rs` alike, where `scripts/render_spec.py`, `./scripts/render_spec.py`, and
+`base-template/scripts/render_spec.py` all normalize to the same subject and therefore the same
+`finding_id`. `mev carryover`'s existing `finding_id` clustering groups these automatically once
+written.
+
+#### Exit codes
+
+Unlike `mev carryover` (always exits `0` — it reports, it never gates), `graph-findings` is a
+**gate-shaped reporter**:
+
+| Code | Meaning |
+|---|---|
+| `0` | The corpus is clean — no findings and no error-severity diagnostic |
+| `1` | At least one finding was reported, or an error-severity diagnostic was surfaced (e.g. an unparseable lane record), or `brain.toml` was not found/unreadable, or `--json` serialization failed |
+
+#### `--write`
+
+`--write` routes through `src/brain/carryover.rs` (`carryover_entry_for_finding` /
+`write_graph_findings_for_repo`) rather than hand-serializing an entry in
+`graph_findings.rs`, so every emitted entry inherits the existing `Carryover` shape and the
+dispose sweep for free:
+
+- **`scope`** is `{"repo": "<owning repo>", "tier": null, "cross_repo": null}` — exactly one
+  non-null key, per the fleet-wide `scope` contract.
+- **`kind`** is always `drift` — the honest fit for both detectors, since each is a fact held in
+  two places that no longer agree (a lane's claim vs. `state.json`'s registry; a reference vs.
+  the filesystem). `constraint` and `known_issue` are retired and are never minted here.
+- **`finding_id`** is carried onto the entry verbatim, which is also the **idempotence key**: a
+  finding whose `finding_id` already exists in that repo's `carryover[]` is skipped, so running
+  `--write` twice never duplicates an entry and the verb is safe to run unattended.
+- **No `clears_when`** is authored — no honest machine-checkable predicate exists for "the lane
+  and the registry now agree" or "the path now exists" that wouldn't risk retiring the entry
+  while the finding is still live, so the entry carries prose only.
+- The rewrite is **byte-faithful** to the rest of the file: `state.json` is serialized with
+  `ensure_ascii=False`-equivalent output, `indent=2`, and a trailing newline, so an append
+  changes only the added array elements — the untouched portion of the file is byte-identical.
+- Per-repo output names how many findings were newly appended (`"{repo}: appended N finding(s)
+  to {path}"`), or `"{repo}: 0 appended (nothing new)"` when every finding for that repo was
+  already present.
+
+**Examples:**
+
+```bash
+# Human, detector-class-grouped summary of the whole fleet
+mev graph-findings
+
+# Machine-readable JSON envelope
+mev graph-findings --json
+
+# Report AND write new findings into each owning repo's carryover[]
+mev graph-findings --write
+
+# From an explicit brain root
+mev graph-findings ~/Dev/agentic-portfolio
+```
+
+---
+
 ### `attention-queue [--out <path>] [path]`
 
 Emits every Attention-board item — across all four lanes (stale carryover's `Blocking`/`Hot`/
