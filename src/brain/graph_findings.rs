@@ -18,7 +18,7 @@
 //! counts alongside the total.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
@@ -277,6 +277,239 @@ pub fn detect_unregistered_lane_blocks(
     }
 
     unregistered_lane_block_findings(&lane_files, &lane_diags, &loaded)
+}
+
+// ---------------------------------------------------------------------------
+// Detector 2: referenced-path-absent
+// ---------------------------------------------------------------------------
+//
+// ## Scope contract (read this before extending the matcher)
+//
+// **Files scanned**, per repo (each `[[repos]]` entry in `brain.toml`):
+// - every `.md` file under `<repo>/.claude/commands/` — a "command"
+// - every `.json` file under `<repo>/planning/blocks/` — a "spec" (block record)
+//
+// No other markdown (READMEs, plans, decisions, prose docs generally) is
+// scanned, and no other JSON (`state.json`, `tasks.json`, lane files) is
+// scanned. Commands and block records are where a script/generator gets
+// *invoked*, not merely mentioned in passing prose — the block record's own
+// example, `render-spec.py`, is exactly this: a generator a command shells
+// out to and a spec names as a `validation_commands`/interface detail. An
+// over-broad matcher that treated every path-like string in prose as a
+// reference would bury these findings under noise from narrative docs that
+// merely *discuss* a script (D-numbers, block IDs, and prose paths in a
+// `notes` field are not references to resolve).
+//
+// **What shape counts as "named as a script or generator"**: a
+// whitespace/punctuation-delimited run of path characters (ASCII
+// alphanumerics, `.`, `_`, `-`, `/`) that contains at least one `/` (so it
+// reads as a *path*, not a bare word) and ends in `.py` or `.sh` — the two
+// extensions the fleet's own `scripts/` and command-invoked generators
+// actually use (see `planning/harness.json`'s shell checks and the
+// `render_spec.py` case named in the block record). Deliberately excluded:
+// bare filenames with no directory component (too easy to collide with an
+// unrelated word), URLs (`://` is not a path character so a URL token never
+// reaches the extension check), and every other extension (`.rs`, `.md`,
+// `.json`, …) — those are either source code (not "a script a command
+// runs") or not script/generator shapes at all. Extending the extension set
+// is a deliberate scope change, not a bug fix; do it by editing
+// [`is_script_extension`] and adding a test, not by relaxing the character
+// class.
+//
+// **Resolution follows symlinks.** Every `planning/` in this corpus is a
+// symlink into a `_planning/` vault (D46). [`std::path::Path::exists`]
+// resolves symlinks at *every* path component (it is backed by `stat`, not
+// `lstat`), so `repo_root.join(&raw_path).exists()` already does the right
+// thing for a referenced path that only exists through a `planning/`
+// symlink — no special-casing needed in the existence check itself. The
+// trap is on the *walk* side instead: [`walkdir::WalkDir`] does not descend
+// into an interior symlinked directory unless `.follow_links(true)` is set,
+// so [`detect_referenced_path_absent`] sets it explicitly when walking for
+// command/spec files to scan — otherwise a repo whose `planning/blocks/`
+// is itself a symlink target would never have its specs discovered at all,
+// which (per standing rule 11) would look like a clean empty result for
+// exactly the wrong reason.
+
+/// One file whose contents are scanned for referenced script/generator
+/// paths, together with the repo it belongs to and that repo's root — the
+/// root a relative reference in this file is resolved against.
+#[derive(Debug, Clone)]
+pub struct ReferencingSource {
+    /// Owning repo slug (from `brain.toml`'s `[[repos]]`).
+    pub repo: String,
+    /// Absolute path to the repo's own root directory — relative
+    /// references extracted from `contents` resolve against this, not the
+    /// fleet HQ root.
+    pub repo_root: PathBuf,
+    /// The command or spec file the reference was found in (for
+    /// diagnostics/messages only — never fed into `finding_id`).
+    pub file_path: PathBuf,
+    /// Raw file contents to scan.
+    pub contents: String,
+}
+
+/// Whether `ext`-less-dot suffix counts as a "script or generator" for this
+/// detector. See the module-level scope contract above for why only these
+/// two.
+fn is_script_extension(token: &str) -> bool {
+    token.ends_with(".py") || token.ends_with(".sh")
+}
+
+/// Extract candidate script/generator path references from raw file
+/// contents.
+///
+/// Pure text scan, independent of file format (markdown command or JSON
+/// spec) — both are scanned as flat text, since the reference shape (a
+/// path-like token ending `.py`/`.sh`) shows up the same way whether it
+/// sits inside a backtick span, a JSON string value, or a shell
+/// invocation. See the module-level scope contract for the exact character
+/// class and the `/`-required rule that excludes bare filenames and URLs.
+#[must_use]
+pub fn extract_referenced_script_paths(contents: &str) -> Vec<String> {
+    let is_path_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/');
+
+    let mut tokens: Vec<&str> = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, c) in contents.char_indices() {
+        if is_path_char(c) {
+            if start.is_none() {
+                start = Some(i);
+            }
+        } else if let Some(s) = start.take() {
+            tokens.push(&contents[s..i]);
+        }
+    }
+    if let Some(s) = start {
+        tokens.push(&contents[s..]);
+    }
+
+    let mut found = Vec::new();
+    for raw in tokens {
+        // Sentence-terminal punctuation ('.') is itself a path character, so a
+        // reference immediately followed by a period with no space (end of a
+        // sentence) would otherwise swallow it into the token. Trim trailing
+        // dots before checking the extension.
+        let trimmed = raw.trim_end_matches('.');
+        if trimmed.contains('/') && is_script_extension(trimmed) {
+            found.push(trimmed.to_string());
+        }
+    }
+    found
+}
+
+/// Detector 2 — `referenced-path-absent`, over already-extracted sources.
+/// Pure with respect to disk beyond the existence check itself: callers do
+/// the file discovery ([`detect_referenced_path_absent`] is the disk-facing
+/// wrapper), which keeps this half unit-testable without a fixture
+/// directory per case.
+///
+/// For every candidate reference [`extract_referenced_script_paths`] finds
+/// in each `source`, resolves it against that source's `repo_root` (never
+/// the fleet HQ root — a repo's command references its own scripts
+/// relatively) and reports a finding when it does not exist on disk.
+/// `subject` is [`normalize_referenced_path`] applied to the raw reference,
+/// so the *same* missing path referenced from different repos — or
+/// spelled with a different leading prefix — produces rows sharing one
+/// `finding_id`, per the block record's `render-spec.py` case.
+#[must_use]
+pub fn referenced_path_absent_findings(sources: &[ReferencingSource]) -> Vec<GraphFinding> {
+    let mut findings = Vec::new();
+    for source in sources {
+        for raw_path in extract_referenced_script_paths(&source.contents) {
+            if source.repo_root.join(&raw_path).exists() {
+                continue;
+            }
+            let subject = normalize_referenced_path(&raw_path);
+            let message = format!(
+                "{} references '{}', which does not exist under {} (repo '{}')",
+                source.file_path.display(),
+                raw_path,
+                source.repo_root.display(),
+                source.repo,
+            );
+            findings.push(GraphFinding {
+                detector: DetectorClass::ReferencedPathAbsent,
+                repo: source.repo.clone(),
+                subject: subject.clone(),
+                message,
+                finding_id: finding_id(DetectorClass::ReferencedPathAbsent, &subject),
+            });
+        }
+    }
+    findings
+}
+
+/// Disk-facing wrapper for [`referenced_path_absent_findings`]: for every
+/// `[[repos]]` entry in `config`, walks `<repo>/.claude/commands/` (`.md`)
+/// and `<repo>/planning/blocks/` (`.json`) under `root`, reads each file,
+/// and reduces the collected [`ReferencingSource`]s through the pure
+/// detector above.
+///
+/// `.follow_links(true)` on both walks — see the module-level scope
+/// contract's symlink-trap note: a repo's `planning/` is itself a symlink
+/// into the `_planning/` vault, and the walk must descend into it to find
+/// `planning/blocks/*.json` at all.
+#[must_use]
+pub fn detect_referenced_path_absent(
+    root: &Path,
+    config: &BrainConfig,
+) -> (Vec<GraphFinding>, Vec<Diagnostic>) {
+    let mut sources = Vec::new();
+    let mut diags = Vec::new();
+
+    for repo in &config.repos {
+        let repo_path = repo.repo_path.trim();
+        let repo_root = if repo_path.is_empty() || repo_path == "." {
+            root.to_path_buf()
+        } else {
+            root.join(repo_path)
+        };
+
+        for (scan_dir, ext) in [
+            (repo_root.join(".claude").join("commands"), "md"),
+            (repo_root.join("planning").join("blocks"), "json"),
+        ] {
+            if !scan_dir.exists() {
+                continue;
+            }
+            let iter = walkdir::WalkDir::new(&scan_dir)
+                .follow_links(true)
+                .into_iter();
+            for entry in iter {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        diags.push(Diagnostic::error(&scan_dir, "", format!("walk error: {e}")));
+                        continue;
+                    }
+                };
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                if entry.path().extension().and_then(|e| e.to_str()) != Some(ext) {
+                    continue;
+                }
+                match std::fs::read_to_string(entry.path()) {
+                    Ok(contents) => sources.push(ReferencingSource {
+                        repo: repo.slug.clone(),
+                        repo_root: repo_root.clone(),
+                        file_path: entry.path().to_path_buf(),
+                        contents,
+                    }),
+                    Err(e) => {
+                        diags.push(Diagnostic::error(
+                            entry.path(),
+                            "",
+                            format!("could not read file: {e}"),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let findings = referenced_path_absent_findings(&sources);
+    (findings, diags)
 }
 
 // ---------------------------------------------------------------------------
@@ -598,5 +831,184 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // Detector 2: referenced-path-absent
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn extract_finds_slash_qualified_script_reference() {
+        let contents = "Run `scripts/render_spec.py --check` before committing.";
+        let found = extract_referenced_script_paths(contents);
+        assert_eq!(found, vec!["scripts/render_spec.py".to_string()]);
+    }
+
+    #[test]
+    fn extract_finds_sh_reference_in_json_style_text() {
+        let contents = r#"{"validation_commands": ["scripts/check_things.sh --all"]}"#;
+        let found = extract_referenced_script_paths(contents);
+        assert_eq!(found, vec!["scripts/check_things.sh".to_string()]);
+    }
+
+    #[test]
+    fn extract_trims_trailing_sentence_period() {
+        let contents = "See scripts/render_spec.py.";
+        let found = extract_referenced_script_paths(contents);
+        assert_eq!(found, vec!["scripts/render_spec.py".to_string()]);
+    }
+
+    #[test]
+    fn extract_ignores_bare_filename_with_no_directory() {
+        // No '/' — deliberately excluded per the scope contract (too easy
+        // to collide with an unrelated word).
+        let contents = "run render_spec.py directly";
+        assert!(extract_referenced_script_paths(contents).is_empty());
+    }
+
+    #[test]
+    fn extract_ignores_non_script_extensions() {
+        let contents = "see src/brain/graph_findings.rs and docs/cli.md";
+        assert!(extract_referenced_script_paths(contents).is_empty());
+    }
+
+    #[test]
+    fn extract_ignores_bare_domain_url() {
+        // '://' is not a path character, so a bare domain reference with no
+        // script-shaped path segment never reaches the extension check.
+        let found = extract_referenced_script_paths("see https://example.com for docs");
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn extract_multiple_references_in_one_file() {
+        let contents = "scripts/a.py then scripts/b.sh then done";
+        let found = extract_referenced_script_paths(contents);
+        assert_eq!(
+            found,
+            vec!["scripts/a.py".to_string(), "scripts/b.sh".to_string()]
+        );
+    }
+
+    fn referencing_source(repo: &str, repo_root: &Path, contents: &str) -> ReferencingSource {
+        ReferencingSource {
+            repo: repo.to_string(),
+            repo_root: repo_root.to_path_buf(),
+            file_path: repo_root.join(".claude/commands/example.md"),
+            contents: contents.to_string(),
+        }
+    }
+
+    #[test]
+    fn existing_referenced_path_produces_no_finding() {
+        let dir = crate::testsupport::unique_temp_dir("mev-graph-findings-existing-ref");
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts/render_spec.py"), b"# exists").unwrap();
+
+        let source = referencing_source(
+            "mev",
+            &dir,
+            "invoke `scripts/render_spec.py` to render the spec",
+        );
+        let findings = referenced_path_absent_findings(&[source]);
+        assert!(
+            findings.is_empty(),
+            "expected no findings for an existing path, got {findings:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_referenced_path_produces_a_finding() {
+        let dir = crate::testsupport::unique_temp_dir("mev-graph-findings-missing-ref");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let source = referencing_source(
+            "mev",
+            &dir,
+            "invoke `scripts/render_spec.py` to render the spec",
+        );
+        let findings = referenced_path_absent_findings(&[source]);
+        assert_eq!(
+            findings.len(),
+            1,
+            "expected exactly one finding, got {findings:?}"
+        );
+        let f = &findings[0];
+        assert_eq!(f.detector, DetectorClass::ReferencedPathAbsent);
+        assert_eq!(f.repo, "mev");
+        assert_eq!(f.subject, "scripts/render_spec.py");
+        assert_eq!(
+            f.finding_id,
+            finding_id(
+                DetectorClass::ReferencedPathAbsent,
+                "scripts/render_spec.py"
+            )
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn referenced_path_reachable_only_through_a_planning_symlink_produces_nothing() {
+        // The symlink trap: `planning/` in the real corpus is a symlink into
+        // a `_planning/` vault. Build the same shape here -- a real vault
+        // directory holding the referenced file, and `planning` as a
+        // symlink to it -- and assert std::path resolution (used directly
+        // by the detector, no special-casing) already follows it.
+        let dir = crate::testsupport::unique_temp_dir("mev-graph-findings-symlink-ref");
+        let vault = dir.join("_planning_vault");
+        std::fs::create_dir_all(vault.join("scripts")).unwrap();
+        std::fs::write(vault.join("scripts/render_spec.py"), b"# exists via vault").unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&vault, dir.join("planning")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&vault, dir.join("planning")).unwrap();
+
+        let source = referencing_source(
+            "mev",
+            &dir,
+            "invoke `planning/scripts/render_spec.py` to render the spec",
+        );
+        let findings = referenced_path_absent_findings(&[source]);
+        assert!(
+            findings.is_empty(),
+            "a path reachable only through a planning/ symlink must not be \
+             reported absent, got {findings:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_missing_path_in_two_repos_produces_two_rows_sharing_one_finding_id() {
+        let dir_a = crate::testsupport::unique_temp_dir("mev-graph-findings-two-repo-a");
+        let dir_b = crate::testsupport::unique_temp_dir("mev-graph-findings-two-repo-b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+
+        let source_a = referencing_source(
+            "base-template",
+            &dir_a,
+            "invoke `scripts/render_spec.py` here",
+        );
+        // A different spelling of the same reference, per the block record's
+        // three-repo render-spec.py case -- normalization must still collapse
+        // it to the same subject/finding_id.
+        let source_b = referencing_source("mev", &dir_b, "invoke `./scripts/render_spec.py` here");
+
+        let findings = referenced_path_absent_findings(&[source_a, source_b]);
+        assert_eq!(
+            findings.len(),
+            2,
+            "expected one row per repo, got {findings:?}"
+        );
+        assert_eq!(findings[0].finding_id, findings[1].finding_id);
+        assert_ne!(findings[0].repo, findings[1].repo);
+
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
     }
 }
