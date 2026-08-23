@@ -284,12 +284,29 @@ pub fn unregistered_lane_block_findings(
                 .find(|r| r.slug == block_ref.repo)
                 .map(|r| r.repo_path.clone())
                 .unwrap_or_else(|| block_ref.repo.clone());
+            // The pattern MUST be the JSON-anchored registration spelling
+            // (`"id": "<block>"`), never the bare block id. `--write` appends
+            // this very entry into the same `state.json` the predicate checks,
+            // and the entry's own `message` quotes the block id verbatim -- so a
+            // bare-id `file_contains` is satisfied by the entry's own prose the
+            // instant it is written, retiring a live finding on its first
+            // `mev carryover` sweep. Positively controlled on the live corpus
+            // 2026-08-23: `BT.3.A` occurs 7 times in base-template's state.json
+            // while `"id": "BT.3.A"` occurs 0 times -- the block is genuinely
+            // unregistered, yet the bare form would clear it.
+            //
+            // NOTE the coupling this buys: the anchored spelling depends on
+            // `state.json` being pretty-printed (`"id": "X"`, with the space
+            // serde_json's `to_string_pretty` emits). Every writer in this crate
+            // goes through `serialize_state_file_pretty`, so that holds today; a
+            // compact writer would silently make this predicate never clear.
             let clears_when = ClearsWhenPredicate::FileContains {
                 path: format!("{repo_path}/planning/state.json"),
-                pattern: block_ref.id.clone(),
+                pattern: format!("\"id\": \"{}\"", block_ref.id),
                 note: Some(format!(
-                    "clears when block '{}' appears in {}'s planning/state.json \
-                     tracks[].blocks[].id",
+                    "clears when block '{}' is REGISTERED in {}'s planning/state.json \
+                     tracks[].blocks[].id -- matched on the anchored spelling, not a \
+                     bare id mention",
                     block_ref.id, block_ref.repo,
                 )),
             };
@@ -1603,7 +1620,16 @@ mod tests {
         let root = crate::testsupport::unique_temp_dir("mev-graph-findings-task4-lane");
         let state_path = root.join("mev/planning/state.json");
         std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-        std::fs::write(&state_path, r#"{"tracks":[{"blocks":[{"id":"MV.9.Z"}]}]}"#).unwrap();
+        // The fixture MUST reproduce the real `--write` path: the emitted
+        // carryover entry lands in the SAME state.json the predicate checks,
+        // and its text quotes the block id verbatim. A fixture without that
+        // carryover[] array cannot exercise the condition that actually
+        // fails, which is how the bare-id spelling survived review once.
+        std::fs::write(
+            &state_path,
+            r#"{"tracks": [{"blocks": [{"id": "MV.9.Z"}]}], "carryover":[{"slug":"graph-finding-unregistered-lane-block-mev-mv-1-a","text":"MECHANICALLY DETECTED by `mev graph-findings` (unregistered-lane-block). lane 'alpha' names block 'MV.1.A' owned by repo 'mev', which has no matching tracks[].blocks[].id in mev's planning/state.json","kind":"drift","created":"2026-08-23"}]}"#,
+        )
+        .unwrap();
 
         let lane = lane_file("substrate", "alpha", vec![lane_block_ref("MV.1.A", "mev")]);
         let state_files = vec![(
@@ -1654,7 +1680,7 @@ mod tests {
         // Repair: register MV.1.A in mev's real planning/state.json.
         std::fs::write(
             &state_path,
-            r#"{"tracks":[{"blocks":[{"id":"MV.9.Z"},{"id":"MV.1.A"}]}]}"#,
+            r#"{"tracks": [{"blocks": [{"id": "MV.9.Z"}, {"id": "MV.1.A"}]}], "carryover":[{"slug":"graph-finding-unregistered-lane-block-mev-mv-1-a","text":"MECHANICALLY DETECTED by `mev graph-findings` (unregistered-lane-block). lane 'alpha' names block 'MV.1.A' owned by repo 'mev', which has no matching tracks[].blocks[].id in mev's planning/state.json","kind":"drift","created":"2026-08-23"}]}"#,
         )
         .unwrap();
 
