@@ -21,6 +21,7 @@ pub mod epics;
 pub mod frontier;
 pub mod graph;
 pub mod graph_emit;
+pub mod graph_findings;
 pub mod history;
 pub mod lane_segments;
 pub mod last_touched;

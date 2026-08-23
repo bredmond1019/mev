@@ -35,6 +35,9 @@ pub use brain::emit::{
 };
 pub use brain::graph::{Graph, build_graph, check_graph};
 pub use brain::graph_emit::{GraphExport, build_graph_export};
+pub use brain::graph_findings::{
+    DetectorClass, GraphFinding, GraphFindingsReport, finding_id, normalize_referenced_path,
+};
 pub use brain::history::{
     HistoryError, Revision, history_dir, list_revisions, prune, read_revision, record_revision,
 };
