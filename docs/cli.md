@@ -2157,7 +2157,30 @@ mev graph-findings [--json] [--write] [path]
 | Class | Meaning |
 |---|---|
 | `unregistered-lane-block` | An id in some `lane-*.json`'s `blocks[]` with no matching `tracks[].blocks[].id` in **that entry's own `repo`** field's `state.json` — a lane is not single-repo in this corpus, so ownership is resolved per-entry, never against the lane file's own location. Reuses `discover_lane_files` (`src/brain/lane_segments.rs`) and the existing state/block-graph readers (`src/brain/block_graph.rs`, `src/brain/state.rs`); a lane record that fails to parse is surfaced as an error diagnostic, never silently swallowed into a clean-looking zero |
-| `referenced-path-absent` | A path named as a script or generator in a command or spec that resolves nowhere in the fleet. Scanned sources are deliberately narrow: every `.md` under `<repo>/.claude/commands/` and every `.json` under `<repo>/planning/blocks/` — not READMEs, plans, decisions, or other prose, which would bury real findings under narrative mentions. A candidate reference is a `/`-containing path token ending in `.py` or `.sh` (the fleet's own generator/script extensions); bare filenames, URLs, and every other extension are excluded by design, not oversight. Resolution follows symlinks (`Path::exists` already does; the corpus walk sets `.follow_links(true)` explicitly), so a path that exists only through a `planning/` symlink into its `_planning/` vault is correctly reported present, never a false `absent` |
+| `referenced-path-absent` | A path named as a script or generator in a command or spec that resolves nowhere in the fleet, checked fleet-wide (see **Fleet-wide path resolution** below), not just against the referencing repo. Scanned sources are deliberately narrow: every `.md` under `<repo>/.claude/commands/` and every `.json` under `<repo>/planning/blocks/` — not READMEs, plans, decisions, or other prose, which would bury real findings under narrative mentions. A candidate reference is a `/`-containing path token ending in `.py` or `.sh` (the fleet's own generator/script extensions); bare filenames, URLs, and every other extension are excluded by design, not oversight. Resolution follows symlinks (`Path::exists` already does; the corpus walk sets `.follow_links(true)` explicitly), so a path that exists only through a `planning/` symlink into its `_planning/` vault is correctly reported present, never a false `absent` |
+
+#### Fleet-wide path resolution (`referenced-path-absent`)
+
+Measured on the live corpus 2026-08-23: checking a referenced path only against the repo that
+references it made 25 of 31 distinct `referenced-path-absent` findings false (81%) — a shared
+fleet script lives once, in the repo that owns the original, but the `.claude/commands/*.md` file
+that references it is synced into every repo it was distributed to, so a repo-local-only check
+reported the same real file "absent" in up to 19 places.
+
+A referenced path is now resolved against these roots, **first match wins**:
+
+| Order | Root | Base path |
+|---|---|---|
+| (a) | `repo:<repo>` | The referencing repo's own root — the only check that existed before this fix |
+| (b) | `brain-root` | The fleet HQ root (`agentic-portfolio/`), for a path referenced relative to the brain rather than any one repo |
+| (c) | `base-template` | `base-template/`'s own root — the source every `.claude/commands/*.md` file in the fleet is synced FROM, so a shared fleet script committed there resolves for every repo it was synced to |
+| (d) | `owner:base-template` | Added only when the referencing file is a **synced command** — a `.claude/commands/*.md` whose basename also exists under `base-template/.claude/commands/`. Resolved through `BrainConfig`'s `base-template` `[[repos]]` entry, not a hardcoded path |
+
+A path found under ANY of these roots is present — no finding is emitted. A path absent under
+every root still produces exactly one finding per referencing repo (the fix narrows false
+positives, it does not silence the detector), and that finding's `message` names every root that
+was searched, by label and base path, so a future false positive is diagnosable from the
+carryover entry alone without re-reading the source.
 
 #### `finding_id` — why the same finding correlates across repos
 
@@ -2195,9 +2218,26 @@ dispose sweep for free:
 - **`finding_id`** is carried onto the entry verbatim, which is also the **idempotence key**: a
   finding whose `finding_id` already exists in that repo's `carryover[]` is skipped, so running
   `--write` twice never duplicates an entry and the verb is safe to run unattended.
-- **No `clears_when`** is authored — no honest machine-checkable predicate exists for "the lane
-  and the registry now agree" or "the path now exists" that wouldn't risk retiring the entry
-  while the finding is still live, so the entry carries prose only.
+- **`clears_when`** is a typed, brain-root-relative predicate (`MV.ticket.graph-findings-path-resolution`
+  task 3), never `None` — every finding this verb emits is machine-detected from two data sources
+  disagreeing, and that disagreement is itself machine-recheckable:
+  - `referenced-path-absent` emits `FileExists { path: <raw reference>, .. }`. `path` is the raw,
+    un-normalized reference (never the lossy normalized `subject`), spelled brain-root-relative so
+    `mev carryover`'s own evaluator (`path_ref_satisfied` / `resolve_existing_path` in
+    `src/brain/carryover.rs`) resolves it the same way this detector did for roots (a)/(b) —
+    the evaluator only ever tries the brain root then the owning repo's `repo_path`, a narrower
+    two-root check than the detector's four. A finding that resolved only via root (c)/(d) is
+    never emitted in the first place, so the evaluator is never asked to reproduce a (c)/(d)-only
+    verdict — only to notice a (a)/(b) repair.
+  - `unregistered-lane-block` emits `FileContains { path: "<repo_path>/planning/state.json",
+    pattern: "<block id>", .. }`, so the same evaluator's `file_contains_satisfied` resolves it.
+  - Each predicate is guaranteed UNSATISFIED at the moment it is written — the detector just proved
+    the path absent / the block unregistered — so `mev carryover`'s dispose sweep never retires a
+    still-live finding on its first pass.
+  - Entries written before this ticket carried no predicate at all (`clears_when: null`); the
+    corpus reconciliation this ticket performed (`MV.ticket.graph-findings-path-resolution` task 6)
+    removed the `referenced-path-absent` entries that now resolve and gave every survivor, plus
+    every `unregistered-lane-block` entry, the typed predicate above.
 - The rewrite is **byte-faithful** to the rest of the file: `state.json` is serialized with
   `ensure_ascii=False`-equivalent output, `indent=2`, and a trailing newline, so an append
   changes only the added array elements — the untouched portion of the file is byte-identical.

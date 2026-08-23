@@ -11,7 +11,33 @@ related: [status]
 timestamp: "2026-08-23T09:17:53-03:00"
 ---
 
+## [run: 2026-08-23]
+
+Ran `MV.ticket.graph-findings-path-resolution` (tasks 1–7) via `/sdlc-flow` on a fresh continuation of the branch. Task 1 (already committed from an earlier partial run) implemented fleet-wide `ResolutionRoot` resolution for `referenced-path-absent`. Task 2 (already committed) added the resolver test suite including the load-bearing positive control. Task 3 made both detectors emit a typed, not-already-satisfied `clears_when` (`FileContains` for `unregistered-lane-block`, `FileExists` for `referenced-path-absent`) and wired `carryover_entry_for_finding` to propagate it instead of always writing `None`. Task 4 added end-to-end predicate tests through the real `evaluate_carryover` evaluator plus an idempotent-rewrite test over real fixtures. Task 5 documented the resolution order and predicates in `docs/cli.md`. Task 6 reconciled all 37 surviving live carryover entries fleet-wide — 6 `referenced-path-absent` entries re-verified genuinely absent (0 removed) and given a `file_exists` `clears_when`; 31 `unregistered-lane-block` entries given a `file_contains` `clears_when` anchored to `"id": "<block>"` (not task 3's bare-id spelling, which a self-match trap makes vacuously satisfied) — and flagged a residual leading-slash path-join defect in the resolver as a follow-up, left unfixed as out of scope. Task 7 confirmed all four full-suite gates green with no code changes.
+
+The consolidated review returned **PARTIAL after 3 attempts**: AC #3 ("each emitted entry carries a typed `clears_when` that is NOT satisfied at the moment it is written") fails for the `unregistered-lane-block` detector class specifically — `src/brain/graph_findings.rs:288` still emits the bare-id `ClearsWhenPredicate::FileContains { path, pattern: block_ref.id }` that task 3 wrote and task 6 explicitly worked around on disk rather than fixed in code, so the entry's own written `text` (which quotes the block id verbatim) satisfies its own predicate the instant `--write` runs. The guard test at line 1597 does not catch this because its fixture state.json has no `carryover` array, so it never reproduces the real write path. Notable decision: task 6 deliberately left the detector code unfixed (out of its own scope as corpus reconciliation, not detector logic) and flagged it as a named follow-up, which the review then surfaced as the blocking gap. Next: fix `unregistered_lane_block_findings`'s predicate to anchor `"id": "<block_id>"` (matching the on-disk workaround already applied fleet-wide by task 6) instead of the bare id, and rewrite the line-1597 guard test against a fixture that already contains the just-written entry so it actually exercises the self-satisfaction trap.
+
+```
+fd110c3 fix: review pass 1 for MV.ticket.graph-findings-path-resolution
+35be7d5 feat: implement MV.ticket.graph-findings-path-resolution-task5
+cb00782 feat: implement MV.ticket.graph-findings-path-resolution-task4
+142c123 feat: implement MV.ticket.graph-findings-path-resolution-task3
+56f4436 chore: wrap up MV.ticket.graph-findings-path-resolution
+4c0b578 feat: implement MV.ticket.graph-findings-path-resolution-task2
+f01a6bc feat: implement MV.ticket.graph-findings-path-resolution-task1
+```
+
 # Log — mev
+
+## [run: 2026-08-23]
+
+Ran `MV.ticket.graph-findings-path-resolution` (tasks 1–7 planned, tasks 1–2 executed) via `/sdlc-flow`. Task 1 implemented fleet-wide path resolution for the `referenced-path-absent` detector: candidates are now resolved against an ordered `ResolutionRoot` list (referencing repo, brain root, base-template, and — for a synced command — the owning repo, resolved through `BrainConfig`'s base-template `[[repos]]` entry rather than a second hardcoded literal) via a new `resolve_referenced_path`, with every searched root named in a finding's message; `finding_id` and `normalize_referenced_path` untouched, and the existing `referencing_source()` test helper updated so prior repo-local-only cases still pass. Task 2 added the resolver test suite, including the load-bearing positive control (a file that exists only in `base-template/` and is referenced from another repo's synced command now yields zero findings), plus fleet-wide-absent-still-reports, repo-local-only regression, brain-root-only resolution, and searched-root-labels-in-message cases. The run BAILED at task 2's validation gate: `cargo test fleet_readiness_is_unchanged_for_blocks_without_a_new_edge` fails on fleet-wide `state.json` drift in `/Users/brandon/Dev/agentic-portfolio/planning/state.json` and `core/engine-rs/planning/state.json` (engine-rs `focus.next` missing `EN.ticket.test-gate-must-terminate-a-hang-not-wedge`) — unrelated to and outside the scope of this task's diff (both task 1 and task 2 touch only `src/brain/graph_findings.rs`). Tasks 3–7 (predicate emission, live-corpus cleanup, docs) did not run. Next: rebase this branch once the fleet-wide `state.json` drift clears (or file it as its own environmental defect), then resume tasks 3–7.
+
+```
+4c0b578 feat: implement MV.ticket.graph-findings-path-resolution-task2
+f01a6bc feat: implement MV.ticket.graph-findings-path-resolution-task1
+```
+
 
 ### Autonomous-foundation lane, session 2 — graph-findings shipped, then measured 81% wrong
 - **What:** Closed `MV.ticket.graph-derived-carryover-findings`. Its D64 evidence step ran `--write`

@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
+use okf_core::ClearsWhenPredicate;
+
 use crate::Diagnostic;
 use crate::brain::config::BrainConfig;
 use crate::brain::lane_segments::{LaneFile, discover_lane_files};
@@ -149,6 +151,29 @@ pub struct GraphFinding {
     /// Stable, content-derived id from [`finding_id`] — identical across
     /// every repo independently reporting the same `(detector, subject)`.
     pub finding_id: String,
+    /// Typed condition under which this finding — and the `carryover[]`
+    /// entry `--write` derives from it via
+    /// [`crate::brain::carryover::carryover_entry_for_finding`] — should be
+    /// deleted (`MV.ticket.graph-findings-path-resolution` task 3). Always
+    /// `Some`: every finding this module emits is machine-detected from a
+    /// disagreement between two data sources, and that disagreement is
+    /// itself machine-recheckable, so there is no detector class here for
+    /// which `None` would be honest.
+    ///
+    /// **Reconciliation with `mev carryover`'s evaluator**
+    /// (`path_ref_satisfied` / `resolve_existing_path` in
+    /// `src/brain/carryover.rs`): the evaluator only ever tries two roots —
+    /// the brain root, then the owning repo's `repo_path` — never
+    /// `base-template` or a synced command's owning repo. Task 1's detector
+    /// search order is wider than that (four roots). Each predicate below is
+    /// spelled so the evaluator's narrower two-root check lines up with the
+    /// SAME verdict the detector reached for roots (a)/(b) specifically; a
+    /// finding that resolved only via root (c)/(d) (`base-template` or a
+    /// synced command's owner) is never emitted in the first place — see
+    /// [`referenced_path_absent_findings`] — so this narrower reconciliation
+    /// is never asked to reproduce a (c)/(d)-only verdict, only to notice a
+    /// (a)/(b) repair.
+    pub clears_when: Option<ClearsWhenPredicate>,
 }
 
 /// The full `mev graph-findings` report.
@@ -209,11 +234,23 @@ impl GraphFindingsReport {
 /// silently contribute zero findings (standing rule 11: a clean-looking empty
 /// result from a detector that could not read its input is the exact failure mode
 /// this exists to avoid).
+///
+/// `config` supplies each repo's `repo_path` (brain-root-relative) so the
+/// emitted `clears_when` predicate (task 3) can name a brain-root-relative
+/// `<repo_path>/planning/state.json` — the same file this detector already
+/// reads for `registered`, so `mev carryover`'s evaluator resolving it later
+/// checks the identical file. When `block_ref.repo` has no `[[repos]]` entry
+/// in `config` (a lane naming a repo that is not even registered — a
+/// different, worse problem than this detector targets), the repo slug
+/// itself is used as a best-effort `repo_path` fallback rather than omitting
+/// the predicate: every finding this module emits carries a typed
+/// `clears_when` by construction (see [`GraphFinding::clears_when`]).
 #[must_use]
 pub fn unregistered_lane_block_findings(
     lane_files: &[LaneFile],
     lane_diags: &[Diagnostic],
     state_files: &[(StateSource, StateFile)],
+    config: &BrainConfig,
 ) -> (Vec<GraphFinding>, Vec<Diagnostic>) {
     let mut registered: HashSet<(&str, &str)> = HashSet::new();
     for (src, file) in state_files {
@@ -241,12 +278,45 @@ pub fn unregistered_lane_block_findings(
                 block_ref.repo,
                 block_ref.repo,
             );
+            let repo_path = config
+                .repos
+                .iter()
+                .find(|r| r.slug == block_ref.repo)
+                .map(|r| r.repo_path.clone())
+                .unwrap_or_else(|| block_ref.repo.clone());
+            // The pattern MUST be the JSON-anchored registration spelling
+            // (`"id": "<block>"`), never the bare block id. `--write` appends
+            // this very entry into the same `state.json` the predicate checks,
+            // and the entry's own `message` quotes the block id verbatim -- so a
+            // bare-id `file_contains` is satisfied by the entry's own prose the
+            // instant it is written, retiring a live finding on its first
+            // `mev carryover` sweep. Positively controlled on the live corpus
+            // 2026-08-23: `BT.3.A` occurs 7 times in base-template's state.json
+            // while `"id": "BT.3.A"` occurs 0 times -- the block is genuinely
+            // unregistered, yet the bare form would clear it.
+            //
+            // NOTE the coupling this buys: the anchored spelling depends on
+            // `state.json` being pretty-printed (`"id": "X"`, with the space
+            // serde_json's `to_string_pretty` emits). Every writer in this crate
+            // goes through `serialize_state_file_pretty`, so that holds today; a
+            // compact writer would silently make this predicate never clear.
+            let clears_when = ClearsWhenPredicate::FileContains {
+                path: format!("{repo_path}/planning/state.json"),
+                pattern: format!("\"id\": \"{}\"", block_ref.id),
+                note: Some(format!(
+                    "clears when block '{}' is REGISTERED in {}'s planning/state.json \
+                     tracks[].blocks[].id -- matched on the anchored spelling, not a \
+                     bare id mention",
+                    block_ref.id, block_ref.repo,
+                )),
+            };
             findings.push(GraphFinding {
                 detector: DetectorClass::UnregisteredLaneBlock,
                 repo: block_ref.repo.clone(),
                 subject: subject.clone(),
                 message,
                 finding_id: finding_id(DetectorClass::UnregisteredLaneBlock, &subject),
+                clears_when: Some(clears_when),
             });
         }
     }
@@ -276,7 +346,7 @@ pub fn detect_unregistered_lane_blocks(
         }
     }
 
-    unregistered_lane_block_findings(&lane_files, &lane_diags, &loaded)
+    unregistered_lane_block_findings(&lane_files, &lane_diags, &loaded, config)
 }
 
 // ---------------------------------------------------------------------------
@@ -329,23 +399,127 @@ pub fn detect_unregistered_lane_blocks(
 // is itself a symlink target would never have its specs discovered at all,
 // which (per standing rule 11) would look like a clean empty result for
 // exactly the wrong reason.
+//
+// **Resolution is fleet-wide, not repo-local (MV.ticket.graph-findings-path-resolution
+// task 1).** A shared fleet script referenced from a synced `.claude/commands/*.md`
+// file lives once, in the repo that owns the original, but the command that
+// references it is copied into every repo it was synced to — so a repo-local-only
+// check reports the same real file "absent" in every one of those copies. A
+// referenced path is resolved against, in order, the FIRST match wins:
+//
+//   (a) `repo:<repo>`    — the referencing repo's own root (the original,
+//                          only check before this ticket).
+//   (b) `brain-root`     — the fleet HQ root (`agentic-portfolio/`), for a
+//                          path referenced relative to the brain rather than
+//                          any one repo.
+//   (c) `base-template`  — `base-template/`'s own root, the source every
+//                          `.claude/commands/*.md` file in the fleet is
+//                          synced FROM (D54-family sync), so a shared
+//                          fleet script committed there resolves for every
+//                          repo it was synced to.
+//   (d) `owner:base-template` — added only when the referencing file is a
+//                          synced command: a `.claude/commands/*.md` whose
+//                          basename also exists under
+//                          `base-template/.claude/commands/`. Resolved
+//                          through [`BrainConfig`]'s `base-template`
+//                          `[[repos]]` entry rather than a hardcoded path,
+//                          so a future repo-path change to that entry is
+//                          picked up automatically. In today's fleet this
+//                          shares (c)'s base path — it exists as a distinct,
+//                          separately-labeled root because the *reason* a
+//                          synced command's reference resolves is "this is
+//                          the file's origin template", which is a
+//                          different fact from (c)'s "base-template is
+//                          always in the search path regardless of file
+//                          type", and the two should stay independently
+//                          auditable from a finding's message.
+//
+// A path found under ANY of these roots is present — no finding is emitted.
+// When a path is absent under every root, the finding's `message` names every
+// root that was searched (label + base path), so a future false positive is
+// diagnosable from the carryover entry alone, without re-reading the source
+// (see [`ResolutionRoot`] and [`resolve_referenced_path`]).
+
+/// One named search location [`resolve_referenced_path`] tries, in the
+/// order it appears in the list passed to it. See the module-level scope
+/// contract's "Resolution is fleet-wide, not repo-local" section for the
+/// concrete order this crate builds.
+#[derive(Debug, Clone)]
+pub struct ResolutionRoot {
+    /// Human-readable label for this root — e.g. `repo:mev`, `brain-root`,
+    /// `base-template`, `owner:base-template`. Surfaced verbatim in a
+    /// finding's `message` so a future false positive is diagnosable from
+    /// the carryover entry alone.
+    pub label: String,
+    /// Absolute base path a referenced path is joined onto.
+    pub base: PathBuf,
+}
+
+impl ResolutionRoot {
+    /// Construct a root from a label and base path.
+    #[must_use]
+    pub fn new(label: impl Into<String>, base: PathBuf) -> Self {
+        ResolutionRoot {
+            label: label.into(),
+            base,
+        }
+    }
+}
+
+/// Resolve `raw` (a raw, un-normalized reference as extracted by
+/// [`extract_referenced_script_paths`]) against `roots`, in order, and
+/// return the FIRST root under which `root.base.join(raw)` exists — `None`
+/// only when it exists under none of them.
+///
+/// `roots` order encodes precedence, not preference among ties: since this
+/// only answers "does it exist anywhere", which root is returned when more
+/// than one would match does not change the presence/absence verdict a
+/// finding is based on — it only changes which root's label a caller
+/// wanting a single "found here" answer would report. The message built by
+/// [`referenced_path_absent_findings`] instead always lists every root that
+/// was searched, not just the one (if any) that matched, which is why order
+/// among matching roots is otherwise unobservable from a finding.
+#[must_use]
+pub fn resolve_referenced_path<'a>(
+    raw: &str,
+    roots: &'a [ResolutionRoot],
+) -> Option<&'a ResolutionRoot> {
+    // `PathBuf::join` discards `root.base` entirely when `raw` is itself
+    // absolute (starts with `/`) — per the stdlib contract, joining an
+    // absolute path replaces the base rather than appending to it. Many
+    // synced-command references in the live corpus are written with a
+    // leading slash (e.g. `/scripts/fleet_concurrency_check.py`), so
+    // without stripping it every root fails identically regardless of
+    // where the file actually lives. Strip a single leading `/` (and any
+    // repeats) so `raw` is always treated as relative to `root.base`.
+    let relative = raw.trim_start_matches('/');
+    roots.iter().find(|root| root.base.join(relative).exists())
+}
 
 /// One file whose contents are scanned for referenced script/generator
-/// paths, together with the repo it belongs to and that repo's root — the
-/// root a relative reference in this file is resolved against.
+/// paths, together with the repo it belongs to, that repo's root (root (a)
+/// in the module-level resolution order — the original, only check before
+/// MV.ticket.graph-findings-path-resolution), and the additional roots (b),
+/// (c), (d) that apply to this particular source.
 #[derive(Debug, Clone)]
 pub struct ReferencingSource {
     /// Owning repo slug (from `brain.toml`'s `[[repos]]`).
     pub repo: String,
     /// Absolute path to the repo's own root directory — relative
-    /// references extracted from `contents` resolve against this, not the
-    /// fleet HQ root.
+    /// references extracted from `contents` resolve against this FIRST
+    /// (root (a)), not the fleet HQ root.
     pub repo_root: PathBuf,
     /// The command or spec file the reference was found in (for
     /// diagnostics/messages only — never fed into `finding_id`).
     pub file_path: PathBuf,
     /// Raw file contents to scan.
     pub contents: String,
+    /// Additional resolution roots beyond `repo_root` — the brain root,
+    /// base-template, and (for a synced command) its owning repo, in the
+    /// module-level resolution order (b), (c), (d). Empty is valid (e.g. in
+    /// tests exercising only the repo-local case) — [`referenced_path_absent_findings`]
+    /// always prepends `repo_root` as root (a) regardless of this field.
+    pub resolution_roots: Vec<ResolutionRoot>,
 }
 
 /// Whether `ext`-less-dot suffix counts as a "script or generator" for this
@@ -411,28 +585,68 @@ pub fn extract_referenced_script_paths(contents: &str) -> Vec<String> {
 /// so the *same* missing path referenced from different repos — or
 /// spelled with a different leading prefix — produces rows sharing one
 /// `finding_id`, per the block record's `render-spec.py` case.
+///
+/// Resolution is fleet-wide (MV.ticket.graph-findings-path-resolution task
+/// 1): each source's `repo_root` is always tried first (root (a)),
+/// followed by `source.resolution_roots` in the order the caller built them
+/// (roots (b)/(c)/(d) — see the module-level scope contract). A path found
+/// under ANY root is present; a finding is emitted only when it resolves
+/// under none of them, and its `message` names every root that was
+/// searched (label + base path) so a future false positive is diagnosable
+/// from the carryover entry alone.
 #[must_use]
 pub fn referenced_path_absent_findings(sources: &[ReferencingSource]) -> Vec<GraphFinding> {
     let mut findings = Vec::new();
     for source in sources {
+        let mut roots: Vec<ResolutionRoot> = Vec::with_capacity(1 + source.resolution_roots.len());
+        roots.push(ResolutionRoot::new(
+            format!("repo:{}", source.repo),
+            source.repo_root.clone(),
+        ));
+        roots.extend(source.resolution_roots.iter().cloned());
+
         for raw_path in extract_referenced_script_paths(&source.contents) {
-            if source.repo_root.join(&raw_path).exists() {
+            if resolve_referenced_path(&raw_path, &roots).is_some() {
                 continue;
             }
             let subject = normalize_referenced_path(&raw_path);
+            let searched = roots
+                .iter()
+                .map(|root| format!("{} ({})", root.label, root.base.display()))
+                .collect::<Vec<_>>()
+                .join(", ");
             let message = format!(
-                "{} references '{}', which does not exist under {} (repo '{}')",
+                "{} references '{}', which does not exist under any searched root: {} (repo '{}')",
                 source.file_path.display(),
                 raw_path,
-                source.repo_root.display(),
+                searched,
                 source.repo,
             );
+            // Brain-root-relative, per `GraphFinding::clears_when`'s
+            // reconciliation note: `raw_path` (never the normalized
+            // `subject`, which is lossy) lets `mev carryover`'s evaluator
+            // reproduce roots (a)/(b) of the search above — brain_root.join
+            // (raw_path) is root (b) exactly, and the evaluator's owning-
+            // repo fallback, repo_paths[repo].join(raw_path), is root (a)
+            // exactly. Roots (c)/(d) (`base-template`, a synced command's
+            // owner) are outside the evaluator's two-root reach, but this
+            // finding was only emitted because the path resolved under NONE
+            // of the four roots, so there is no (c)/(d)-only verdict this
+            // predicate needs to reproduce.
+            let clears_when = ClearsWhenPredicate::FileExists {
+                path: raw_path.clone(),
+                note: Some(format!(
+                    "clears when '{raw_path}' resolves under the referencing repo's \
+                     root or the brain root"
+                )),
+            };
             findings.push(GraphFinding {
                 detector: DetectorClass::ReferencedPathAbsent,
                 repo: source.repo.clone(),
                 subject: subject.clone(),
                 message,
                 finding_id: finding_id(DetectorClass::ReferencedPathAbsent, &subject),
+                clears_when: Some(clears_when),
             });
         }
     }
@@ -449,6 +663,16 @@ pub fn referenced_path_absent_findings(sources: &[ReferencingSource]) -> Vec<Gra
 /// contract's symlink-trap note: a repo's `planning/` is itself a symlink
 /// into the `_planning/` vault, and the walk must descend into it to find
 /// `planning/blocks/*.json` at all.
+///
+/// Builds each source's fleet-wide resolution roots (b)/(c)/(d) — see the
+/// module-level scope contract — from `config`: root (b) is `root` itself
+/// (the brain/HQ root); root (c) is the `base-template` `[[repos]]` entry's
+/// own root, added unconditionally for every source, present or absent, so
+/// its presence never depends on file type; root (d) is added ONLY when the
+/// source is itself a `.claude/commands/*.md` file whose basename also
+/// exists under `base-template/.claude/commands/` (the "synced command"
+/// test the block record names) — resolved through the same `base-template`
+/// `[[repos]]` entry rather than a second hardcoded path.
 #[must_use]
 pub fn detect_referenced_path_absent(
     root: &Path,
@@ -457,17 +681,37 @@ pub fn detect_referenced_path_absent(
     let mut sources = Vec::new();
     let mut diags = Vec::new();
 
-    for repo in &config.repos {
-        let repo_path = repo.repo_path.trim();
-        let repo_root = if repo_path.is_empty() || repo_path == "." {
+    let resolve_repo_root = |repo_path: &str| -> PathBuf {
+        let trimmed = repo_path.trim();
+        if trimmed.is_empty() || trimmed == "." {
             root.to_path_buf()
         } else {
-            root.join(repo_path)
-        };
+            root.join(trimmed)
+        }
+    };
 
-        for (scan_dir, ext) in [
-            (repo_root.join(".claude").join("commands"), "md"),
-            (repo_root.join("planning").join("blocks"), "json"),
+    // Root (c)/(d)'s shared base: base-template's OWN root, resolved
+    // through its `[[repos]]` entry (not a hardcoded "base-template"
+    // literal) so a future repo_path change to that entry is picked up
+    // automatically. `None` when the corpus has no `base-template` entry
+    // (e.g. a fixture config in a test) — roots (c)/(d) are then simply
+    // never added, which degrades to the pre-ticket repo-local-only
+    // behavior rather than panicking.
+    let base_template_root: Option<PathBuf> = config
+        .repos
+        .iter()
+        .find(|r| r.slug == "base-template")
+        .map(|r| resolve_repo_root(&r.repo_path));
+    let base_template_commands_dir = base_template_root
+        .as_ref()
+        .map(|r| r.join(".claude").join("commands"));
+
+    for repo in &config.repos {
+        let repo_root = resolve_repo_root(&repo.repo_path);
+
+        for (scan_dir, ext, is_command_dir) in [
+            (repo_root.join(".claude").join("commands"), "md", true),
+            (repo_root.join("planning").join("blocks"), "json", false),
         ] {
             if !scan_dir.exists() {
                 continue;
@@ -490,12 +734,36 @@ pub fn detect_referenced_path_absent(
                     continue;
                 }
                 match std::fs::read_to_string(entry.path()) {
-                    Ok(contents) => sources.push(ReferencingSource {
-                        repo: repo.slug.clone(),
-                        repo_root: repo_root.clone(),
-                        file_path: entry.path().to_path_buf(),
-                        contents,
-                    }),
+                    Ok(contents) => {
+                        let mut resolution_roots =
+                            vec![ResolutionRoot::new("brain-root", root.to_path_buf())];
+                        if let Some(bt_root) = &base_template_root {
+                            resolution_roots
+                                .push(ResolutionRoot::new("base-template", bt_root.clone()));
+
+                            let is_synced_command = is_command_dir
+                                && base_template_commands_dir
+                                    .as_ref()
+                                    .and_then(|dir| {
+                                        entry.path().file_name().map(|name| dir.join(name))
+                                    })
+                                    .is_some_and(|candidate| candidate.exists());
+                            if is_synced_command {
+                                resolution_roots.push(ResolutionRoot::new(
+                                    "owner:base-template",
+                                    bt_root.clone(),
+                                ));
+                            }
+                        }
+
+                        sources.push(ReferencingSource {
+                            repo: repo.slug.clone(),
+                            repo_root: repo_root.clone(),
+                            file_path: entry.path().to_path_buf(),
+                            contents,
+                            resolution_roots,
+                        });
+                    }
                     Err(e) => {
                         diags.push(Diagnostic::error(
                             entry.path(),
@@ -624,6 +892,7 @@ mod tests {
                 subject: "mev:MV.1.A".to_string(),
                 message: "unregistered".to_string(),
                 finding_id: finding_id(DetectorClass::UnregisteredLaneBlock, "mev:MV.1.A"),
+                clears_when: None,
             },
             GraphFinding {
                 detector: DetectorClass::ReferencedPathAbsent,
@@ -634,6 +903,7 @@ mod tests {
                     DetectorClass::ReferencedPathAbsent,
                     "scripts/render_spec.py",
                 ),
+                clears_when: None,
             },
             GraphFinding {
                 detector: DetectorClass::ReferencedPathAbsent,
@@ -644,6 +914,7 @@ mod tests {
                     DetectorClass::ReferencedPathAbsent,
                     "scripts/render_spec.py",
                 ),
+                clears_when: None,
             },
         ];
 
@@ -690,6 +961,25 @@ mod tests {
         }
     }
 
+    /// Minimal `BrainConfig` fixture: one `[[repos]]` entry per given slug,
+    /// with `repo_path` set identical to the slug (matching how
+    /// [`state_source`]'s fake `abs_path`es are built, so a computed
+    /// `<repo_path>/planning/state.json` predicate path lines up with what
+    /// these tests otherwise assert).
+    fn test_config(repos: &[&str]) -> BrainConfig {
+        BrainConfig {
+            repos: repos
+                .iter()
+                .map(|slug| crate::brain::config::RepoEntry {
+                    slug: (*slug).to_string(),
+                    repo_path: (*slug).to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
     fn state_source(repo: &str) -> StateSource {
         StateSource {
             repo_slug: repo.to_string(),
@@ -731,7 +1021,9 @@ mod tests {
             project_file("mev", vec![track_block("MV.1.A")]),
         )];
 
-        let (findings, diags) = unregistered_lane_block_findings(&[lane], &[], &state_files);
+        let config = test_config(&["mev"]);
+        let (findings, diags) =
+            unregistered_lane_block_findings(&[lane], &[], &state_files, &config);
         assert!(
             findings.is_empty(),
             "expected no findings, got {findings:?}"
@@ -749,7 +1041,9 @@ mod tests {
             project_file("mev", vec![track_block("MV.9.Z")]),
         )];
 
-        let (findings, diags) = unregistered_lane_block_findings(&[lane], &[], &state_files);
+        let config = test_config(&["mev"]);
+        let (findings, diags) =
+            unregistered_lane_block_findings(&[lane], &[], &state_files, &config);
         assert_eq!(
             findings.len(),
             1,
@@ -779,7 +1073,9 @@ mod tests {
             project_file("base-template", vec![track_block("MV.1.A")]),
         )];
 
-        let (findings, _diags) = unregistered_lane_block_findings(&[lane], &[], &state_files);
+        let config = test_config(&["mev", "base-template"]);
+        let (findings, _diags) =
+            unregistered_lane_block_findings(&[lane], &[], &state_files, &config);
         assert_eq!(
             findings.len(),
             1,
@@ -819,7 +1115,9 @@ mod tests {
             "discover_lane_files must surface a diagnostic for the malformed record"
         );
 
-        let (findings, diags) = unregistered_lane_block_findings(&lane_files, &lane_diags, &[]);
+        let config = test_config(&[]);
+        let (findings, diags) =
+            unregistered_lane_block_findings(&lane_files, &lane_diags, &[], &config);
         assert!(
             findings.is_empty(),
             "no lane blocks were discoverable, so there is nothing to report as unregistered"
@@ -896,6 +1194,7 @@ mod tests {
             repo_root: repo_root.to_path_buf(),
             file_path: repo_root.join(".claude/commands/example.md"),
             contents: contents.to_string(),
+            resolution_roots: Vec::new(),
         }
     }
 
@@ -1010,5 +1309,506 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir_a);
         let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
+    // -----------------------------------------------------------------
+    // Task 2 -- resolver test suite (MV.ticket.graph-findings-path-resolution)
+    // -----------------------------------------------------------------
+
+    /// The load-bearing positive control the original block LACKED: a
+    /// script that lives ONLY under `base-template/scripts/`, referenced
+    /// from a DIFFERENT repo's synced command, must produce zero findings.
+    /// This is the exact shape of the 81% false-positive class measured
+    /// live 2026-08-23 -- a real file reported "absent" in up to 19 repos
+    /// because the pre-fix detector only ever checked the referencing
+    /// repo's own root.
+    #[test]
+    fn path_present_only_in_base_template_referenced_from_another_repo_produces_zero_findings() {
+        let repo_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-fleet-repo");
+        let bt_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-fleet-bt");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::create_dir_all(bt_dir.join("scripts")).unwrap();
+        std::fs::write(
+            bt_dir.join("scripts/fleet_concurrency_check.py"),
+            b"# lives only in base-template",
+        )
+        .unwrap();
+
+        let source = ReferencingSource {
+            repo: "engine-rs".to_string(),
+            repo_root: repo_dir.clone(),
+            file_path: repo_dir.join(".claude/commands/orchestrate.md"),
+            contents: "run `scripts/fleet_concurrency_check.py` before merging".to_string(),
+            resolution_roots: vec![
+                ResolutionRoot::new("brain-root", repo_dir.join("does-not-exist-brain-root")),
+                ResolutionRoot::new("base-template", bt_dir.clone()),
+                ResolutionRoot::new("owner:base-template", bt_dir.clone()),
+            ],
+        };
+
+        let findings = referenced_path_absent_findings(&[source]);
+        assert!(
+            findings.is_empty(),
+            "a script that exists only in base-template/scripts/, referenced \
+             from another repo's synced command, must not be reported absent \
+             -- this is the whole 81%, got {findings:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo_dir);
+        let _ = std::fs::remove_dir_all(&bt_dir);
+    }
+
+    /// The leading-slash form of the same shape: `PathBuf::join` discards
+    /// the base entirely when the joined component is absolute, so
+    /// `/scripts/fleet_concurrency_check.py` (the ticket's own motivating
+    /// spelling) must resolve exactly like the relative form above, not
+    /// fail identically under every root regardless of where the file
+    /// actually lives.
+    #[test]
+    fn leading_slash_reference_resolves_against_root_instead_of_replacing_it() {
+        let repo_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-leadslash-repo");
+        let bt_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-leadslash-bt");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::create_dir_all(bt_dir.join("scripts")).unwrap();
+        std::fs::write(
+            bt_dir.join("scripts/fleet_concurrency_check.py"),
+            b"# lives only in base-template",
+        )
+        .unwrap();
+
+        let source = ReferencingSource {
+            repo: "engine-rs".to_string(),
+            repo_root: repo_dir.clone(),
+            file_path: repo_dir.join(".claude/commands/orchestrate.md"),
+            contents: "run `/scripts/fleet_concurrency_check.py` before merging".to_string(),
+            resolution_roots: vec![
+                ResolutionRoot::new("brain-root", repo_dir.join("does-not-exist-brain-root")),
+                ResolutionRoot::new("base-template", bt_dir.clone()),
+                ResolutionRoot::new("owner:base-template", bt_dir.clone()),
+            ],
+        };
+
+        let findings = referenced_path_absent_findings(&[source]);
+        assert!(
+            findings.is_empty(),
+            "a leading-slash reference to a script that exists under a \
+             searched root must not be reported absent -- got {findings:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo_dir);
+        let _ = std::fs::remove_dir_all(&bt_dir);
+    }
+
+    /// The fix must not simply silence the detector: a path absent under
+    /// every searched root still produces exactly one finding per
+    /// referencing repo.
+    #[test]
+    fn path_absent_under_every_root_still_reports_one_finding_per_repo() {
+        let dir_a = crate::testsupport::unique_temp_dir("mev-graph-findings-absent-everywhere-a");
+        let dir_b = crate::testsupport::unique_temp_dir("mev-graph-findings-absent-everywhere-b");
+        let brain_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-absent-brain");
+        let bt_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-absent-bt");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        std::fs::create_dir_all(&brain_dir).unwrap();
+        std::fs::create_dir_all(&bt_dir).unwrap();
+
+        let roots = vec![
+            ResolutionRoot::new("brain-root", brain_dir.clone()),
+            ResolutionRoot::new("base-template", bt_dir.clone()),
+        ];
+
+        let source_a = ReferencingSource {
+            repo: "engine-rs".to_string(),
+            repo_root: dir_a.clone(),
+            file_path: dir_a.join(".claude/commands/example.md"),
+            contents: "invoke `scripts/nowhere.py` please".to_string(),
+            resolution_roots: roots.clone(),
+        };
+        let source_b = ReferencingSource {
+            repo: "mev".to_string(),
+            repo_root: dir_b.clone(),
+            file_path: dir_b.join(".claude/commands/example.md"),
+            contents: "invoke `scripts/nowhere.py` please".to_string(),
+            resolution_roots: roots,
+        };
+
+        let findings = referenced_path_absent_findings(&[source_a, source_b]);
+        assert_eq!(
+            findings.len(),
+            2,
+            "a fleet-wide-absent path must still report once per referencing \
+             repo, not be silenced -- got {findings:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
+        let _ = std::fs::remove_dir_all(&brain_dir);
+        let _ = std::fs::remove_dir_all(&bt_dir);
+    }
+
+    /// Regression on today's only working case: a path present only in the
+    /// referencing repo's own root still resolves clean once fleet-wide
+    /// roots are added alongside it.
+    #[test]
+    fn path_present_only_in_referencing_repo_still_resolves_clean() {
+        let dir = crate::testsupport::unique_temp_dir("mev-graph-findings-repo-local-only");
+        let brain_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-repo-local-brain");
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts/local_only.py"), b"# repo-local").unwrap();
+        std::fs::create_dir_all(&brain_dir).unwrap();
+
+        let source = ReferencingSource {
+            repo: "mev".to_string(),
+            repo_root: dir.clone(),
+            file_path: dir.join(".claude/commands/example.md"),
+            contents: "invoke `scripts/local_only.py` here".to_string(),
+            resolution_roots: vec![ResolutionRoot::new("brain-root", brain_dir.clone())],
+        };
+
+        let findings = referenced_path_absent_findings(&[source]);
+        assert!(
+            findings.is_empty(),
+            "a path present only in the referencing repo must still resolve \
+             clean, got {findings:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&brain_dir);
+    }
+
+    /// A path resolvable only through the brain root (not the referencing
+    /// repo, not base-template) still resolves clean.
+    #[test]
+    fn path_resolvable_only_through_brain_root_resolves_clean() {
+        let dir = crate::testsupport::unique_temp_dir("mev-graph-findings-brain-root-only");
+        let brain_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-brain-root-only-b");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(brain_dir.join("scripts")).unwrap();
+        std::fs::write(brain_dir.join("scripts/hq_only.py"), b"# brain-root only").unwrap();
+
+        let source = ReferencingSource {
+            repo: "mev".to_string(),
+            repo_root: dir.clone(),
+            file_path: dir.join(".claude/commands/example.md"),
+            contents: "invoke `scripts/hq_only.py` here".to_string(),
+            resolution_roots: vec![ResolutionRoot::new("brain-root", brain_dir.clone())],
+        };
+
+        let findings = referenced_path_absent_findings(&[source]);
+        assert!(
+            findings.is_empty(),
+            "a path resolvable only through the brain root must resolve \
+             clean, got {findings:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&brain_dir);
+    }
+
+    /// The recorded search order must appear in the emitted finding's
+    /// `message` -- by label and base path -- so a future false positive is
+    /// diagnosable from the carryover entry alone, without re-reading the
+    /// source.
+    #[test]
+    fn recorded_search_order_appears_in_finding_message() {
+        let dir = crate::testsupport::unique_temp_dir("mev-graph-findings-search-order");
+        let brain_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-search-order-b");
+        let bt_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-search-order-c");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&brain_dir).unwrap();
+        std::fs::create_dir_all(&bt_dir).unwrap();
+
+        let source = ReferencingSource {
+            repo: "mev".to_string(),
+            repo_root: dir.clone(),
+            file_path: dir.join(".claude/commands/example.md"),
+            contents: "invoke `scripts/nowhere.py` here".to_string(),
+            resolution_roots: vec![
+                ResolutionRoot::new("brain-root", brain_dir.clone()),
+                ResolutionRoot::new("base-template", bt_dir.clone()),
+            ],
+        };
+
+        let findings = referenced_path_absent_findings(&[source]);
+        assert_eq!(findings.len(), 1, "expected one finding, got {findings:?}");
+        let message = &findings[0].message;
+        assert!(
+            message.contains(&format!("repo:mev ({})", dir.display())),
+            "message must name the repo-local root, got: {message}"
+        );
+        assert!(
+            message.contains(&format!("brain-root ({})", brain_dir.display())),
+            "message must name the brain-root, got: {message}"
+        );
+        assert!(
+            message.contains(&format!("base-template ({})", bt_dir.display())),
+            "message must name base-template, got: {message}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&brain_dir);
+        let _ = std::fs::remove_dir_all(&bt_dir);
+    }
+
+    // -----------------------------------------------------------------
+    // Task 4 -- predicate tests: not-already-satisfied, and idempotent
+    // re-run (MV.ticket.graph-findings-path-resolution)
+    // -----------------------------------------------------------------
+    //
+    // These tests prove the predicate HALF of the ticket end to end: run a
+    // real detector over a real fixture corpus, take the `clears_when` it
+    // emits, and hand it to `mev carryover`'s own evaluator
+    // (`evaluate_carryover`) -- never by inspecting the predicate's fields
+    // directly. This is the exact trap the block record names: an emitted
+    // predicate that is already satisfied at write time would retire a
+    // live finding on its very first `mev carryover` sweep.
+
+    use crate::brain::carryover::{
+        CarryoverLane, carryover_entry_for_finding, write_graph_findings_for_repo,
+    };
+    use crate::brain::config::AttentionThresholds;
+    use std::collections::HashMap;
+
+    /// Run `crate::brain::carryover::evaluate_carryover` over one repo's
+    /// `carryover[]` and return the lane assigned to entry `0` -- the thin
+    /// end-to-end seam these tests need, without pulling in the rest of
+    /// `evaluate_carryover`'s call-site scaffolding (status map, dedup
+    /// flag) that these predicate classes never touch.
+    fn evaluated_lane(
+        repo: &str,
+        state_path: &Path,
+        carryover: Vec<okf_core::Carryover>,
+        brain_root: &Path,
+        repo_paths: &HashMap<String, PathBuf>,
+    ) -> CarryoverLane {
+        let source = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: state_path.to_path_buf(),
+            expected_kind: "project",
+        };
+        let file = StateFile {
+            carryover,
+            ..project_file(repo, vec![])
+        };
+        let files = vec![(source, file)];
+        let report = crate::brain::carryover::evaluate_carryover(
+            &files,
+            &HashMap::new(),
+            brain_root,
+            repo_paths,
+            "2026-08-23",
+            &AttentionThresholds::default(),
+            None,
+            false,
+        );
+        assert_eq!(
+            report.entries.len(),
+            1,
+            "expected exactly one entry evaluated"
+        );
+        report.entries[0].lane
+    }
+
+    #[test]
+    fn unregistered_lane_block_predicate_is_unsatisfied_at_write_time_then_satisfied_once_repaired()
+    {
+        // Fixture corpus: a lane names MV.1.A for repo "mev", but mev's
+        // planning/state.json (a REAL file on disk, since the emitted
+        // predicate is a `file_contains` check against it) registers only
+        // MV.9.Z -- so the detector fires.
+        let root = crate::testsupport::unique_temp_dir("mev-graph-findings-task4-lane");
+        let state_path = root.join("mev/planning/state.json");
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        // The fixture MUST reproduce the real `--write` path: the emitted
+        // carryover entry lands in the SAME state.json the predicate checks,
+        // and its text quotes the block id verbatim. A fixture without that
+        // carryover[] array cannot exercise the condition that actually
+        // fails, which is how the bare-id spelling survived review once.
+        std::fs::write(
+            &state_path,
+            r#"{"tracks": [{"blocks": [{"id": "MV.9.Z"}]}], "carryover":[{"slug":"graph-finding-unregistered-lane-block-mev-mv-1-a","text":"MECHANICALLY DETECTED by `mev graph-findings` (unregistered-lane-block). lane 'alpha' names block 'MV.1.A' owned by repo 'mev', which has no matching tracks[].blocks[].id in mev's planning/state.json","kind":"drift","created":"2026-08-23"}]}"#,
+        )
+        .unwrap();
+
+        let lane = lane_file("substrate", "alpha", vec![lane_block_ref("MV.1.A", "mev")]);
+        let state_files = vec![(
+            state_source("mev"),
+            project_file("mev", vec![track_block("MV.9.Z")]),
+        )];
+        let config = test_config(&["mev"]);
+        let (findings, _diags) =
+            unregistered_lane_block_findings(&[lane], &[], &state_files, &config);
+        assert_eq!(
+            findings.len(),
+            1,
+            "expected exactly one finding, got {findings:?}"
+        );
+        let f = findings[0].clone();
+        assert!(
+            f.clears_when.is_some(),
+            "every emitted finding must carry a typed clears_when"
+        );
+
+        let entry = carryover_entry_for_finding(&f, "2026-08-23");
+        assert_eq!(
+            entry.scope.repo.as_deref(),
+            Some("mev"),
+            "scope must set exactly repo, per the exactly-one-of rule"
+        );
+        assert!(entry.scope.tier.is_none());
+        assert!(entry.scope.cross_repo.is_none());
+
+        // NOT SATISFIED at write time -- via the evaluator, not inspection.
+        // repo_paths is empty; the evaluator resolves the predicate's
+        // "mev/planning/state.json" path against `root` directly (brain
+        // root first, matching `test_config`'s `repo_path == slug`).
+        let lane_before = evaluated_lane(
+            "mev",
+            &state_path,
+            vec![entry.clone()],
+            &root,
+            &HashMap::new(),
+        );
+        assert_eq!(
+            lane_before,
+            CarryoverLane::Actionable,
+            "the emitted predicate must NOT already be satisfied at write time -- \
+             this is the trap that would retire a live finding on its first sweep"
+        );
+
+        // Repair: register MV.1.A in mev's real planning/state.json.
+        std::fs::write(
+            &state_path,
+            r#"{"tracks": [{"blocks": [{"id": "MV.9.Z"}, {"id": "MV.1.A"}]}], "carryover":[{"slug":"graph-finding-unregistered-lane-block-mev-mv-1-a","text":"MECHANICALLY DETECTED by `mev graph-findings` (unregistered-lane-block). lane 'alpha' names block 'MV.1.A' owned by repo 'mev', which has no matching tracks[].blocks[].id in mev's planning/state.json","kind":"drift","created":"2026-08-23"}]}"#,
+        )
+        .unwrap();
+
+        let lane_after = evaluated_lane("mev", &state_path, vec![entry], &root, &HashMap::new());
+        assert_eq!(
+            lane_after,
+            CarryoverLane::Cleared,
+            "once the block is registered, the same predicate must evaluate satisfied \
+             so the entry can actually be retired"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn referenced_path_absent_predicate_is_unsatisfied_at_write_time_then_satisfied_once_repaired()
+    {
+        let repo_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-task4-path");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let source = referencing_source(
+            "mev",
+            &repo_dir,
+            "invoke `scripts/render_spec.py` to render the spec",
+        );
+        let findings = referenced_path_absent_findings(&[source]);
+        assert_eq!(
+            findings.len(),
+            1,
+            "expected exactly one finding, got {findings:?}"
+        );
+        let f = findings[0].clone();
+        assert!(f.clears_when.is_some());
+
+        let entry = carryover_entry_for_finding(&f, "2026-08-23");
+        assert_eq!(entry.scope.repo.as_deref(), Some("mev"));
+        assert!(entry.scope.tier.is_none());
+        assert!(entry.scope.cross_repo.is_none());
+
+        let mut repo_paths = HashMap::new();
+        repo_paths.insert("mev".to_string(), repo_dir.clone());
+        let brain_root = crate::testsupport::unique_temp_dir("mev-graph-findings-task4-path-brain");
+        std::fs::create_dir_all(&brain_root).unwrap();
+        let state_path = repo_dir.join("planning/state.json");
+
+        // NOT SATISFIED at write time: the script does not exist yet under
+        // any root the evaluator checks.
+        let lane_before = evaluated_lane(
+            "mev",
+            &state_path,
+            vec![entry.clone()],
+            &brain_root,
+            &repo_paths,
+        );
+        assert_eq!(
+            lane_before,
+            CarryoverLane::Actionable,
+            "the emitted predicate must NOT already be satisfied at write time"
+        );
+
+        // Repair: the script is created.
+        std::fs::create_dir_all(repo_dir.join("scripts")).unwrap();
+        std::fs::write(repo_dir.join("scripts/render_spec.py"), b"# now exists").unwrap();
+
+        let lane_after = evaluated_lane("mev", &state_path, vec![entry], &brain_root, &repo_paths);
+        assert_eq!(
+            lane_after,
+            CarryoverLane::Cleared,
+            "once the script exists, the same predicate must evaluate satisfied"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo_dir);
+        let _ = std::fs::remove_dir_all(&brain_root);
+    }
+
+    #[test]
+    fn write_graph_findings_for_repo_over_fixture_corpus_second_write_appends_nothing() {
+        // Idempotence over a REAL detector-produced finding (not a synthetic
+        // one), across two `--write` calls where the second sees exactly
+        // what the first one wrote.
+        let repo_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-task4-idempotent");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let state_dir = repo_dir.join("planning");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let state_path = state_dir.join("state.json");
+
+        let source = referencing_source(
+            "mev",
+            &repo_dir,
+            "invoke `scripts/render_spec.py` to render the spec",
+        );
+        let findings = referenced_path_absent_findings(&[source]);
+        assert_eq!(
+            findings.len(),
+            1,
+            "expected exactly one finding, got {findings:?}"
+        );
+
+        let state_source = StateSource {
+            repo_slug: "mev".to_string(),
+            abs_path: state_path.clone(),
+            expected_kind: "project",
+        };
+        let initial_file = project_file("mev", vec![]);
+        let initial_content = serde_json::to_string_pretty(&initial_file).unwrap();
+        std::fs::write(&state_path, initial_content).unwrap();
+
+        let first =
+            write_graph_findings_for_repo(&state_source, &initial_file, &findings, "2026-08-23")
+                .expect("first write must succeed");
+        assert!(first.written);
+        assert_eq!(first.appended, vec![findings[0].finding_id.clone()]);
+
+        // Reload what actually landed on disk -- the same unchanged fixture
+        // corpus a second `--write` would see.
+        let on_disk = std::fs::read_to_string(&state_path).unwrap();
+        let reloaded: StateFile = serde_json::from_str(&on_disk).unwrap();
+        assert_eq!(reloaded.carryover.len(), 1);
+
+        let second =
+            write_graph_findings_for_repo(&state_source, &reloaded, &findings, "2026-08-24")
+                .expect("second write must succeed");
+        assert!(
+            !second.written,
+            "a repeated --write over an unchanged fixture corpus must append nothing"
+        );
+        assert!(second.appended.is_empty());
+
+        let _ = std::fs::remove_dir_all(&repo_dir);
     }
 }
