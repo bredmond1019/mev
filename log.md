@@ -13,6 +13,19 @@ timestamp: "2026-08-22T16:30:00-03:00"
 
 # Log — mev
 
+## [run: 2026-08-23]
+
+Implemented `MV.ticket.graph-derived-carryover-findings` (tasks 2–7 of 7, PASS via `/sdlc-flow`; task 1 landed in an earlier partial run). Added the `mev graph-findings [--json] [--write]` CLI verb backed by a new `src/brain/graph_findings.rs` module carrying two deterministic detectors: unregistered-lane-block (a lane `blocks[]` id with no matching `state.json` registration under its own `repo` field) and referenced-path-absent (a `.py`/`.sh` path named in a command or spec that resolves nowhere in the fleet). Both share a stable, content-derived `finding_id` so the same finding correlates across repos. `--write` routes through new `brain/carryover.rs` helpers to append typed `carryover[]` entries (kind always `drift`, no `clears_when`, finding_id-keyed dedup for idempotence); a live `--write` run appended 323 entries across 24 repos (897 raw rows deduplicated), with mev's own two vault files (18 entries) committed through the run and the other 23 repos' diffs left uncommitted as outside this task's authority. Documented the new verb in `docs/cli.md` and `docs/index.md`. Full-suite validation (task 8) passed fmt/clippy/build/audit; `cargo test` failed only on a pre-existing, unrelated `tests/fleet_regression.rs` fixture-drift case. Review verdict: PASS, zero findings. Next: pull the next item from the master-plan or HQ backlog.
+
+```
+74e569a feat: implement MV.ticket.graph-derived-carryover-findings-task7
+dd164c5 feat: implement MV.ticket.graph-derived-carryover-findings-task5
+2b632a0 feat: implement MV.ticket.graph-derived-carryover-findings-task4
+c0962d5 feat: implement MV.ticket.graph-derived-carryover-findings-task3
+55c5800 feat: implement MV.ticket.graph-derived-carryover-findings-task2
+3f54d1a feat: implement MV.ticket.graph-derived-carryover-findings-task1
+```
+
 ## [orchestration: 2026-08-22]
 
 ### Autonomous-foundation lane driven end-to-end via `/begin-orchestration`
