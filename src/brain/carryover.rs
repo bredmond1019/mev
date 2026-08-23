@@ -820,10 +820,7 @@ pub fn evaluate_carryover_with_dedup(
         // the match).
         if let Some(filter) = repo_filter
             && src.repo_slug != filter
-            && !file
-                .carryover
-                .iter()
-                .any(|item| item.scope.repo.is_some())
+            && !file.carryover.iter().any(|item| item.scope.repo.is_some())
         {
             continue;
         }
@@ -1921,10 +1918,7 @@ pub fn audit_carryover(
         // carryover/reference entry in it carries a `scope.repo` override.
         if let Some(filter) = repo_filter
             && src.repo_slug != filter
-            && !file
-                .carryover
-                .iter()
-                .any(|item| item.scope.repo.is_some())
+            && !file.carryover.iter().any(|item| item.scope.repo.is_some())
             && !file.reference.iter().any(|item| item.scope.repo.is_some())
         {
             continue;
@@ -3092,6 +3086,15 @@ mod tests {
         }
     }
 
+    /// Like [`item`], but with an explicit `scope` override — used to build
+    /// the cross-file-attribution fixtures for `--repo` filtering (Task 2 of
+    /// MV.ticket.carryover-repo-filter-keys-on-file).
+    fn item_scoped(slug: &str, scope: CarryoverScope) -> Carryover {
+        let mut c = item(slug, "env", None, vec![], "2020-01-01", None, None);
+        c.scope = scope;
+        c
+    }
+
     fn status_map(files: &[(StateSource, StateFile)]) -> HashMap<String, Option<String>> {
         let mut map = HashMap::new();
         for (s, f) in files {
@@ -3624,6 +3627,251 @@ mod tests {
         );
         assert_eq!(report.total, 1);
         assert_eq!(report.entries[0].repo, "mev");
+    }
+
+    /// Fixture corpus for the `--repo` ownership tests below. Two files:
+    /// `base-template` holds only same-file (unscoped) entries — the
+    /// positive control. `brain` holds a mix: one entry scoped to
+    /// `base-template` (the cross-file-attribution case the ticket exists
+    /// for), one unscoped (falls back to `brain`), one scoped to a `tier`,
+    /// and one marked `cross_repo` (neither of the last two has a single
+    /// owning repo and must match no `--repo` filter).
+    fn repo_filter_fixture() -> Vec<(StateSource, StateFile)> {
+        vec![
+            (
+                src("base-template"),
+                state_file(
+                    "base-template",
+                    vec![],
+                    vec![
+                        item_scoped(
+                            "four-repos-still-narrow-clippy",
+                            CarryoverScope {
+                                repo: None,
+                                tier: None,
+                                cross_repo: None,
+                            },
+                        ),
+                        item_scoped(
+                            "installed-mev-and-bastion-are-stale",
+                            CarryoverScope {
+                                repo: None,
+                                tier: None,
+                                cross_repo: None,
+                            },
+                        ),
+                    ],
+                ),
+            ),
+            (
+                src("brain"),
+                state_file(
+                    "brain",
+                    vec![],
+                    vec![
+                        item_scoped(
+                            "sdlc-flow-is-structurally-unrunnable-in-hq",
+                            CarryoverScope {
+                                repo: Some("base-template".to_string()),
+                                tier: None,
+                                cross_repo: None,
+                            },
+                        ),
+                        item_scoped(
+                            "brain-native-entry",
+                            CarryoverScope {
+                                repo: None,
+                                tier: None,
+                                cross_repo: None,
+                            },
+                        ),
+                        item_scoped(
+                            "tier-scoped-entry",
+                            CarryoverScope {
+                                repo: None,
+                                tier: Some("core".to_string()),
+                                cross_repo: None,
+                            },
+                        ),
+                        item_scoped(
+                            "cross-repo-scoped-entry",
+                            CarryoverScope {
+                                repo: None,
+                                tier: None,
+                                cross_repo: Some(true),
+                            },
+                        ),
+                    ],
+                ),
+            ),
+        ]
+    }
+
+    #[test]
+    fn evaluate_repo_filter_finds_entry_owned_by_filter_but_filed_in_another_repo_file() {
+        // The measured live repro (2026-08-23): an entry physically living in
+        // `brain`'s state.json, scoped to `base-template`, must be returned
+        // by `--repo base-template`. Pre-fix, the file-level skip discarded
+        // the whole `brain` file before this entry's own `scope.repo` was
+        // ever read, so this assertion fails against the pre-fix behaviour.
+        let files = repo_filter_fixture();
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            Some("base-template"),
+            false,
+        );
+        let slugs: Vec<&str> = report.entries.iter().map(|e| e.slug.as_str()).collect();
+        assert!(
+            slugs.contains(&"sdlc-flow-is-structurally-unrunnable-in-hq"),
+            "entry filed in brain's file but scope.repo=base-template must be visible to \
+             --repo base-template; got {slugs:?}"
+        );
+    }
+
+    #[test]
+    fn evaluate_repo_filter_positive_control_same_file_entries_still_listed() {
+        // Required so the above is a true positive and not a broken filter
+        // that now matches everything: entries living AND owned in
+        // base-template's own file must still appear under --repo
+        // base-template.
+        let files = repo_filter_fixture();
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            Some("base-template"),
+            false,
+        );
+        let slugs: Vec<&str> = report.entries.iter().map(|e| e.slug.as_str()).collect();
+        assert!(slugs.contains(&"four-repos-still-narrow-clippy"));
+        assert!(slugs.contains(&"installed-mev-and-bastion-are-stale"));
+        // Exactly the three base-template-owned entries — no more, no less.
+        assert_eq!(report.total, 3, "unexpected entry set: {slugs:?}");
+    }
+
+    #[test]
+    fn evaluate_repo_filter_entry_with_no_scope_repo_falls_back_to_file_repo() {
+        let files = repo_filter_fixture();
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            Some("brain"),
+            false,
+        );
+        let slugs: Vec<&str> = report.entries.iter().map(|e| e.slug.as_str()).collect();
+        assert!(
+            slugs.contains(&"brain-native-entry"),
+            "unscoped entry must fall back to its file's repo; got {slugs:?}"
+        );
+        assert!(
+            !slugs.contains(&"sdlc-flow-is-structurally-unrunnable-in-hq"),
+            "an entry scoped away to base-template must NOT also match --repo brain; got {slugs:?}"
+        );
+    }
+
+    #[test]
+    fn evaluate_repo_filter_tier_and_cross_repo_scoped_entries_match_no_repo_filter() {
+        let files = repo_filter_fixture();
+        let status = status_map(&files);
+        for filter in ["brain", "base-template", "core"] {
+            let report = evaluate_carryover(
+                &files,
+                &status,
+                Path::new("/fake/brain"),
+                &HashMap::new(),
+                "2026-08-03",
+                &thresholds(),
+                Some(filter),
+                false,
+            );
+            let slugs: Vec<&str> = report.entries.iter().map(|e| e.slug.as_str()).collect();
+            assert!(
+                !slugs.contains(&"tier-scoped-entry"),
+                "tier-scoped entry must match no --repo filter (tried {filter}); got {slugs:?}"
+            );
+            assert!(
+                !slugs.contains(&"cross-repo-scoped-entry"),
+                "cross_repo-scoped entry must match no --repo filter (tried {filter}); got {slugs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_repo_filter_absent_is_unchanged_regression() {
+        // The unfiltered path must be byte-identical in behaviour to before
+        // this ticket: every entry in the fixture corpus, regardless of
+        // scope, appears when no --repo filter is passed.
+        let files = repo_filter_fixture();
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+            false,
+        );
+        assert_eq!(report.total, 6);
+        let slugs: std::collections::HashSet<&str> =
+            report.entries.iter().map(|e| e.slug.as_str()).collect();
+        for expected in [
+            "four-repos-still-narrow-clippy",
+            "installed-mev-and-bastion-are-stale",
+            "sdlc-flow-is-structurally-unrunnable-in-hq",
+            "brain-native-entry",
+            "tier-scoped-entry",
+            "cross-repo-scoped-entry",
+        ] {
+            assert!(
+                slugs.contains(expected),
+                "missing {expected} in unfiltered set"
+            );
+        }
+    }
+
+    #[test]
+    fn audit_carryover_repo_filter_agrees_with_evaluate_carryover() {
+        // `--audit --repo B` must select the identical entry set as
+        // `--repo B` on the same corpus, for every case above: the
+        // cross-file-owned entry, the positive control, the fallback, and
+        // the no-owner tier/cross_repo entries.
+        let files = repo_filter_fixture();
+        let status = status_map(&files);
+
+        for filter in [Some("base-template"), Some("brain"), Some("core"), None] {
+            let report = evaluate_carryover(
+                &files,
+                &status,
+                Path::new("/fake/brain"),
+                &HashMap::new(),
+                "2026-08-03",
+                &thresholds(),
+                filter,
+                false,
+            );
+            let audit = audit_carryover(&files, &report, "2026-08-03", 90, filter);
+            assert_eq!(
+                audit.carryover_count, report.total,
+                "audit_carryover disagreed with evaluate_carryover for --repo {filter:?}"
+            );
+        }
     }
 
     #[test]
