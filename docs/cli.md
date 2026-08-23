@@ -1866,10 +1866,10 @@ mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>
 | Argument / Flag | Default | Description |
 |---|---|---|
 | `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
-| `--repo <SLUG>` | unset | Restrict the sweep to one repo's `carryover[]` entries. An unknown slug is a hard error naming the valid slugs |
+| `--repo <SLUG>` | unset | Restrict the sweep to one repo's `carryover[]` entries **by ownership**, not by which file an entry happens to be stored in — see below. An unknown slug is a hard error naming the valid slugs |
 | `--json` | off | Emit the `CarryoverReport` (or, under `--audit`, the `CarryoverAudit`) as compact JSON instead of the human summary |
 | `--allow-exec` | off | Opt in to running `command_exits_zero` predicates. Without it, every such entry reports `not-evaluable` (reason `execution-not-allowed`) and **no command is ever run**. **`--dispose` does not imply this** — passing `--dispose` never turns on command execution, so a `command_exits_zero` entry that is `not-evaluable` for lack of `--allow-exec` is never disposal-eligible either |
-| `--audit` | off | Report a fleet-wide `carryover[]`/`reference[]` census instead of the per-entry sweep — total, per-container and per-kind/per-class counts, typed-predicate coverage, and inflow/outflow over `--window` days. Composed entirely from the same loaded corpus and `CarryoverReport` the ordinary sweep already produces — no second corpus walk |
+| `--audit` | off | Report a fleet-wide `carryover[]`/`reference[]` census instead of the per-entry sweep — total, per-container and per-kind/per-class counts, typed-predicate coverage, and inflow/outflow over `--window` days. Composed entirely from the same loaded corpus and `CarryoverReport` the ordinary sweep already produces — no second corpus walk. Shares the exact same `--repo` ownership rule as the ordinary sweep, so `mev carryover --audit --repo X` and `mev carryover --repo X` always agree on which entries are in scope |
 | `--window <DAYS>` | `30` | Window, in days, `--audit`'s inflow/outflow figures are measured over. Ignored without `--audit` |
 | `--dispose` | off | Move every CLEARED-lane entry out of its owning repo's `state.json` and into that repo's `planning/carryover-archive.jsonl`. The one write path this subcommand has — see below |
 | `--dry-run` | off | Only meaningful together with `--dispose`: compute and print the identical disposal plan without writing anything. Passed without `--dispose`, `mev carryover` reports the misuse and exits non-zero rather than silently ignoring it |
@@ -1877,6 +1877,18 @@ mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>
 Resolves `brain.toml` by walking up from `path`, discovers and loads every repo's
 `planning/state.json` (individual load failures are skipped, not fatal), and evaluates every
 `carryover[]` entry against the corpus.
+
+**`--repo <SLUG>` selects by ownership (`scope.repo`), never by which file an entry lives in.**
+An entry's owner is its own `scope.repo` when set; when `scope.repo` is absent but `scope.tier` or
+`scope.cross_repo` is set, the entry has no single owning repo and matches **no** `--repo` filter
+for any slug; when `scope` is entirely empty, the entry falls back to the repo of the file it lives
+in (the same `own_repo` fallback used for `clears_when` path/command resolution elsewhere). So an
+entry that physically lives in repo A's `state.json` but carries `scope.repo: B` is returned by
+`--repo B`, **not** by `--repo A` — the file it happens to be stored in is irrelevant to `--repo`.
+Before this behaviour was fixed, `--repo` keyed on the file's repo instead, so a cross-repo entry
+was invisible to the very repo that owned it and could only be found via the repo it happened to be
+filed under. `--audit --repo` applies the identical rule, so the two flags never disagree on which
+entries are in scope.
 
 **Without `--dispose`, `mev carryover` writes nothing.** The `cleared` lane is a recommendation
 — a human, or a `--dispose` run, acts on it; the plain sweep and `--audit` never delete or
