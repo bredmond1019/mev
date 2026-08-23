@@ -13,6 +13,16 @@ timestamp: "2026-08-23T09:17:53-03:00"
 
 # Log — mev
 
+## [run: 2026-08-23]
+
+Ran `MV.ticket.graph-findings-path-resolution` (tasks 1–7 planned, tasks 1–2 executed) via `/sdlc-flow`. Task 1 implemented fleet-wide path resolution for the `referenced-path-absent` detector: candidates are now resolved against an ordered `ResolutionRoot` list (referencing repo, brain root, base-template, and — for a synced command — the owning repo, resolved through `BrainConfig`'s base-template `[[repos]]` entry rather than a second hardcoded literal) via a new `resolve_referenced_path`, with every searched root named in a finding's message; `finding_id` and `normalize_referenced_path` untouched, and the existing `referencing_source()` test helper updated so prior repo-local-only cases still pass. Task 2 added the resolver test suite, including the load-bearing positive control (a file that exists only in `base-template/` and is referenced from another repo's synced command now yields zero findings), plus fleet-wide-absent-still-reports, repo-local-only regression, brain-root-only resolution, and searched-root-labels-in-message cases. The run BAILED at task 2's validation gate: `cargo test fleet_readiness_is_unchanged_for_blocks_without_a_new_edge` fails on fleet-wide `state.json` drift in `/Users/brandon/Dev/agentic-portfolio/planning/state.json` and `core/engine-rs/planning/state.json` (engine-rs `focus.next` missing `EN.ticket.test-gate-must-terminate-a-hang-not-wedge`) — unrelated to and outside the scope of this task's diff (both task 1 and task 2 touch only `src/brain/graph_findings.rs`). Tasks 3–7 (predicate emission, live-corpus cleanup, docs) did not run. Next: rebase this branch once the fleet-wide `state.json` drift clears (or file it as its own environmental defect), then resume tasks 3–7.
+
+```
+4c0b578 feat: implement MV.ticket.graph-findings-path-resolution-task2
+f01a6bc feat: implement MV.ticket.graph-findings-path-resolution-task1
+```
+
+
 ### Autonomous-foundation lane, session 2 — graph-findings shipped, then measured 81% wrong
 - **What:** Closed `MV.ticket.graph-derived-carryover-findings`. Its D64 evidence step ran `--write`
   against the live corpus, appending 323 carryover entries across 24 repos; measured that **25 of 31
