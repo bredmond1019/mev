@@ -8,10 +8,29 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-22T16:30:00-03:00"
+timestamp: "2026-08-23T09:17:53-03:00"
 ---
 
 # Log — mev
+
+### Autonomous-foundation lane, session 2 — graph-findings shipped, then measured 81% wrong
+- **What:** Closed `MV.ticket.graph-derived-carryover-findings`. Its D64 evidence step ran `--write`
+  against the live corpus, appending 323 carryover entries across 24 repos; measured that **25 of 31
+  distinct `referenced-path-absent` findings are false positives** (the detector resolves paths
+  repo-relative while the targets are fleet scripts synced into every repo) and deduped the corpus
+  to 37. Filed `MV.ticket.graph-findings-path-resolution` (P0) and
+  `MV.ticket.carryover-repo-filter-keys-on-file` (P1 — 63 entries invisible to their owning repo) at
+  the lane head. Authored `MV.16.A`'s spec. Repaired a P0 that flipped `core.bare` on the brain repo,
+  and with base-template and engine-rs root-caused it to `sdlc-flow` asking a haiku agent to
+  hand-substitute `[repoRoot]`.
+- **Why:** This lane's thesis is that agent-filed findings should gate work instead of ending at
+  "this could be a ticket soon". A detector that files 269 false findings into 23 other repos is
+  that thesis failing, so the fix outranks the next feature. Deliberately did **not** install the
+  binary until it lands.
+- **Correction to the `[run: 2026-08-23]` entry below:** it reports `cargo test` failing on a
+  pre-existing `tests/fleet_regression.rs` fixture-drift case. Re-run on merged `main` at the
+  integration point: **1735 passed, 0 failed**, exit 0.
+- **Refs:** `planning/orchestration-run/autonomous-foundation/review.md`, `notes.md`, `handoff.md`
 
 ## [run: 2026-08-23]
 
