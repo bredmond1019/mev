@@ -1599,6 +1599,180 @@ pub fn render_dispose_summary(report: &DisposeRunReport) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// `--write` for `mev graph-findings` (`MV.ticket.graph-derived-carryover-findings`
+// task 5) — append mechanically-detected findings as typed `carryover[]` entries
+// ---------------------------------------------------------------------------
+//
+// Routed through this module (per the block record) so an emitted entry inherits
+// the existing entry shape, the `scope` exactly-one-of rule, and the dispose
+// sweep — a `graph-findings`-authored entry is indistinguishable from a hand-filed
+// one except for carrying `finding_id`.
+
+/// Slugify a [`GraphFinding`] into a stable, human-readable `carryover[].slug`.
+///
+/// Not the `finding_id` itself — slugs are meant to read like the fleet's existing
+/// hand-authored ones (`epic-weight-not-surfaced-by-bastion`), and `finding_id` is a
+/// 64-hex-character digest that would make every diff and board listing unreadable.
+/// Built from the detector tag plus the finding's own `subject`, lowercased with
+/// every run of non `[a-z0-9]` collapsed to a single `-`, trimmed of leading/trailing
+/// `-`, and capped at 80 characters (a subject like a long path stays legible without
+/// growing the slug unboundedly). Deterministic and content-derived exactly like
+/// `finding_id`, so it does not double as an extra source of drift between two runs
+/// over the same corpus.
+#[must_use]
+pub fn slug_for_finding(finding: &crate::brain::graph_findings::GraphFinding) -> String {
+    let raw = format!(
+        "graph-finding-{}-{}",
+        finding.detector.tag(),
+        finding.subject
+    );
+    let mut slug = String::with_capacity(raw.len());
+    let mut last_was_dash = false;
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+    let trimmed = slug.trim_matches('-');
+    if trimmed.len() > 80 {
+        trimmed[..80].trim_end_matches('-').to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Build the `carryover[]` entry `--write` appends for one [`GraphFinding`].
+///
+/// - `scope` has exactly one non-null key (`repo`, per the finding's own `repo` —
+///   never `tier`/`cross_repo`), so `bastion validate-brain --state` never reports
+///   `E_STATE_SCHEMA_MALFORMED_SCOPE` for an emitted entry.
+/// - `kind` is [`okf_core::KnownCarryoverKind::Drift`] for both detector classes —
+///   an `unregistered-lane-block` finding is a lane record and a `state.json`
+///   disagreeing about a block's existence, and a `referenced-path-absent` finding
+///   is a command/spec and the filesystem disagreeing about a script's existence;
+///   both are "a fact held in two places that no longer agree," which is `drift`'s
+///   definition, not `defect`/`deferred`/`env`.
+/// - `clears_when` is deliberately `None`: the honest machine-checkable predicate
+///   for "the graph and the filesystem agree again" would just be "re-run
+///   `graph-findings` and this finding is gone", which no `ClearsWhenPredicate`
+///   variant expresses, and authoring a predicate that is not actually satisfied
+///   yet would violate the "never author an already-satisfied `clears_when`" rule
+///   in the opposite direction (a predicate that can never fire). `--write`'s own
+///   idempotence (dedup on `finding_id`) is what makes a stale entry self-correcting
+///   instead: the NEXT `--write` after the underlying drift is fixed simply stops
+///   re-finding it, and a human/`mev carryover --dispose` closes the now-cleared
+///   entry the normal way.
+#[must_use]
+pub fn carryover_entry_for_finding(
+    finding: &crate::brain::graph_findings::GraphFinding,
+    created: &str,
+) -> Carryover {
+    Carryover {
+        slug: slug_for_finding(finding),
+        scope: okf_core::CarryoverScope {
+            repo: Some(finding.repo.clone()),
+            tier: None,
+            cross_repo: None,
+        },
+        kind: okf_core::CarryoverKind::Known(okf_core::KnownCarryoverKind::Drift),
+        text: format!(
+            "MECHANICALLY DETECTED by `mev graph-findings` ({}). {}",
+            finding.detector.tag(),
+            finding.message
+        ),
+        finding_id: Some(finding.finding_id.clone()),
+        created: created.to_string(),
+        ..Carryover::default()
+    }
+}
+
+/// Result of attempting `--write` for one repo: how many findings were newly
+/// appended (already-present `finding_id`s are silently skipped — the dedup that
+/// makes a repeated `--write` idempotent) and whether the file was actually
+/// touched.
+#[derive(Debug, Clone)]
+pub struct GraphFindingsWrite {
+    /// Owning repo slug.
+    pub repo: String,
+    /// Absolute path of the repo's `planning/state.json`.
+    pub state_path: PathBuf,
+    /// `finding_id`s newly appended this run (excludes ones already present,
+    /// which are the idempotence case).
+    pub appended: Vec<String>,
+    /// Whether disk was actually touched (`false` when every finding for this
+    /// repo already had a matching `finding_id` in `carryover[]`).
+    pub written: bool,
+}
+
+/// Append `findings` scoped to `state_source`'s repo onto `state_file`'s
+/// `carryover[]` and write the result back to disk — the disk-facing half of
+/// `--write` for one repo. Findings for OTHER repos in `findings` are ignored (the
+/// caller is expected to have already partitioned by repo, but filtering here too
+/// means a caller mistake produces a no-op for the wrong repo rather than a
+/// cross-repo write).
+///
+/// **Idempotence**: a finding whose `finding_id` already appears on some existing
+/// `carryover[]` entry in `state_file` — or was already appended earlier in this
+/// same call, covering two findings in one run that happen to normalize to the
+/// same subject — is skipped, never duplicated. Running `--write` twice against an
+/// unchanged corpus therefore appends nothing the second time.
+///
+/// **Byte-faithful for the untouched portion**: serialized via
+/// [`serialize_state_file_pretty`] — the same `to_string_pretty` + trailing newline
+/// [`dispose_repo`] uses — so a write that only appends entries produces a diff of
+/// exactly the appended lines, never a re-indent or key-reorder of the rest of the
+/// file. Writes nothing to disk (`written: false`) when there is nothing new to
+/// append, matching [`dispose_repo`]'s "empty candidates is a no-op" convention.
+pub fn write_graph_findings_for_repo(
+    state_source: &StateSource,
+    state_file: &StateFile,
+    findings: &[crate::brain::graph_findings::GraphFinding],
+    created: &str,
+) -> anyhow::Result<GraphFindingsWrite> {
+    let mut seen_ids: HashSet<String> = state_file
+        .carryover
+        .iter()
+        .filter_map(|c| c.finding_id.clone())
+        .collect();
+
+    let mut new_state = state_file.clone();
+    let mut appended = Vec::new();
+    for finding in findings.iter().filter(|f| f.repo == state_source.repo_slug) {
+        if seen_ids.contains(&finding.finding_id) {
+            continue;
+        }
+        seen_ids.insert(finding.finding_id.clone());
+        new_state
+            .carryover
+            .push(carryover_entry_for_finding(finding, created));
+        appended.push(finding.finding_id.clone());
+    }
+
+    if appended.is_empty() {
+        return Ok(GraphFindingsWrite {
+            repo: state_source.repo_slug.clone(),
+            state_path: state_source.abs_path.clone(),
+            appended,
+            written: false,
+        });
+    }
+
+    let content = serialize_state_file_pretty(&new_state)?;
+    crate::brain::emit::write_atomic(&state_source.abs_path, content.as_bytes())?;
+
+    Ok(GraphFindingsWrite {
+        repo: state_source.repo_slug.clone(),
+        state_path: state_source.abs_path.clone(),
+        appended,
+        written: true,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Audit — `mev carryover --audit` (`MV.ticket.reference-container-validation`
 // task 4)
 // ---------------------------------------------------------------------------
@@ -5754,6 +5928,217 @@ mod tests {
             after_content, original_content,
             "state.json must be untouched when the archive write fails"
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // -- graph-findings `--write` (task 5) ---------------------------------------
+
+    fn finding(
+        detector: crate::brain::graph_findings::DetectorClass,
+        repo: &str,
+        subject: &str,
+        message: &str,
+    ) -> crate::brain::graph_findings::GraphFinding {
+        crate::brain::graph_findings::GraphFinding {
+            detector,
+            repo: repo.to_string(),
+            subject: subject.to_string(),
+            message: message.to_string(),
+            finding_id: crate::brain::graph_findings::finding_id(detector, subject),
+        }
+    }
+
+    #[test]
+    fn slug_for_finding_is_readable_kebab_case_and_deterministic() {
+        let f = finding(
+            crate::brain::graph_findings::DetectorClass::UnregisteredLaneBlock,
+            "acme",
+            "acme:ACME.9.Z",
+            "msg",
+        );
+        let slug = slug_for_finding(&f);
+        assert_eq!(slug, "graph-finding-unregistered-lane-block-acme-acme-9-z");
+        // Deterministic: recomputing from the same finding yields the same slug.
+        assert_eq!(slug, slug_for_finding(&f));
+    }
+
+    #[test]
+    fn slug_for_finding_caps_at_eighty_chars_with_no_trailing_dash() {
+        let long_subject = "scripts/".to_string() + &"x".repeat(200) + ".py";
+        let f = finding(
+            crate::brain::graph_findings::DetectorClass::ReferencedPathAbsent,
+            "acme",
+            &long_subject,
+            "msg",
+        );
+        let slug = slug_for_finding(&f);
+        assert!(slug.len() <= 80, "slug too long: {} chars", slug.len());
+        assert!(!slug.ends_with('-'));
+    }
+
+    #[test]
+    fn carryover_entry_for_finding_has_single_key_scope_and_drift_kind() {
+        let f = finding(
+            crate::brain::graph_findings::DetectorClass::ReferencedPathAbsent,
+            "acme",
+            "scripts/render_spec.py",
+            "example.md references 'scripts/render_spec.py', which does not exist",
+        );
+        let entry = carryover_entry_for_finding(&f, "2026-08-23");
+
+        assert_eq!(entry.scope.repo.as_deref(), Some("acme"));
+        assert!(entry.scope.tier.is_none());
+        assert!(entry.scope.cross_repo.is_none());
+        assert_eq!(
+            entry.kind,
+            okf_core::CarryoverKind::Known(okf_core::KnownCarryoverKind::Drift)
+        );
+        assert_eq!(entry.finding_id.as_deref(), Some(f.finding_id.as_str()));
+        assert_eq!(entry.created, "2026-08-23");
+        assert!(entry.clears_when.is_none());
+        assert!(entry.text.contains("render_spec.py"));
+    }
+
+    #[test]
+    fn write_graph_findings_for_repo_appends_and_leaves_untouched_portion_byte_identical() {
+        let survivor = item(
+            "unrelated-entry",
+            "deferred",
+            Some("MV.9.A lands"),
+            vec![],
+            "2020-01-01",
+            None,
+            None,
+        );
+        let file = state_file("acme", vec![], vec![survivor.clone()]);
+        let (dir, source, _archive) = scratch_repo("write-appends", &file);
+
+        let f = finding(
+            crate::brain::graph_findings::DetectorClass::UnregisteredLaneBlock,
+            "acme",
+            "acme:ACME.9.Z",
+            "lane names an unregistered block",
+        );
+        let result = write_graph_findings_for_repo(&source, &file, &[f.clone()], "2026-08-23")
+            .expect("write must succeed");
+        assert!(result.written);
+        assert_eq!(result.appended, vec![f.finding_id.clone()]);
+
+        let new_content = std::fs::read_to_string(&source.abs_path).unwrap();
+        let new_file: StateFile = serde_json::from_str(&new_content).unwrap();
+        assert_eq!(new_file.carryover.len(), 2);
+        assert_eq!(new_file.carryover[0].slug, "unrelated-entry");
+        assert_eq!(
+            new_file.carryover[1].finding_id.as_deref(),
+            Some(f.finding_id.as_str())
+        );
+
+        // Byte-faithful for everything but the appended entry: reconstructing
+        // "original plus exactly this one new entry" and re-serializing must match
+        // on-disk bytes exactly (no re-indent, no key reorder).
+        let mut expected = file.clone();
+        expected
+            .carryover
+            .push(carryover_entry_for_finding(&f, "2026-08-23"));
+        let mut expected_content = serde_json::to_string_pretty(&expected).unwrap();
+        expected_content.push('\n');
+        assert_eq!(new_content, expected_content);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_graph_findings_for_repo_ignores_findings_for_other_repos() {
+        let file = state_file("acme", vec![], vec![]);
+        let (dir, source, _archive) = scratch_repo("write-filters-repo", &file);
+
+        let other_repo_finding = finding(
+            crate::brain::graph_findings::DetectorClass::UnregisteredLaneBlock,
+            "other-repo",
+            "other-repo:X.1.A",
+            "msg",
+        );
+        let result =
+            write_graph_findings_for_repo(&source, &file, &[other_repo_finding], "2026-08-23")
+                .expect("write must succeed");
+        assert!(!result.written);
+        assert!(result.appended.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_graph_findings_for_repo_is_idempotent_on_finding_id() {
+        let f = finding(
+            crate::brain::graph_findings::DetectorClass::ReferencedPathAbsent,
+            "acme",
+            "scripts/render_spec.py",
+            "msg",
+        );
+        // Simulate a `finding_id` already present from a prior --write.
+        let already_written = carryover_entry_for_finding(&f, "2026-08-20");
+        let file = state_file("acme", vec![], vec![already_written]);
+        let (dir, source, _archive) = scratch_repo("write-idempotent", &file);
+
+        let result = write_graph_findings_for_repo(&source, &file, &[f], "2026-08-23")
+            .expect("write must succeed");
+        assert!(
+            !result.written,
+            "a finding already present by finding_id must not be re-appended"
+        );
+        assert!(result.appended.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_graph_findings_for_repo_dedups_two_findings_sharing_one_finding_id_in_one_call() {
+        // The same missing path can be extracted twice from the same repo (e.g.
+        // referenced from two different files) -- both findings share one
+        // finding_id and only one carryover[] entry must result.
+        let file = state_file("acme", vec![], vec![]);
+        let (dir, source, _archive) = scratch_repo("write-dedups-batch", &file);
+
+        let a = finding(
+            crate::brain::graph_findings::DetectorClass::ReferencedPathAbsent,
+            "acme",
+            "scripts/render_spec.py",
+            "referenced from command a.md",
+        );
+        let b = finding(
+            crate::brain::graph_findings::DetectorClass::ReferencedPathAbsent,
+            "acme",
+            "scripts/render_spec.py",
+            "referenced from command b.md",
+        );
+        assert_eq!(a.finding_id, b.finding_id);
+
+        let result = write_graph_findings_for_repo(&source, &file, &[a, b], "2026-08-23")
+            .expect("write must succeed");
+        assert!(result.written);
+        assert_eq!(result.appended.len(), 1);
+
+        let new_content = std::fs::read_to_string(&source.abs_path).unwrap();
+        let new_file: StateFile = serde_json::from_str(&new_content).unwrap();
+        assert_eq!(new_file.carryover.len(), 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_graph_findings_for_repo_with_no_findings_is_a_no_op() {
+        let file = state_file("acme", vec![], vec![]);
+        let (dir, source, _archive) = scratch_repo("write-no-findings", &file);
+        let original = std::fs::read_to_string(&source.abs_path).unwrap();
+
+        let result = write_graph_findings_for_repo(&source, &file, &[], "2026-08-23")
+            .expect("write must succeed");
+        assert!(!result.written);
+        assert!(result.appended.is_empty());
+
+        let after = std::fs::read_to_string(&source.abs_path).unwrap();
+        assert_eq!(after, original);
 
         let _ = std::fs::remove_dir_all(dir);
     }

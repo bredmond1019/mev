@@ -20,8 +20,9 @@ pub use brain::block_graph::{
 };
 pub use brain::carryover::{
     CarryoverAudit, CarryoverLane, CarryoverRanking, CarryoverRef, CarryoverReport,
-    CarryoverVerdict, ClusterMember, DedupSuggestion, FindingCluster, NotEvaluableReason,
-    TriageLane, audit_carryover, evaluate_carryover, rank_carryover,
+    CarryoverVerdict, ClusterMember, DedupSuggestion, FindingCluster, GraphFindingsWrite,
+    NotEvaluableReason, TriageLane, audit_carryover, carryover_entry_for_finding,
+    evaluate_carryover, rank_carryover, slug_for_finding, write_graph_findings_for_repo,
 };
 pub use brain::conformance::{
     CheckOutcome, CheckResult, CheckStatus, ConformanceCheck, ConformanceCtx, ConformanceReport,
@@ -2602,6 +2603,58 @@ pub fn graph_findings_report(
         brain::graph_findings::GraphFindingsReport::from_findings(findings),
         diagnostics,
     ))
+}
+
+/// `mev graph-findings --write` driver (task 5) — appends `findings` to each
+/// owning repo's `state.json` `carryover[]`, routed through
+/// [`brain::carryover::write_graph_findings_for_repo`] so every emitted entry
+/// inherits the existing entry shape, the `scope` exactly-one-of rule, and the
+/// dispose sweep.
+///
+/// Only repos actually named by at least one finding are discovered/loaded/written
+/// — a repo with zero findings is left untouched (no read even attempted), which is
+/// also what keeps a `--json` (no `--write`) run byte-identical: this function is
+/// simply never called on that path.
+///
+/// A repo named by a finding whose `state.json` cannot be discovered or loaded is
+/// reported back as an error rather than silently skipped, matching standing rule
+/// 11 — a `--write` that quietly wrote nothing for a repo it could not reach must
+/// not look identical to a `--write` that correctly found nothing to do there.
+pub fn graph_findings_write(
+    root: &std::path::Path,
+    findings: &[brain::graph_findings::GraphFinding],
+    created: &str,
+) -> anyhow::Result<Vec<brain::carryover::GraphFindingsWrite>> {
+    use brain::config::find_brain_config;
+    use brain::state::{discover_state_files, load_state};
+    use std::collections::BTreeSet;
+
+    let repos_with_findings: BTreeSet<&str> = findings.iter().map(|f| f.repo.as_str()).collect();
+    if repos_with_findings.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let config = find_brain_config(root)
+        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
+    let (sources, _discovery_diags) = discover_state_files(root, &config);
+
+    let mut writes = Vec::new();
+    for repo in repos_with_findings {
+        let Some(source) = sources.iter().find(|s| s.repo_slug == repo) else {
+            anyhow::bail!("no planning/state.json discovered for repo '{repo}'");
+        };
+        let state_file = load_state(&source.abs_path)
+            .map_err(|e| anyhow::anyhow!("failed to load {}: {e}", source.abs_path.display()))?;
+        let write = brain::carryover::write_graph_findings_for_repo(
+            source,
+            &state_file,
+            findings,
+            created,
+        )?;
+        writes.push(write);
+    }
+
+    Ok(writes)
 }
 
 /// `mev check-consumers` driver — compiles each discovered consumer's test targets against

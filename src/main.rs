@@ -858,9 +858,10 @@ enum Command {
         #[arg(long)]
         json: bool,
         /// Append each finding to its owning repo's `state.json` `carryover[]` as a
-        /// typed entry carrying its `finding_id`. Not yet implemented — the flag is
-        /// wired ahead of the write path (task 5 of this spec) so the surface stays
-        /// stable; passing it errors clearly rather than silently doing nothing.
+        /// typed entry carrying its `finding_id`, with `kind: drift` and a
+        /// single-key `scope`. Idempotent — a finding already present (matched by
+        /// `finding_id`) is skipped, so re-running is safe. Never writes anything
+        /// without this flag.
         #[arg(long)]
         write: bool,
     },
@@ -3033,13 +3034,6 @@ fn main() -> ExitCode {
             }
         }
         Command::GraphFindings { path, json, write } => {
-            if write {
-                eprintln!(
-                    "error: --write is not yet implemented for graph-findings (lands in \
-                     MV.ticket.graph-derived-carryover-findings task 5); rerun without --write"
-                );
-                return ExitCode::FAILURE;
-            }
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,
                 Err(e) => {
@@ -3050,6 +3044,31 @@ fn main() -> ExitCode {
             match mev::graph_findings_report(&root) {
                 Ok((report, diagnostics)) => {
                     let has_error_diag = diagnostics.iter().any(|d| d.severity == Severity::Error);
+
+                    if write {
+                        let created = chrono::Local::now().date_naive().to_string();
+                        match mev::graph_findings_write(&root, &report.findings, &created) {
+                            Ok(writes) => {
+                                for w in &writes {
+                                    if w.written {
+                                        println!(
+                                            "{}: appended {} finding(s) to {}",
+                                            w.repo,
+                                            w.appended.len(),
+                                            w.state_path.display()
+                                        );
+                                    } else {
+                                        println!("{}: 0 appended (nothing new)", w.repo);
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                eprintln!("error: --write failed: {err:#}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    }
+
                     if json || cli.json {
                         match serde_json::to_string(&report) {
                             Ok(s) => {
