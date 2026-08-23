@@ -2573,6 +2573,37 @@ pub fn conformance(
     run_checks(&ctx, only)
 }
 
+/// `mev graph-findings` driver (task 4) — runs both deterministic detectors
+/// (`unregistered-lane-block`, `referenced-path-absent`) over the corpus rooted at
+/// `root` and reduces them into one [`brain::graph_findings::GraphFindingsReport`],
+/// alongside every diagnostic either detector's disk-facing wrapper surfaced (a
+/// malformed lane record, a file that failed to read, a walk error) — never
+/// swallowed, per standing rule 11.
+///
+/// `brain.toml` is resolved once and shared between both detectors' disk-facing
+/// wrappers ([`brain::graph_findings::detect_unregistered_lane_blocks`],
+/// [`brain::graph_findings::detect_referenced_path_absent`]) rather than each
+/// re-resolving it.
+pub fn graph_findings_report(
+    root: &std::path::Path,
+) -> anyhow::Result<(brain::graph_findings::GraphFindingsReport, Vec<Diagnostic>)> {
+    use brain::config::find_brain_config;
+    use brain::graph_findings::{detect_referenced_path_absent, detect_unregistered_lane_blocks};
+
+    let config = find_brain_config(root)
+        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
+
+    let (mut findings, mut diagnostics) = detect_unregistered_lane_blocks(root, &config);
+    let (more_findings, more_diags) = detect_referenced_path_absent(root, &config);
+    findings.extend(more_findings);
+    diagnostics.extend(more_diags);
+
+    Ok((
+        brain::graph_findings::GraphFindingsReport::from_findings(findings),
+        diagnostics,
+    ))
+}
+
 /// `mev check-consumers` driver — compiles each discovered consumer's test targets against
 /// the working mev and reports the true, classified outcome per consumer
 /// (`MV.ticket.consumer-compile-gate`).

@@ -825,6 +825,45 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Scan the corpus for mechanically-detectable `carryover[]` findings instead of
+    /// having an agent notice them by hand (`MV.ticket.graph-derived-carryover-findings`).
+    ///
+    /// Two deterministic detectors ship today:
+    ///   unregistered-lane-block  — an id in some `lane-*.json`'s `blocks[]` with no
+    ///                              matching `tracks[].blocks[].id` in its owning
+    ///                              repo's `state.json`
+    ///   referenced-path-absent  — a path named as a script or generator in a command
+    ///                              or spec that resolves nowhere in the fleet
+    ///
+    /// Each finding carries a stable, content-derived `finding_id` (hashed over the
+    /// detector class and the normalized subject only — never the repo or file it was
+    /// found in), so the *same* finding filed independently by several repos
+    /// correlates to one id and `mev carryover`'s existing clustering can group them.
+    ///
+    /// Reports by default; never writes anything without `--write`. Diagnostics a
+    /// detector's disk-facing wrapper surfaced (a malformed lane record, a file that
+    /// failed to read) print alongside the findings, never silently swallowed.
+    ///
+    /// Exit codes:
+    ///   0 — the corpus is clean: no findings and no error-severity diagnostic
+    ///   1 — at least one finding was reported, or an error-severity diagnostic was
+    ///       surfaced, or brain.toml was not found/unreadable, or `--json`
+    ///       serialization failed
+    GraphFindings {
+        /// Path to search from when locating brain.toml (walks up to find it).
+        /// Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Emit the GraphFindingsReport as compact JSON instead of a human summary.
+        #[arg(long)]
+        json: bool,
+        /// Append each finding to its owning repo's `state.json` `carryover[]` as a
+        /// typed entry carrying its `finding_id`. Not yet implemented — the flag is
+        /// wired ahead of the write path (task 5 of this spec) so the surface stays
+        /// stable; passing it errors clearly rather than silently doing nothing.
+        #[arg(long)]
+        write: bool,
+    },
     /// Run the registry of named drift checks over facts kept in two places
     /// (`MV.ticket.conformance-check-registry`).
     ///
@@ -1781,6 +1820,37 @@ fn print_carryover_report(report: &mev::CarryoverReport) {
             "  note: a finding_id used in only one repo is usually a typo that silently failed \
              to group with its intended cross-repo match."
         );
+    }
+}
+
+/// Human-readable, detector-class-grouped summary for `mev graph-findings`'s default
+/// (non-`--json`) output. Modelled on [`print_carryover_report`]'s lane-grouped shape.
+fn print_graph_findings_report(report: &mev::GraphFindingsReport, diagnostics: &[mev::Diagnostic]) {
+    for d in diagnostics {
+        print_diagnostic(d);
+    }
+
+    println!(
+        "graph-findings: {} total — {} unregistered-lane-block, {} referenced-path-absent",
+        report.total, report.unregistered_lane_block, report.referenced_path_absent
+    );
+
+    for class in [
+        mev::DetectorClass::UnregisteredLaneBlock,
+        mev::DetectorClass::ReferencedPathAbsent,
+    ] {
+        let rows: Vec<&mev::GraphFinding> = report
+            .findings
+            .iter()
+            .filter(|f| f.detector == class)
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        println!("\n{} ({}):", class.tag(), rows.len());
+        for row in rows {
+            println!("  {} [{}] — {}", row.repo, row.finding_id, row.message);
+        }
     }
 }
 
@@ -2959,6 +3029,49 @@ fn main() -> ExitCode {
                         eprintln!("error: {err:#}");
                         ExitCode::FAILURE
                     }
+                }
+            }
+        }
+        Command::GraphFindings { path, json, write } => {
+            if write {
+                eprintln!(
+                    "error: --write is not yet implemented for graph-findings (lands in \
+                     MV.ticket.graph-derived-carryover-findings task 5); rerun without --write"
+                );
+                return ExitCode::FAILURE;
+            }
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match mev::graph_findings_report(&root) {
+                Ok((report, diagnostics)) => {
+                    let has_error_diag = diagnostics.iter().any(|d| d.severity == Severity::Error);
+                    if json || cli.json {
+                        match serde_json::to_string(&report) {
+                            Ok(s) => {
+                                println!("{s}");
+                            }
+                            Err(err) => {
+                                eprintln!("error serializing graph-findings report: {err:#}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    } else {
+                        print_graph_findings_report(&report, &diagnostics);
+                    }
+                    if report.total > 0 || has_error_diag {
+                        ExitCode::FAILURE
+                    } else {
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    ExitCode::FAILURE
                 }
             }
         }
