@@ -329,23 +329,118 @@ pub fn detect_unregistered_lane_blocks(
 // is itself a symlink target would never have its specs discovered at all,
 // which (per standing rule 11) would look like a clean empty result for
 // exactly the wrong reason.
+//
+// **Resolution is fleet-wide, not repo-local (MV.ticket.graph-findings-path-resolution
+// task 1).** A shared fleet script referenced from a synced `.claude/commands/*.md`
+// file lives once, in the repo that owns the original, but the command that
+// references it is copied into every repo it was synced to — so a repo-local-only
+// check reports the same real file "absent" in every one of those copies. A
+// referenced path is resolved against, in order, the FIRST match wins:
+//
+//   (a) `repo:<repo>`    — the referencing repo's own root (the original,
+//                          only check before this ticket).
+//   (b) `brain-root`     — the fleet HQ root (`agentic-portfolio/`), for a
+//                          path referenced relative to the brain rather than
+//                          any one repo.
+//   (c) `base-template`  — `base-template/`'s own root, the source every
+//                          `.claude/commands/*.md` file in the fleet is
+//                          synced FROM (D54-family sync), so a shared
+//                          fleet script committed there resolves for every
+//                          repo it was synced to.
+//   (d) `owner:base-template` — added only when the referencing file is a
+//                          synced command: a `.claude/commands/*.md` whose
+//                          basename also exists under
+//                          `base-template/.claude/commands/`. Resolved
+//                          through [`BrainConfig`]'s `base-template`
+//                          `[[repos]]` entry rather than a hardcoded path,
+//                          so a future repo-path change to that entry is
+//                          picked up automatically. In today's fleet this
+//                          shares (c)'s base path — it exists as a distinct,
+//                          separately-labeled root because the *reason* a
+//                          synced command's reference resolves is "this is
+//                          the file's origin template", which is a
+//                          different fact from (c)'s "base-template is
+//                          always in the search path regardless of file
+//                          type", and the two should stay independently
+//                          auditable from a finding's message.
+//
+// A path found under ANY of these roots is present — no finding is emitted.
+// When a path is absent under every root, the finding's `message` names every
+// root that was searched (label + base path), so a future false positive is
+// diagnosable from the carryover entry alone, without re-reading the source
+// (see [`ResolutionRoot`] and [`resolve_referenced_path`]).
+
+/// One named search location [`resolve_referenced_path`] tries, in the
+/// order it appears in the list passed to it. See the module-level scope
+/// contract's "Resolution is fleet-wide, not repo-local" section for the
+/// concrete order this crate builds.
+#[derive(Debug, Clone)]
+pub struct ResolutionRoot {
+    /// Human-readable label for this root — e.g. `repo:mev`, `brain-root`,
+    /// `base-template`, `owner:base-template`. Surfaced verbatim in a
+    /// finding's `message` so a future false positive is diagnosable from
+    /// the carryover entry alone.
+    pub label: String,
+    /// Absolute base path a referenced path is joined onto.
+    pub base: PathBuf,
+}
+
+impl ResolutionRoot {
+    /// Construct a root from a label and base path.
+    #[must_use]
+    pub fn new(label: impl Into<String>, base: PathBuf) -> Self {
+        ResolutionRoot {
+            label: label.into(),
+            base,
+        }
+    }
+}
+
+/// Resolve `raw` (a raw, un-normalized reference as extracted by
+/// [`extract_referenced_script_paths`]) against `roots`, in order, and
+/// return the FIRST root under which `root.base.join(raw)` exists — `None`
+/// only when it exists under none of them.
+///
+/// `roots` order encodes precedence, not preference among ties: since this
+/// only answers "does it exist anywhere", which root is returned when more
+/// than one would match does not change the presence/absence verdict a
+/// finding is based on — it only changes which root's label a caller
+/// wanting a single "found here" answer would report. The message built by
+/// [`referenced_path_absent_findings`] instead always lists every root that
+/// was searched, not just the one (if any) that matched, which is why order
+/// among matching roots is otherwise unobservable from a finding.
+#[must_use]
+pub fn resolve_referenced_path<'a>(
+    raw: &str,
+    roots: &'a [ResolutionRoot],
+) -> Option<&'a ResolutionRoot> {
+    roots.iter().find(|root| root.base.join(raw).exists())
+}
 
 /// One file whose contents are scanned for referenced script/generator
-/// paths, together with the repo it belongs to and that repo's root — the
-/// root a relative reference in this file is resolved against.
+/// paths, together with the repo it belongs to, that repo's root (root (a)
+/// in the module-level resolution order — the original, only check before
+/// MV.ticket.graph-findings-path-resolution), and the additional roots (b),
+/// (c), (d) that apply to this particular source.
 #[derive(Debug, Clone)]
 pub struct ReferencingSource {
     /// Owning repo slug (from `brain.toml`'s `[[repos]]`).
     pub repo: String,
     /// Absolute path to the repo's own root directory — relative
-    /// references extracted from `contents` resolve against this, not the
-    /// fleet HQ root.
+    /// references extracted from `contents` resolve against this FIRST
+    /// (root (a)), not the fleet HQ root.
     pub repo_root: PathBuf,
     /// The command or spec file the reference was found in (for
     /// diagnostics/messages only — never fed into `finding_id`).
     pub file_path: PathBuf,
     /// Raw file contents to scan.
     pub contents: String,
+    /// Additional resolution roots beyond `repo_root` — the brain root,
+    /// base-template, and (for a synced command) its owning repo, in the
+    /// module-level resolution order (b), (c), (d). Empty is valid (e.g. in
+    /// tests exercising only the repo-local case) — [`referenced_path_absent_findings`]
+    /// always prepends `repo_root` as root (a) regardless of this field.
+    pub resolution_roots: Vec<ResolutionRoot>,
 }
 
 /// Whether `ext`-less-dot suffix counts as a "script or generator" for this
@@ -411,20 +506,41 @@ pub fn extract_referenced_script_paths(contents: &str) -> Vec<String> {
 /// so the *same* missing path referenced from different repos — or
 /// spelled with a different leading prefix — produces rows sharing one
 /// `finding_id`, per the block record's `render-spec.py` case.
+///
+/// Resolution is fleet-wide (MV.ticket.graph-findings-path-resolution task
+/// 1): each source's `repo_root` is always tried first (root (a)),
+/// followed by `source.resolution_roots` in the order the caller built them
+/// (roots (b)/(c)/(d) — see the module-level scope contract). A path found
+/// under ANY root is present; a finding is emitted only when it resolves
+/// under none of them, and its `message` names every root that was
+/// searched (label + base path) so a future false positive is diagnosable
+/// from the carryover entry alone.
 #[must_use]
 pub fn referenced_path_absent_findings(sources: &[ReferencingSource]) -> Vec<GraphFinding> {
     let mut findings = Vec::new();
     for source in sources {
+        let mut roots: Vec<ResolutionRoot> = Vec::with_capacity(1 + source.resolution_roots.len());
+        roots.push(ResolutionRoot::new(
+            format!("repo:{}", source.repo),
+            source.repo_root.clone(),
+        ));
+        roots.extend(source.resolution_roots.iter().cloned());
+
         for raw_path in extract_referenced_script_paths(&source.contents) {
-            if source.repo_root.join(&raw_path).exists() {
+            if resolve_referenced_path(&raw_path, &roots).is_some() {
                 continue;
             }
             let subject = normalize_referenced_path(&raw_path);
+            let searched = roots
+                .iter()
+                .map(|root| format!("{} ({})", root.label, root.base.display()))
+                .collect::<Vec<_>>()
+                .join(", ");
             let message = format!(
-                "{} references '{}', which does not exist under {} (repo '{}')",
+                "{} references '{}', which does not exist under any searched root: {} (repo '{}')",
                 source.file_path.display(),
                 raw_path,
-                source.repo_root.display(),
+                searched,
                 source.repo,
             );
             findings.push(GraphFinding {
@@ -449,6 +565,16 @@ pub fn referenced_path_absent_findings(sources: &[ReferencingSource]) -> Vec<Gra
 /// contract's symlink-trap note: a repo's `planning/` is itself a symlink
 /// into the `_planning/` vault, and the walk must descend into it to find
 /// `planning/blocks/*.json` at all.
+///
+/// Builds each source's fleet-wide resolution roots (b)/(c)/(d) — see the
+/// module-level scope contract — from `config`: root (b) is `root` itself
+/// (the brain/HQ root); root (c) is the `base-template` `[[repos]]` entry's
+/// own root, added unconditionally for every source, present or absent, so
+/// its presence never depends on file type; root (d) is added ONLY when the
+/// source is itself a `.claude/commands/*.md` file whose basename also
+/// exists under `base-template/.claude/commands/` (the "synced command"
+/// test the block record names) — resolved through the same `base-template`
+/// `[[repos]]` entry rather than a second hardcoded path.
 #[must_use]
 pub fn detect_referenced_path_absent(
     root: &Path,
@@ -457,17 +583,37 @@ pub fn detect_referenced_path_absent(
     let mut sources = Vec::new();
     let mut diags = Vec::new();
 
-    for repo in &config.repos {
-        let repo_path = repo.repo_path.trim();
-        let repo_root = if repo_path.is_empty() || repo_path == "." {
+    let resolve_repo_root = |repo_path: &str| -> PathBuf {
+        let trimmed = repo_path.trim();
+        if trimmed.is_empty() || trimmed == "." {
             root.to_path_buf()
         } else {
-            root.join(repo_path)
-        };
+            root.join(trimmed)
+        }
+    };
 
-        for (scan_dir, ext) in [
-            (repo_root.join(".claude").join("commands"), "md"),
-            (repo_root.join("planning").join("blocks"), "json"),
+    // Root (c)/(d)'s shared base: base-template's OWN root, resolved
+    // through its `[[repos]]` entry (not a hardcoded "base-template"
+    // literal) so a future repo_path change to that entry is picked up
+    // automatically. `None` when the corpus has no `base-template` entry
+    // (e.g. a fixture config in a test) — roots (c)/(d) are then simply
+    // never added, which degrades to the pre-ticket repo-local-only
+    // behavior rather than panicking.
+    let base_template_root: Option<PathBuf> = config
+        .repos
+        .iter()
+        .find(|r| r.slug == "base-template")
+        .map(|r| resolve_repo_root(&r.repo_path));
+    let base_template_commands_dir = base_template_root
+        .as_ref()
+        .map(|r| r.join(".claude").join("commands"));
+
+    for repo in &config.repos {
+        let repo_root = resolve_repo_root(&repo.repo_path);
+
+        for (scan_dir, ext, is_command_dir) in [
+            (repo_root.join(".claude").join("commands"), "md", true),
+            (repo_root.join("planning").join("blocks"), "json", false),
         ] {
             if !scan_dir.exists() {
                 continue;
@@ -490,12 +636,36 @@ pub fn detect_referenced_path_absent(
                     continue;
                 }
                 match std::fs::read_to_string(entry.path()) {
-                    Ok(contents) => sources.push(ReferencingSource {
-                        repo: repo.slug.clone(),
-                        repo_root: repo_root.clone(),
-                        file_path: entry.path().to_path_buf(),
-                        contents,
-                    }),
+                    Ok(contents) => {
+                        let mut resolution_roots =
+                            vec![ResolutionRoot::new("brain-root", root.to_path_buf())];
+                        if let Some(bt_root) = &base_template_root {
+                            resolution_roots
+                                .push(ResolutionRoot::new("base-template", bt_root.clone()));
+
+                            let is_synced_command = is_command_dir
+                                && base_template_commands_dir
+                                    .as_ref()
+                                    .and_then(|dir| {
+                                        entry.path().file_name().map(|name| dir.join(name))
+                                    })
+                                    .is_some_and(|candidate| candidate.exists());
+                            if is_synced_command {
+                                resolution_roots.push(ResolutionRoot::new(
+                                    "owner:base-template",
+                                    bt_root.clone(),
+                                ));
+                            }
+                        }
+
+                        sources.push(ReferencingSource {
+                            repo: repo.slug.clone(),
+                            repo_root: repo_root.clone(),
+                            file_path: entry.path().to_path_buf(),
+                            contents,
+                            resolution_roots,
+                        });
+                    }
                     Err(e) => {
                         diags.push(Diagnostic::error(
                             entry.path(),
@@ -896,6 +1066,7 @@ mod tests {
             repo_root: repo_root.to_path_buf(),
             file_path: repo_root.join(".claude/commands/example.md"),
             contents: contents.to_string(),
+            resolution_roots: Vec::new(),
         }
     }
 
