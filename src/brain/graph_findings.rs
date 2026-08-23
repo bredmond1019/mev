@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
+use okf_core::ClearsWhenPredicate;
+
 use crate::Diagnostic;
 use crate::brain::config::BrainConfig;
 use crate::brain::lane_segments::{LaneFile, discover_lane_files};
@@ -149,6 +151,29 @@ pub struct GraphFinding {
     /// Stable, content-derived id from [`finding_id`] — identical across
     /// every repo independently reporting the same `(detector, subject)`.
     pub finding_id: String,
+    /// Typed condition under which this finding — and the `carryover[]`
+    /// entry `--write` derives from it via
+    /// [`crate::brain::carryover::carryover_entry_for_finding`] — should be
+    /// deleted (`MV.ticket.graph-findings-path-resolution` task 3). Always
+    /// `Some`: every finding this module emits is machine-detected from a
+    /// disagreement between two data sources, and that disagreement is
+    /// itself machine-recheckable, so there is no detector class here for
+    /// which `None` would be honest.
+    ///
+    /// **Reconciliation with `mev carryover`'s evaluator**
+    /// (`path_ref_satisfied` / `resolve_existing_path` in
+    /// `src/brain/carryover.rs`): the evaluator only ever tries two roots —
+    /// the brain root, then the owning repo's `repo_path` — never
+    /// `base-template` or a synced command's owning repo. Task 1's detector
+    /// search order is wider than that (four roots). Each predicate below is
+    /// spelled so the evaluator's narrower two-root check lines up with the
+    /// SAME verdict the detector reached for roots (a)/(b) specifically; a
+    /// finding that resolved only via root (c)/(d) (`base-template` or a
+    /// synced command's owner) is never emitted in the first place — see
+    /// [`referenced_path_absent_findings`] — so this narrower reconciliation
+    /// is never asked to reproduce a (c)/(d)-only verdict, only to notice a
+    /// (a)/(b) repair.
+    pub clears_when: Option<ClearsWhenPredicate>,
 }
 
 /// The full `mev graph-findings` report.
@@ -209,11 +234,23 @@ impl GraphFindingsReport {
 /// silently contribute zero findings (standing rule 11: a clean-looking empty
 /// result from a detector that could not read its input is the exact failure mode
 /// this exists to avoid).
+///
+/// `config` supplies each repo's `repo_path` (brain-root-relative) so the
+/// emitted `clears_when` predicate (task 3) can name a brain-root-relative
+/// `<repo_path>/planning/state.json` — the same file this detector already
+/// reads for `registered`, so `mev carryover`'s evaluator resolving it later
+/// checks the identical file. When `block_ref.repo` has no `[[repos]]` entry
+/// in `config` (a lane naming a repo that is not even registered — a
+/// different, worse problem than this detector targets), the repo slug
+/// itself is used as a best-effort `repo_path` fallback rather than omitting
+/// the predicate: every finding this module emits carries a typed
+/// `clears_when` by construction (see [`GraphFinding::clears_when`]).
 #[must_use]
 pub fn unregistered_lane_block_findings(
     lane_files: &[LaneFile],
     lane_diags: &[Diagnostic],
     state_files: &[(StateSource, StateFile)],
+    config: &BrainConfig,
 ) -> (Vec<GraphFinding>, Vec<Diagnostic>) {
     let mut registered: HashSet<(&str, &str)> = HashSet::new();
     for (src, file) in state_files {
@@ -241,12 +278,28 @@ pub fn unregistered_lane_block_findings(
                 block_ref.repo,
                 block_ref.repo,
             );
+            let repo_path = config
+                .repos
+                .iter()
+                .find(|r| r.slug == block_ref.repo)
+                .map(|r| r.repo_path.clone())
+                .unwrap_or_else(|| block_ref.repo.clone());
+            let clears_when = ClearsWhenPredicate::FileContains {
+                path: format!("{repo_path}/planning/state.json"),
+                pattern: block_ref.id.clone(),
+                note: Some(format!(
+                    "clears when block '{}' appears in {}'s planning/state.json \
+                     tracks[].blocks[].id",
+                    block_ref.id, block_ref.repo,
+                )),
+            };
             findings.push(GraphFinding {
                 detector: DetectorClass::UnregisteredLaneBlock,
                 repo: block_ref.repo.clone(),
                 subject: subject.clone(),
                 message,
                 finding_id: finding_id(DetectorClass::UnregisteredLaneBlock, &subject),
+                clears_when: Some(clears_when),
             });
         }
     }
@@ -276,7 +329,7 @@ pub fn detect_unregistered_lane_blocks(
         }
     }
 
-    unregistered_lane_block_findings(&lane_files, &lane_diags, &loaded)
+    unregistered_lane_block_findings(&lane_files, &lane_diags, &loaded, config)
 }
 
 // ---------------------------------------------------------------------------
@@ -543,12 +596,31 @@ pub fn referenced_path_absent_findings(sources: &[ReferencingSource]) -> Vec<Gra
                 searched,
                 source.repo,
             );
+            // Brain-root-relative, per `GraphFinding::clears_when`'s
+            // reconciliation note: `raw_path` (never the normalized
+            // `subject`, which is lossy) lets `mev carryover`'s evaluator
+            // reproduce roots (a)/(b) of the search above — brain_root.join
+            // (raw_path) is root (b) exactly, and the evaluator's owning-
+            // repo fallback, repo_paths[repo].join(raw_path), is root (a)
+            // exactly. Roots (c)/(d) (`base-template`, a synced command's
+            // owner) are outside the evaluator's two-root reach, but this
+            // finding was only emitted because the path resolved under NONE
+            // of the four roots, so there is no (c)/(d)-only verdict this
+            // predicate needs to reproduce.
+            let clears_when = ClearsWhenPredicate::FileExists {
+                path: raw_path.clone(),
+                note: Some(format!(
+                    "clears when '{raw_path}' resolves under the referencing repo's \
+                     root or the brain root"
+                )),
+            };
             findings.push(GraphFinding {
                 detector: DetectorClass::ReferencedPathAbsent,
                 repo: source.repo.clone(),
                 subject: subject.clone(),
                 message,
                 finding_id: finding_id(DetectorClass::ReferencedPathAbsent, &subject),
+                clears_when: Some(clears_when),
             });
         }
     }
@@ -794,6 +866,7 @@ mod tests {
                 subject: "mev:MV.1.A".to_string(),
                 message: "unregistered".to_string(),
                 finding_id: finding_id(DetectorClass::UnregisteredLaneBlock, "mev:MV.1.A"),
+                clears_when: None,
             },
             GraphFinding {
                 detector: DetectorClass::ReferencedPathAbsent,
@@ -804,6 +877,7 @@ mod tests {
                     DetectorClass::ReferencedPathAbsent,
                     "scripts/render_spec.py",
                 ),
+                clears_when: None,
             },
             GraphFinding {
                 detector: DetectorClass::ReferencedPathAbsent,
@@ -814,6 +888,7 @@ mod tests {
                     DetectorClass::ReferencedPathAbsent,
                     "scripts/render_spec.py",
                 ),
+                clears_when: None,
             },
         ];
 
@@ -860,6 +935,25 @@ mod tests {
         }
     }
 
+    /// Minimal `BrainConfig` fixture: one `[[repos]]` entry per given slug,
+    /// with `repo_path` set identical to the slug (matching how
+    /// [`state_source`]'s fake `abs_path`es are built, so a computed
+    /// `<repo_path>/planning/state.json` predicate path lines up with what
+    /// these tests otherwise assert).
+    fn test_config(repos: &[&str]) -> BrainConfig {
+        BrainConfig {
+            repos: repos
+                .iter()
+                .map(|slug| crate::brain::config::RepoEntry {
+                    slug: (*slug).to_string(),
+                    repo_path: (*slug).to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
     fn state_source(repo: &str) -> StateSource {
         StateSource {
             repo_slug: repo.to_string(),
@@ -901,7 +995,9 @@ mod tests {
             project_file("mev", vec![track_block("MV.1.A")]),
         )];
 
-        let (findings, diags) = unregistered_lane_block_findings(&[lane], &[], &state_files);
+        let config = test_config(&["mev"]);
+        let (findings, diags) =
+            unregistered_lane_block_findings(&[lane], &[], &state_files, &config);
         assert!(
             findings.is_empty(),
             "expected no findings, got {findings:?}"
@@ -919,7 +1015,9 @@ mod tests {
             project_file("mev", vec![track_block("MV.9.Z")]),
         )];
 
-        let (findings, diags) = unregistered_lane_block_findings(&[lane], &[], &state_files);
+        let config = test_config(&["mev"]);
+        let (findings, diags) =
+            unregistered_lane_block_findings(&[lane], &[], &state_files, &config);
         assert_eq!(
             findings.len(),
             1,
@@ -949,7 +1047,9 @@ mod tests {
             project_file("base-template", vec![track_block("MV.1.A")]),
         )];
 
-        let (findings, _diags) = unregistered_lane_block_findings(&[lane], &[], &state_files);
+        let config = test_config(&["mev", "base-template"]);
+        let (findings, _diags) =
+            unregistered_lane_block_findings(&[lane], &[], &state_files, &config);
         assert_eq!(
             findings.len(),
             1,
@@ -989,7 +1089,9 @@ mod tests {
             "discover_lane_files must surface a diagnostic for the malformed record"
         );
 
-        let (findings, diags) = unregistered_lane_block_findings(&lane_files, &lane_diags, &[]);
+        let config = test_config(&[]);
+        let (findings, diags) =
+            unregistered_lane_block_findings(&lane_files, &lane_diags, &[], &config);
         assert!(
             findings.is_empty(),
             "no lane blocks were discoverable, so there is nothing to report as unregistered"

@@ -1656,16 +1656,23 @@ pub fn slug_for_finding(finding: &crate::brain::graph_findings::GraphFinding) ->
 ///   is a command/spec and the filesystem disagreeing about a script's existence;
 ///   both are "a fact held in two places that no longer agree," which is `drift`'s
 ///   definition, not `defect`/`deferred`/`env`.
-/// - `clears_when` is deliberately `None`: the honest machine-checkable predicate
-///   for "the graph and the filesystem agree again" would just be "re-run
-///   `graph-findings` and this finding is gone", which no `ClearsWhenPredicate`
-///   variant expresses, and authoring a predicate that is not actually satisfied
-///   yet would violate the "never author an already-satisfied `clears_when`" rule
-///   in the opposite direction (a predicate that can never fire). `--write`'s own
-///   idempotence (dedup on `finding_id`) is what makes a stale entry self-correcting
-///   instead: the NEXT `--write` after the underlying drift is fixed simply stops
-///   re-finding it, and a human/`mev carryover --dispose` closes the now-cleared
-///   entry the normal way.
+/// - `clears_when` is set from the finding's own typed predicate
+///   (`MV.ticket.graph-findings-path-resolution` task 3 — supersedes this
+///   function's earlier "deliberately `None`" posture). That earlier
+///   reasoning treated "re-run `graph-findings` and this finding is gone" as
+///   the only honest predicate, and no `ClearsWhenPredicate` variant
+///   expresses "re-run a detector" directly — but the block record's
+///   verdict is that emitting `None` at fleet scale converts one-time
+///   detection into permanent, unclearable manual debt, which is worse.
+///   [`crate::brain::graph_findings::GraphFinding::clears_when`] resolves
+///   this instead: both detector classes emit a typed, filesystem-checkable
+///   predicate that is a genuine STAND-IN for "re-run the detector" — a
+///   `file_exists`/`file_contains` check over the exact fact the detector
+///   itself checked — spelled so `mev carryover`'s own evaluator
+///   (`path_ref_satisfied`/`file_contains_satisfied`) resolves it the same
+///   way. `--write`'s idempotence (dedup on `finding_id`) still matters
+///   independently: it is what keeps a repeated `--write` from duplicating
+///   an entry, not what retires one — that is now the predicate's job.
 #[must_use]
 pub fn carryover_entry_for_finding(
     finding: &crate::brain::graph_findings::GraphFinding,
@@ -1685,6 +1692,7 @@ pub fn carryover_entry_for_finding(
             finding.message
         ),
         finding_id: Some(finding.finding_id.clone()),
+        clears_when: finding.clears_when.clone().map(ClearsWhen::Predicate),
         created: created.to_string(),
         ..Carryover::default()
     }
@@ -5934,11 +5942,31 @@ mod tests {
 
     // -- graph-findings `--write` (task 5) ---------------------------------------
 
+    /// Test fixture builder. `clears_when` defaults to `None` here for every
+    /// call site EXCEPT the one test
+    /// (`carryover_entry_for_finding_sets_typed_clears_when_from_the_finding`)
+    /// that exists specifically to pin the task-3 reconciliation this
+    /// module's `carryover_entry_for_finding` now performs — real detector
+    /// output never has `None` (see
+    /// `crate::brain::graph_findings::GraphFinding::clears_when`'s doc
+    /// comment), but every OTHER test in this section is about the
+    /// write/dedup/slug machinery, not the predicate, so `None` keeps them
+    /// focused.
     fn finding(
         detector: crate::brain::graph_findings::DetectorClass,
         repo: &str,
         subject: &str,
         message: &str,
+    ) -> crate::brain::graph_findings::GraphFinding {
+        finding_with_clears_when(detector, repo, subject, message, None)
+    }
+
+    fn finding_with_clears_when(
+        detector: crate::brain::graph_findings::DetectorClass,
+        repo: &str,
+        subject: &str,
+        message: &str,
+        clears_when: Option<ClearsWhenPredicate>,
     ) -> crate::brain::graph_findings::GraphFinding {
         crate::brain::graph_findings::GraphFinding {
             detector,
@@ -5946,6 +5974,7 @@ mod tests {
             subject: subject.to_string(),
             message: message.to_string(),
             finding_id: crate::brain::graph_findings::finding_id(detector, subject),
+            clears_when,
         }
     }
 
@@ -5996,8 +6025,38 @@ mod tests {
         );
         assert_eq!(entry.finding_id.as_deref(), Some(f.finding_id.as_str()));
         assert_eq!(entry.created, "2026-08-23");
-        assert!(entry.clears_when.is_none());
+        assert!(
+            entry.clears_when.is_none(),
+            "this fixture uses the plain `finding()` builder, which defaults to no \
+             predicate -- see carryover_entry_for_finding_sets_typed_clears_when_from_the_finding \
+             for the task-3 predicate-propagation assertion"
+        );
         assert!(entry.text.contains("render_spec.py"));
+    }
+
+    #[test]
+    fn carryover_entry_for_finding_sets_typed_clears_when_from_the_finding() {
+        // MV.ticket.graph-findings-path-resolution task 3: `clears_when` must
+        // come from the finding's own typed predicate, not be left `None`.
+        let predicate = ClearsWhenPredicate::FileExists {
+            path: "scripts/render_spec.py".to_string(),
+            note: Some("clears when the script resolves".to_string()),
+        };
+        let f = finding_with_clears_when(
+            crate::brain::graph_findings::DetectorClass::ReferencedPathAbsent,
+            "acme",
+            "scripts/render_spec.py",
+            "example.md references 'scripts/render_spec.py', which does not exist",
+            Some(predicate.clone()),
+        );
+        let entry = carryover_entry_for_finding(&f, "2026-08-23");
+
+        assert_eq!(
+            entry.clears_when,
+            Some(ClearsWhen::Predicate(predicate)),
+            "carryover_entry_for_finding must propagate the finding's own \
+             clears_when instead of leaving it None"
+        );
     }
 
     #[test]
