@@ -1483,4 +1483,256 @@ mod tests {
         let _ = std::fs::remove_dir_all(&brain_dir);
         let _ = std::fs::remove_dir_all(&bt_dir);
     }
+
+    // -----------------------------------------------------------------
+    // Task 4 -- predicate tests: not-already-satisfied, and idempotent
+    // re-run (MV.ticket.graph-findings-path-resolution)
+    // -----------------------------------------------------------------
+    //
+    // These tests prove the predicate HALF of the ticket end to end: run a
+    // real detector over a real fixture corpus, take the `clears_when` it
+    // emits, and hand it to `mev carryover`'s own evaluator
+    // (`evaluate_carryover`) -- never by inspecting the predicate's fields
+    // directly. This is the exact trap the block record names: an emitted
+    // predicate that is already satisfied at write time would retire a
+    // live finding on its very first `mev carryover` sweep.
+
+    use crate::brain::carryover::{
+        CarryoverLane, carryover_entry_for_finding, write_graph_findings_for_repo,
+    };
+    use crate::brain::config::AttentionThresholds;
+    use std::collections::HashMap;
+
+    /// Run `crate::brain::carryover::evaluate_carryover` over one repo's
+    /// `carryover[]` and return the lane assigned to entry `0` -- the thin
+    /// end-to-end seam these tests need, without pulling in the rest of
+    /// `evaluate_carryover`'s call-site scaffolding (status map, dedup
+    /// flag) that these predicate classes never touch.
+    fn evaluated_lane(
+        repo: &str,
+        state_path: &Path,
+        carryover: Vec<okf_core::Carryover>,
+        brain_root: &Path,
+        repo_paths: &HashMap<String, PathBuf>,
+    ) -> CarryoverLane {
+        let source = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: state_path.to_path_buf(),
+            expected_kind: "project",
+        };
+        let file = StateFile {
+            carryover,
+            ..project_file(repo, vec![])
+        };
+        let files = vec![(source, file)];
+        let report = crate::brain::carryover::evaluate_carryover(
+            &files,
+            &HashMap::new(),
+            brain_root,
+            repo_paths,
+            "2026-08-23",
+            &AttentionThresholds::default(),
+            None,
+            false,
+        );
+        assert_eq!(
+            report.entries.len(),
+            1,
+            "expected exactly one entry evaluated"
+        );
+        report.entries[0].lane
+    }
+
+    #[test]
+    fn unregistered_lane_block_predicate_is_unsatisfied_at_write_time_then_satisfied_once_repaired()
+    {
+        // Fixture corpus: a lane names MV.1.A for repo "mev", but mev's
+        // planning/state.json (a REAL file on disk, since the emitted
+        // predicate is a `file_contains` check against it) registers only
+        // MV.9.Z -- so the detector fires.
+        let root = crate::testsupport::unique_temp_dir("mev-graph-findings-task4-lane");
+        let state_path = root.join("mev/planning/state.json");
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::fs::write(&state_path, r#"{"tracks":[{"blocks":[{"id":"MV.9.Z"}]}]}"#).unwrap();
+
+        let lane = lane_file("substrate", "alpha", vec![lane_block_ref("MV.1.A", "mev")]);
+        let state_files = vec![(
+            state_source("mev"),
+            project_file("mev", vec![track_block("MV.9.Z")]),
+        )];
+        let config = test_config(&["mev"]);
+        let (findings, _diags) =
+            unregistered_lane_block_findings(&[lane], &[], &state_files, &config);
+        assert_eq!(
+            findings.len(),
+            1,
+            "expected exactly one finding, got {findings:?}"
+        );
+        let f = findings[0].clone();
+        assert!(
+            f.clears_when.is_some(),
+            "every emitted finding must carry a typed clears_when"
+        );
+
+        let entry = carryover_entry_for_finding(&f, "2026-08-23");
+        assert_eq!(
+            entry.scope.repo.as_deref(),
+            Some("mev"),
+            "scope must set exactly repo, per the exactly-one-of rule"
+        );
+        assert!(entry.scope.tier.is_none());
+        assert!(entry.scope.cross_repo.is_none());
+
+        // NOT SATISFIED at write time -- via the evaluator, not inspection.
+        // repo_paths is empty; the evaluator resolves the predicate's
+        // "mev/planning/state.json" path against `root` directly (brain
+        // root first, matching `test_config`'s `repo_path == slug`).
+        let lane_before = evaluated_lane(
+            "mev",
+            &state_path,
+            vec![entry.clone()],
+            &root,
+            &HashMap::new(),
+        );
+        assert_eq!(
+            lane_before,
+            CarryoverLane::Actionable,
+            "the emitted predicate must NOT already be satisfied at write time -- \
+             this is the trap that would retire a live finding on its first sweep"
+        );
+
+        // Repair: register MV.1.A in mev's real planning/state.json.
+        std::fs::write(
+            &state_path,
+            r#"{"tracks":[{"blocks":[{"id":"MV.9.Z"},{"id":"MV.1.A"}]}]}"#,
+        )
+        .unwrap();
+
+        let lane_after = evaluated_lane("mev", &state_path, vec![entry], &root, &HashMap::new());
+        assert_eq!(
+            lane_after,
+            CarryoverLane::Cleared,
+            "once the block is registered, the same predicate must evaluate satisfied \
+             so the entry can actually be retired"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn referenced_path_absent_predicate_is_unsatisfied_at_write_time_then_satisfied_once_repaired()
+    {
+        let repo_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-task4-path");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let source = referencing_source(
+            "mev",
+            &repo_dir,
+            "invoke `scripts/render_spec.py` to render the spec",
+        );
+        let findings = referenced_path_absent_findings(&[source]);
+        assert_eq!(
+            findings.len(),
+            1,
+            "expected exactly one finding, got {findings:?}"
+        );
+        let f = findings[0].clone();
+        assert!(f.clears_when.is_some());
+
+        let entry = carryover_entry_for_finding(&f, "2026-08-23");
+        assert_eq!(entry.scope.repo.as_deref(), Some("mev"));
+        assert!(entry.scope.tier.is_none());
+        assert!(entry.scope.cross_repo.is_none());
+
+        let mut repo_paths = HashMap::new();
+        repo_paths.insert("mev".to_string(), repo_dir.clone());
+        let brain_root = crate::testsupport::unique_temp_dir("mev-graph-findings-task4-path-brain");
+        std::fs::create_dir_all(&brain_root).unwrap();
+        let state_path = repo_dir.join("planning/state.json");
+
+        // NOT SATISFIED at write time: the script does not exist yet under
+        // any root the evaluator checks.
+        let lane_before = evaluated_lane(
+            "mev",
+            &state_path,
+            vec![entry.clone()],
+            &brain_root,
+            &repo_paths,
+        );
+        assert_eq!(
+            lane_before,
+            CarryoverLane::Actionable,
+            "the emitted predicate must NOT already be satisfied at write time"
+        );
+
+        // Repair: the script is created.
+        std::fs::create_dir_all(repo_dir.join("scripts")).unwrap();
+        std::fs::write(repo_dir.join("scripts/render_spec.py"), b"# now exists").unwrap();
+
+        let lane_after = evaluated_lane("mev", &state_path, vec![entry], &brain_root, &repo_paths);
+        assert_eq!(
+            lane_after,
+            CarryoverLane::Cleared,
+            "once the script exists, the same predicate must evaluate satisfied"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo_dir);
+        let _ = std::fs::remove_dir_all(&brain_root);
+    }
+
+    #[test]
+    fn write_graph_findings_for_repo_over_fixture_corpus_second_write_appends_nothing() {
+        // Idempotence over a REAL detector-produced finding (not a synthetic
+        // one), across two `--write` calls where the second sees exactly
+        // what the first one wrote.
+        let repo_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-task4-idempotent");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let state_dir = repo_dir.join("planning");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let state_path = state_dir.join("state.json");
+
+        let source = referencing_source(
+            "mev",
+            &repo_dir,
+            "invoke `scripts/render_spec.py` to render the spec",
+        );
+        let findings = referenced_path_absent_findings(&[source]);
+        assert_eq!(
+            findings.len(),
+            1,
+            "expected exactly one finding, got {findings:?}"
+        );
+
+        let state_source = StateSource {
+            repo_slug: "mev".to_string(),
+            abs_path: state_path.clone(),
+            expected_kind: "project",
+        };
+        let initial_file = project_file("mev", vec![]);
+        let initial_content = serde_json::to_string_pretty(&initial_file).unwrap();
+        std::fs::write(&state_path, initial_content).unwrap();
+
+        let first =
+            write_graph_findings_for_repo(&state_source, &initial_file, &findings, "2026-08-23")
+                .expect("first write must succeed");
+        assert!(first.written);
+        assert_eq!(first.appended, vec![findings[0].finding_id.clone()]);
+
+        // Reload what actually landed on disk -- the same unchanged fixture
+        // corpus a second `--write` would see.
+        let on_disk = std::fs::read_to_string(&state_path).unwrap();
+        let reloaded: StateFile = serde_json::from_str(&on_disk).unwrap();
+        assert_eq!(reloaded.carryover.len(), 1);
+
+        let second =
+            write_graph_findings_for_repo(&state_source, &reloaded, &findings, "2026-08-24")
+                .expect("second write must succeed");
+        assert!(
+            !second.written,
+            "a repeated --write over an unchanged fixture corpus must append nothing"
+        );
+        assert!(second.appended.is_empty());
+
+        let _ = std::fs::remove_dir_all(&repo_dir);
+    }
 }
