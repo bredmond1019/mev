@@ -60,8 +60,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use okf_core::{
-    ApprovalDep, BlockDep, BlockedBy, Carryover, ClearsWhen, ClearsWhenPredicate, ExternalDep,
-    OperatorDep, StateFile, StateSource,
+    ApprovalDep, BlockDep, BlockedBy, Carryover, CarryoverScope, ClearsWhen, ClearsWhenPredicate,
+    ExternalDep, OperatorDep, StateFile, StateSource,
 };
 
 use crate::brain::config::AttentionThresholds;
@@ -764,6 +764,34 @@ pub fn evaluate_carryover(
 /// field (`bastion-web-attention-perf`, 2026-08-10). Callers that only need
 /// `entries` (`build_attention` in `bastion`) should pass `false`; callers that
 /// print or serialize the report (`mev carryover`) should pass `true`.
+/// The repo that "owns" a `carryover[]`/`reference[]` entry for the purposes
+/// of `--repo <slug>` filtering.
+///
+/// This is deliberately distinct from the `own_repo` fallback used elsewhere
+/// in this module for `clears_when` path/command resolution (which always
+/// falls back to the file's repo, even for `tier`/`cross_repo`-scoped
+/// entries — that fallback is about "where do we run this check", not "who
+/// owns this finding"). For `--repo` filtering specifically: an entry scoped
+/// to a `tier` or marked `cross_repo` has no single owning repo and must
+/// match no `--repo` filter at all, rather than silently being attributed to
+/// whichever file it happens to live in.
+///
+/// Returns:
+/// - `Some(repo)` when `scope.repo` is set — the entry's declared owner.
+/// - `None` when `scope.repo` is absent but `scope.tier` or `scope.cross_repo`
+///   is set — no single owning repo.
+/// - `Some(file_repo)` when the scope is entirely empty — falls back to the
+///   file's own repo (same fallback `own_repo` computes today).
+fn carryover_filter_owner<'a>(scope: &'a CarryoverScope, file_repo: &'a str) -> Option<&'a str> {
+    if let Some(repo) = scope.repo.as_deref() {
+        return Some(repo);
+    }
+    if scope.tier.is_some() || scope.cross_repo.is_some() {
+        return None;
+    }
+    Some(file_repo)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_carryover_with_dedup(
     files: &[(StateSource, StateFile)],
@@ -782,13 +810,32 @@ pub fn evaluate_carryover_with_dedup(
     let mut entries: Vec<CarryoverVerdict> = Vec::new();
 
     for (src, file) in files {
+        // Cheap pre-pass, kept for perf on a 25-file corpus: a file whose repo
+        // doesn't match the filter can still contribute an entry when that
+        // entry carries its own `scope.repo` override. Only skip the whole
+        // file when NEITHER the file's own repo matches NOR any entry in it
+        // has a `scope.repo` override at all — such a file provably cannot
+        // contain an entry owned by a different repo (an entry with no
+        // override falls back to the file's own repo, which already failed
+        // the match).
         if let Some(filter) = repo_filter
             && src.repo_slug != filter
+            && !file
+                .carryover
+                .iter()
+                .any(|item| item.scope.repo.is_some())
         {
             continue;
         }
 
         for item in &file.carryover {
+            let filter_owner = carryover_filter_owner(&item.scope, src.repo_slug.as_str());
+            if let Some(filter) = repo_filter
+                && filter_owner != Some(filter)
+            {
+                continue;
+            }
+
             let own_repo = item.scope.repo.as_deref().unwrap_or(src.repo_slug.as_str());
 
             let mut refs: Vec<CarryoverRef> = Vec::new();
@@ -1869,12 +1916,26 @@ pub fn audit_carryover(
     };
 
     for (src, file) in files {
+        // Same cheap pre-pass as `evaluate_carryover_with_dedup`: only skip a
+        // file outright when neither its own repo matches the filter nor any
+        // carryover/reference entry in it carries a `scope.repo` override.
         if let Some(filter) = repo_filter
             && src.repo_slug != filter
+            && !file
+                .carryover
+                .iter()
+                .any(|item| item.scope.repo.is_some())
+            && !file.reference.iter().any(|item| item.scope.repo.is_some())
         {
             continue;
         }
         for item in &file.carryover {
+            let filter_owner = carryover_filter_owner(&item.scope, src.repo_slug.as_str());
+            if let Some(filter) = repo_filter
+                && filter_owner != Some(filter)
+            {
+                continue;
+            }
             carryover_count += 1;
             let kind = carryover_kind_str(&item.kind).into_owned();
             *per_kind.entry(kind).or_insert(0) += 1;
@@ -1886,6 +1947,12 @@ pub fn audit_carryover(
             }
         }
         for item in &file.reference {
+            let filter_owner = carryover_filter_owner(&item.scope, src.repo_slug.as_str());
+            if let Some(filter) = repo_filter
+                && filter_owner != Some(filter)
+            {
+                continue;
+            }
             reference_count += 1;
             *per_class.entry(item.class.clone()).or_insert(0) += 1;
             if within_window(&item.created) {
