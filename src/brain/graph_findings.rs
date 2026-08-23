@@ -467,7 +467,16 @@ pub fn resolve_referenced_path<'a>(
     raw: &str,
     roots: &'a [ResolutionRoot],
 ) -> Option<&'a ResolutionRoot> {
-    roots.iter().find(|root| root.base.join(raw).exists())
+    // `PathBuf::join` discards `root.base` entirely when `raw` is itself
+    // absolute (starts with `/`) — per the stdlib contract, joining an
+    // absolute path replaces the base rather than appending to it. Many
+    // synced-command references in the live corpus are written with a
+    // leading slash (e.g. `/scripts/fleet_concurrency_check.py`), so
+    // without stripping it every root fails identically regardless of
+    // where the file actually lives. Strip a single leading `/` (and any
+    // repeats) so `raw` is always treated as relative to `root.base`.
+    let relative = raw.trim_start_matches('/');
+    roots.iter().find(|root| root.base.join(relative).exists())
 }
 
 /// One file whose contents are scanned for referenced script/generator
@@ -1326,6 +1335,47 @@ mod tests {
             "a script that exists only in base-template/scripts/, referenced \
              from another repo's synced command, must not be reported absent \
              -- this is the whole 81%, got {findings:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo_dir);
+        let _ = std::fs::remove_dir_all(&bt_dir);
+    }
+
+    /// The leading-slash form of the same shape: `PathBuf::join` discards
+    /// the base entirely when the joined component is absolute, so
+    /// `/scripts/fleet_concurrency_check.py` (the ticket's own motivating
+    /// spelling) must resolve exactly like the relative form above, not
+    /// fail identically under every root regardless of where the file
+    /// actually lives.
+    #[test]
+    fn leading_slash_reference_resolves_against_root_instead_of_replacing_it() {
+        let repo_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-leadslash-repo");
+        let bt_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-leadslash-bt");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::create_dir_all(bt_dir.join("scripts")).unwrap();
+        std::fs::write(
+            bt_dir.join("scripts/fleet_concurrency_check.py"),
+            b"# lives only in base-template",
+        )
+        .unwrap();
+
+        let source = ReferencingSource {
+            repo: "engine-rs".to_string(),
+            repo_root: repo_dir.clone(),
+            file_path: repo_dir.join(".claude/commands/orchestrate.md"),
+            contents: "run `/scripts/fleet_concurrency_check.py` before merging".to_string(),
+            resolution_roots: vec![
+                ResolutionRoot::new("brain-root", repo_dir.join("does-not-exist-brain-root")),
+                ResolutionRoot::new("base-template", bt_dir.clone()),
+                ResolutionRoot::new("owner:base-template", bt_dir.clone()),
+            ],
+        };
+
+        let findings = referenced_path_absent_findings(&[source]);
+        assert!(
+            findings.is_empty(),
+            "a leading-slash reference to a script that exists under a \
+             searched root must not be reported absent -- got {findings:?}"
         );
 
         let _ = std::fs::remove_dir_all(&repo_dir);
