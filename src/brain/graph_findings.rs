@@ -1182,4 +1182,203 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir_a);
         let _ = std::fs::remove_dir_all(&dir_b);
     }
+
+    // -----------------------------------------------------------------
+    // Task 2 -- resolver test suite (MV.ticket.graph-findings-path-resolution)
+    // -----------------------------------------------------------------
+
+    /// The load-bearing positive control the original block LACKED: a
+    /// script that lives ONLY under `base-template/scripts/`, referenced
+    /// from a DIFFERENT repo's synced command, must produce zero findings.
+    /// This is the exact shape of the 81% false-positive class measured
+    /// live 2026-08-23 -- a real file reported "absent" in up to 19 repos
+    /// because the pre-fix detector only ever checked the referencing
+    /// repo's own root.
+    #[test]
+    fn path_present_only_in_base_template_referenced_from_another_repo_produces_zero_findings() {
+        let repo_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-fleet-repo");
+        let bt_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-fleet-bt");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::create_dir_all(bt_dir.join("scripts")).unwrap();
+        std::fs::write(
+            bt_dir.join("scripts/fleet_concurrency_check.py"),
+            b"# lives only in base-template",
+        )
+        .unwrap();
+
+        let source = ReferencingSource {
+            repo: "engine-rs".to_string(),
+            repo_root: repo_dir.clone(),
+            file_path: repo_dir.join(".claude/commands/orchestrate.md"),
+            contents: "run `scripts/fleet_concurrency_check.py` before merging".to_string(),
+            resolution_roots: vec![
+                ResolutionRoot::new("brain-root", repo_dir.join("does-not-exist-brain-root")),
+                ResolutionRoot::new("base-template", bt_dir.clone()),
+                ResolutionRoot::new("owner:base-template", bt_dir.clone()),
+            ],
+        };
+
+        let findings = referenced_path_absent_findings(&[source]);
+        assert!(
+            findings.is_empty(),
+            "a script that exists only in base-template/scripts/, referenced \
+             from another repo's synced command, must not be reported absent \
+             -- this is the whole 81%, got {findings:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo_dir);
+        let _ = std::fs::remove_dir_all(&bt_dir);
+    }
+
+    /// The fix must not simply silence the detector: a path absent under
+    /// every searched root still produces exactly one finding per
+    /// referencing repo.
+    #[test]
+    fn path_absent_under_every_root_still_reports_one_finding_per_repo() {
+        let dir_a = crate::testsupport::unique_temp_dir("mev-graph-findings-absent-everywhere-a");
+        let dir_b = crate::testsupport::unique_temp_dir("mev-graph-findings-absent-everywhere-b");
+        let brain_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-absent-brain");
+        let bt_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-absent-bt");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        std::fs::create_dir_all(&brain_dir).unwrap();
+        std::fs::create_dir_all(&bt_dir).unwrap();
+
+        let roots = vec![
+            ResolutionRoot::new("brain-root", brain_dir.clone()),
+            ResolutionRoot::new("base-template", bt_dir.clone()),
+        ];
+
+        let source_a = ReferencingSource {
+            repo: "engine-rs".to_string(),
+            repo_root: dir_a.clone(),
+            file_path: dir_a.join(".claude/commands/example.md"),
+            contents: "invoke `scripts/nowhere.py` please".to_string(),
+            resolution_roots: roots.clone(),
+        };
+        let source_b = ReferencingSource {
+            repo: "mev".to_string(),
+            repo_root: dir_b.clone(),
+            file_path: dir_b.join(".claude/commands/example.md"),
+            contents: "invoke `scripts/nowhere.py` please".to_string(),
+            resolution_roots: roots,
+        };
+
+        let findings = referenced_path_absent_findings(&[source_a, source_b]);
+        assert_eq!(
+            findings.len(),
+            2,
+            "a fleet-wide-absent path must still report once per referencing \
+             repo, not be silenced -- got {findings:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
+        let _ = std::fs::remove_dir_all(&brain_dir);
+        let _ = std::fs::remove_dir_all(&bt_dir);
+    }
+
+    /// Regression on today's only working case: a path present only in the
+    /// referencing repo's own root still resolves clean once fleet-wide
+    /// roots are added alongside it.
+    #[test]
+    fn path_present_only_in_referencing_repo_still_resolves_clean() {
+        let dir = crate::testsupport::unique_temp_dir("mev-graph-findings-repo-local-only");
+        let brain_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-repo-local-brain");
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts/local_only.py"), b"# repo-local").unwrap();
+        std::fs::create_dir_all(&brain_dir).unwrap();
+
+        let source = ReferencingSource {
+            repo: "mev".to_string(),
+            repo_root: dir.clone(),
+            file_path: dir.join(".claude/commands/example.md"),
+            contents: "invoke `scripts/local_only.py` here".to_string(),
+            resolution_roots: vec![ResolutionRoot::new("brain-root", brain_dir.clone())],
+        };
+
+        let findings = referenced_path_absent_findings(&[source]);
+        assert!(
+            findings.is_empty(),
+            "a path present only in the referencing repo must still resolve \
+             clean, got {findings:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&brain_dir);
+    }
+
+    /// A path resolvable only through the brain root (not the referencing
+    /// repo, not base-template) still resolves clean.
+    #[test]
+    fn path_resolvable_only_through_brain_root_resolves_clean() {
+        let dir = crate::testsupport::unique_temp_dir("mev-graph-findings-brain-root-only");
+        let brain_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-brain-root-only-b");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(brain_dir.join("scripts")).unwrap();
+        std::fs::write(brain_dir.join("scripts/hq_only.py"), b"# brain-root only").unwrap();
+
+        let source = ReferencingSource {
+            repo: "mev".to_string(),
+            repo_root: dir.clone(),
+            file_path: dir.join(".claude/commands/example.md"),
+            contents: "invoke `scripts/hq_only.py` here".to_string(),
+            resolution_roots: vec![ResolutionRoot::new("brain-root", brain_dir.clone())],
+        };
+
+        let findings = referenced_path_absent_findings(&[source]);
+        assert!(
+            findings.is_empty(),
+            "a path resolvable only through the brain root must resolve \
+             clean, got {findings:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&brain_dir);
+    }
+
+    /// The recorded search order must appear in the emitted finding's
+    /// `message` -- by label and base path -- so a future false positive is
+    /// diagnosable from the carryover entry alone, without re-reading the
+    /// source.
+    #[test]
+    fn recorded_search_order_appears_in_finding_message() {
+        let dir = crate::testsupport::unique_temp_dir("mev-graph-findings-search-order");
+        let brain_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-search-order-b");
+        let bt_dir = crate::testsupport::unique_temp_dir("mev-graph-findings-search-order-c");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&brain_dir).unwrap();
+        std::fs::create_dir_all(&bt_dir).unwrap();
+
+        let source = ReferencingSource {
+            repo: "mev".to_string(),
+            repo_root: dir.clone(),
+            file_path: dir.join(".claude/commands/example.md"),
+            contents: "invoke `scripts/nowhere.py` here".to_string(),
+            resolution_roots: vec![
+                ResolutionRoot::new("brain-root", brain_dir.clone()),
+                ResolutionRoot::new("base-template", bt_dir.clone()),
+            ],
+        };
+
+        let findings = referenced_path_absent_findings(&[source]);
+        assert_eq!(findings.len(), 1, "expected one finding, got {findings:?}");
+        let message = &findings[0].message;
+        assert!(
+            message.contains(&format!("repo:mev ({})", dir.display())),
+            "message must name the repo-local root, got: {message}"
+        );
+        assert!(
+            message.contains(&format!("brain-root ({})", brain_dir.display())),
+            "message must name the brain-root, got: {message}"
+        );
+        assert!(
+            message.contains(&format!("base-template ({})", bt_dir.display())),
+            "message must name base-template, got: {message}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&brain_dir);
+        let _ = std::fs::remove_dir_all(&bt_dir);
+    }
 }
