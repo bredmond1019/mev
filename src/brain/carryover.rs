@@ -6482,6 +6482,101 @@ mod tests {
         assert!(table.contains(&format!("total: {}", report.summary.total_edges)));
     }
 
+    // -- differential test: --would-block vs unmet_carryover_block_keys (MV.16.A,
+    // task 5) -----------------------------------------------------------------
+    //
+    // The load-bearing test named in this block's `notes`: `unmet_carryover_block_keys`
+    // and `compute_would_block_report`'s per-edge verdict must never resolve a `Block`
+    // edge's target differently, since both delegate to `classify_blocked_by_edge`
+    // (task 1's doc comment on `unmet_carryover_block_keys` makes this contract
+    // explicit). The two functions DO deliberately diverge on what counts as
+    // "blocking": the legacy predicate treats `Wontfix` and `Unresolvable` targets as
+    // unmet (it predates the wontfix/unresolvable distinction and has other callers —
+    // `rank_carryover`, the triage lanes — that must keep seeing them as unmet), while
+    // `--would-block` explicitly does not count either toward its blocking headline.
+    // This test asserts BOTH: agreement everywhere else, and the two carve-outs named
+    // by identity rather than tolerated as an unexplained difference.
+    #[test]
+    fn would_block_blocking_verdict_agrees_with_unmet_carryover_block_keys_except_wontfix_and_unresolvable()
+     {
+        let entries = vec![
+            ranking_verdict("mev", "open-entry", None, vec![block_edge("mev", "MV.1.A")]),
+            ranking_verdict(
+                "mev",
+                "closed-entry",
+                None,
+                vec![block_edge("mev", "MV.2.B")],
+            ),
+            ranking_verdict(
+                "mev",
+                "wontfix-entry",
+                None,
+                vec![block_edge("mev", "JF.2.A")],
+            ),
+            ranking_verdict(
+                "mev",
+                "unresolvable-entry",
+                None,
+                vec![block_edge("mev", "MV.99.Z")],
+            ),
+        ];
+        let status = HashMap::from([
+            ("mev:MV.1.A".to_string(), Some("open".to_string())),
+            ("mev:MV.2.B".to_string(), Some("closed".to_string())),
+            ("mev:JF.2.A".to_string(), Some("wontfix".to_string())),
+        ]);
+        let lane_index = LaneResidencyIndex::default();
+        let report = compute_would_block_report(&entries, &status, &lane_index);
+
+        assert_eq!(entries.len(), report.rows.len());
+        let mut carved_out = Vec::new();
+        for (entry, row) in entries.iter().zip(report.rows.iter()) {
+            let key = row
+                .target_key
+                .clone()
+                .expect("every entry here carries exactly one Block edge");
+            let legacy_unmet = unmet_carryover_block_keys(entry, &status).contains(&key);
+
+            match row.verdict {
+                EdgeBlockVerdict::Wontfix | EdgeBlockVerdict::Unresolvable => {
+                    // Deliberate carve-out: the legacy predicate still treats this
+                    // target as unmet (it must, for `rank_carryover`'s existing
+                    // contract), but `--would-block` does not count it as blocking.
+                    assert!(
+                        legacy_unmet,
+                        "legacy predicate should still treat {key} as unmet (verdict {:?})",
+                        row.verdict
+                    );
+                    assert!(
+                        row.verdict != EdgeBlockVerdict::Blocking,
+                        "--would-block must not count a {:?} target as blocking",
+                        row.verdict
+                    );
+                    carved_out.push(row.verdict);
+                }
+                _ => {
+                    assert_eq!(
+                        legacy_unmet,
+                        row.verdict == EdgeBlockVerdict::Blocking,
+                        "divergence on {key}: legacy unmet={legacy_unmet}, \
+                         would-block is_blocking={}, verdict={:?}",
+                        row.verdict == EdgeBlockVerdict::Blocking,
+                        row.verdict
+                    );
+                }
+            }
+        }
+
+        assert!(
+            carved_out.contains(&EdgeBlockVerdict::Wontfix),
+            "expected the wontfix row to hit the carve-out branch"
+        );
+        assert!(
+            carved_out.contains(&EdgeBlockVerdict::Unresolvable),
+            "expected the unresolvable row to hit the carve-out branch"
+        );
+    }
+
     #[test]
     fn carryover_effective_priorities_p3_blocking_p0_block_resolves_to_zero() {
         let entries = vec![ranking_verdict(
