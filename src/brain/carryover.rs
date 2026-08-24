@@ -2751,6 +2751,79 @@ fn unmet_carryover_block_keys(
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Lane-residency lookup over `discover_lane_files` (MV.16.A, task 2) — a
+// second axis, independent of `classify_blocked_by_edge`'s status verdict.
+// An `open` target in no lane and an `open` target someone is actively
+// driving both classify as `Blocking`; only this index tells them apart.
+//
+// `lane_segments::discover_lane_files`'s existing public surface
+// (`Vec<LaneFile>` with each `LaneBlockRef` already carrying its own `repo`)
+// is already sufficient to build this index directly from here, so
+// `lane_segments.rs` itself is left untouched — no new surface was needed
+// there.
+// ---------------------------------------------------------------------------
+
+/// A `{repo}:{id}` target key's lane residency: which lane(s), if any, a
+/// discovered `lane-<name>.json` record lists that exact block under.
+///
+/// Built once per run from every [`LaneFile`] `discover_lane_files` finds,
+/// keyed by `"{repo}:{id}"` — matching on the lane entry's own authored
+/// `repo` (never the owning entry's `repo`, and never assumed single-repo:
+/// "a lane is not single-repo in this corpus").
+#[derive(Debug, Default, Clone)]
+pub struct LaneResidencyIndex {
+    /// target key -> the lane identifiers (`"{roadmap}/lane-{lane}.json"`)
+    /// that list it, in first-discovered order. Absence from this map means
+    /// "resident in no lane", not "unknown" — every discovered lane record
+    /// (parse failures aside; see [`build_lane_residency_index`]'s returned
+    /// diagnostics) has already been folded in.
+    by_target: HashMap<String, Vec<String>>,
+}
+
+impl LaneResidencyIndex {
+    /// The lane identifiers (`"{roadmap}/lane-{lane}.json"`) that list
+    /// `target_key` (`"{repo}:{id}"`) among their `blocks[]`. Empty when the
+    /// target is resident in no discovered lane.
+    pub fn lanes_for(&self, target_key: &str) -> &[String] {
+        self.by_target
+            .get(target_key)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// `true` iff `target_key` appears in at least one discovered lane.
+    pub fn is_resident(&self, target_key: &str) -> bool {
+        !self.lanes_for(target_key).is_empty()
+    }
+}
+
+/// Builds a [`LaneResidencyIndex`] once per run by walking every lane record
+/// `discover_lane_files` finds under `root`. Callers must build this ONCE
+/// and reuse it across every edge in a report — `discover_lane_files` walks
+/// the whole roadmaps tree and must not be called per edge.
+///
+/// Returns the index plus every diagnostic `discover_lane_files` produced
+/// (e.g. a malformed `lane-<name>.json` record, or a roadmap slug claimed by
+/// both the current and legacy layout). Diagnostics are returned, never
+/// swallowed here — a record that fails to parse must not silently make its
+/// blocks look non-resident; the caller is responsible for surfacing these
+/// alongside the report rather than dropping them.
+pub fn build_lane_residency_index(
+    root: &std::path::Path,
+) -> (LaneResidencyIndex, Vec<crate::Diagnostic>) {
+    let (lane_files, diags) = crate::brain::lane_segments::discover_lane_files(root);
+    let mut by_target: HashMap<String, Vec<String>> = HashMap::new();
+    for lane_file in &lane_files {
+        let lane_id = format!("{}/lane-{}.json", lane_file.roadmap, lane_file.lane);
+        for block in &lane_file.blocks {
+            let key = format!("{}:{}", block.repo, block.id);
+            by_target.entry(key).or_default().push(lane_id.clone());
+        }
+    }
+    (LaneResidencyIndex { by_target }, diags)
+}
+
 /// `TriageLane` sort rank: BLOCKING first, then HOT, AGING, STANDING.
 fn triage_lane_rank(lane: TriageLane) -> u8 {
     match lane {
@@ -5932,6 +6005,107 @@ mod tests {
             unmet_carryover_block_keys(&entry, &HashMap::new()),
             vec!["mev:MV.99.Z".to_string()]
         );
+    }
+
+    // -- build_lane_residency_index / LaneResidencyIndex (MV.16.A, task 2) --
+
+    fn write_fixture(dir: &std::path::Path, rel: &str, content: &str) {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn lane_json(lane: &str, roadmap: &str, blocks: &[(&str, &str)]) -> String {
+        // blocks: (repo, id)
+        let blocks_json: Vec<String> = blocks
+            .iter()
+            .map(|(repo, id)| {
+                format!(r#"{{"id":"{id}","origin_roadmap":"{roadmap}","repo":"{repo}"}}"#)
+            })
+            .collect();
+        format!(
+            r#"{{"lane":"{lane}","roadmap":"{roadmap}","blocks":[{}]}}"#,
+            blocks_json.join(",")
+        )
+    }
+
+    #[test]
+    fn lane_residency_target_present_in_one_lane() {
+        let dir = crate::testsupport::unique_temp_dir("mev-carryover-lane-residency-one");
+        write_fixture(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &lane_json("substrate", "alpha", &[("mev", "MV.1.A")]),
+        );
+
+        let (index, diags) = build_lane_residency_index(&dir);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        assert!(index.is_resident("mev:MV.1.A"));
+        assert_eq!(
+            index.lanes_for("mev:MV.1.A"),
+            &["alpha/lane-substrate.json".to_string()]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lane_residency_target_present_in_two_lanes() {
+        let dir = crate::testsupport::unique_temp_dir("mev-carryover-lane-residency-two");
+        write_fixture(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &lane_json("substrate", "alpha", &[("mev", "MV.1.A")]),
+        );
+        write_fixture(
+            &dir,
+            "planning/roadmaps/beta/lane-web.json",
+            &lane_json("web", "beta", &[("mev", "MV.1.A")]),
+        );
+
+        let (index, diags) = build_lane_residency_index(&dir);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        let lanes = index.lanes_for("mev:MV.1.A");
+        assert_eq!(lanes.len(), 2, "expected 2 lanes, got {lanes:?}");
+        assert!(lanes.contains(&"alpha/lane-substrate.json".to_string()));
+        assert!(lanes.contains(&"beta/lane-web.json".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lane_residency_target_in_no_lane() {
+        let dir = crate::testsupport::unique_temp_dir("mev-carryover-lane-residency-none");
+        write_fixture(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &lane_json("substrate", "alpha", &[("mev", "MV.1.A")]),
+        );
+
+        let (index, diags) = build_lane_residency_index(&dir);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        assert!(!index.is_resident("mev:MV.2.B"));
+        assert!(index.lanes_for("mev:MV.2.B").is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lane_residency_id_match_but_repo_mismatch_is_not_resident() {
+        let dir = crate::testsupport::unique_temp_dir("mev-carryover-lane-residency-repo-mismatch");
+        write_fixture(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &lane_json("substrate", "alpha", &[("mev", "MV.1.A")]),
+        );
+
+        let (index, diags) = build_lane_residency_index(&dir);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        // Same id, different repo — must NOT be resident.
+        assert!(!index.is_resident("base-template:MV.1.A"));
+        assert!(index.is_resident("mev:MV.1.A"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
