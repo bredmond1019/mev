@@ -1849,7 +1849,7 @@ mev --json doc opportunity ingest --input company-brief.json
 
 ---
 
-### `carryover [--repo <slug>] [--json] [--allow-exec] [--audit] [--window <days>] [--dispose] [--dry-run] [--would-block] [path]`
+### `carryover [--repo <slug>] [--json] [--allow-exec] [--audit] [--window <days>] [--dispose] [--backfill] [--dry-run] [--would-block] [path]`
 
 Fleet-wide sweep of every discovered `planning/state.json`'s `carryover[]` array. By default
 this is **read-only**: it evaluates each entry's `clears_when` predicate where it is
@@ -1857,12 +1857,14 @@ machine-checkable and sorts the fleet into three lanes. `--audit` switches to a 
 triage containers instead (see [`--audit` — the `carryover[]`/`reference[]`
 census](#--audit--the-carryover-reference-census) below). `--would-block` switches to a
 read-only report over `carryover[].blocks[]` edges instead (see [`--would-block` — the honest
-blast radius](#--would-block--the-honest-blast-radius) below). `--dispose` switches to the one
+blast radius](#--would-block--the-honest-blast-radius) below). `--dispose` switches to the live
 write path this subcommand has — see [`--dispose` — archiving CLEARED
-entries](#--dispose--archiving-cleared-entries) below.
+entries](#--dispose--archiving-cleared-entries) below. `--backfill` switches to a one-time,
+history-based write path instead — see [`--backfill` — one-time git reconstruction of past
+removals](#--backfill--one-time-git-reconstruction-of-past-removals) below.
 
 ```bash
-mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>] [--dispose] [--dry-run] [--would-block] [path]
+mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>] [--dispose] [--backfill] [--dry-run] [--would-block] [path]
 ```
 
 | Argument / Flag | Default | Description |
@@ -1873,8 +1875,9 @@ mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>
 | `--allow-exec` | off | Opt in to running `command_exits_zero` predicates. Without it, every such entry reports `not-evaluable` (reason `execution-not-allowed`) and **no command is ever run**. **`--dispose` does not imply this** — passing `--dispose` never turns on command execution, so a `command_exits_zero` entry that is `not-evaluable` for lack of `--allow-exec` is never disposal-eligible either |
 | `--audit` | off | Report a fleet-wide `carryover[]`/`reference[]` census instead of the per-entry sweep — total, per-container and per-kind/per-class counts, typed-predicate coverage, and inflow/outflow over `--window` days. Composed entirely from the same loaded corpus and `CarryoverReport` the ordinary sweep already produces — no second corpus walk. Shares the exact same `--repo` ownership rule as the ordinary sweep, so `mev carryover --audit --repo X` and `mev carryover --repo X` always agree on which entries are in scope |
 | `--window <DAYS>` | `30` | Window, in days, `--audit`'s inflow/outflow figures are measured over. Ignored without `--audit` |
-| `--dispose` | off | Move every CLEARED-lane entry out of its owning repo's `state.json` and into that repo's `planning/carryover-archive.jsonl`. The one write path this subcommand has — see below |
-| `--dry-run` | off | Only meaningful together with `--dispose`: compute and print the identical disposal plan without writing anything. Passed without `--dispose`, `mev carryover` reports the misuse and exits non-zero rather than silently ignoring it |
+| `--dispose` | off | Move every CLEARED-lane entry out of its owning repo's `state.json` and into that repo's `planning/carryover-archive.jsonl`. The live write path this subcommand has — see below |
+| `--backfill` | off | One-time reconstruction of `carryover[]` entries removed from `state.json` **before** `--dispose` existed, recovered from git history and written to that repo's `planning/carryover-archive.jsonl` flagged `reconstructed: true`. Refuses a second run over a populated archive rather than merging. Cannot be combined with `--dispose` — see below |
+| `--dry-run` | off | Only meaningful together with `--dispose` or `--backfill`: compute and print the identical plan without writing anything. Passed without either, `mev carryover` reports the misuse and exits non-zero rather than silently ignoring it |
 | `--would-block` | off | Report every `carryover[].blocks[]` edge's honest blast radius — owner, edge type, resolved target, the target's live authored status, lane residency, and a verdict — with enforcement off. Read-only, always exits `0`, and cannot be combined with `--dispose`/`--dry-run`/`--audit`. See below |
 
 Resolves `brain.toml` by walking up from `path`, discovers and loads every repo's
@@ -2149,8 +2152,89 @@ acts on the `cleared` lane only:
   There is no separate dry-run implementation to drift from the real one.
 
 Exit code `0` on a successful run, including one where some repos were skipped (reported, not
-fatal); non-zero if `--dry-run` is passed without `--dispose`, or on the same `brain.toml`/
-`--repo`/serialization failures the plain sweep can hit.
+fatal); non-zero if `--dry-run` is passed without `--dispose` or `--backfill`, or on the same
+`brain.toml`/`--repo`/serialization failures the plain sweep can hit.
+
+#### `--backfill` — one-time git reconstruction of past removals
+
+`mev carryover --backfill` (`MV.16.B`) is the missing history half of `--dispose`: `--dispose`
+only records outflow from the moment it shipped forward, so every `carryover[]` entry removed
+from a `state.json` *before* that — by hand, by a script, by any commit at all — left no trace in
+any archive. This pass walks git history instead of the live sweep and reconstructs those past
+removals into the same `CarryoverArchiveRow` shape `--dispose` writes, so `--audit`'s outflow
+accounting has something to read for the period before `--dispose` existed.
+
+- **It is a ONE-TIME pass, not a recurring one.** A run over a repo whose archive already has
+  rows refuses outright rather than merging or diffing against what is there — see the refusal
+  rule below. There is no "catch up the archive again" mode; once a repo's archive is
+  backfilled, later removals are recorded by real, live `--dispose` runs only.
+- **A "removal" is a diff, per commit,** between a `carryover[]` entry present in that commit's
+  parent and absent in the commit itself. A commit that only adds or only edits an entry
+  produces no row.
+- **It writes ONLY `carryover-archive.jsonl`, never `state.json`.** The entries this pass
+  recovers are already gone from `state.json` — that absence is the premise of the whole block —
+  so there is nothing for it to remove there. Contrast `--dispose`, whose defining act is
+  removing the entry from `state.json` at the same time it archives it.
+- **Every emitted row carries `reconstructed: true`.** This is the field a consumer checks to
+  tell a row this pass wrote from one a live `--dispose` run wrote — `MV.16.E`'s outflow
+  breakdown splits its counts on exactly this field and must never blend the two, because a
+  reconstructed row is not a closure event in the same sense a live disposal is (at least one
+  removing commit in the corpus is a relocation to another repo, and at least one is a generator
+  run — neither is a disposal in any meaningful sense; the honest claim is that this output is
+  raw).
+- **The reason-derivation rule.** `okf_core::DisposalReason` is a closed four-value enum —
+  `cleared | superseded | promoted | withdrawn` — with no `unknown` member, and this pass does
+  not add one (that type lives in okf-core, another repo; a fifth member to describe our own
+  ignorance would duplicate what `evidence` and `reconstructed` already carry). The removing
+  commit's subject is matched, case-insensitively, against a small keyword set per reason
+  (wording about clearing/resolving → `cleared`; superseding/replacing → `superseded`;
+  promoting → `promoted`). **When the subject names none of these, the reason defaults to
+  `withdrawn`** — "retired without being resolved" is the only member that asserts nothing
+  unevidenced — and the row's `evidence` string says explicitly that the reason was not
+  attributable from the commit subject, rather than fabricating a more specific one.
+- **The embedded entry is the parent commit's value, verbatim.** `CarryoverArchiveRow` flattens
+  `Carryover`, which itself ends in a catch-all `extra` map (okf-core's own doc comment flags
+  this nested-flatten hazard) — the entry is deserialized from the removing commit's PARENT blob
+  and carried through unchanged, including any key `Carryover` does not model. It is never
+  re-synthesized from the fields this pass happens to care about, which would silently drop
+  every unmodeled key.
+- **`evidence` always names the removing commit** as `<short-sha> <subject>`, plus the
+  not-attributable note when the reason was defaulted.
+- **Idempotent by refusal, never by merge.** Before writing anything, every repo's existing
+  archive is read and indexed by `(slug, disposed_at)` — the identity `okf_core::AmendsRef`
+  already establishes as an archive row's unique key. If any planned row collides with an
+  existing one, the ENTIRE run aborts before a single byte is written anywhere, naming the
+  colliding `(slug, disposed_at)` pair, and exits non-zero. It does not skip the collision and
+  write the rest — a partial backfill is harder to reason about than none.
+- **Atomic per-repo write, revert on failure.** Mirrors `--dispose`'s own discipline: each
+  repo's archive file's original bytes are read first, and on any write error the file is
+  reverted to exactly those bytes before the error is reported; sibling repos in the same run
+  are unaffected.
+- **`--backfill --dry-run` is the same code path with the write suppressed** — identical plan,
+  identical per-repo summary and commit-pathspec preview, zero bytes written.
+- **Prints the exact `git commit -o <pathspec>`** covering every archive file it wrote, because
+  every `planning/` is a symlink into the one HQ git repo where `git add -A` is banned (Standing
+  Rule 10).
+- **Composes with `--repo <slug>`**, restricting both the history walk and the writes to that
+  repo's state file, with the same ownership semantics `--dispose --repo` already has.
+- **Deliberately not gated by `harness.json`.** It is a one-time command; running a full history
+  walk on every push would be pure overhead for a check that, after the first successful run,
+  can only ever refuse.
+
+Exit code `0` on a successful run (including a `--dry-run`); non-zero on a collision against a
+populated archive, a write failure, or the same `brain.toml`/`--repo` failures the plain sweep
+can hit.
+
+```bash
+# Preview the full reconstruction plan without writing anything
+mev carryover --backfill --dry-run
+
+# Run the one-time backfill for the whole fleet
+mev carryover --backfill
+
+# Restrict to one repo
+mev carryover --backfill --repo mev
+```
 
 #### `--would-block` — the honest blast radius
 
