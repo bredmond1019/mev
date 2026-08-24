@@ -1643,6 +1643,294 @@ pub fn render_dispose_summary(report: &DisposeRunReport) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Historical removal walk — `mev carryover --backfill` (`MV.16.B` task 1)
+// ---------------------------------------------------------------------------
+//
+// A one-time, read-only reconstruction pass over git history: for every
+// `planning/state.json` this brain corpus discovers, walk the commits that
+// touched it and recover every `carryover[]` entry a commit deleted, taken
+// verbatim from the removing commit's PARENT. Nothing here writes anything —
+// task 2 (reason derivation + archive row construction) and task 3 (the
+// refusal-guarded writer) build on this plan.
+
+/// One historical `carryover[]` removal recovered from git history.
+///
+/// `entry` is the removed entry exactly as it appeared in the removing
+/// commit's PARENT — never re-synthesized from the fields this pass happens
+/// to care about, so an unmodeled key (captured in [`Carryover::extra`])
+/// survives unchanged into task 2's archive row.
+#[derive(Debug, Clone)]
+pub struct HistoricalRemoval {
+    /// Owning repo slug (the [`StateSource::repo_slug`] of the state file
+    /// the removal was found in).
+    pub repo: String,
+    /// Absolute path of the repo's `planning/carryover-archive.jsonl` — the
+    /// file task 3 appends this removal's archive row to.
+    pub archive_path: PathBuf,
+    /// The removed entry, verbatim, as loaded from the removing commit's
+    /// parent revision.
+    pub entry: Carryover,
+    /// Short (`git log --format=%h`) sha of the commit that removed the
+    /// entry.
+    pub commit_sha: String,
+    /// Subject line of the removing commit — task 2 derives the archive
+    /// row's `DisposalReason` from this text.
+    pub commit_subject: String,
+    /// Committer date of the removing commit, `YYYY-MM-DD`.
+    pub commit_date: String,
+}
+
+/// One diagnostic surfaced by the history walk without aborting it — either
+/// a whole state file git could not be walked at all, or a single historical
+/// revision of one that failed to parse. Never a panic: constraint from task
+/// 1's own spec ("a state file that fails to parse at some historical
+/// revision is a diagnostic, not a panic").
+#[derive(Debug, Clone)]
+pub struct HistoryWalkDiagnostic {
+    /// Owning repo slug the diagnostic is reported against.
+    pub repo: String,
+    /// Human-readable message — the git error or JSON parse error, verbatim.
+    pub message: String,
+}
+
+/// The read-only result of `mev carryover --backfill`'s history walk: every
+/// recovered [`HistoricalRemoval`], plus every [`HistoryWalkDiagnostic`]
+/// raised along the way. `removals.len()` IS the re-derived removal count —
+/// `sequence.md` SQ-05's carried-over figure of 311 is never asserted
+/// against; this walk's own count is the number.
+#[derive(Debug, Clone, Default)]
+pub struct HistoryWalkPlan {
+    pub removals: Vec<HistoricalRemoval>,
+    pub diagnostics: Vec<HistoryWalkDiagnostic>,
+}
+
+/// Read one revision of one file as a `carryover[]` list, distinguishing
+/// "this revision doesn't have the file" (not an error — a root commit's
+/// `<sha>~1`, or the commit that introduced the file) from "the file is
+/// there but doesn't parse" (a genuine diagnostic).
+///
+/// `spec` is a `git show`-style revision spec, `<rev>:<path>`.
+fn read_carryover_at_revision(
+    git_root: &Path,
+    rev: &str,
+    rel_path: &str,
+) -> Result<Option<Vec<Carryover>>, String> {
+    let spec = format!("{rev}:{rel_path}");
+    let output = crate::shared::git_command()
+        .arg("-C")
+        .arg(git_root)
+        .arg("show")
+        .arg(&spec)
+        .output()
+        .map_err(|e| format!("failed to run `git show {spec}`: {e}"))?;
+
+    if !output.status.success() {
+        // Not present at this point in history — a root commit's `~1`, or
+        // the commit that introduced the path. Nothing to diff against;
+        // this is not a diagnostic.
+        return Ok(None);
+    }
+
+    let content = String::from_utf8_lossy(&output.stdout);
+    let file: StateFile = serde_json::from_str(&content)
+        .map_err(|e| format!("`git show {spec}` did not parse as state.json: {e}"))?;
+    Ok(Some(file.carryover))
+}
+
+/// Walk one state file's full history and recover every `carryover[]`
+/// removal it shows, per [`enumerate_historical_removals`]'s contract.
+///
+/// `git_root` must already be canonicalized (the caller resolves it once for
+/// every source it walks). `source.abs_path` is resolved here because it may
+/// reach the file through a `planning/` symlink (D46) — `git log`/`git show`
+/// need the real, repo-relative path, not the symlinked one, or they see no
+/// history at all (measured: `git log -- <repo>/planning/state.json` returns
+/// nothing while `git log -- <repo>/../_planning/<slug>/state.json` returns
+/// the real log).
+fn walk_removals_for_state_file(
+    git_root: &Path,
+    source: &StateSource,
+) -> (Vec<HistoricalRemoval>, Vec<HistoryWalkDiagnostic>) {
+    let mut removals = Vec::new();
+    let mut diagnostics = Vec::new();
+
+    let real_path = match source.abs_path.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            diagnostics.push(HistoryWalkDiagnostic {
+                repo: source.repo_slug.clone(),
+                message: format!("failed to canonicalize {}: {e}", source.abs_path.display()),
+            });
+            return (removals, diagnostics);
+        }
+    };
+    let rel_path = match real_path.strip_prefix(git_root) {
+        Ok(p) => p,
+        Err(_) => {
+            diagnostics.push(HistoryWalkDiagnostic {
+                repo: source.repo_slug.clone(),
+                message: format!(
+                    "{} does not resolve under git root {}",
+                    real_path.display(),
+                    git_root.display()
+                ),
+            });
+            return (removals, diagnostics);
+        }
+    };
+    let rel_path_str = rel_path.to_string_lossy().to_string();
+    let archive_path = archive_path_for(&source.abs_path);
+
+    let log_output = crate::shared::git_command()
+        .arg("-C")
+        .arg(git_root)
+        .arg("log")
+        .arg("--format=%H%x00%h%x00%cd%x00%s")
+        .arg("--date=format:%Y-%m-%d")
+        .arg("--follow")
+        .arg("--")
+        .arg(&rel_path_str)
+        .output();
+
+    let output = match log_output {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            diagnostics.push(HistoryWalkDiagnostic {
+                repo: source.repo_slug.clone(),
+                message: format!(
+                    "git log failed for {rel_path_str}: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ),
+            });
+            return (removals, diagnostics);
+        }
+        Err(e) => {
+            diagnostics.push(HistoryWalkDiagnostic {
+                repo: source.repo_slug.clone(),
+                message: format!("failed to run `git log` for {rel_path_str}: {e}"),
+            });
+            return (removals, diagnostics);
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(4, '\0');
+        let (full_sha, short_sha, date, subject) =
+            match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
+                _ => {
+                    diagnostics.push(HistoryWalkDiagnostic {
+                        repo: source.repo_slug.clone(),
+                        message: format!("unparseable `git log` line: {line}"),
+                    });
+                    continue;
+                }
+            };
+
+        let child = match read_carryover_at_revision(git_root, full_sha, &rel_path_str) {
+            Ok(Some(entries)) => entries,
+            Ok(None) => continue,
+            Err(message) => {
+                diagnostics.push(HistoryWalkDiagnostic {
+                    repo: source.repo_slug.clone(),
+                    message: format!("{full_sha} ({subject}): {message}"),
+                });
+                continue;
+            }
+        };
+
+        let parent_rev = format!("{full_sha}~1");
+        let parent = match read_carryover_at_revision(git_root, &parent_rev, &rel_path_str) {
+            Ok(Some(entries)) => entries,
+            // Root commit, or the commit that introduced the file: no
+            // parent version exists to diff against, so nothing was
+            // removed here by definition.
+            Ok(None) => continue,
+            Err(message) => {
+                diagnostics.push(HistoryWalkDiagnostic {
+                    repo: source.repo_slug.clone(),
+                    message: format!("{parent_rev} ({subject}): {message}"),
+                });
+                continue;
+            }
+        };
+
+        let child_slugs: HashSet<&str> = child.iter().map(|c| c.slug.as_str()).collect();
+        for entry in &parent {
+            if !child_slugs.contains(entry.slug.as_str()) {
+                removals.push(HistoricalRemoval {
+                    repo: source.repo_slug.clone(),
+                    archive_path: archive_path.clone(),
+                    entry: entry.clone(),
+                    commit_sha: short_sha.to_string(),
+                    commit_subject: subject.to_string(),
+                    commit_date: date.to_string(),
+                });
+            }
+        }
+    }
+
+    (removals, diagnostics)
+}
+
+/// Compute the full history-walk plan for `mev carryover --backfill` (task
+/// 1): discover every `planning/state.json` this brain corpus registers
+/// (reusing [`crate::brain::config::find_brain_config`] +
+/// [`crate::brain::state::discover_state_files`], the same pair
+/// `load_and_evaluate_carryover_corpus_for_dispose` already uses), then walk
+/// each one's git history for removed `carryover[]` entries.
+///
+/// `repo_filter`, when set, restricts the walk to exactly that repo slug and
+/// errors out (naming the valid slugs) if the slug is unknown — the same
+/// contract `--dispose --repo` already has.
+///
+/// Read-only: this touches no filesystem beyond reading, spawns no `git`
+/// command that mutates the working tree, and returns before any archive
+/// write is ever considered (task 3).
+pub fn enumerate_historical_removals(
+    git_root: &Path,
+    repo_filter: Option<&str>,
+) -> anyhow::Result<HistoryWalkPlan> {
+    let config = crate::brain::config::find_brain_config(git_root)
+        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
+    let (sources, _discovery_diags) = crate::brain::state::discover_state_files(git_root, &config);
+
+    if let Some(slug) = repo_filter
+        && !sources.iter().any(|s| s.repo_slug == slug)
+    {
+        let mut valid_slugs: Vec<&str> = sources.iter().map(|s| s.repo_slug.as_str()).collect();
+        valid_slugs.sort_unstable();
+        valid_slugs.dedup();
+        return Err(anyhow::anyhow!(
+            "unknown --repo slug '{slug}'; valid slugs: {}",
+            valid_slugs.join(", ")
+        ));
+    }
+
+    let real_root = git_root
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("failed to canonicalize {}: {e}", git_root.display()))?;
+
+    let mut plan = HistoryWalkPlan::default();
+    for source in &sources {
+        if let Some(slug) = repo_filter
+            && source.repo_slug != slug
+        {
+            continue;
+        }
+        let (removals, diagnostics) = walk_removals_for_state_file(&real_root, source);
+        plan.removals.extend(removals);
+        plan.diagnostics.extend(diagnostics);
+    }
+
+    Ok(plan)
+}
+
+// ---------------------------------------------------------------------------
 // `--write` for `mev graph-findings` (`MV.ticket.graph-derived-carryover-findings`
 // task 5) — append mechanically-detected findings as typed `carryover[]` entries
 // ---------------------------------------------------------------------------
@@ -7708,5 +7996,284 @@ mod tests {
             dry_run: false,
         };
         assert!(!with_failure.succeeded());
+    }
+
+    // -- enumerate_historical_removals (`MV.16.B` task 1) -------------------
+
+    mod backfill_history_walk {
+        use super::*;
+        use std::fs;
+        use std::path::{Path, PathBuf};
+
+        fn temp_dir(tag: &str) -> PathBuf {
+            let dir =
+                crate::testsupport::unique_temp_dir(&format!("mev-carryover-backfill-unit-{tag}"));
+            fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        fn run_git(dir: &Path, args: &[&str]) {
+            let output = crate::shared::git_command()
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .expect("failed to spawn git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed in {}: {}",
+                args,
+                dir.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        fn write_brain_toml(root: &Path, repos: &[&str]) {
+            let mut toml = String::from(
+                r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+"#,
+            );
+            for slug in repos {
+                toml.push_str(&format!(
+                    r#"[[repos]]
+slug = "{slug}"
+tier = "primary"
+repo_path = "repos/{slug}"
+status_file = "repos/{slug}/planning/status.md"
+cache_doc = "docs/projects/{slug}.md"
+heading = "{slug}"
+
+"#
+                ));
+            }
+            fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
+        }
+
+        fn write_state(root: &Path, slug: &str, value: &serde_json::Value) {
+            let path = root
+                .join("repos")
+                .join(slug)
+                .join("planning")
+                .join("state.json");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, serde_json::to_string_pretty(value).unwrap()).unwrap();
+        }
+
+        fn entry(slug: &str, extra_key: Option<(&str, &str)>) -> serde_json::Value {
+            let mut v = serde_json::json!({
+                "slug": slug,
+                "scope": { "repo": "alpha" },
+                "kind": "known_issue",
+                "text": format!("entry {slug}"),
+                "created": "2026-01-01"
+            });
+            if let Some((k, val)) = extra_key {
+                v.as_object_mut()
+                    .unwrap()
+                    .insert(k.to_string(), serde_json::json!(val));
+            }
+            v
+        }
+
+        fn state_with_carryover(carryover: Vec<serde_json::Value>) -> serde_json::Value {
+            serde_json::json!({
+                "repo": "alpha",
+                "kind": "project",
+                "updated": "2026-01-01",
+                "focus": { "now": [], "next": [], "blocked": [] },
+                "carryover": carryover
+            })
+        }
+
+        fn init_repo(root: &Path) {
+            run_git(root, &["init", "-q"]);
+            run_git(root, &["config", "user.email", "test@example.com"]);
+            run_git(root, &["config", "user.name", "Test"]);
+        }
+
+        fn commit_all(root: &Path, msg: &str) {
+            run_git(root, &["add", "."]);
+            run_git(root, &["commit", "-q", "-m", msg]);
+        }
+
+        #[test]
+        fn removal_commit_yields_one_row_with_verbatim_entry_and_unmodeled_key() {
+            let root = temp_dir("removal");
+            write_brain_toml(&root, &["alpha"]);
+            write_state(
+                &root,
+                "alpha",
+                &state_with_carryover(vec![entry(
+                    "alpha-a",
+                    Some(("totally_unmodeled_field", "F-1")),
+                )]),
+            );
+            init_repo(&root);
+            commit_all(&root, "add alpha-a");
+
+            write_state(&root, "alpha", &state_with_carryover(vec![]));
+            commit_all(&root, "clear alpha-a: resolved upstream");
+
+            let plan = enumerate_historical_removals(&root, None).expect("walk should succeed");
+            assert!(
+                plan.diagnostics.is_empty(),
+                "unexpected diagnostics: {:?}",
+                plan.diagnostics
+            );
+            assert_eq!(plan.removals.len(), 1);
+            let removal = &plan.removals[0];
+            assert_eq!(removal.repo, "alpha");
+            assert_eq!(removal.entry.slug, "alpha-a");
+            assert_eq!(
+                removal
+                    .entry
+                    .extra
+                    .get("totally_unmodeled_field")
+                    .and_then(|v| v.as_str()),
+                Some("F-1"),
+                "an unmodeled key on the entry must survive verbatim into the removal"
+            );
+            assert_eq!(removal.commit_subject, "clear alpha-a: resolved upstream");
+            assert_eq!(
+                removal.archive_path,
+                archive_path_for(&root.join("repos/alpha/planning/state.json"))
+            );
+        }
+
+        #[test]
+        fn commit_removing_three_entries_yields_three_rows() {
+            let root = temp_dir("removal-three");
+            write_brain_toml(&root, &["alpha"]);
+            write_state(
+                &root,
+                "alpha",
+                &state_with_carryover(vec![
+                    entry("alpha-a", None),
+                    entry("alpha-b", None),
+                    entry("alpha-c", None),
+                ]),
+            );
+            init_repo(&root);
+            commit_all(&root, "add three entries");
+
+            write_state(&root, "alpha", &state_with_carryover(vec![]));
+            commit_all(&root, "clear all three");
+
+            let plan = enumerate_historical_removals(&root, None).expect("walk should succeed");
+            assert_eq!(plan.removals.len(), 3);
+            let mut slugs: Vec<&str> = plan
+                .removals
+                .iter()
+                .map(|r| r.entry.slug.as_str())
+                .collect();
+            slugs.sort_unstable();
+            assert_eq!(slugs, vec!["alpha-a", "alpha-b", "alpha-c"]);
+        }
+
+        #[test]
+        fn commit_that_only_adds_or_only_edits_yields_no_removal() {
+            let root = temp_dir("add-edit");
+            write_brain_toml(&root, &["alpha"]);
+            write_state(
+                &root,
+                "alpha",
+                &state_with_carryover(vec![entry("alpha-a", None)]),
+            );
+            init_repo(&root);
+            commit_all(&root, "add alpha-a");
+
+            // Only ADD alpha-b.
+            write_state(
+                &root,
+                "alpha",
+                &state_with_carryover(vec![entry("alpha-a", None), entry("alpha-b", None)]),
+            );
+            commit_all(&root, "add alpha-b");
+
+            // Only EDIT alpha-a's text.
+            let mut edited = entry("alpha-a", None);
+            edited["text"] = serde_json::json!("edited text");
+            write_state(
+                &root,
+                "alpha",
+                &state_with_carryover(vec![edited, entry("alpha-b", None)]),
+            );
+            commit_all(&root, "edit alpha-a");
+
+            let plan = enumerate_historical_removals(&root, None).expect("walk should succeed");
+            assert!(
+                plan.removals.is_empty(),
+                "add-only and edit-only commits must yield no removal, got: {:?}",
+                plan.removals
+            );
+        }
+
+        #[test]
+        fn root_commit_yields_no_removal() {
+            let root = temp_dir("root-commit");
+            write_brain_toml(&root, &["alpha"]);
+            write_state(
+                &root,
+                "alpha",
+                &state_with_carryover(vec![entry("alpha-a", None)]),
+            );
+            init_repo(&root);
+            commit_all(&root, "initial commit with alpha-a already present");
+
+            let plan = enumerate_historical_removals(&root, None).expect("walk should succeed");
+            assert!(
+                plan.removals.is_empty(),
+                "a root commit has no parent to diff against, so it must yield nothing"
+            );
+        }
+
+        #[test]
+        fn repo_filter_restricts_the_walk_to_one_repo() {
+            let root = temp_dir("repo-filter");
+            write_brain_toml(&root, &["alpha", "beta"]);
+            write_state(
+                &root,
+                "alpha",
+                &state_with_carryover(vec![entry("alpha-a", None)]),
+            );
+            write_state(
+                &root,
+                "beta",
+                &state_with_carryover(vec![entry("beta-a", None)]),
+            );
+            init_repo(&root);
+            commit_all(&root, "add both");
+
+            write_state(&root, "alpha", &state_with_carryover(vec![]));
+            write_state(&root, "beta", &state_with_carryover(vec![]));
+            commit_all(&root, "clear both");
+
+            let plan =
+                enumerate_historical_removals(&root, Some("alpha")).expect("walk should succeed");
+            assert_eq!(plan.removals.len(), 1);
+            assert_eq!(plan.removals[0].repo, "alpha");
+        }
+
+        #[test]
+        fn unknown_repo_filter_errors_naming_valid_slugs() {
+            let root = temp_dir("unknown-repo");
+            write_brain_toml(&root, &["alpha"]);
+            write_state(&root, "alpha", &state_with_carryover(vec![]));
+            init_repo(&root);
+            commit_all(&root, "initial");
+
+            let err = enumerate_historical_removals(&root, Some("nonexistent"))
+                .expect_err("unknown --repo slug must error");
+            assert!(
+                err.to_string().contains("alpha"),
+                "error should name valid slugs: {err}"
+            );
+        }
     }
 }
