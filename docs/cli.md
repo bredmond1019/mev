@@ -1849,30 +1849,33 @@ mev --json doc opportunity ingest --input company-brief.json
 
 ---
 
-### `carryover [--repo <slug>] [--json] [--allow-exec] [--audit] [--window <days>] [--dispose] [--dry-run] [path]`
+### `carryover [--repo <slug>] [--json] [--allow-exec] [--audit] [--window <days>] [--dispose] [--dry-run] [--would-block] [path]`
 
 Fleet-wide sweep of every discovered `planning/state.json`'s `carryover[]` array. By default
 this is **read-only**: it evaluates each entry's `clears_when` predicate where it is
 machine-checkable and sorts the fleet into three lanes. `--audit` switches to a census over both
 triage containers instead (see [`--audit` — the `carryover[]`/`reference[]`
-census](#--audit--the-carryover-reference-census) below). `--dispose` switches to the one write
-path this subcommand has — see [`--dispose` — archiving CLEARED
+census](#--audit--the-carryover-reference-census) below). `--would-block` switches to a
+read-only report over `carryover[].blocks[]` edges instead (see [`--would-block` — the honest
+blast radius](#--would-block--the-honest-blast-radius) below). `--dispose` switches to the one
+write path this subcommand has — see [`--dispose` — archiving CLEARED
 entries](#--dispose--archiving-cleared-entries) below.
 
 ```bash
-mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>] [--dispose] [--dry-run] [path]
+mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>] [--dispose] [--dry-run] [--would-block] [path]
 ```
 
 | Argument / Flag | Default | Description |
 |---|---|---|
 | `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
 | `--repo <SLUG>` | unset | Restrict the sweep to one repo's `carryover[]` entries **by ownership**, not by which file an entry happens to be stored in — see below. An unknown slug is a hard error naming the valid slugs |
-| `--json` | off | Emit the `CarryoverReport` (or, under `--audit`, the `CarryoverAudit`) as compact JSON instead of the human summary |
+| `--json` | off | Emit the `CarryoverReport` (or, under `--audit`, the `CarryoverAudit`; or, under `--would-block`, the `WouldBlockReport`) as compact JSON instead of the human summary |
 | `--allow-exec` | off | Opt in to running `command_exits_zero` predicates. Without it, every such entry reports `not-evaluable` (reason `execution-not-allowed`) and **no command is ever run**. **`--dispose` does not imply this** — passing `--dispose` never turns on command execution, so a `command_exits_zero` entry that is `not-evaluable` for lack of `--allow-exec` is never disposal-eligible either |
 | `--audit` | off | Report a fleet-wide `carryover[]`/`reference[]` census instead of the per-entry sweep — total, per-container and per-kind/per-class counts, typed-predicate coverage, and inflow/outflow over `--window` days. Composed entirely from the same loaded corpus and `CarryoverReport` the ordinary sweep already produces — no second corpus walk. Shares the exact same `--repo` ownership rule as the ordinary sweep, so `mev carryover --audit --repo X` and `mev carryover --repo X` always agree on which entries are in scope |
 | `--window <DAYS>` | `30` | Window, in days, `--audit`'s inflow/outflow figures are measured over. Ignored without `--audit` |
 | `--dispose` | off | Move every CLEARED-lane entry out of its owning repo's `state.json` and into that repo's `planning/carryover-archive.jsonl`. The one write path this subcommand has — see below |
 | `--dry-run` | off | Only meaningful together with `--dispose`: compute and print the identical disposal plan without writing anything. Passed without `--dispose`, `mev carryover` reports the misuse and exits non-zero rather than silently ignoring it |
+| `--would-block` | off | Report every `carryover[].blocks[]` edge's honest blast radius — owner, edge type, resolved target, the target's live authored status, lane residency, and a verdict — with enforcement off. Read-only, always exits `0`, and cannot be combined with `--dispose`/`--dry-run`/`--audit`. See below |
 
 Resolves `brain.toml` by walking up from `path`, discovers and loads every repo's
 `planning/state.json` (individual load failures are skipped, not fatal), and evaluates every
@@ -2092,6 +2095,12 @@ mev carryover --dispose --dry-run
 
 # Restrict disposal to one repo
 mev carryover --dispose --repo mev
+
+# Preview the blast radius of every carryover[].blocks[] edge (read-only)
+mev carryover --would-block
+
+# Same, as JSON, restricted to one repo
+mev carryover --would-block --json --repo mev
 ```
 
 #### `--dispose` — archiving CLEARED entries
@@ -2142,6 +2151,66 @@ acts on the `cleared` lane only:
 Exit code `0` on a successful run, including one where some repos were skipped (reported, not
 fatal); non-zero if `--dry-run` is passed without `--dispose`, or on the same `brain.toml`/
 `--repo`/serialization failures the plain sweep can hit.
+
+#### `--would-block` — the honest blast radius
+
+`mev carryover --would-block` (`MV.16.A`) answers, before any enforcement ships, the one question
+nobody could answer before this block: **if `carryover[].blocks[]` actually gated work today,
+what would stop?** `blocks[]` today only propagates priority — the only thing that actually holds
+a block back is a `depends_on {type: "block"}` edge — so this report changes nothing; it previews
+what `MV.16.C`'s enforcement, gated behind `enforce_blocks` and a per-repo cap, would do once
+turned on.
+
+It walks every `carryover[].blocks[]` edge in the swept corpus (the identical corpus the plain
+sweep and `--audit` already load — no second discovery walk) and emits one row per edge:
+
+| Column | Meaning |
+|---|---|
+| owner | The `carryover[]` entry that carries the edge, as `{repo}:{slug}` |
+| edge type | `block` / `external` / `operator` / `approval` — the `BlockedBy` edge's own type |
+| target | The resolved `{repo}:{id}` the edge points at, or `-` for a non-`block` edge, which has no node target |
+| status | The target's live authored status (e.g. `open`, `closed`, `wontfix`), or `-` when the edge has no node target |
+| lane? | `true`/`false` — whether the target appears in any `lane-<name>.json` record discovered by `discover_lane_files`. **A separate axis from status**: an `open` target in no lane and an `open` target someone is actively driving are both `blocking`, and this column is what tells them apart. Always `false` for a non-`block` edge |
+| verdict | `blocking` / `closed` / `wontfix` / `unresolvable` / `no-node-target` — see below |
+| lanes | The lane identifier(s) (`{roadmap}/lane-{lane}.json`) the target was found in, or `-` when not lane-resident |
+
+**The verdict, all five cases explicit — never collapsed into a bare `!= closed` test:**
+
+| Verdict | Meaning | Counted as blocking? |
+|---|---|---|
+| `blocking` | A `block` edge whose target resolved and whose authored status is neither `closed` nor `wontfix` | yes |
+| `closed` | A `block` edge whose target resolved with status `closed` — gates nothing | no |
+| `wontfix` | A `block` edge whose target resolved with status `wontfix` — gates nothing. Not in `sequence.md`'s original cut; measured live in the corpus on `JF.2.A` and handled explicitly rather than falling through a `!= closed` test | no |
+| `unresolvable` | A `block` edge whose target does not resolve to any node in the loaded corpus (a typo'd repo/id) — a data defect, not a live block. Reported so the defect is visible, but never counted toward the blast radius, since counting it would inflate the number with typos | no |
+| `no-node-target` | An `external` / `operator` / `approval` edge — these have no node target by construction and are reported as rows, never silently dropped, so the report never looks complete while hiding edges | no |
+
+The report's summary line totals every edge and breaks the non-blocking count down by reason
+(`closed` / `wontfix` / `unresolvable` / `no-node-target`), so a reader sees at a glance how many
+edges were excluded and why, never just a bare headline number.
+
+**Shares its resolution rules with `unmet_carryover_block_keys` — never a second copy.** Both are
+built from the same edge-classification core in `src/brain/carryover.rs`, so a dry-run that
+disagreed with the predicate `MV.16.C`'s enforcement will actually gate on would be worse than no
+dry-run at all. The only deliberate divergence is the `wontfix`/`unresolvable` carve-out this
+report adds — everything else agrees edge-for-edge.
+
+**Composes with `--repo <slug>`**, restricting the rows to the named repo's owning entries, the
+same ownership rule the plain sweep uses.
+
+**Never writes, never gates.** `--would-block` opens no file handle for writing on this path,
+leaves every `state.json` and `carryover-archive.jsonl` byte-identical, and is **not** part of
+`planning/harness.json` — nothing in this fleet's push gate depends on what it finds. Enforcement,
+when it ships, is `MV.16.C`, behind an `enforce_blocks` flag and a per-repo cap; until then this
+flag only ever previews.
+
+**Cannot be combined with `--dispose`, `--dry-run`, or `--audit`** — pass it alone (optionally
+with `--repo`/`--json`); combining reports the misuse and exits non-zero rather than silently
+picking one.
+
+Exit code `0` regardless of what it finds — a non-zero blocking count is a finding, not a failure;
+that is the whole point of shipping this before enforcement exists. Non-zero only on the same
+`brain.toml`/`--repo`/serialization failures the plain sweep can hit, or on an incoherent flag
+combination as above.
 
 ---
 
