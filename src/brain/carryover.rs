@@ -2019,6 +2019,365 @@ pub fn build_historical_archive_row(removal: &HistoricalRemoval) -> okf_core::Ca
 }
 
 // ---------------------------------------------------------------------------
+// The refusal guard + atomic per-repo archive writer — `mev carryover
+// --backfill` (`MV.16.B` task 3)
+// ---------------------------------------------------------------------------
+//
+// Idempotency here is by REFUSAL, never by merge: a second run over a
+// populated archive must abort the whole run rather than appending
+// duplicates or attempting a diff-and-merge. Detection is on the
+// `(slug, disposed_at)` pair, the identity `okf_core::AmendsRef` already
+// establishes as an archive row's unique key. This pass writes ONLY
+// `carryover-archive.jsonl` — it never touches `state.json`, because the
+// entries it archives are already gone from it (that is the premise of the
+// whole block).
+
+/// One `(slug, disposed_at)` pair a planned backfill row would have
+/// duplicated against an already-populated archive — the refusal guard's
+/// error. Naming the colliding pair (not just "duplicate found") is the
+/// point: the operator needs to know which line to go look at.
+#[derive(Debug, Clone)]
+pub struct BackfillCollision {
+    pub repo: String,
+    pub archive_path: PathBuf,
+    pub slug: String,
+    pub disposed_at: String,
+}
+
+impl std::fmt::Display for BackfillCollision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: archive {} already has a row for (slug='{}', disposed_at='{}') — refusing to backfill over a populated archive",
+            self.repo,
+            self.archive_path.display(),
+            self.slug,
+            self.disposed_at
+        )
+    }
+}
+
+impl std::error::Error for BackfillCollision {}
+
+/// One repo's backfill write (or, under `--dry-run`, computed-but-not-written
+/// plan) — what task 4's CLI driver prints per repo.
+#[derive(Debug, Clone)]
+pub struct RepoBackfillWrite {
+    /// Owning repo slug.
+    pub repo: String,
+    /// Absolute path of the repo's `planning/carryover-archive.jsonl`.
+    pub archive_path: PathBuf,
+    /// The archive rows this repo contributed, in the order they were
+    /// appended.
+    pub rows: Vec<okf_core::CarryoverArchiveRow>,
+    /// Whether disk was actually touched (`false` under `--dry-run`, or when
+    /// `rows` is empty and there was nothing to write).
+    pub written: bool,
+}
+
+/// One repo's backfill write failed partway through — mirrors
+/// [`RepoDisposalError`] so task 4's reporting can name the repo without
+/// aborting the whole run.
+#[derive(Debug, Clone)]
+pub struct RepoBackfillError {
+    pub repo: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for RepoBackfillError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.repo, self.message)
+    }
+}
+
+impl std::error::Error for RepoBackfillError {}
+
+/// The full result of one `mev carryover --backfill` (or `--backfill
+/// --dry-run`) run: one [`RepoBackfillWrite`] per repo that had at least one
+/// removal to backfill, any repo whose write failed partway through, and
+/// every [`HistoryWalkDiagnostic`] the walk itself raised.
+#[derive(Debug, Clone, Default)]
+pub struct BackfillRunReport {
+    pub writes: Vec<RepoBackfillWrite>,
+    pub failures: Vec<RepoBackfillError>,
+    pub diagnostics: Vec<HistoryWalkDiagnostic>,
+    pub dry_run: bool,
+}
+
+impl BackfillRunReport {
+    /// Whether this run is clean enough for `mev carryover --backfill` to
+    /// exit 0 — a repo whose write itself failed is fatal.
+    pub fn succeeded(&self) -> bool {
+        self.failures.is_empty()
+    }
+}
+
+/// Parse an existing `carryover-archive.jsonl` file's lines into
+/// [`okf_core::CarryoverArchiveRow`]s, skipping blank lines. A malformed
+/// line is a diagnostic-worthy condition in principle, but this reader is
+/// used only to build the collision index before writing — a line that
+/// fails to parse cannot be a `(slug, disposed_at)` collision target, so it
+/// is skipped rather than aborting the whole backfill (the file predates
+/// this pass and may not even exist yet).
+fn read_archive_rows(archive_path: &Path) -> Vec<okf_core::CarryoverArchiveRow> {
+    let Ok(content) = std::fs::read_to_string(archive_path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<okf_core::CarryoverArchiveRow>(l).ok())
+        .collect()
+}
+
+/// Run (or, under `dry_run`, simulate) `mev carryover --backfill`'s write
+/// half over every [`HistoricalRemoval`] in `plan`.
+///
+/// # The refusal guard runs FIRST, over the whole plan
+///
+/// Before any file is touched, every repo's existing archive is read and
+/// indexed by `(slug, disposed_at)`. Every planned row (across every repo)
+/// is checked against that index; the first collision found aborts the
+/// ENTIRE run with `Err(BackfillCollision)` before a single byte is
+/// written anywhere — a partial backfill is harder to reason about than
+/// none. This is why the guard is a pre-pass rather than folded into the
+/// per-repo write loop below: a collision in one repo must not leave a
+/// sibling repo's rows written while this repo's are refused.
+///
+/// # Per-repo atomic write, revert on failure
+///
+/// Once the guard has cleared, each repo with at least one planned row is
+/// written independently: the archive's original bytes are read first, and
+/// on any write error the file is reverted to exactly those bytes before
+/// the error is collected into `failures` — mirroring [`dispose_repo`]'s
+/// own discipline, minus the `state.json` half (this pass never touches
+/// `state.json`; the entries it archives are already gone from it).
+pub fn run_backfill(
+    plan: &HistoryWalkPlan,
+    dry_run: bool,
+) -> Result<BackfillRunReport, BackfillCollision> {
+    // Group removals by repo, preserving plan order.
+    let mut repos: Vec<String> = Vec::new();
+    let mut by_repo: std::collections::HashMap<String, (PathBuf, Vec<&HistoricalRemoval>)> =
+        std::collections::HashMap::new();
+    for removal in &plan.removals {
+        let entry = by_repo
+            .entry(removal.repo.clone())
+            .or_insert_with(|| (removal.archive_path.clone(), Vec::new()));
+        entry.1.push(removal);
+        if !repos.contains(&removal.repo) {
+            repos.push(removal.repo.clone());
+        }
+    }
+
+    // Refusal guard: check every planned row against its repo's existing
+    // archive (and against rows already accepted earlier in this same
+    // pre-pass, in case the walk itself produced a duplicate pair) before
+    // writing anything.
+    let mut seen_this_run: HashSet<(String, String, String)> = HashSet::new();
+    for repo in &repos {
+        let (archive_path, removals) = &by_repo[repo];
+        let existing = read_archive_rows(archive_path);
+        let existing_keys: HashSet<(String, String)> = existing
+            .iter()
+            .map(|r| (r.entry.slug.clone(), r.disposed_at.clone()))
+            .collect();
+
+        for removal in removals {
+            let row = build_historical_archive_row(removal);
+            let key = (row.entry.slug.clone(), row.disposed_at.clone());
+            if existing_keys.contains(&key)
+                || !seen_this_run.insert((repo.clone(), key.0.clone(), key.1.clone()))
+            {
+                return Err(BackfillCollision {
+                    repo: repo.clone(),
+                    archive_path: archive_path.clone(),
+                    slug: key.0,
+                    disposed_at: key.1,
+                });
+            }
+        }
+    }
+
+    // Guard cleared — build and (unless dry_run) write each repo's rows.
+    let mut writes = Vec::new();
+    let mut failures = Vec::new();
+
+    for repo in &repos {
+        let (archive_path, removals) = &by_repo[repo];
+        let rows: Vec<okf_core::CarryoverArchiveRow> = removals
+            .iter()
+            .map(|r| build_historical_archive_row(r))
+            .collect();
+
+        if dry_run {
+            writes.push(RepoBackfillWrite {
+                repo: repo.clone(),
+                archive_path: archive_path.clone(),
+                rows,
+                written: false,
+            });
+            continue;
+        }
+
+        let archive_existed = archive_path.exists();
+        let original_content = if archive_existed {
+            match std::fs::read_to_string(archive_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    failures.push(RepoBackfillError {
+                        repo: repo.clone(),
+                        message: format!("failed to read {}: {e}", archive_path.display()),
+                    });
+                    continue;
+                }
+            }
+        } else {
+            String::new()
+        };
+
+        let mut new_content = original_content.clone();
+        let mut serialize_failed = false;
+        for row in &rows {
+            match serde_json::to_string(row) {
+                Ok(line) => {
+                    new_content.push_str(&line);
+                    new_content.push('\n');
+                }
+                Err(e) => {
+                    failures.push(RepoBackfillError {
+                        repo: repo.clone(),
+                        message: format!(
+                            "failed to serialize archive row for '{}': {e}",
+                            row.entry.slug
+                        ),
+                    });
+                    serialize_failed = true;
+                    break;
+                }
+            }
+        }
+        if serialize_failed {
+            continue;
+        }
+
+        if let Err(e) = crate::brain::emit::write_atomic(archive_path, new_content.as_bytes()) {
+            // Revert to the original bytes so a failed write never leaves
+            // the archive partially updated.
+            let revert_result = if archive_existed {
+                crate::brain::emit::write_atomic(archive_path, original_content.as_bytes())
+            } else {
+                std::fs::remove_file(archive_path)
+            };
+            let revert_note = if revert_result.is_err() {
+                " (archive revert ALSO FAILED — manual check required)"
+            } else {
+                " (archive write reverted)"
+            };
+            failures.push(RepoBackfillError {
+                repo: repo.clone(),
+                message: format!(
+                    "failed to write {}: {e}{revert_note}",
+                    archive_path.display()
+                ),
+            });
+            continue;
+        }
+
+        writes.push(RepoBackfillWrite {
+            repo: repo.clone(),
+            archive_path: archive_path.clone(),
+            rows,
+            written: true,
+        });
+    }
+
+    Ok(BackfillRunReport {
+        writes,
+        failures,
+        diagnostics: plan.diagnostics.clone(),
+        dry_run,
+    })
+}
+
+/// Render the explicit `git commit -o <pathspec>` line covering every
+/// archive file this run wrote (or, under `--dry-run`, would have written)
+/// — every `planning/` is a symlink into the one HQ git repo where Standing
+/// Rule 10 bans `git add -A`. `None` when no repo in the run wrote
+/// anything, so a no-op run never prints an empty `git commit -o` with no
+/// arguments.
+pub fn render_backfill_commit_pathspec(report: &BackfillRunReport) -> Option<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for write in &report.writes {
+        if write.rows.is_empty() {
+            continue;
+        }
+        paths.push(write.archive_path.display().to_string());
+    }
+
+    if paths.is_empty() {
+        None
+    } else {
+        Some(format!("git commit -o {}", paths.join(" ")))
+    }
+}
+
+/// Render the per-repo backfill summary a caller prints after
+/// [`run_backfill`] returns: per repo, the archive path, the row count, and
+/// the per-[`okf_core::DisposalReason`] breakdown; then every
+/// [`HistoryWalkDiagnostic`] the walk raised; then the commit pathspec.
+/// Identical under `--dry-run` apart from the "(dry-run, not written)"
+/// suffix on a repo that had rows to write — same code path, same content,
+/// nothing written.
+pub fn render_backfill_summary(report: &BackfillRunReport) -> String {
+    let mut lines = Vec::new();
+
+    for write in &report.writes {
+        let suffix = if report.dry_run && !write.rows.is_empty() {
+            " (dry-run, not written)"
+        } else {
+            ""
+        };
+
+        let mut cleared = 0usize;
+        let mut superseded = 0usize;
+        let mut promoted = 0usize;
+        let mut withdrawn = 0usize;
+        for row in &write.rows {
+            match row.reason {
+                okf_core::DisposalReason::Cleared => cleared += 1,
+                okf_core::DisposalReason::Superseded => superseded += 1,
+                okf_core::DisposalReason::Promoted => promoted += 1,
+                okf_core::DisposalReason::Withdrawn => withdrawn += 1,
+            }
+        }
+
+        lines.push(format!(
+            "{}: {} — {} row(s){} (cleared={cleared} superseded={superseded} promoted={promoted} withdrawn={withdrawn})",
+            write.repo,
+            write.archive_path.display(),
+            write.rows.len(),
+            suffix
+        ));
+    }
+
+    for failure in &report.failures {
+        lines.push(format!("{}: FAILED — {}", failure.repo, failure.message));
+    }
+
+    for diag in &report.diagnostics {
+        lines.push(format!("{}: DIAGNOSTIC — {}", diag.repo, diag.message));
+    }
+
+    if let Some(pathspec) = render_backfill_commit_pathspec(report) {
+        lines.push(String::new());
+        lines.push(pathspec);
+    }
+
+    lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
 // `--write` for `mev graph-findings` (`MV.ticket.graph-derived-carryover-findings`
 // task 5) — append mechanically-detected findings as typed `carryover[]` entries
 // ---------------------------------------------------------------------------
