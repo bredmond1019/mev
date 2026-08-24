@@ -8681,6 +8681,143 @@ mod tests {
         assert_eq!(slugs, vec!["z-blocking", "a-hot"]);
     }
 
+    // -- notify_subset (`MV.ticket.attention-notify-policy` task 4) ---------
+    //
+    // Filter-level fixture tests: the fail-closed default, the two cases
+    // that distinguish this from a naive priority floor, and each policy
+    // key demonstrably changing the returned set. `digest_everything_else`
+    // is intentionally NOT exercised here as a filter-changing key — it is
+    // read (see `config.rs::notify_policy_each_key_is_actually_read`) but
+    // consumed only by the digest side (bastion:BA.21.D), never by
+    // `notify_subset` itself; see the rule doc comment above.
+
+    #[test]
+    fn fail_closed_when_attention_table_absent() {
+        // `AttentionThresholds::default()` is what an absent `[attention]`
+        // table deserializes to (config.rs pins the deserialization side;
+        // this pins what the filter DOES with those defaults). Getting this
+        // backwards reproduces the 395-item notification burst the ticket
+        // exists to prevent.
+        let t = AttentionThresholds::default();
+        let entries = vec![
+            ranking(TriageLane::Blocking, Some(3), "blocking-p3"),
+            ranking(TriageLane::Hot, Some(0), "hot-p0"),
+            ranking(TriageLane::Hot, Some(1), "hot-p1"),
+            ranking(TriageLane::Aging, Some(0), "aging"),
+            ranking(TriageLane::Standing, None, "standing"),
+        ];
+        let out = notify_subset(&entries, &t);
+        let slugs: Vec<&str> = out.iter().map(|r| r.slug.as_str()).collect();
+        assert_eq!(
+            slugs,
+            vec!["blocking-p3", "hot-p0"],
+            "absent [attention] table must yield blocking-any-priority + hot-P0 only, never notify-everything"
+        );
+    }
+
+    #[test]
+    fn fail_closed_when_table_present_but_no_policy_keys() {
+        // A present `[attention]` table that only overrides an unrelated
+        // staleness field (never a policy key) must still yield the
+        // documented default rule.
+        let mut t = AttentionThresholds::default();
+        t.deferred_days = 2;
+        let entries = vec![
+            ranking(TriageLane::Blocking, Some(3), "blocking-p3"),
+            ranking(TriageLane::Hot, Some(0), "hot-p0"),
+            ranking(TriageLane::Hot, Some(1), "hot-p1"),
+        ];
+        let out = notify_subset(&entries, &t);
+        let slugs: Vec<&str> = out.iter().map(|r| r.slug.as_str()).collect();
+        assert_eq!(slugs, vec!["blocking-p3", "hot-p0"]);
+    }
+
+    #[test]
+    fn blocking_at_p3_is_included() {
+        let entries = vec![ranking(TriageLane::Blocking, Some(3), "a")];
+        let out = notify_subset(&entries, &thresholds());
+        assert_eq!(
+            out.len(),
+            1,
+            "blocking never consults priority — P3 is included"
+        );
+    }
+
+    #[test]
+    fn hot_at_p1_is_excluded() {
+        let entries = vec![ranking(TriageLane::Hot, Some(1), "a")];
+        assert!(
+            notify_subset(&entries, &thresholds()).is_empty(),
+            "hot P1 is excluded under the default floor of 0 — the case a naive \
+             priority<=floor filter over every lane would get wrong the other way"
+        );
+    }
+
+    #[test]
+    fn key_notify_lanes_changes_output() {
+        let entries = vec![ranking(TriageLane::Hot, Some(0), "hot-p0")];
+        assert_eq!(
+            notify_subset(&entries, &thresholds()).len(),
+            1,
+            "hot is in notify_lanes by default"
+        );
+        let mut t = thresholds();
+        t.notify_lanes = vec!["blocking".to_string()];
+        assert!(
+            notify_subset(&entries, &t).is_empty(),
+            "removing hot from notify_lanes must exclude a hot P0 that was included before"
+        );
+    }
+
+    #[test]
+    fn key_notify_priority_floor_changes_output() {
+        let entries = vec![ranking(TriageLane::Hot, Some(1), "hot-p1")];
+        assert!(
+            notify_subset(&entries, &thresholds()).is_empty(),
+            "default floor of 0 excludes hot P1"
+        );
+        let mut t = thresholds();
+        t.notify_priority_floor = 1;
+        assert_eq!(
+            notify_subset(&entries, &t).len(),
+            1,
+            "raising the floor to 1 must include a hot P1 that was excluded before"
+        );
+    }
+
+    #[test]
+    fn key_notify_blocking_any_priority_changes_output() {
+        let entries = vec![ranking(TriageLane::Blocking, Some(0), "blocking-p0")];
+        assert_eq!(
+            notify_subset(&entries, &thresholds()).len(),
+            1,
+            "notify_blocking_any_priority defaults true"
+        );
+        let mut t = thresholds();
+        t.notify_blocking_any_priority = false;
+        assert!(
+            notify_subset(&entries, &t).is_empty(),
+            "flipping notify_blocking_any_priority to false must exclude a blocking \
+             item that was included before"
+        );
+    }
+
+    #[test]
+    fn lane_absent_from_notify_lanes_is_excluded() {
+        let mut t = thresholds();
+        t.notify_lanes = vec![]; // neither lane named
+        let entries = vec![
+            ranking(TriageLane::Blocking, Some(0), "blocking"),
+            ranking(TriageLane::Hot, Some(0), "hot"),
+        ];
+        let out = notify_subset(&entries, &t);
+        // `notify_blocking_any_priority` still governs Blocking independent
+        // of notify_lanes (rule 1's doc comment), so only Hot drops out
+        // here; this pins that Hot specifically requires lane membership.
+        let slugs: Vec<&str> = out.iter().map(|r| r.slug.as_str()).collect();
+        assert_eq!(slugs, vec!["blocking"]);
+    }
+
     // -- enumerate_historical_removals (`MV.16.B` task 1) -------------------
 
     mod backfill_history_walk {

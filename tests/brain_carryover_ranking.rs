@@ -318,3 +318,69 @@ fn rank_carryover_standing_is_last() {
     assert_eq!(ranked.last().unwrap().slug, "standing");
     assert_eq!(ranked.last().unwrap().lane, TriageLane::Standing);
 }
+
+// ---------------------------------------------------------------------------
+// `notify_subset` over the public `rank_carryover` -> `notify_subset`
+// pipeline (`MV.ticket.attention-notify-policy`, task 4). The unit tests in
+// `src/brain/carryover.rs` cover the filter's rules directly; these confirm
+// the same public API composes correctly end to end, ranked -> filtered,
+// preserving `rank_carryover`'s deterministic order.
+// ---------------------------------------------------------------------------
+
+use mev::brain::config::AttentionThresholds;
+use mev::notify_subset;
+
+#[test]
+fn notify_subset_over_ranked_output_is_fail_closed_by_default() {
+    let entries = vec![
+        verdict(
+            "mev",
+            "blocking-p3",
+            Some(3),
+            false,
+            Some(1),
+            vec![block_edge("mev", "MV.1.A")],
+            CarryoverLane::Actionable,
+        ),
+        verdict(
+            "mev",
+            "hot-p0",
+            Some(0),
+            false,
+            Some(1),
+            Vec::new(),
+            CarryoverLane::Actionable,
+        ),
+        verdict(
+            "mev",
+            "hot-p1",
+            Some(1),
+            false,
+            Some(1),
+            Vec::new(),
+            CarryoverLane::Actionable,
+        ),
+        verdict(
+            "mev",
+            "standing",
+            None,
+            false,
+            Some(1),
+            Vec::new(),
+            CarryoverLane::Actionable,
+        ),
+    ];
+    let mut block_status = HashMap::new();
+    block_status.insert("mev:MV.1.A".to_string(), Some("open".to_string()));
+
+    let ranked = rank_carryover(&entries, &HashMap::new(), &block_status);
+    let notified = notify_subset(&ranked, &AttentionThresholds::default());
+
+    let slugs: Vec<&str> = notified.iter().map(|r| r.slug.as_str()).collect();
+    assert_eq!(
+        slugs,
+        vec!["blocking-p3", "hot-p0"],
+        "default policy over a ranked set must keep only blocking (any priority) \
+         and hot P0, in the ranker's own order"
+    );
+}

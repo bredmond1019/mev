@@ -304,6 +304,49 @@ fn running_twice_yields_byte_identical_output() {
 }
 
 // ---------------------------------------------------------------------------
+// (c.2) `--notify-only` cuts the interrupt subset; the default (no flag)
+// output stays the full unfiltered set (`MV.ticket.attention-notify-policy`
+// task 4 — the CLI end of the fixture requiring the default output be
+// unchanged by this ticket).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn notify_only_filters_default_output_stays_full_set() {
+    let dir = temp_dir("notify-only");
+    write_brain_toml(&dir);
+    write_all_four_lanes_brain_state(&dir);
+
+    let default_out = run_mev(&["attention-queue", dir.to_str().unwrap()]);
+    assert!(
+        default_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&default_out.stderr)
+    );
+    let default_payloads = parse_payloads(&default_out.stdout);
+    assert_eq!(
+        default_payloads.len(),
+        4,
+        "no-flag output must stay the full unfiltered set: {default_payloads:#?}"
+    );
+
+    let notify_out = run_mev(&["attention-queue", dir.to_str().unwrap(), "--notify-only"]);
+    assert!(
+        notify_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&notify_out.stderr)
+    );
+    let notify_payloads = parse_payloads(&notify_out.stdout);
+    // Fixture's only carryover item is Hot P1 (excluded by the default P0
+    // floor); the backlog/capture/distilled rows have no TriageLane at all
+    // and are never eligible for --notify-only.
+    assert!(
+        notify_payloads.is_empty(),
+        "--notify-only with the default policy must exclude a hot P1 carryover \
+         and every non-carryover lane: {notify_payloads:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // (d) An empty corpus emits `[]` and exits 0.
 // ---------------------------------------------------------------------------
 
