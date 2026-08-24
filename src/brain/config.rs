@@ -113,6 +113,32 @@ pub struct AttentionThresholds {
     /// `ticket-operator-edge-graph`.
     #[serde(default = "default_operator_days")]
     pub operator_days: i64,
+    /// Which `TriageLane` names may interrupt the operator (default
+    /// `["blocking", "hot"]`). Decided 2026-08-24 via
+    /// `/begin-session operator-attention-triage-rule` (see
+    /// `docs/attention-triage-rule.md` in the brain repo). A lane not named
+    /// here never interrupts, regardless of `notify_priority_floor` or
+    /// `notify_blocking_any_priority` — it still shows on `/attention` and
+    /// still warns, it simply waits for the once-daily digest.
+    #[serde(default = "default_notify_lanes")]
+    pub notify_lanes: Vec<String>,
+    /// Within the `hot` lane only, the highest (i.e. least urgent) priority
+    /// number still eligible to interrupt (default `0` — P0 only; `0` is
+    /// hottest). Does not affect `blocking`, which is governed solely by
+    /// `notify_blocking_any_priority`.
+    #[serde(default = "default_notify_priority_floor")]
+    pub notify_priority_floor: u8,
+    /// Whether `blocking` items interrupt regardless of priority, including
+    /// items with no priority set at all (default `true`).
+    #[serde(default = "default_notify_blocking_any_priority")]
+    pub notify_blocking_any_priority: bool,
+    /// Whether everything not selected to interrupt still rolls into a
+    /// once-daily digest rather than being dropped (default `true`).
+    /// Nothing surfaced by `/attention` is ever silently discarded by this
+    /// policy — this flag only controls whether the non-interrupt remainder
+    /// is bundled into a digest.
+    #[serde(default = "default_digest_everything_else")]
+    pub digest_everything_else: bool,
 }
 
 fn default_env_days() -> i64 {
@@ -145,6 +171,18 @@ fn default_memory_days() -> i64 {
 fn default_operator_days() -> i64 {
     7
 }
+fn default_notify_lanes() -> Vec<String> {
+    vec!["blocking".to_string(), "hot".to_string()]
+}
+fn default_notify_priority_floor() -> u8 {
+    0
+}
+fn default_notify_blocking_any_priority() -> bool {
+    true
+}
+fn default_digest_everything_else() -> bool {
+    true
+}
 
 impl Default for AttentionThresholds {
     fn default() -> Self {
@@ -159,6 +197,10 @@ impl Default for AttentionThresholds {
             knowledge_days: default_knowledge_days(),
             memory_days: default_memory_days(),
             operator_days: default_operator_days(),
+            notify_lanes: default_notify_lanes(),
+            notify_priority_floor: default_notify_priority_floor(),
+            notify_blocking_any_priority: default_notify_blocking_any_priority(),
+            digest_everything_else: default_digest_everything_else(),
         }
     }
 }
@@ -613,6 +655,54 @@ mod tests {
         assert_eq!(cfg.attention.distill_threshold("knowledge"), 45);
         assert_eq!(cfg.attention.distill_threshold("memory"), 30);
         assert_eq!(cfg.attention.distill_threshold("mystery"), 45);
+    }
+
+    #[test]
+    fn notify_policy_fail_closed_when_attention_table_absent() {
+        // An absent [attention] table must yield the documented rule --
+        // blocking any priority + hot P0 -- never notify-everything.
+        // Getting this backwards reproduces the 395-item notification burst
+        // this ticket exists to prevent.
+        let cfg = load_brain_config(&fixture_path()).expect("should parse fixture");
+        assert_eq!(cfg.attention.notify_lanes, vec!["blocking", "hot"]);
+        assert_eq!(cfg.attention.notify_priority_floor, 0);
+        assert!(cfg.attention.notify_blocking_any_priority);
+        assert!(cfg.attention.digest_everything_else);
+    }
+
+    #[test]
+    fn notify_policy_fail_closed_when_table_present_but_no_policy_keys() {
+        // A present [attention] table that only sets an unrelated staleness
+        // field must also yield the documented default rule.
+        let toml = r#"
+[attention]
+deferred_days = 2
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.attention.notify_lanes, vec!["blocking", "hot"]);
+        assert_eq!(cfg.attention.notify_priority_floor, 0);
+        assert!(cfg.attention.notify_blocking_any_priority);
+        assert!(cfg.attention.digest_everything_else);
+    }
+
+    #[test]
+    fn notify_policy_each_key_is_actually_read() {
+        // Each of the four keys must demonstrably change what's parsed --
+        // pins that they are read, not silently ignored (no
+        // deny_unknown_fields means a typo'd/unread key parses clean and
+        // does nothing, which looks identical to success).
+        let toml = r#"
+[attention]
+notify_lanes = ["blocking"]
+notify_priority_floor = 1
+notify_blocking_any_priority = false
+digest_everything_else = false
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.attention.notify_lanes, vec!["blocking"]);
+        assert_eq!(cfg.attention.notify_priority_floor, 1);
+        assert!(!cfg.attention.notify_blocking_any_priority);
+        assert!(!cfg.attention.digest_everything_else);
     }
 
     #[test]
