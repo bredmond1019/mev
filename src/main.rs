@@ -824,6 +824,15 @@ enum Command {
         /// exits non-zero rather than silently ignoring it.
         #[arg(long)]
         dry_run: bool,
+        /// Report every `carryover[].blocks[]` edge's honest blast radius —
+        /// owner, edge type, resolved target, the target's live authored
+        /// status, lane residency, and a verdict (`MV.16.A`) — without
+        /// enforcing anything. Read-only: exits 0 regardless of what it
+        /// finds, writes nothing, and is never added to `harness.json`.
+        /// Enforcement is `MV.16.C`, behind `enforce_blocks` and a per-repo
+        /// cap; this flag only ever previews.
+        #[arg(long)]
+        would_block: bool,
     },
     /// Scan the corpus for mechanically-detectable `carryover[]` findings instead of
     /// having an agent notice them by hand (`MV.ticket.graph-derived-carryover-findings`).
@@ -1680,6 +1689,90 @@ fn run_carryover_dispose(
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// Drive `mev carryover --would-block`: load and evaluate the corpus (reusing
+/// [`load_and_evaluate_carryover_corpus_for_dispose`] for its already-built
+/// `entries` and `block_status`), build the [`mev::brain::carryover::LaneResidencyIndex`]
+/// once via [`mev::brain::carryover::build_lane_residency_index`], compute the report,
+/// render it, and exit 0.
+///
+/// This is a preview only: it opens no file handle for writing anywhere on
+/// this path, and a non-zero blocking count is a finding, not a failure —
+/// enforcement is `MV.16.C`. A repo whose sweep failed to load is still a
+/// hard error (same as every other `carryover` mode), since a report built
+/// on a partial corpus would understate the blast radius.
+fn run_carryover_would_block(
+    root: &std::path::Path,
+    repo_filter: Option<&str>,
+    allow_exec: bool,
+    as_json: bool,
+) -> ExitCode {
+    use mev::brain::carryover::{
+        build_lane_residency_index, compute_would_block_report, render_would_block_json,
+        render_would_block_table,
+    };
+
+    let (_loaded, load_errors, report) =
+        match load_and_evaluate_carryover_corpus_for_dispose(root, repo_filter, allow_exec) {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!("error: {err:#}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+    for (repo_slug, msg) in &load_errors {
+        eprintln!("warning: {repo_slug}: failed to load state: {msg}");
+    }
+
+    // Rebuild the status map from the loaded state — mirrors
+    // `load_and_evaluate_carryover_corpus_for_dispose`'s own internal
+    // status_map, which is not returned to callers, so it is rebuilt here
+    // from the same source (`discover_state_files` + `load_state`) rather
+    // than threading a new return value through that function's contract.
+    let config = match mev::brain::config::find_brain_config(root) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: brain.toml not found or unreadable: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (sources, _diags) = mev::brain::state::discover_state_files(root, &config);
+    let mut real_status_map: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    for src in &sources {
+        if let Ok(file) = mev::brain::state::load_state(&src.abs_path) {
+            for track in &file.tracks {
+                for block in &track.blocks {
+                    let key = format!("{}:{}", src.repo_slug, block.id);
+                    real_status_map.insert(key, block.status.clone());
+                }
+            }
+        }
+    }
+
+    let (lane_index, lane_diags) = build_lane_residency_index(root);
+    for diag in &lane_diags {
+        eprintln!("warning: {}", diag.message);
+    }
+
+    let would_block_report =
+        compute_would_block_report(&report.entries, &real_status_map, &lane_index);
+
+    if as_json {
+        match render_would_block_json(&would_block_report) {
+            Ok(s) => println!("{s}"),
+            Err(err) => {
+                eprintln!("error serializing --would-block report: {err:#}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        println!("{}", render_would_block_table(&would_block_report));
+    }
+
+    ExitCode::SUCCESS
 }
 
 /// Human-readable, lane-grouped summary for `mev carryover`'s default (non-`--json`) output.
@@ -2967,6 +3060,7 @@ fn main() -> ExitCode {
             window,
             dispose,
             dry_run,
+            would_block,
         } => {
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,
@@ -2981,7 +3075,15 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::FAILURE;
             }
-            if dispose {
+            if would_block && (dispose || dry_run || audit) {
+                eprintln!(
+                    "error: --would-block cannot be combined with --dispose, --dry-run, or --audit; pass it alone (optionally with --repo/--json)"
+                );
+                return ExitCode::FAILURE;
+            }
+            if would_block {
+                run_carryover_would_block(&root, repo.as_deref(), allow_exec, json || cli.json)
+            } else if dispose {
                 run_carryover_dispose(&root, repo.as_deref(), allow_exec, dry_run)
             } else if audit {
                 match mev::carryover_audit(&root, repo.as_deref(), allow_exec, window) {

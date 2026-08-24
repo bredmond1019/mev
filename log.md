@@ -11,6 +11,21 @@ related: [status]
 timestamp: "2026-08-23T09:17:53-03:00"
 ---
 
+## [run: 2026-08-24]
+
+Closed `MV.16.A` end to end via `/sdlc-flow` (7 of 7 tasks, PASS). Added `mev carryover --would-block [--json]`, a read-only report over every fleet `carryover[].blocks[]` edge: owning `{repo}:{slug}`, edge type, resolved target key, live authored status, lane residency (`discover_lane_files`), and a verdict — built on `classify_blocked_by_edge`, a resolution helper widened out of the existing private `unmet_carryover_block_keys` core (task 1) so the dry-run agrees edge-for-edge with the future gate rather than re-deriving its own rules. `closed` and `wontfix` targets, and unresolvable targets, are reported but never counted as blocking; `External`/`Operator`/`Approval` edges appear with no node target and also don't count (tasks 2–3). Wired into the `mev carryover` CLI, composing with `--repo`/`--json`, guarded against combination with `--dispose`/`--dry-run`/`--audit`, writes nothing, always exits 0, and is deliberately not added to `harness.json` — enforcement is `MV.16.C` (task 4). Full fixture suite: counted/not-counted matrix, blocking-count 0→1→2 progression, no-write byte-identity, and a differential test asserting agreement with `unmet_carryover_block_keys` outside the deliberate wontfix/unresolvable carve-outs (task 5). `docs/cli.md` documents the flag, the five verdicts, and the lane-residency axis (task 6). Task 7 ran full-suite validation end to end — fmt, clippy `-D warnings`, full `cargo test`, release build, `cargo audit` — all clean, plus a live-corpus smoke check confirming 5 edges / 1 blocking, matching the block's re-measured notes. Review verdict PASS on first pass, no findings. Next: pull the next item from the master-plan or HQ backlog — `MV.16.B` (carryover git backfill) or `MV.16.C` (enforcement, now unblocked).
+
+```
+9d423aa feat: implement MV.16.A-task6
+8daf37f feat: implement MV.16.A-task5
+5ca9b69 feat: implement MV.16.A-task4
+5859bea feat: implement MV.16.A-task3
+f4a330e feat: implement MV.16.A-task2
+bcdd0d0 feat: implement MV.16.A-task1
+3da0357 chore(harness): sync engines, commands and skills from base-template
+24e9356 docs: no direct push — route through HQ's git_push.sh
+```
+
 ## [run: 2026-08-23]
 
 Closed `MV.ticket.carryover-repo-filter-keys-on-file` via `/sdlc-flow` (5 of 5 tasks, PASS). `mev carryover --repo <slug>` and `--audit --repo` previously decided membership by which repo's `state.json` an entry happened to live in — a cross-repo entry filed in one repo's file but owned by another was invisible to the owner's own `--repo` query. Task 1 moved the filter to a new `carryover_filter_owner()` helper that reads each entry's own `scope.repo` (falling back to the containing file's repo when absent), applied to both `evaluate_carryover_with_dedup` and `audit_carryover`'s `reference[]` loop, with tier-/cross_repo-scoped entries matching no `--repo` filter and a cheap file-level pre-pass retained only where provably safe. Task 2 added fixture tests: cross-file attribution, same-file positive control, no-scope fallback, tier/cross_repo no-match, the unfiltered-path regression, and `audit`/plain agreement — no live-corpus reads. Task 3 documented the ownership semantics in `docs/cli.md`. Task 4 verified against the live fleet corpus (D64 declared un-gateable): all 5 HQ-resident `base-template`-scoped entries now appear under `--repo base-template` (was 0/5), the positive control still appears, `--audit` and plain agree (63/63), and the fleet-wide invisible-entry figure re-measured at 68 (up from 63, growth not attributable to this fix). Task 5 ran the full validation suite clean (fmt, clippy `-D warnings`, `cargo test`, release build); the one review-flagged `cargo test` failure (`fleet_regression.rs::fleet_readiness_is_unchanged_for_blocks_without_a_new_edge`) was confirmed pre-existing, reading live external fleet `state.json` files unrelated to this ticket's code. `mev emit-state --write` regenerated derived surfaces post-close. Next: pull the next item from the master-plan or HQ backlog.

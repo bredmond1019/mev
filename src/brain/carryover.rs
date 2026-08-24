@@ -2558,6 +2558,150 @@ pub fn carryover_effective_priorities(
 // ranking, task 3) — THE contract surface bastion calls
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// classify_blocked_by_edge — the shared per-edge resolution core
+// (MV.16.A, task 1). THE predicate `unmet_carryover_block_keys` (ranking)
+// and `--would-block`'s report (MV.16.A, tasks 2-4) both build on — they
+// must never re-derive resolution rules independently, because MV.16.C's
+// enforcement is built on this exact predicate and a dry-run that disagrees
+// with the gate it previews is worse than no dry-run.
+// ---------------------------------------------------------------------------
+
+/// Which kind of `BlockedBy` edge a row reports — independent of the
+/// payload, for display and grouping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlockedByEdgeType {
+    Block,
+    External,
+    Operator,
+    Approval,
+}
+
+/// The verdict for one `BlockedBy` edge, resolved against a live authored
+/// block-status map.
+///
+/// Deliberately NOT collapsed into a `!= "closed"` boolean: `Closed` and
+/// `Wontfix` are both terminal "gates nothing" outcomes but are distinct
+/// statuses live in the corpus today (`wontfix` on `JF.2.A`, measured
+/// 2026-08-22 — not anticipated by `sequence.md` SQ-A34), and
+/// `Unresolvable` is a data defect (a typo) that must never inflate a
+/// blocking count the way a false `Blocking` would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EdgeBlockVerdict {
+    /// A `block` edge whose target resolved with a status that is neither
+    /// `"closed"` nor `"wontfix"` — this edge would actually stop work.
+    Blocking,
+    /// A `block` edge whose target resolved with status `"closed"` — gates
+    /// nothing.
+    Closed,
+    /// A `block` edge whose target resolved with status `"wontfix"` — gates
+    /// nothing.
+    Wontfix,
+    /// A `block` edge whose target is absent from the status map entirely —
+    /// a data defect, not counted as blocking.
+    Unresolvable,
+    /// An `external` / `operator` / `approval` edge — there is no node
+    /// target to resolve, so no blocking verdict applies.
+    NoNodeTarget,
+}
+
+/// The result of classifying one `BlockedBy` edge against a block-status
+/// map — [`classify_blocked_by_edge`]'s return type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BlockedByEdgeClassification {
+    pub edge_type: BlockedByEdgeType,
+    /// The resolved target key (`"{repo}:{id}"`), or `None` for
+    /// `External`/`Operator`/`Approval` edges, which have no node target.
+    pub target_key: Option<String>,
+    /// The target's live authored status, if the edge resolved to a node
+    /// present in `block_status`. `None` for a non-`Block` edge, and also
+    /// `None` when the target resolved but carries no status value.
+    pub target_status: Option<String>,
+    pub verdict: EdgeBlockVerdict,
+}
+
+impl BlockedByEdgeClassification {
+    /// `true` only for [`EdgeBlockVerdict::Blocking`] — the one verdict
+    /// that would actually stop work.
+    pub fn is_blocking(&self) -> bool {
+        matches!(self.verdict, EdgeBlockVerdict::Blocking)
+    }
+}
+
+/// Classifies ONE `BlockedBy` edge against a live authored-status map.
+///
+/// Resolution rules, all explicit:
+/// - [`BlockedBy::Block`]: the target key is `"{repo}:{id}"`, where an empty
+///   `repo` on the edge falls back to `entry_repo` (the owning entry's own
+///   repo), mirroring [`block_refs_from_related`]'s fallback. The verdict is
+///   [`EdgeBlockVerdict::Blocking`] when the target resolves in
+///   `block_status` with a status that is neither `"closed"` nor
+///   `"wontfix"`; [`EdgeBlockVerdict::Closed`] / [`EdgeBlockVerdict::Wontfix`]
+///   when it resolves to exactly that status; and
+///   [`EdgeBlockVerdict::Unresolvable`] when the target key is absent from
+///   `block_status` entirely.
+/// - [`BlockedBy::External`] / [`BlockedBy::Operator`] / [`BlockedBy::Approval`]:
+///   no node target exists to resolve, so `target_key` and `target_status`
+///   are both `None` and the verdict is [`EdgeBlockVerdict::NoNodeTarget`].
+pub fn classify_blocked_by_edge(
+    entry_repo: &str,
+    edge: &BlockedBy,
+    block_status: &HashMap<String, Option<String>>,
+) -> BlockedByEdgeClassification {
+    match edge {
+        BlockedBy::External(_) => BlockedByEdgeClassification {
+            edge_type: BlockedByEdgeType::External,
+            target_key: None,
+            target_status: None,
+            verdict: EdgeBlockVerdict::NoNodeTarget,
+        },
+        BlockedBy::Operator(_) => BlockedByEdgeClassification {
+            edge_type: BlockedByEdgeType::Operator,
+            target_key: None,
+            target_status: None,
+            verdict: EdgeBlockVerdict::NoNodeTarget,
+        },
+        BlockedBy::Approval(_) => BlockedByEdgeClassification {
+            edge_type: BlockedByEdgeType::Approval,
+            target_key: None,
+            target_status: None,
+            verdict: EdgeBlockVerdict::NoNodeTarget,
+        },
+        BlockedBy::Block(BlockDep { repo, id, .. }) => {
+            let target_repo = if repo.is_empty() {
+                entry_repo
+            } else {
+                repo.as_str()
+            };
+            let key = format!("{target_repo}:{id}");
+            match block_status.get(&key) {
+                None => BlockedByEdgeClassification {
+                    edge_type: BlockedByEdgeType::Block,
+                    target_key: Some(key),
+                    target_status: None,
+                    verdict: EdgeBlockVerdict::Unresolvable,
+                },
+                Some(status_opt) => {
+                    let status = status_opt.clone();
+                    let verdict = match status.as_deref() {
+                        Some("closed") => EdgeBlockVerdict::Closed,
+                        Some("wontfix") => EdgeBlockVerdict::Wontfix,
+                        _ => EdgeBlockVerdict::Blocking,
+                    };
+                    BlockedByEdgeClassification {
+                        edge_type: BlockedByEdgeType::Block,
+                        target_key: Some(key),
+                        target_status: status,
+                        verdict,
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Unmet `blocks[]` keys for one carryover entry.
 ///
 /// Mirrors `has_unmet_dep`'s predicate shape verbatim
@@ -2567,13 +2711,21 @@ pub fn carryover_effective_priorities(
 /// resolve), and a [`BlockedBy::Block`] edge is unmet unless its target's
 /// authored status in `block_status` is exactly `"closed"` — an
 /// unresolvable target (absent from `block_status` entirely) counts as
-/// unmet too. An empty `repo` on a `Block` edge falls back to the entry's
-/// own `repo`, mirroring [`block_refs_from_related`]'s fallback.
+/// unmet too, and so (unchanged from before `--would-block`'s wontfix
+/// carve-out existed) does a `"wontfix"` target: this function's contract
+/// predates that distinction and must keep treating both as unmet for its
+/// existing callers (`rank_carryover`, the triage lanes).
 ///
 /// `External` edges are keyed `"external:{what}"` (matching the display
 /// convention already used for `depends_on` at
 /// `crate::brain::emit::render_wave_table`) so every returned string is a
 /// stable, human-readable identifier — never an empty string.
+///
+/// The `Block`-edge resolution itself (empty-`repo` fallback, target-status
+/// lookup) is delegated to [`classify_blocked_by_edge`] so this function and
+/// `--would-block`'s report can never resolve the same edge differently;
+/// only the closed-vs-not-closed collapse into "unmet" below is specific to
+/// this legacy, narrower contract.
 fn unmet_carryover_block_keys(
     entry: &CarryoverVerdict,
     block_status: &HashMap<String, Option<String>>,
@@ -2585,18 +2737,279 @@ fn unmet_carryover_block_keys(
             BlockedBy::External(ExternalDep { what }) => Some(format!("external:{what}")),
             BlockedBy::Operator(OperatorDep { slug, .. }) => Some(okf_core::op_id(slug)),
             BlockedBy::Approval(ApprovalDep { slug, .. }) => Some(okf_core::op_id(slug)),
-            BlockedBy::Block(BlockDep { repo, id, .. }) => {
-                let target_repo = if repo.is_empty() {
-                    entry.repo.as_str()
-                } else {
-                    repo.as_str()
-                };
-                let key = format!("{target_repo}:{id}");
-                let closed = block_status.get(&key).and_then(|s| s.as_deref()) == Some("closed");
-                if closed { None } else { Some(key) }
+            BlockedBy::Block(_) => {
+                let classification = classify_blocked_by_edge(&entry.repo, edge, block_status);
+                let key = classification
+                    .target_key
+                    .expect("a Block edge always resolves a target key");
+                match classification.verdict {
+                    EdgeBlockVerdict::Closed => None,
+                    _ => Some(key),
+                }
             }
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Lane-residency lookup over `discover_lane_files` (MV.16.A, task 2) — a
+// second axis, independent of `classify_blocked_by_edge`'s status verdict.
+// An `open` target in no lane and an `open` target someone is actively
+// driving both classify as `Blocking`; only this index tells them apart.
+//
+// `lane_segments::discover_lane_files`'s existing public surface
+// (`Vec<LaneFile>` with each `LaneBlockRef` already carrying its own `repo`)
+// is already sufficient to build this index directly from here, so
+// `lane_segments.rs` itself is left untouched — no new surface was needed
+// there.
+// ---------------------------------------------------------------------------
+
+/// A `{repo}:{id}` target key's lane residency: which lane(s), if any, a
+/// discovered `lane-<name>.json` record lists that exact block under.
+///
+/// Built once per run from every [`LaneFile`] `discover_lane_files` finds,
+/// keyed by `"{repo}:{id}"` — matching on the lane entry's own authored
+/// `repo` (never the owning entry's `repo`, and never assumed single-repo:
+/// "a lane is not single-repo in this corpus").
+#[derive(Debug, Default, Clone)]
+pub struct LaneResidencyIndex {
+    /// target key -> the lane identifiers (`"{roadmap}/lane-{lane}.json"`)
+    /// that list it, in first-discovered order. Absence from this map means
+    /// "resident in no lane", not "unknown" — every discovered lane record
+    /// (parse failures aside; see [`build_lane_residency_index`]'s returned
+    /// diagnostics) has already been folded in.
+    by_target: HashMap<String, Vec<String>>,
+}
+
+impl LaneResidencyIndex {
+    /// The lane identifiers (`"{roadmap}/lane-{lane}.json"`) that list
+    /// `target_key` (`"{repo}:{id}"`) among their `blocks[]`. Empty when the
+    /// target is resident in no discovered lane.
+    pub fn lanes_for(&self, target_key: &str) -> &[String] {
+        self.by_target
+            .get(target_key)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// `true` iff `target_key` appears in at least one discovered lane.
+    pub fn is_resident(&self, target_key: &str) -> bool {
+        !self.lanes_for(target_key).is_empty()
+    }
+}
+
+/// Builds a [`LaneResidencyIndex`] once per run by walking every lane record
+/// `discover_lane_files` finds under `root`. Callers must build this ONCE
+/// and reuse it across every edge in a report — `discover_lane_files` walks
+/// the whole roadmaps tree and must not be called per edge.
+///
+/// Returns the index plus every diagnostic `discover_lane_files` produced
+/// (e.g. a malformed `lane-<name>.json` record, or a roadmap slug claimed by
+/// both the current and legacy layout). Diagnostics are returned, never
+/// swallowed here — a record that fails to parse must not silently make its
+/// blocks look non-resident; the caller is responsible for surfacing these
+/// alongside the report rather than dropping them.
+pub fn build_lane_residency_index(
+    root: &std::path::Path,
+) -> (LaneResidencyIndex, Vec<crate::Diagnostic>) {
+    let (lane_files, diags) = crate::brain::lane_segments::discover_lane_files(root);
+    let mut by_target: HashMap<String, Vec<String>> = HashMap::new();
+    for lane_file in &lane_files {
+        let lane_id = format!("{}/lane-{}.json", lane_file.roadmap, lane_file.lane);
+        for block in &lane_file.blocks {
+            let key = format!("{}:{}", block.repo, block.id);
+            by_target.entry(key).or_default().push(lane_id.clone());
+        }
+    }
+    (LaneResidencyIndex { by_target }, diags)
+}
+
+// ---------------------------------------------------------------------------
+// `--would-block` report (MV.16.A, task 3) — the honest blast radius, with
+// enforcement off. One row per `carryover[].blocks[]` edge in the swept
+// corpus, built purely from [`classify_blocked_by_edge`] (task 1) and
+// [`LaneResidencyIndex`] (task 2) — no resolution logic is re-derived here.
+// This report writes nothing; it only reads already-evaluated state.
+// ---------------------------------------------------------------------------
+
+/// One row of the `--would-block` report: one `carryover[].blocks[]` edge,
+/// fully classified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WouldBlockRow {
+    /// The owning entry, `"{repo}:{slug}"`.
+    pub owner: String,
+    pub edge_type: BlockedByEdgeType,
+    /// The resolved target key (`"{repo}:{id}"`), or `None` for a
+    /// non-`Block` edge, which has no node target.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_key: Option<String>,
+    /// The target's live authored status, or `None` when the edge has no
+    /// node target, or the target resolved but carries no status value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_status: Option<String>,
+    /// `true` iff `target_key` appears in at least one lane discovered by
+    /// [`build_lane_residency_index`]. Always `false` for a non-`Block`
+    /// edge (no target to look up). Independent of `verdict` — an `open`
+    /// target in no lane and an `open` target someone is actively driving
+    /// are both `Blocking`; this field is what tells them apart.
+    pub lane_resident: bool,
+    /// The lane identifiers (`"{roadmap}/lane-{lane}.json"`) that list the
+    /// target, if any. Empty when `lane_resident` is `false`.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub lanes: Vec<String>,
+    pub verdict: EdgeBlockVerdict,
+}
+
+/// Summary counts over a [`WouldBlockReport`]'s rows: the headline blocking
+/// count plus a breakdown of every non-blocking reason, so a reader can see
+/// at a glance how many edges were excluded and why — never just a bare
+/// total that hides the classification.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WouldBlockSummary {
+    pub total_edges: usize,
+    pub blocking: usize,
+    pub closed: usize,
+    pub wontfix: usize,
+    pub unresolvable: usize,
+    pub no_node_target: usize,
+}
+
+/// The full `--would-block` report: every row plus its summary. Produced by
+/// [`compute_would_block_report`]; rendered by [`render_would_block_table`]
+/// (human) and [`render_would_block_json`] (machine) — both pure functions
+/// over this type, so the two renderers can never independently derive a
+/// different verdict for the same row.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WouldBlockReport {
+    pub rows: Vec<WouldBlockRow>,
+    pub summary: WouldBlockSummary,
+}
+
+/// Walks every `carryover[].blocks[]` edge across `entries` and classifies
+/// each one via [`classify_blocked_by_edge`] and `lane_index`, producing one
+/// [`WouldBlockRow`] per edge plus the [`WouldBlockSummary`] breakdown.
+///
+/// Pure and read-only: this function opens no file handle and writes
+/// nothing — it only reads `entries` (already evaluated by
+/// [`evaluate_carryover`]), `block_status`, and `lane_index` (built once by
+/// [`build_lane_residency_index`] and reused, per that function's own
+/// contract, across the whole run rather than rebuilt per edge).
+///
+/// Row order matches `entries`' order, and within an entry, `entry.blocks`'
+/// order — deterministic given deterministic inputs.
+pub fn compute_would_block_report(
+    entries: &[CarryoverVerdict],
+    block_status: &HashMap<String, Option<String>>,
+    lane_index: &LaneResidencyIndex,
+) -> WouldBlockReport {
+    let mut rows = Vec::new();
+    let mut summary = WouldBlockSummary::default();
+
+    for entry in entries {
+        let owner = format!("{}:{}", entry.repo, entry.slug);
+        for edge in &entry.blocks {
+            let classification = classify_blocked_by_edge(&entry.repo, edge, block_status);
+
+            summary.total_edges += 1;
+            match classification.verdict {
+                EdgeBlockVerdict::Blocking => summary.blocking += 1,
+                EdgeBlockVerdict::Closed => summary.closed += 1,
+                EdgeBlockVerdict::Wontfix => summary.wontfix += 1,
+                EdgeBlockVerdict::Unresolvable => summary.unresolvable += 1,
+                EdgeBlockVerdict::NoNodeTarget => summary.no_node_target += 1,
+            }
+
+            let lanes = classification
+                .target_key
+                .as_deref()
+                .map(|key| lane_index.lanes_for(key).to_vec())
+                .unwrap_or_default();
+            let lane_resident = !lanes.is_empty();
+
+            rows.push(WouldBlockRow {
+                owner: owner.clone(),
+                edge_type: classification.edge_type,
+                target_key: classification.target_key,
+                target_status: classification.target_status,
+                lane_resident,
+                lanes,
+                verdict: classification.verdict,
+            });
+        }
+    }
+
+    WouldBlockReport { rows, summary }
+}
+
+/// `EdgeBlockVerdict` as the short label used by both renderers.
+fn would_block_verdict_label(verdict: EdgeBlockVerdict) -> &'static str {
+    match verdict {
+        EdgeBlockVerdict::Blocking => "blocking",
+        EdgeBlockVerdict::Closed => "closed",
+        EdgeBlockVerdict::Wontfix => "wontfix",
+        EdgeBlockVerdict::Unresolvable => "unresolvable",
+        EdgeBlockVerdict::NoNodeTarget => "no-node-target",
+    }
+}
+
+/// `BlockedByEdgeType` as the short label used by both renderers.
+fn would_block_edge_type_label(edge_type: BlockedByEdgeType) -> &'static str {
+    match edge_type {
+        BlockedByEdgeType::Block => "block",
+        BlockedByEdgeType::External => "external",
+        BlockedByEdgeType::Operator => "operator",
+        BlockedByEdgeType::Approval => "approval",
+    }
+}
+
+/// Renders a [`WouldBlockReport`] as a human-readable table plus a summary
+/// footer — one line per row, in the report's row order, followed by the
+/// blocking headline and the non-blocking breakdown. Pure: reads only
+/// `report`, prints nothing itself.
+pub fn render_would_block_table(report: &WouldBlockReport) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "{:<28} {:<10} {:<28} {:<12} {:<7} {:<14} lanes",
+        "owner", "edge-type", "target", "status", "lane?", "verdict"
+    ));
+
+    for row in &report.rows {
+        lines.push(format!(
+            "{:<28} {:<10} {:<28} {:<12} {:<7} {:<14} {}",
+            row.owner,
+            would_block_edge_type_label(row.edge_type),
+            row.target_key.as_deref().unwrap_or("-"),
+            row.target_status.as_deref().unwrap_or("-"),
+            row.lane_resident,
+            would_block_verdict_label(row.verdict),
+            if row.lanes.is_empty() {
+                "-".to_string()
+            } else {
+                row.lanes.join(",")
+            }
+        ));
+    }
+
+    lines.push(String::new());
+    lines.push(format!(
+        "total: {}  blocking: {}  closed: {}  wontfix: {}  unresolvable: {}  no-node-target: {}",
+        report.summary.total_edges,
+        report.summary.blocking,
+        report.summary.closed,
+        report.summary.wontfix,
+        report.summary.unresolvable,
+        report.summary.no_node_target,
+    ));
+
+    lines.join("\n")
+}
+
+/// Renders a [`WouldBlockReport`] as pretty-printed JSON — the same rows and
+/// the same verdicts as [`render_would_block_table`], serialized directly
+/// from `report` rather than re-derived, so the two renderers can never
+/// disagree.
+pub fn render_would_block_json(report: &WouldBlockReport) -> serde_json::Result<String> {
+    serde_json::to_string_pretty(report)
 }
 
 /// `TriageLane` sort rank: BLOCKING first, then HOT, AGING, STANDING.
@@ -5659,6 +6072,509 @@ mod tests {
             id: id.to_string(),
             what: None,
         })
+    }
+
+    // -- classify_blocked_by_edge (MV.16.A, task 1) --------------------------
+
+    #[test]
+    fn classify_blocked_by_edge_open_target_is_blocking() {
+        let block_status = HashMap::from([("mev:MV.1.A".to_string(), Some("open".to_string()))]);
+        let edge = block_edge("mev", "MV.1.A");
+        let c = classify_blocked_by_edge("mev", &edge, &block_status);
+        assert_eq!(c.edge_type, BlockedByEdgeType::Block);
+        assert_eq!(c.target_key.as_deref(), Some("mev:MV.1.A"));
+        assert_eq!(c.target_status.as_deref(), Some("open"));
+        assert_eq!(c.verdict, EdgeBlockVerdict::Blocking);
+        assert!(c.is_blocking());
+    }
+
+    #[test]
+    fn classify_blocked_by_edge_closed_target_is_not_blocking() {
+        let block_status = HashMap::from([("mev:MV.1.A".to_string(), Some("closed".to_string()))]);
+        let edge = block_edge("mev", "MV.1.A");
+        let c = classify_blocked_by_edge("mev", &edge, &block_status);
+        assert_eq!(c.verdict, EdgeBlockVerdict::Closed);
+        assert!(!c.is_blocking());
+    }
+
+    #[test]
+    fn classify_blocked_by_edge_wontfix_target_is_not_blocking() {
+        let block_status = HashMap::from([("mev:JF.2.A".to_string(), Some("wontfix".to_string()))]);
+        let edge = block_edge("mev", "JF.2.A");
+        let c = classify_blocked_by_edge("mev", &edge, &block_status);
+        assert_eq!(c.verdict, EdgeBlockVerdict::Wontfix);
+        assert!(!c.is_blocking());
+    }
+
+    #[test]
+    fn classify_blocked_by_edge_unresolvable_target_is_not_blocking() {
+        let edge = block_edge("mev", "MV.99.Z");
+        let c = classify_blocked_by_edge("mev", &edge, &HashMap::new());
+        assert_eq!(c.target_key.as_deref(), Some("mev:MV.99.Z"));
+        assert_eq!(c.target_status, None);
+        assert_eq!(c.verdict, EdgeBlockVerdict::Unresolvable);
+        assert!(!c.is_blocking());
+    }
+
+    #[test]
+    fn classify_blocked_by_edge_external_has_no_node_target() {
+        let edge = BlockedBy::External(ExternalDep {
+            what: "waiting on vendor API".to_string(),
+        });
+        let c = classify_blocked_by_edge("mev", &edge, &HashMap::new());
+        assert_eq!(c.edge_type, BlockedByEdgeType::External);
+        assert_eq!(c.target_key, None);
+        assert_eq!(c.target_status, None);
+        assert_eq!(c.verdict, EdgeBlockVerdict::NoNodeTarget);
+        assert!(!c.is_blocking());
+    }
+
+    #[test]
+    fn classify_blocked_by_edge_operator_has_no_node_target() {
+        let edge = BlockedBy::Operator(OperatorDep {
+            slug: "some-session".to_string(),
+            exit: "some/artifact.md".to_string(),
+            start: "/begin-session some-session".to_string(),
+            what: None,
+        });
+        let c = classify_blocked_by_edge("mev", &edge, &HashMap::new());
+        assert_eq!(c.edge_type, BlockedByEdgeType::Operator);
+        assert_eq!(c.target_key, None);
+        assert_eq!(c.verdict, EdgeBlockVerdict::NoNodeTarget);
+        assert!(!c.is_blocking());
+    }
+
+    #[test]
+    fn classify_blocked_by_edge_approval_has_no_node_target() {
+        let edge = BlockedBy::Approval(ApprovalDep {
+            slug: "some-approval".to_string(),
+            what: "ship the thing".to_string(),
+            digest: "deadbeef".to_string(),
+        });
+        let c = classify_blocked_by_edge("mev", &edge, &HashMap::new());
+        assert_eq!(c.edge_type, BlockedByEdgeType::Approval);
+        assert_eq!(c.target_key, None);
+        assert_eq!(c.verdict, EdgeBlockVerdict::NoNodeTarget);
+        assert!(!c.is_blocking());
+    }
+
+    #[test]
+    fn classify_blocked_by_edge_empty_repo_falls_back_to_entry_repo() {
+        let block_status = HashMap::from([("mev:MV.1.A".to_string(), Some("open".to_string()))]);
+        let edge = block_edge("", "MV.1.A");
+        let c = classify_blocked_by_edge("mev", &edge, &block_status);
+        assert_eq!(c.target_key.as_deref(), Some("mev:MV.1.A"));
+        assert_eq!(c.verdict, EdgeBlockVerdict::Blocking);
+    }
+
+    // -- unmet_carryover_block_keys (delegates to classify_blocked_by_edge) --
+
+    #[test]
+    fn unmet_carryover_block_keys_treats_wontfix_as_unmet() {
+        let entry = ranking_verdict("mev", "gated", None, vec![block_edge("mev", "JF.2.A")]);
+        let block_status = HashMap::from([("mev:JF.2.A".to_string(), Some("wontfix".to_string()))]);
+        assert_eq!(
+            unmet_carryover_block_keys(&entry, &block_status),
+            vec!["mev:JF.2.A".to_string()]
+        );
+    }
+
+    #[test]
+    fn unmet_carryover_block_keys_treats_closed_as_met() {
+        let entry = ranking_verdict("mev", "gated", None, vec![block_edge("mev", "MV.1.A")]);
+        let block_status = HashMap::from([("mev:MV.1.A".to_string(), Some("closed".to_string()))]);
+        assert!(unmet_carryover_block_keys(&entry, &block_status).is_empty());
+    }
+
+    #[test]
+    fn unmet_carryover_block_keys_treats_unresolvable_as_unmet() {
+        let entry = ranking_verdict("mev", "gated", None, vec![block_edge("mev", "MV.99.Z")]);
+        assert_eq!(
+            unmet_carryover_block_keys(&entry, &HashMap::new()),
+            vec!["mev:MV.99.Z".to_string()]
+        );
+    }
+
+    // -- build_lane_residency_index / LaneResidencyIndex (MV.16.A, task 2) --
+
+    fn write_fixture(dir: &std::path::Path, rel: &str, content: &str) {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn lane_json(lane: &str, roadmap: &str, blocks: &[(&str, &str)]) -> String {
+        // blocks: (repo, id)
+        let blocks_json: Vec<String> = blocks
+            .iter()
+            .map(|(repo, id)| {
+                format!(r#"{{"id":"{id}","origin_roadmap":"{roadmap}","repo":"{repo}"}}"#)
+            })
+            .collect();
+        format!(
+            r#"{{"lane":"{lane}","roadmap":"{roadmap}","blocks":[{}]}}"#,
+            blocks_json.join(",")
+        )
+    }
+
+    #[test]
+    fn lane_residency_target_present_in_one_lane() {
+        let dir = crate::testsupport::unique_temp_dir("mev-carryover-lane-residency-one");
+        write_fixture(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &lane_json("substrate", "alpha", &[("mev", "MV.1.A")]),
+        );
+
+        let (index, diags) = build_lane_residency_index(&dir);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        assert!(index.is_resident("mev:MV.1.A"));
+        assert_eq!(
+            index.lanes_for("mev:MV.1.A"),
+            &["alpha/lane-substrate.json".to_string()]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lane_residency_target_present_in_two_lanes() {
+        let dir = crate::testsupport::unique_temp_dir("mev-carryover-lane-residency-two");
+        write_fixture(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &lane_json("substrate", "alpha", &[("mev", "MV.1.A")]),
+        );
+        write_fixture(
+            &dir,
+            "planning/roadmaps/beta/lane-web.json",
+            &lane_json("web", "beta", &[("mev", "MV.1.A")]),
+        );
+
+        let (index, diags) = build_lane_residency_index(&dir);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        let lanes = index.lanes_for("mev:MV.1.A");
+        assert_eq!(lanes.len(), 2, "expected 2 lanes, got {lanes:?}");
+        assert!(lanes.contains(&"alpha/lane-substrate.json".to_string()));
+        assert!(lanes.contains(&"beta/lane-web.json".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lane_residency_target_in_no_lane() {
+        let dir = crate::testsupport::unique_temp_dir("mev-carryover-lane-residency-none");
+        write_fixture(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &lane_json("substrate", "alpha", &[("mev", "MV.1.A")]),
+        );
+
+        let (index, diags) = build_lane_residency_index(&dir);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        assert!(!index.is_resident("mev:MV.2.B"));
+        assert!(index.lanes_for("mev:MV.2.B").is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lane_residency_id_match_but_repo_mismatch_is_not_resident() {
+        let dir = crate::testsupport::unique_temp_dir("mev-carryover-lane-residency-repo-mismatch");
+        write_fixture(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &lane_json("substrate", "alpha", &[("mev", "MV.1.A")]),
+        );
+
+        let (index, diags) = build_lane_residency_index(&dir);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        // Same id, different repo — must NOT be resident.
+        assert!(!index.is_resident("base-template:MV.1.A"));
+        assert!(index.is_resident("mev:MV.1.A"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- compute_would_block_report / renderers (MV.16.A, task 3) -----------
+
+    fn would_block_fixture_entries() -> Vec<CarryoverVerdict> {
+        vec![
+            ranking_verdict(
+                "mev",
+                "blocking-entry",
+                None,
+                vec![block_edge("mev", "MV.1.A")],
+            ),
+            ranking_verdict(
+                "mev",
+                "closed-entry",
+                None,
+                vec![block_edge("mev", "MV.2.B")],
+            ),
+            ranking_verdict(
+                "mev",
+                "wontfix-entry",
+                None,
+                vec![block_edge("mev", "JF.2.A")],
+            ),
+            ranking_verdict(
+                "mev",
+                "unresolvable-entry",
+                None,
+                vec![block_edge("mev", "MV.99.Z")],
+            ),
+            ranking_verdict(
+                "mev",
+                "external-entry",
+                None,
+                vec![BlockedBy::External(ExternalDep {
+                    what: "waiting on vendor API".to_string(),
+                })],
+            ),
+        ]
+    }
+
+    fn would_block_fixture_status() -> HashMap<String, Option<String>> {
+        HashMap::from([
+            ("mev:MV.1.A".to_string(), Some("open".to_string())),
+            ("mev:MV.2.B".to_string(), Some("closed".to_string())),
+            ("mev:JF.2.A".to_string(), Some("wontfix".to_string())),
+        ])
+    }
+
+    #[test]
+    fn compute_would_block_report_summary_counts_one_of_each_verdict() {
+        let entries = would_block_fixture_entries();
+        let status = would_block_fixture_status();
+        let lane_index = LaneResidencyIndex::default();
+
+        let report = compute_would_block_report(&entries, &status, &lane_index);
+
+        assert_eq!(report.summary.total_edges, 5);
+        assert_eq!(report.summary.blocking, 1);
+        assert_eq!(report.summary.closed, 1);
+        assert_eq!(report.summary.wontfix, 1);
+        assert_eq!(report.summary.unresolvable, 1);
+        assert_eq!(report.summary.no_node_target, 1);
+        assert_eq!(report.rows.len(), 5);
+    }
+
+    #[test]
+    fn compute_would_block_report_row_carries_owner_and_lane_residency() {
+        let entries = vec![ranking_verdict(
+            "mev",
+            "blocking-entry",
+            None,
+            vec![block_edge("mev", "MV.1.A")],
+        )];
+        let status = HashMap::from([("mev:MV.1.A".to_string(), Some("open".to_string()))]);
+        let mut by_target: HashMap<String, Vec<String>> = HashMap::new();
+        by_target.insert(
+            "mev:MV.1.A".to_string(),
+            vec!["alpha/lane-substrate.json".to_string()],
+        );
+        let lane_index = LaneResidencyIndex { by_target };
+
+        let report = compute_would_block_report(&entries, &status, &lane_index);
+
+        assert_eq!(report.rows.len(), 1);
+        let row = &report.rows[0];
+        assert_eq!(row.owner, "mev:blocking-entry");
+        assert_eq!(row.edge_type, BlockedByEdgeType::Block);
+        assert_eq!(row.target_key.as_deref(), Some("mev:MV.1.A"));
+        assert_eq!(row.target_status.as_deref(), Some("open"));
+        assert!(row.lane_resident);
+        assert_eq!(row.lanes, vec!["alpha/lane-substrate.json".to_string()]);
+        assert_eq!(row.verdict, EdgeBlockVerdict::Blocking);
+    }
+
+    #[test]
+    fn compute_would_block_report_open_target_in_no_lane_is_blocking_but_not_resident() {
+        let entries = vec![ranking_verdict(
+            "mev",
+            "blocking-entry",
+            None,
+            vec![block_edge("mev", "MV.1.A")],
+        )];
+        let status = HashMap::from([("mev:MV.1.A".to_string(), Some("open".to_string()))]);
+        let lane_index = LaneResidencyIndex::default();
+
+        let report = compute_would_block_report(&entries, &status, &lane_index);
+
+        let row = &report.rows[0];
+        assert_eq!(row.verdict, EdgeBlockVerdict::Blocking);
+        assert!(!row.lane_resident);
+        assert!(row.lanes.is_empty());
+    }
+
+    #[test]
+    fn compute_would_block_report_non_block_edges_have_no_target_and_are_not_resident() {
+        let entries = vec![ranking_verdict(
+            "mev",
+            "external-entry",
+            None,
+            vec![BlockedBy::External(ExternalDep {
+                what: "waiting on vendor API".to_string(),
+            })],
+        )];
+        let lane_index = LaneResidencyIndex::default();
+
+        let report = compute_would_block_report(&entries, &HashMap::new(), &lane_index);
+
+        let row = &report.rows[0];
+        assert_eq!(row.edge_type, BlockedByEdgeType::External);
+        assert_eq!(row.target_key, None);
+        assert_eq!(row.target_status, None);
+        assert!(!row.lane_resident);
+        assert_eq!(row.verdict, EdgeBlockVerdict::NoNodeTarget);
+    }
+
+    #[test]
+    fn compute_would_block_report_writes_nothing() {
+        let dir = crate::testsupport::unique_temp_dir("mev-carryover-would-block-no-write");
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("untouched.txt");
+        std::fs::write(&marker, "before").unwrap();
+        let before = std::fs::read_to_string(&marker).unwrap();
+
+        let entries = would_block_fixture_entries();
+        let status = would_block_fixture_status();
+        let (lane_index, _diags) = build_lane_residency_index(&dir);
+        let report = compute_would_block_report(&entries, &status, &lane_index);
+        let _ = render_would_block_table(&report);
+        let _ = render_would_block_json(&report).unwrap();
+
+        let after = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(before, after, "compute/render must never write to disk");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn would_block_json_and_table_renderers_agree_row_for_row() {
+        let entries = would_block_fixture_entries();
+        let status = would_block_fixture_status();
+        let lane_index = LaneResidencyIndex::default();
+        let report = compute_would_block_report(&entries, &status, &lane_index);
+
+        let json = render_would_block_json(&report).unwrap();
+        let table = render_would_block_table(&report);
+
+        let parsed: WouldBlockReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, report);
+
+        for row in &report.rows {
+            let target = row.target_key.as_deref().unwrap_or("-");
+            assert!(
+                table.contains(&row.owner) && table.contains(target),
+                "table missing row for {} -> {}",
+                row.owner,
+                target
+            );
+            assert!(
+                table.contains(would_block_verdict_label(row.verdict)),
+                "table missing verdict label {:?}",
+                row.verdict
+            );
+        }
+
+        assert!(table.contains(&format!("total: {}", report.summary.total_edges)));
+    }
+
+    // -- differential test: --would-block vs unmet_carryover_block_keys (MV.16.A,
+    // task 5) -----------------------------------------------------------------
+    //
+    // The load-bearing test named in this block's `notes`: `unmet_carryover_block_keys`
+    // and `compute_would_block_report`'s per-edge verdict must never resolve a `Block`
+    // edge's target differently, since both delegate to `classify_blocked_by_edge`
+    // (task 1's doc comment on `unmet_carryover_block_keys` makes this contract
+    // explicit). The two functions DO deliberately diverge on what counts as
+    // "blocking": the legacy predicate treats `Wontfix` and `Unresolvable` targets as
+    // unmet (it predates the wontfix/unresolvable distinction and has other callers —
+    // `rank_carryover`, the triage lanes — that must keep seeing them as unmet), while
+    // `--would-block` explicitly does not count either toward its blocking headline.
+    // This test asserts BOTH: agreement everywhere else, and the two carve-outs named
+    // by identity rather than tolerated as an unexplained difference.
+    #[test]
+    fn would_block_blocking_verdict_agrees_with_unmet_carryover_block_keys_except_wontfix_and_unresolvable()
+     {
+        let entries = vec![
+            ranking_verdict("mev", "open-entry", None, vec![block_edge("mev", "MV.1.A")]),
+            ranking_verdict(
+                "mev",
+                "closed-entry",
+                None,
+                vec![block_edge("mev", "MV.2.B")],
+            ),
+            ranking_verdict(
+                "mev",
+                "wontfix-entry",
+                None,
+                vec![block_edge("mev", "JF.2.A")],
+            ),
+            ranking_verdict(
+                "mev",
+                "unresolvable-entry",
+                None,
+                vec![block_edge("mev", "MV.99.Z")],
+            ),
+        ];
+        let status = HashMap::from([
+            ("mev:MV.1.A".to_string(), Some("open".to_string())),
+            ("mev:MV.2.B".to_string(), Some("closed".to_string())),
+            ("mev:JF.2.A".to_string(), Some("wontfix".to_string())),
+        ]);
+        let lane_index = LaneResidencyIndex::default();
+        let report = compute_would_block_report(&entries, &status, &lane_index);
+
+        assert_eq!(entries.len(), report.rows.len());
+        let mut carved_out = Vec::new();
+        for (entry, row) in entries.iter().zip(report.rows.iter()) {
+            let key = row
+                .target_key
+                .clone()
+                .expect("every entry here carries exactly one Block edge");
+            let legacy_unmet = unmet_carryover_block_keys(entry, &status).contains(&key);
+
+            match row.verdict {
+                EdgeBlockVerdict::Wontfix | EdgeBlockVerdict::Unresolvable => {
+                    // Deliberate carve-out: the legacy predicate still treats this
+                    // target as unmet (it must, for `rank_carryover`'s existing
+                    // contract), but `--would-block` does not count it as blocking.
+                    assert!(
+                        legacy_unmet,
+                        "legacy predicate should still treat {key} as unmet (verdict {:?})",
+                        row.verdict
+                    );
+                    assert!(
+                        row.verdict != EdgeBlockVerdict::Blocking,
+                        "--would-block must not count a {:?} target as blocking",
+                        row.verdict
+                    );
+                    carved_out.push(row.verdict);
+                }
+                _ => {
+                    assert_eq!(
+                        legacy_unmet,
+                        row.verdict == EdgeBlockVerdict::Blocking,
+                        "divergence on {key}: legacy unmet={legacy_unmet}, \
+                         would-block is_blocking={}, verdict={:?}",
+                        row.verdict == EdgeBlockVerdict::Blocking,
+                        row.verdict
+                    );
+                }
+            }
+        }
+
+        assert!(
+            carved_out.contains(&EdgeBlockVerdict::Wontfix),
+            "expected the wontfix row to hit the carve-out branch"
+        );
+        assert!(
+            carved_out.contains(&EdgeBlockVerdict::Unresolvable),
+            "expected the unresolvable row to hit the carve-out branch"
+        );
     }
 
     #[test]
