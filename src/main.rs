@@ -817,11 +817,12 @@ enum Command {
         /// is NotEvaluable for lack of `--allow-exec` is never disposal-eligible.
         #[arg(long)]
         dispose: bool,
-        /// Compute and print the identical disposal plan `--dispose` would
-        /// act on, without writing either `state.json` or
+        /// Compute and print the identical plan `--dispose` or `--backfill`
+        /// would act on, without writing either `state.json` or
         /// `carryover-archive.jsonl`. Only meaningful together with
-        /// `--dispose`; passed alone, `mev carryover` reports the misuse and
-        /// exits non-zero rather than silently ignoring it.
+        /// `--dispose` or `--backfill`; passed alone, `mev carryover`
+        /// reports the misuse and exits non-zero rather than silently
+        /// ignoring it.
         #[arg(long)]
         dry_run: bool,
         /// Report every `carryover[].blocks[]` edge's honest blast radius —
@@ -833,6 +834,18 @@ enum Command {
         /// cap; this flag only ever previews.
         #[arg(long)]
         would_block: bool,
+        /// One-time, idempotent reconstruction of removed `carryover[]`
+        /// entries from git history into each owning repo's
+        /// `planning/carryover-archive.jsonl`, flagged `reconstructed: true`
+        /// (`MV.16.B`). Walks the commits that touched each discovered
+        /// `state.json`; a `slug` present in a commit's parent and absent in
+        /// the child is one removal, archived verbatim from the parent
+        /// blob. A second run over a populated archive refuses and exits
+        /// non-zero rather than appending duplicates. Independent of
+        /// `--allow-exec`, and never touches `state.json` — the entries are
+        /// already gone from it; this pass is archive-write-only.
+        #[arg(long)]
+        backfill: bool,
     },
     /// Scan the corpus for mechanically-detectable `carryover[]` findings instead of
     /// having an agent notice them by hand (`MV.ticket.graph-derived-carryover-findings`).
@@ -1685,6 +1698,62 @@ fn run_carryover_dispose(
     println!("{}", render_dispose_summary(&dispose_report));
 
     if dispose_report.succeeded() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Drive `mev carryover --backfill` (and `--backfill --dry-run`, same code
+/// path — see [`mev::brain::carryover::run_backfill`]'s own `dry_run`
+/// parameter): compute the history-walk plan (task 1), print a preamble
+/// naming the removals found, run (or simulate) the write (task 3), then
+/// print the per-repo summary and commit pathspec.
+///
+/// A collision against a populated archive (`(slug, disposed_at)` already
+/// present) aborts the ENTIRE run before any byte is written anywhere and is
+/// reported as a plain error, not folded into the summary — mirroring
+/// [`mev::brain::carryover::BackfillCollision`]'s own "refuse before
+/// touching anything" contract.
+fn run_carryover_backfill(
+    root: &std::path::Path,
+    repo_filter: Option<&str>,
+    dry_run: bool,
+) -> ExitCode {
+    use mev::brain::carryover::{
+        enumerate_historical_removals, render_backfill_summary, run_backfill,
+    };
+
+    let plan = match enumerate_historical_removals(root, repo_filter) {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!(
+        "backfill: found {} historical removal(s) across {} repo(s)\n",
+        plan.removals.len(),
+        {
+            let mut repos: Vec<&str> = plan.removals.iter().map(|r| r.repo.as_str()).collect();
+            repos.sort_unstable();
+            repos.dedup();
+            repos.len()
+        }
+    );
+
+    let report = match run_backfill(&plan, dry_run) {
+        Ok(r) => r,
+        Err(collision) => {
+            eprintln!("error: {collision}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("{}", render_backfill_summary(&report));
+
+    if report.succeeded() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -3061,6 +3130,7 @@ fn main() -> ExitCode {
             dispose,
             dry_run,
             would_block,
+            backfill,
         } => {
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,
@@ -3069,20 +3139,28 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            if dry_run && !dispose {
+            if dry_run && !dispose && !backfill {
                 eprintln!(
-                    "error: --dry-run has no effect without --dispose; pass --dispose --dry-run"
+                    "error: --dry-run has no effect without --dispose or --backfill; pass --dispose --dry-run or --backfill --dry-run"
                 );
                 return ExitCode::FAILURE;
             }
-            if would_block && (dispose || dry_run || audit) {
+            if backfill && dispose {
                 eprintln!(
-                    "error: --would-block cannot be combined with --dispose, --dry-run, or --audit; pass it alone (optionally with --repo/--json)"
+                    "error: --backfill cannot be combined with --dispose; they are different writers over the same files with no defined ordering — run them separately"
+                );
+                return ExitCode::FAILURE;
+            }
+            if would_block && (dispose || dry_run || audit || backfill) {
+                eprintln!(
+                    "error: --would-block cannot be combined with --dispose, --dry-run, --backfill, or --audit; pass it alone (optionally with --repo/--json)"
                 );
                 return ExitCode::FAILURE;
             }
             if would_block {
                 run_carryover_would_block(&root, repo.as_deref(), allow_exec, json || cli.json)
+            } else if backfill {
+                run_carryover_backfill(&root, repo.as_deref(), dry_run)
             } else if dispose {
                 run_carryover_dispose(&root, repo.as_deref(), allow_exec, dry_run)
             } else if audit {

@@ -1643,6 +1643,741 @@ pub fn render_dispose_summary(report: &DisposeRunReport) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Historical removal walk — `mev carryover --backfill` (`MV.16.B` task 1)
+// ---------------------------------------------------------------------------
+//
+// A one-time, read-only reconstruction pass over git history: for every
+// `planning/state.json` this brain corpus discovers, walk the commits that
+// touched it and recover every `carryover[]` entry a commit deleted, taken
+// verbatim from the removing commit's PARENT. Nothing here writes anything —
+// task 2 (reason derivation + archive row construction) and task 3 (the
+// refusal-guarded writer) build on this plan.
+
+/// One historical `carryover[]` removal recovered from git history.
+///
+/// `entry` is the removed entry exactly as it appeared in the removing
+/// commit's PARENT — never re-synthesized from the fields this pass happens
+/// to care about, so an unmodeled key (captured in [`Carryover::extra`])
+/// survives unchanged into task 2's archive row.
+#[derive(Debug, Clone)]
+pub struct HistoricalRemoval {
+    /// Owning repo slug (the [`StateSource::repo_slug`] of the state file
+    /// the removal was found in).
+    pub repo: String,
+    /// Absolute path of the repo's `planning/carryover-archive.jsonl` — the
+    /// file task 3 appends this removal's archive row to.
+    pub archive_path: PathBuf,
+    /// The removed entry, verbatim, as loaded from the removing commit's
+    /// parent revision.
+    pub entry: Carryover,
+    /// Short (`git log --format=%h`) sha of the commit that removed the
+    /// entry.
+    pub commit_sha: String,
+    /// Subject line of the removing commit — task 2 derives the archive
+    /// row's `DisposalReason` from this text.
+    pub commit_subject: String,
+    /// Committer date of the removing commit, `YYYY-MM-DD`.
+    pub commit_date: String,
+}
+
+/// One diagnostic surfaced by the history walk without aborting it — either
+/// a whole state file git could not be walked at all, or a single historical
+/// revision of one that failed to parse. Never a panic: constraint from task
+/// 1's own spec ("a state file that fails to parse at some historical
+/// revision is a diagnostic, not a panic").
+#[derive(Debug, Clone)]
+pub struct HistoryWalkDiagnostic {
+    /// Owning repo slug the diagnostic is reported against.
+    pub repo: String,
+    /// Human-readable message — the git error or JSON parse error, verbatim.
+    pub message: String,
+}
+
+/// The read-only result of `mev carryover --backfill`'s history walk: every
+/// recovered [`HistoricalRemoval`], plus every [`HistoryWalkDiagnostic`]
+/// raised along the way. `removals.len()` IS the re-derived removal count —
+/// `sequence.md` SQ-05's carried-over figure of 311 is never asserted
+/// against; this walk's own count is the number.
+#[derive(Debug, Clone, Default)]
+pub struct HistoryWalkPlan {
+    pub removals: Vec<HistoricalRemoval>,
+    pub diagnostics: Vec<HistoryWalkDiagnostic>,
+}
+
+/// Read one revision of one file as a `carryover[]` list, distinguishing
+/// "this revision doesn't have the file" (not an error — a root commit's
+/// `<sha>~1`, or the commit that introduced the file) from "the file is
+/// there but doesn't parse" (a genuine diagnostic).
+///
+/// `spec` is a `git show`-style revision spec, `<rev>:<path>`.
+fn read_carryover_at_revision(
+    git_root: &Path,
+    rev: &str,
+    rel_path: &str,
+) -> Result<Option<Vec<Carryover>>, String> {
+    let spec = format!("{rev}:{rel_path}");
+    let output = crate::shared::git_command()
+        .arg("-C")
+        .arg(git_root)
+        .arg("show")
+        .arg(&spec)
+        .output()
+        .map_err(|e| format!("failed to run `git show {spec}`: {e}"))?;
+
+    if !output.status.success() {
+        // Not present at this point in history — a root commit's `~1`, or
+        // the commit that introduced the path. Nothing to diff against;
+        // this is not a diagnostic.
+        return Ok(None);
+    }
+
+    let content = String::from_utf8_lossy(&output.stdout);
+    let file: StateFile = serde_json::from_str(&content)
+        .map_err(|e| format!("`git show {spec}` did not parse as state.json: {e}"))?;
+    Ok(Some(file.carryover))
+}
+
+/// Walk one state file's full history and recover every `carryover[]`
+/// removal it shows, per [`enumerate_historical_removals`]'s contract.
+///
+/// `git_root` must already be canonicalized (the caller resolves it once for
+/// every source it walks). `source.abs_path` is resolved here because it may
+/// reach the file through a `planning/` symlink (D46) — `git log`/`git show`
+/// need the real, repo-relative path, not the symlinked one, or they see no
+/// history at all (measured: `git log -- <repo>/planning/state.json` returns
+/// nothing while `git log -- <repo>/../_planning/<slug>/state.json` returns
+/// the real log).
+fn walk_removals_for_state_file(
+    git_root: &Path,
+    source: &StateSource,
+) -> (Vec<HistoricalRemoval>, Vec<HistoryWalkDiagnostic>) {
+    let mut removals = Vec::new();
+    let mut diagnostics = Vec::new();
+
+    let real_path = match source.abs_path.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            diagnostics.push(HistoryWalkDiagnostic {
+                repo: source.repo_slug.clone(),
+                message: format!("failed to canonicalize {}: {e}", source.abs_path.display()),
+            });
+            return (removals, diagnostics);
+        }
+    };
+    let rel_path = match real_path.strip_prefix(git_root) {
+        Ok(p) => p,
+        Err(_) => {
+            diagnostics.push(HistoryWalkDiagnostic {
+                repo: source.repo_slug.clone(),
+                message: format!(
+                    "{} does not resolve under git root {}",
+                    real_path.display(),
+                    git_root.display()
+                ),
+            });
+            return (removals, diagnostics);
+        }
+    };
+    let rel_path_str = rel_path.to_string_lossy().to_string();
+    let archive_path = archive_path_for(&source.abs_path);
+
+    let log_output = crate::shared::git_command()
+        .arg("-C")
+        .arg(git_root)
+        .arg("log")
+        .arg("--format=%H%x00%h%x00%cd%x00%s")
+        .arg("--date=format:%Y-%m-%d")
+        .arg("--follow")
+        .arg("--")
+        .arg(&rel_path_str)
+        .output();
+
+    let output = match log_output {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            diagnostics.push(HistoryWalkDiagnostic {
+                repo: source.repo_slug.clone(),
+                message: format!(
+                    "git log failed for {rel_path_str}: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ),
+            });
+            return (removals, diagnostics);
+        }
+        Err(e) => {
+            diagnostics.push(HistoryWalkDiagnostic {
+                repo: source.repo_slug.clone(),
+                message: format!("failed to run `git log` for {rel_path_str}: {e}"),
+            });
+            return (removals, diagnostics);
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(4, '\0');
+        let (full_sha, short_sha, date, subject) =
+            match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
+                _ => {
+                    diagnostics.push(HistoryWalkDiagnostic {
+                        repo: source.repo_slug.clone(),
+                        message: format!("unparseable `git log` line: {line}"),
+                    });
+                    continue;
+                }
+            };
+
+        let child = match read_carryover_at_revision(git_root, full_sha, &rel_path_str) {
+            Ok(Some(entries)) => entries,
+            Ok(None) => continue,
+            Err(message) => {
+                diagnostics.push(HistoryWalkDiagnostic {
+                    repo: source.repo_slug.clone(),
+                    message: format!("{full_sha} ({subject}): {message}"),
+                });
+                continue;
+            }
+        };
+
+        let parent_rev = format!("{full_sha}~1");
+        let parent = match read_carryover_at_revision(git_root, &parent_rev, &rel_path_str) {
+            Ok(Some(entries)) => entries,
+            // Root commit, or the commit that introduced the file: no
+            // parent version exists to diff against, so nothing was
+            // removed here by definition.
+            Ok(None) => continue,
+            Err(message) => {
+                diagnostics.push(HistoryWalkDiagnostic {
+                    repo: source.repo_slug.clone(),
+                    message: format!("{parent_rev} ({subject}): {message}"),
+                });
+                continue;
+            }
+        };
+
+        let child_slugs: HashSet<&str> = child.iter().map(|c| c.slug.as_str()).collect();
+        for entry in &parent {
+            if !child_slugs.contains(entry.slug.as_str()) {
+                removals.push(HistoricalRemoval {
+                    repo: source.repo_slug.clone(),
+                    archive_path: archive_path.clone(),
+                    entry: entry.clone(),
+                    commit_sha: short_sha.to_string(),
+                    commit_subject: subject.to_string(),
+                    commit_date: date.to_string(),
+                });
+            }
+        }
+    }
+
+    (removals, diagnostics)
+}
+
+/// Compute the full history-walk plan for `mev carryover --backfill` (task
+/// 1): discover every `planning/state.json` this brain corpus registers
+/// (reusing [`crate::brain::config::find_brain_config`] +
+/// [`crate::brain::state::discover_state_files`], the same pair
+/// `load_and_evaluate_carryover_corpus_for_dispose` already uses), then walk
+/// each one's git history for removed `carryover[]` entries.
+///
+/// `repo_filter`, when set, restricts the walk to exactly that repo slug and
+/// errors out (naming the valid slugs) if the slug is unknown — the same
+/// contract `--dispose --repo` already has.
+///
+/// Read-only: this touches no filesystem beyond reading, spawns no `git`
+/// command that mutates the working tree, and returns before any archive
+/// write is ever considered (task 3).
+pub fn enumerate_historical_removals(
+    git_root: &Path,
+    repo_filter: Option<&str>,
+) -> anyhow::Result<HistoryWalkPlan> {
+    let config = crate::brain::config::find_brain_config(git_root)
+        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
+    let (sources, _discovery_diags) = crate::brain::state::discover_state_files(git_root, &config);
+
+    if let Some(slug) = repo_filter
+        && !sources.iter().any(|s| s.repo_slug == slug)
+    {
+        let mut valid_slugs: Vec<&str> = sources.iter().map(|s| s.repo_slug.as_str()).collect();
+        valid_slugs.sort_unstable();
+        valid_slugs.dedup();
+        return Err(anyhow::anyhow!(
+            "unknown --repo slug '{slug}'; valid slugs: {}",
+            valid_slugs.join(", ")
+        ));
+    }
+
+    let real_root = git_root
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("failed to canonicalize {}: {e}", git_root.display()))?;
+
+    let mut plan = HistoryWalkPlan::default();
+    for source in &sources {
+        if let Some(slug) = repo_filter
+            && source.repo_slug != slug
+        {
+            continue;
+        }
+        let (removals, diagnostics) = walk_removals_for_state_file(&real_root, source);
+        plan.removals.extend(removals);
+        plan.diagnostics.extend(diagnostics);
+    }
+
+    Ok(plan)
+}
+
+// ---------------------------------------------------------------------------
+// Reason derivation + archive row construction — `mev carryover --backfill`
+// (`MV.16.B` task 2)
+// ---------------------------------------------------------------------------
+//
+// `okf_core::DisposalReason` is a closed four-value enum with no `unknown`
+// fallback (see its doc comment in okf-core `src/state.rs`) — that type
+// lives in another repo and this block does not add a fifth member to it.
+// A removing commit whose subject names nothing definite maps to
+// `Withdrawn` ("retired without being resolved" — the only member that
+// asserts nothing unevidenced), and the uncertainty is recorded in the
+// archive row's `evidence` string instead.
+
+/// Derive a [`okf_core::DisposalReason`] from a removing commit's subject,
+/// plus whether the mapping was attributable to explicit wording (`true`)
+/// or defaulted for lack of any (`false`).
+///
+/// Matching is case-insensitive substring matching against a small,
+/// deliberately narrow keyword set per variant — a heuristic, and kept
+/// small and documented in this one place so it reads like one:
+///
+/// - `Cleared`: wording about the underlying condition resolving —
+///   "clear", "resolved", "resolve".
+/// - `Superseded`: wording about replacement — "supersede", "superseded",
+///   "replace", "replaced".
+/// - `Promoted`: wording about graduating into a tracked container —
+///   "promote", "promoted".
+/// - Anything else: `Withdrawn`, with `attributable: false`.
+///
+/// The order above is also the match priority when a subject happens to
+/// contain more than one keyword family (rare, but a commit message is free
+/// text) — `Cleared` is checked first, then `Superseded`, then `Promoted`.
+#[must_use]
+pub fn derive_disposal_reason(commit_subject: &str) -> (okf_core::DisposalReason, bool) {
+    let lower = commit_subject.to_lowercase();
+
+    const CLEARED_WORDS: &[&str] = &["clear", "resolved", "resolve"];
+    const SUPERSEDED_WORDS: &[&str] = &["supersede", "superseded", "replace", "replaced"];
+    const PROMOTED_WORDS: &[&str] = &["promote", "promoted"];
+
+    if CLEARED_WORDS.iter().any(|w| lower.contains(w)) {
+        (okf_core::DisposalReason::Cleared, true)
+    } else if SUPERSEDED_WORDS.iter().any(|w| lower.contains(w)) {
+        (okf_core::DisposalReason::Superseded, true)
+    } else if PROMOTED_WORDS.iter().any(|w| lower.contains(w)) {
+        (okf_core::DisposalReason::Promoted, true)
+    } else {
+        (okf_core::DisposalReason::Withdrawn, false)
+    }
+}
+
+/// Build the archive record for one [`HistoricalRemoval`] recovered by
+/// task 1's history walk.
+///
+/// The embedded entry is `removal.entry` unchanged — it was already loaded
+/// verbatim from the removing commit's PARENT blob by
+/// [`walk_removals_for_state_file`], including any key [`Carryover`] does
+/// not model (preserved via its own `#[serde(flatten)] extra`). This
+/// function never re-synthesizes the entry from selected fields.
+///
+/// `reconstructed` is always `true` — every row this pass emits is a
+/// backfill from history, never a disposal written at the moment it
+/// happened (that is [`build_archive_row`], the live `--dispose` path).
+///
+/// `evidence` always names the removing commit as `<short-sha> <subject>`;
+/// when [`derive_disposal_reason`] could not attribute the reason to
+/// explicit wording, a trailing note records that the reason was defaulted
+/// rather than observed, so a reader of the archive line can tell a
+/// confident mapping from a guessed one without re-deriving it.
+#[must_use]
+pub fn build_historical_archive_row(removal: &HistoricalRemoval) -> okf_core::CarryoverArchiveRow {
+    let (reason, attributable) = derive_disposal_reason(&removal.commit_subject);
+
+    let mut evidence = format!("{} {}", removal.commit_sha, removal.commit_subject);
+    if !attributable {
+        evidence.push_str(" (reason not attributable from commit subject; defaulted to withdrawn)");
+    }
+
+    okf_core::CarryoverArchiveRow {
+        entry: removal.entry.clone(),
+        disposed_at: removal.commit_date.clone(),
+        reason,
+        reconstructed: true,
+        evidence: Some(evidence),
+        amends: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The refusal guard + atomic per-repo archive writer — `mev carryover
+// --backfill` (`MV.16.B` task 3)
+// ---------------------------------------------------------------------------
+//
+// Idempotency here is by REFUSAL, never by merge: a second run over a
+// populated archive must abort the whole run rather than appending
+// duplicates or attempting a diff-and-merge. Detection is on the
+// `(slug, disposed_at)` pair, the identity `okf_core::AmendsRef` already
+// establishes as an archive row's unique key. This pass writes ONLY
+// `carryover-archive.jsonl` — it never touches `state.json`, because the
+// entries it archives are already gone from it (that is the premise of the
+// whole block).
+
+/// One `(slug, disposed_at)` pair a planned backfill row would have
+/// duplicated against an already-populated archive — the refusal guard's
+/// error. Naming the colliding pair (not just "duplicate found") is the
+/// point: the operator needs to know which line to go look at.
+#[derive(Debug, Clone)]
+pub struct BackfillCollision {
+    pub repo: String,
+    pub archive_path: PathBuf,
+    pub slug: String,
+    pub disposed_at: String,
+}
+
+impl std::fmt::Display for BackfillCollision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: archive {} already has a row for (slug='{}', disposed_at='{}') — refusing to backfill over a populated archive",
+            self.repo,
+            self.archive_path.display(),
+            self.slug,
+            self.disposed_at
+        )
+    }
+}
+
+impl std::error::Error for BackfillCollision {}
+
+/// One repo's backfill write (or, under `--dry-run`, computed-but-not-written
+/// plan) — what task 4's CLI driver prints per repo.
+#[derive(Debug, Clone)]
+pub struct RepoBackfillWrite {
+    /// Owning repo slug.
+    pub repo: String,
+    /// Absolute path of the repo's `planning/carryover-archive.jsonl`.
+    pub archive_path: PathBuf,
+    /// The archive rows this repo contributed, in the order they were
+    /// appended.
+    pub rows: Vec<okf_core::CarryoverArchiveRow>,
+    /// Whether disk was actually touched (`false` under `--dry-run`, or when
+    /// `rows` is empty and there was nothing to write).
+    pub written: bool,
+}
+
+/// One repo's backfill write failed partway through — mirrors
+/// [`RepoDisposalError`] so task 4's reporting can name the repo without
+/// aborting the whole run.
+#[derive(Debug, Clone)]
+pub struct RepoBackfillError {
+    pub repo: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for RepoBackfillError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.repo, self.message)
+    }
+}
+
+impl std::error::Error for RepoBackfillError {}
+
+/// The full result of one `mev carryover --backfill` (or `--backfill
+/// --dry-run`) run: one [`RepoBackfillWrite`] per repo that had at least one
+/// removal to backfill, any repo whose write failed partway through, and
+/// every [`HistoryWalkDiagnostic`] the walk itself raised.
+#[derive(Debug, Clone, Default)]
+pub struct BackfillRunReport {
+    pub writes: Vec<RepoBackfillWrite>,
+    pub failures: Vec<RepoBackfillError>,
+    pub diagnostics: Vec<HistoryWalkDiagnostic>,
+    pub dry_run: bool,
+}
+
+impl BackfillRunReport {
+    /// Whether this run is clean enough for `mev carryover --backfill` to
+    /// exit 0 — a repo whose write itself failed is fatal.
+    pub fn succeeded(&self) -> bool {
+        self.failures.is_empty()
+    }
+}
+
+/// Parse an existing `carryover-archive.jsonl` file's lines into
+/// [`okf_core::CarryoverArchiveRow`]s, skipping blank lines. A malformed
+/// line is a diagnostic-worthy condition in principle, but this reader is
+/// used only to build the collision index before writing — a line that
+/// fails to parse cannot be a `(slug, disposed_at)` collision target, so it
+/// is skipped rather than aborting the whole backfill (the file predates
+/// this pass and may not even exist yet).
+fn read_archive_rows(archive_path: &Path) -> Vec<okf_core::CarryoverArchiveRow> {
+    let Ok(content) = std::fs::read_to_string(archive_path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<okf_core::CarryoverArchiveRow>(l).ok())
+        .collect()
+}
+
+/// Run (or, under `dry_run`, simulate) `mev carryover --backfill`'s write
+/// half over every [`HistoricalRemoval`] in `plan`.
+///
+/// # The refusal guard runs FIRST, over the whole plan
+///
+/// Before any file is touched, every repo's existing archive is read and
+/// indexed by `(slug, disposed_at)`. Every planned row (across every repo)
+/// is checked against that index; the first collision found aborts the
+/// ENTIRE run with `Err(BackfillCollision)` before a single byte is
+/// written anywhere — a partial backfill is harder to reason about than
+/// none. This is why the guard is a pre-pass rather than folded into the
+/// per-repo write loop below: a collision in one repo must not leave a
+/// sibling repo's rows written while this repo's are refused.
+///
+/// # Per-repo atomic write, revert on failure
+///
+/// Once the guard has cleared, each repo with at least one planned row is
+/// written independently: the archive's original bytes are read first, and
+/// on any write error the file is reverted to exactly those bytes before
+/// the error is collected into `failures` — mirroring [`dispose_repo`]'s
+/// own discipline, minus the `state.json` half (this pass never touches
+/// `state.json`; the entries it archives are already gone from it).
+pub fn run_backfill(
+    plan: &HistoryWalkPlan,
+    dry_run: bool,
+) -> Result<BackfillRunReport, BackfillCollision> {
+    // Group removals by repo, preserving plan order.
+    let mut repos: Vec<String> = Vec::new();
+    let mut by_repo: std::collections::HashMap<String, (PathBuf, Vec<&HistoricalRemoval>)> =
+        std::collections::HashMap::new();
+    for removal in &plan.removals {
+        let entry = by_repo
+            .entry(removal.repo.clone())
+            .or_insert_with(|| (removal.archive_path.clone(), Vec::new()));
+        entry.1.push(removal);
+        if !repos.contains(&removal.repo) {
+            repos.push(removal.repo.clone());
+        }
+    }
+
+    // Refusal guard: check every planned row against its repo's existing
+    // archive (and against rows already accepted earlier in this same
+    // pre-pass, in case the walk itself produced a duplicate pair) before
+    // writing anything.
+    let mut seen_this_run: HashSet<(String, String, String)> = HashSet::new();
+    for repo in &repos {
+        let (archive_path, removals) = &by_repo[repo];
+        let existing = read_archive_rows(archive_path);
+        let existing_keys: HashSet<(String, String)> = existing
+            .iter()
+            .map(|r| (r.entry.slug.clone(), r.disposed_at.clone()))
+            .collect();
+
+        for removal in removals {
+            let row = build_historical_archive_row(removal);
+            let key = (row.entry.slug.clone(), row.disposed_at.clone());
+            if existing_keys.contains(&key)
+                || !seen_this_run.insert((repo.clone(), key.0.clone(), key.1.clone()))
+            {
+                return Err(BackfillCollision {
+                    repo: repo.clone(),
+                    archive_path: archive_path.clone(),
+                    slug: key.0,
+                    disposed_at: key.1,
+                });
+            }
+        }
+    }
+
+    // Guard cleared — build and (unless dry_run) write each repo's rows.
+    let mut writes = Vec::new();
+    let mut failures = Vec::new();
+
+    for repo in &repos {
+        let (archive_path, removals) = &by_repo[repo];
+        let rows: Vec<okf_core::CarryoverArchiveRow> = removals
+            .iter()
+            .map(|r| build_historical_archive_row(r))
+            .collect();
+
+        if dry_run {
+            writes.push(RepoBackfillWrite {
+                repo: repo.clone(),
+                archive_path: archive_path.clone(),
+                rows,
+                written: false,
+            });
+            continue;
+        }
+
+        let archive_existed = archive_path.exists();
+        let original_content = if archive_existed {
+            match std::fs::read_to_string(archive_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    failures.push(RepoBackfillError {
+                        repo: repo.clone(),
+                        message: format!("failed to read {}: {e}", archive_path.display()),
+                    });
+                    continue;
+                }
+            }
+        } else {
+            String::new()
+        };
+
+        let mut new_content = original_content.clone();
+        let mut serialize_failed = false;
+        for row in &rows {
+            match serde_json::to_string(row) {
+                Ok(line) => {
+                    new_content.push_str(&line);
+                    new_content.push('\n');
+                }
+                Err(e) => {
+                    failures.push(RepoBackfillError {
+                        repo: repo.clone(),
+                        message: format!(
+                            "failed to serialize archive row for '{}': {e}",
+                            row.entry.slug
+                        ),
+                    });
+                    serialize_failed = true;
+                    break;
+                }
+            }
+        }
+        if serialize_failed {
+            continue;
+        }
+
+        if let Err(e) = crate::brain::emit::write_atomic(archive_path, new_content.as_bytes()) {
+            // Revert to the original bytes so a failed write never leaves
+            // the archive partially updated.
+            let revert_result = if archive_existed {
+                crate::brain::emit::write_atomic(archive_path, original_content.as_bytes())
+            } else {
+                std::fs::remove_file(archive_path)
+            };
+            let revert_note = if revert_result.is_err() {
+                " (archive revert ALSO FAILED — manual check required)"
+            } else {
+                " (archive write reverted)"
+            };
+            failures.push(RepoBackfillError {
+                repo: repo.clone(),
+                message: format!(
+                    "failed to write {}: {e}{revert_note}",
+                    archive_path.display()
+                ),
+            });
+            continue;
+        }
+
+        writes.push(RepoBackfillWrite {
+            repo: repo.clone(),
+            archive_path: archive_path.clone(),
+            rows,
+            written: true,
+        });
+    }
+
+    Ok(BackfillRunReport {
+        writes,
+        failures,
+        diagnostics: plan.diagnostics.clone(),
+        dry_run,
+    })
+}
+
+/// Render the explicit `git commit -o <pathspec>` line covering every
+/// archive file this run wrote (or, under `--dry-run`, would have written)
+/// — every `planning/` is a symlink into the one HQ git repo where Standing
+/// Rule 10 bans `git add -A`. `None` when no repo in the run wrote
+/// anything, so a no-op run never prints an empty `git commit -o` with no
+/// arguments.
+pub fn render_backfill_commit_pathspec(report: &BackfillRunReport) -> Option<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for write in &report.writes {
+        if write.rows.is_empty() {
+            continue;
+        }
+        paths.push(write.archive_path.display().to_string());
+    }
+
+    if paths.is_empty() {
+        None
+    } else {
+        Some(format!("git commit -o {}", paths.join(" ")))
+    }
+}
+
+/// Render the per-repo backfill summary a caller prints after
+/// [`run_backfill`] returns: per repo, the archive path, the row count, and
+/// the per-[`okf_core::DisposalReason`] breakdown; then every
+/// [`HistoryWalkDiagnostic`] the walk raised; then the commit pathspec.
+/// Identical under `--dry-run` apart from the "(dry-run, not written)"
+/// suffix on a repo that had rows to write — same code path, same content,
+/// nothing written.
+pub fn render_backfill_summary(report: &BackfillRunReport) -> String {
+    let mut lines = Vec::new();
+
+    for write in &report.writes {
+        let suffix = if report.dry_run && !write.rows.is_empty() {
+            " (dry-run, not written)"
+        } else {
+            ""
+        };
+
+        let mut cleared = 0usize;
+        let mut superseded = 0usize;
+        let mut promoted = 0usize;
+        let mut withdrawn = 0usize;
+        for row in &write.rows {
+            match row.reason {
+                okf_core::DisposalReason::Cleared => cleared += 1,
+                okf_core::DisposalReason::Superseded => superseded += 1,
+                okf_core::DisposalReason::Promoted => promoted += 1,
+                okf_core::DisposalReason::Withdrawn => withdrawn += 1,
+            }
+        }
+
+        lines.push(format!(
+            "{}: {} — {} row(s){} (cleared={cleared} superseded={superseded} promoted={promoted} withdrawn={withdrawn})",
+            write.repo,
+            write.archive_path.display(),
+            write.rows.len(),
+            suffix
+        ));
+    }
+
+    for failure in &report.failures {
+        lines.push(format!("{}: FAILED — {}", failure.repo, failure.message));
+    }
+
+    for diag in &report.diagnostics {
+        lines.push(format!("{}: DIAGNOSTIC — {}", diag.repo, diag.message));
+    }
+
+    if let Some(pathspec) = render_backfill_commit_pathspec(report) {
+        lines.push(String::new());
+        lines.push(pathspec);
+    }
+
+    lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
 // `--write` for `mev graph-findings` (`MV.ticket.graph-derived-carryover-findings`
 // task 5) — append mechanically-detected findings as typed `carryover[]` entries
 // ---------------------------------------------------------------------------
@@ -6950,6 +7685,99 @@ mod tests {
         assert!(row.amends.is_none());
     }
 
+    fn historical_removal(entry: Carryover, commit_subject: &str) -> HistoricalRemoval {
+        HistoricalRemoval {
+            repo: "repo-a".to_string(),
+            archive_path: PathBuf::from("/tmp/repo-a/planning/carryover-archive.jsonl"),
+            entry,
+            commit_sha: "abc1234".to_string(),
+            commit_subject: commit_subject.to_string(),
+            commit_date: "2026-08-01".to_string(),
+        }
+    }
+
+    #[test]
+    fn derive_disposal_reason_maps_clearing_wording_to_cleared() {
+        let (reason, attributable) = derive_disposal_reason("clear stale carryover entry");
+        assert_eq!(reason, okf_core::DisposalReason::Cleared);
+        assert!(attributable);
+
+        let (reason, attributable) = derive_disposal_reason("resolve the OK.4.A blocker note");
+        assert_eq!(reason, okf_core::DisposalReason::Cleared);
+        assert!(attributable);
+    }
+
+    #[test]
+    fn derive_disposal_reason_maps_replacement_wording_to_superseded() {
+        let (reason, attributable) =
+            derive_disposal_reason("supersede old constraint carryover with new one");
+        assert_eq!(reason, okf_core::DisposalReason::Superseded);
+        assert!(attributable);
+    }
+
+    #[test]
+    fn derive_disposal_reason_maps_promotion_wording_to_promoted() {
+        let (reason, attributable) = derive_disposal_reason("promote carryover to MV.9.C block");
+        assert_eq!(reason, okf_core::DisposalReason::Promoted);
+        assert!(attributable);
+    }
+
+    #[test]
+    fn derive_disposal_reason_defaults_to_withdrawn_when_unattributable() {
+        let (reason, attributable) =
+            derive_disposal_reason("move bastiel-registration carryover to business");
+        assert_eq!(reason, okf_core::DisposalReason::Withdrawn);
+        assert!(!attributable);
+    }
+
+    #[test]
+    fn build_historical_archive_row_is_verbatim_reconstructed_and_names_the_commit() {
+        let entry = item(
+            "withdrawn-one",
+            "deferred",
+            Some("some prose"),
+            vec![],
+            "2020-01-01",
+            None,
+            None,
+        );
+        let removal = historical_removal(
+            entry.clone(),
+            "move bastiel-registration carryover to business",
+        );
+        let row = build_historical_archive_row(&removal);
+
+        assert_eq!(row.entry.slug, entry.slug);
+        assert_eq!(row.entry.clears_when, entry.clears_when);
+        assert_eq!(row.disposed_at, "2026-08-01");
+        assert_eq!(row.reason, okf_core::DisposalReason::Withdrawn);
+        assert!(row.reconstructed);
+        let evidence = row.evidence.expect("evidence must be set");
+        assert!(evidence.starts_with("abc1234 move bastiel-registration carryover to business"));
+        assert!(evidence.contains("not attributable"));
+        assert!(row.amends.is_none());
+    }
+
+    #[test]
+    fn build_historical_archive_row_records_attributable_reason_without_the_defaulted_note() {
+        let entry = item(
+            "cleared-two",
+            "defect",
+            None,
+            vec![],
+            "2020-01-01",
+            None,
+            None,
+        );
+        let removal = historical_removal(entry, "clear the stale defect entry");
+        let row = build_historical_archive_row(&removal);
+
+        assert_eq!(row.reason, okf_core::DisposalReason::Cleared);
+        let evidence = row.evidence.expect("evidence must be set");
+        assert_eq!(evidence, "abc1234 clear the stale defect entry");
+        assert!(!evidence.contains("not attributable"));
+    }
+
     #[test]
     fn dispose_repo_removes_cleared_entry_and_leaves_rest_of_state_byte_identical() {
         let survivor = item(
@@ -7708,5 +8536,284 @@ mod tests {
             dry_run: false,
         };
         assert!(!with_failure.succeeded());
+    }
+
+    // -- enumerate_historical_removals (`MV.16.B` task 1) -------------------
+
+    mod backfill_history_walk {
+        use super::*;
+        use std::fs;
+        use std::path::{Path, PathBuf};
+
+        fn temp_dir(tag: &str) -> PathBuf {
+            let dir =
+                crate::testsupport::unique_temp_dir(&format!("mev-carryover-backfill-unit-{tag}"));
+            fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        fn run_git(dir: &Path, args: &[&str]) {
+            let output = crate::shared::git_command()
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .expect("failed to spawn git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed in {}: {}",
+                args,
+                dir.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        fn write_brain_toml(root: &Path, repos: &[&str]) {
+            let mut toml = String::from(
+                r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+"#,
+            );
+            for slug in repos {
+                toml.push_str(&format!(
+                    r#"[[repos]]
+slug = "{slug}"
+tier = "primary"
+repo_path = "repos/{slug}"
+status_file = "repos/{slug}/planning/status.md"
+cache_doc = "docs/projects/{slug}.md"
+heading = "{slug}"
+
+"#
+                ));
+            }
+            fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
+        }
+
+        fn write_state(root: &Path, slug: &str, value: &serde_json::Value) {
+            let path = root
+                .join("repos")
+                .join(slug)
+                .join("planning")
+                .join("state.json");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, serde_json::to_string_pretty(value).unwrap()).unwrap();
+        }
+
+        fn entry(slug: &str, extra_key: Option<(&str, &str)>) -> serde_json::Value {
+            let mut v = serde_json::json!({
+                "slug": slug,
+                "scope": { "repo": "alpha" },
+                "kind": "known_issue",
+                "text": format!("entry {slug}"),
+                "created": "2026-01-01"
+            });
+            if let Some((k, val)) = extra_key {
+                v.as_object_mut()
+                    .unwrap()
+                    .insert(k.to_string(), serde_json::json!(val));
+            }
+            v
+        }
+
+        fn state_with_carryover(carryover: Vec<serde_json::Value>) -> serde_json::Value {
+            serde_json::json!({
+                "repo": "alpha",
+                "kind": "project",
+                "updated": "2026-01-01",
+                "focus": { "now": [], "next": [], "blocked": [] },
+                "carryover": carryover
+            })
+        }
+
+        fn init_repo(root: &Path) {
+            run_git(root, &["init", "-q"]);
+            run_git(root, &["config", "user.email", "test@example.com"]);
+            run_git(root, &["config", "user.name", "Test"]);
+        }
+
+        fn commit_all(root: &Path, msg: &str) {
+            run_git(root, &["add", "."]);
+            run_git(root, &["commit", "-q", "-m", msg]);
+        }
+
+        #[test]
+        fn removal_commit_yields_one_row_with_verbatim_entry_and_unmodeled_key() {
+            let root = temp_dir("removal");
+            write_brain_toml(&root, &["alpha"]);
+            write_state(
+                &root,
+                "alpha",
+                &state_with_carryover(vec![entry(
+                    "alpha-a",
+                    Some(("totally_unmodeled_field", "F-1")),
+                )]),
+            );
+            init_repo(&root);
+            commit_all(&root, "add alpha-a");
+
+            write_state(&root, "alpha", &state_with_carryover(vec![]));
+            commit_all(&root, "clear alpha-a: resolved upstream");
+
+            let plan = enumerate_historical_removals(&root, None).expect("walk should succeed");
+            assert!(
+                plan.diagnostics.is_empty(),
+                "unexpected diagnostics: {:?}",
+                plan.diagnostics
+            );
+            assert_eq!(plan.removals.len(), 1);
+            let removal = &plan.removals[0];
+            assert_eq!(removal.repo, "alpha");
+            assert_eq!(removal.entry.slug, "alpha-a");
+            assert_eq!(
+                removal
+                    .entry
+                    .extra
+                    .get("totally_unmodeled_field")
+                    .and_then(|v| v.as_str()),
+                Some("F-1"),
+                "an unmodeled key on the entry must survive verbatim into the removal"
+            );
+            assert_eq!(removal.commit_subject, "clear alpha-a: resolved upstream");
+            assert_eq!(
+                removal.archive_path,
+                archive_path_for(&root.join("repos/alpha/planning/state.json"))
+            );
+        }
+
+        #[test]
+        fn commit_removing_three_entries_yields_three_rows() {
+            let root = temp_dir("removal-three");
+            write_brain_toml(&root, &["alpha"]);
+            write_state(
+                &root,
+                "alpha",
+                &state_with_carryover(vec![
+                    entry("alpha-a", None),
+                    entry("alpha-b", None),
+                    entry("alpha-c", None),
+                ]),
+            );
+            init_repo(&root);
+            commit_all(&root, "add three entries");
+
+            write_state(&root, "alpha", &state_with_carryover(vec![]));
+            commit_all(&root, "clear all three");
+
+            let plan = enumerate_historical_removals(&root, None).expect("walk should succeed");
+            assert_eq!(plan.removals.len(), 3);
+            let mut slugs: Vec<&str> = plan
+                .removals
+                .iter()
+                .map(|r| r.entry.slug.as_str())
+                .collect();
+            slugs.sort_unstable();
+            assert_eq!(slugs, vec!["alpha-a", "alpha-b", "alpha-c"]);
+        }
+
+        #[test]
+        fn commit_that_only_adds_or_only_edits_yields_no_removal() {
+            let root = temp_dir("add-edit");
+            write_brain_toml(&root, &["alpha"]);
+            write_state(
+                &root,
+                "alpha",
+                &state_with_carryover(vec![entry("alpha-a", None)]),
+            );
+            init_repo(&root);
+            commit_all(&root, "add alpha-a");
+
+            // Only ADD alpha-b.
+            write_state(
+                &root,
+                "alpha",
+                &state_with_carryover(vec![entry("alpha-a", None), entry("alpha-b", None)]),
+            );
+            commit_all(&root, "add alpha-b");
+
+            // Only EDIT alpha-a's text.
+            let mut edited = entry("alpha-a", None);
+            edited["text"] = serde_json::json!("edited text");
+            write_state(
+                &root,
+                "alpha",
+                &state_with_carryover(vec![edited, entry("alpha-b", None)]),
+            );
+            commit_all(&root, "edit alpha-a");
+
+            let plan = enumerate_historical_removals(&root, None).expect("walk should succeed");
+            assert!(
+                plan.removals.is_empty(),
+                "add-only and edit-only commits must yield no removal, got: {:?}",
+                plan.removals
+            );
+        }
+
+        #[test]
+        fn root_commit_yields_no_removal() {
+            let root = temp_dir("root-commit");
+            write_brain_toml(&root, &["alpha"]);
+            write_state(
+                &root,
+                "alpha",
+                &state_with_carryover(vec![entry("alpha-a", None)]),
+            );
+            init_repo(&root);
+            commit_all(&root, "initial commit with alpha-a already present");
+
+            let plan = enumerate_historical_removals(&root, None).expect("walk should succeed");
+            assert!(
+                plan.removals.is_empty(),
+                "a root commit has no parent to diff against, so it must yield nothing"
+            );
+        }
+
+        #[test]
+        fn repo_filter_restricts_the_walk_to_one_repo() {
+            let root = temp_dir("repo-filter");
+            write_brain_toml(&root, &["alpha", "beta"]);
+            write_state(
+                &root,
+                "alpha",
+                &state_with_carryover(vec![entry("alpha-a", None)]),
+            );
+            write_state(
+                &root,
+                "beta",
+                &state_with_carryover(vec![entry("beta-a", None)]),
+            );
+            init_repo(&root);
+            commit_all(&root, "add both");
+
+            write_state(&root, "alpha", &state_with_carryover(vec![]));
+            write_state(&root, "beta", &state_with_carryover(vec![]));
+            commit_all(&root, "clear both");
+
+            let plan =
+                enumerate_historical_removals(&root, Some("alpha")).expect("walk should succeed");
+            assert_eq!(plan.removals.len(), 1);
+            assert_eq!(plan.removals[0].repo, "alpha");
+        }
+
+        #[test]
+        fn unknown_repo_filter_errors_naming_valid_slugs() {
+            let root = temp_dir("unknown-repo");
+            write_brain_toml(&root, &["alpha"]);
+            write_state(&root, "alpha", &state_with_carryover(vec![]));
+            init_repo(&root);
+            commit_all(&root, "initial");
+
+            let err = enumerate_historical_removals(&root, Some("nonexistent"))
+                .expect_err("unknown --repo slug must error");
+            assert!(
+                err.to_string().contains("alpha"),
+                "error should name valid slugs: {err}"
+            );
+        }
     }
 }
