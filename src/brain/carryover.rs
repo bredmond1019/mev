@@ -2558,6 +2558,150 @@ pub fn carryover_effective_priorities(
 // ranking, task 3) — THE contract surface bastion calls
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// classify_blocked_by_edge — the shared per-edge resolution core
+// (MV.16.A, task 1). THE predicate `unmet_carryover_block_keys` (ranking)
+// and `--would-block`'s report (MV.16.A, tasks 2-4) both build on — they
+// must never re-derive resolution rules independently, because MV.16.C's
+// enforcement is built on this exact predicate and a dry-run that disagrees
+// with the gate it previews is worse than no dry-run.
+// ---------------------------------------------------------------------------
+
+/// Which kind of `BlockedBy` edge a row reports — independent of the
+/// payload, for display and grouping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlockedByEdgeType {
+    Block,
+    External,
+    Operator,
+    Approval,
+}
+
+/// The verdict for one `BlockedBy` edge, resolved against a live authored
+/// block-status map.
+///
+/// Deliberately NOT collapsed into a `!= "closed"` boolean: `Closed` and
+/// `Wontfix` are both terminal "gates nothing" outcomes but are distinct
+/// statuses live in the corpus today (`wontfix` on `JF.2.A`, measured
+/// 2026-08-22 — not anticipated by `sequence.md` SQ-A34), and
+/// `Unresolvable` is a data defect (a typo) that must never inflate a
+/// blocking count the way a false `Blocking` would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EdgeBlockVerdict {
+    /// A `block` edge whose target resolved with a status that is neither
+    /// `"closed"` nor `"wontfix"` — this edge would actually stop work.
+    Blocking,
+    /// A `block` edge whose target resolved with status `"closed"` — gates
+    /// nothing.
+    Closed,
+    /// A `block` edge whose target resolved with status `"wontfix"` — gates
+    /// nothing.
+    Wontfix,
+    /// A `block` edge whose target is absent from the status map entirely —
+    /// a data defect, not counted as blocking.
+    Unresolvable,
+    /// An `external` / `operator` / `approval` edge — there is no node
+    /// target to resolve, so no blocking verdict applies.
+    NoNodeTarget,
+}
+
+/// The result of classifying one `BlockedBy` edge against a block-status
+/// map — [`classify_blocked_by_edge`]'s return type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BlockedByEdgeClassification {
+    pub edge_type: BlockedByEdgeType,
+    /// The resolved target key (`"{repo}:{id}"`), or `None` for
+    /// `External`/`Operator`/`Approval` edges, which have no node target.
+    pub target_key: Option<String>,
+    /// The target's live authored status, if the edge resolved to a node
+    /// present in `block_status`. `None` for a non-`Block` edge, and also
+    /// `None` when the target resolved but carries no status value.
+    pub target_status: Option<String>,
+    pub verdict: EdgeBlockVerdict,
+}
+
+impl BlockedByEdgeClassification {
+    /// `true` only for [`EdgeBlockVerdict::Blocking`] — the one verdict
+    /// that would actually stop work.
+    pub fn is_blocking(&self) -> bool {
+        matches!(self.verdict, EdgeBlockVerdict::Blocking)
+    }
+}
+
+/// Classifies ONE `BlockedBy` edge against a live authored-status map.
+///
+/// Resolution rules, all explicit:
+/// - [`BlockedBy::Block`]: the target key is `"{repo}:{id}"`, where an empty
+///   `repo` on the edge falls back to `entry_repo` (the owning entry's own
+///   repo), mirroring [`block_refs_from_related`]'s fallback. The verdict is
+///   [`EdgeBlockVerdict::Blocking`] when the target resolves in
+///   `block_status` with a status that is neither `"closed"` nor
+///   `"wontfix"`; [`EdgeBlockVerdict::Closed`] / [`EdgeBlockVerdict::Wontfix`]
+///   when it resolves to exactly that status; and
+///   [`EdgeBlockVerdict::Unresolvable`] when the target key is absent from
+///   `block_status` entirely.
+/// - [`BlockedBy::External`] / [`BlockedBy::Operator`] / [`BlockedBy::Approval`]:
+///   no node target exists to resolve, so `target_key` and `target_status`
+///   are both `None` and the verdict is [`EdgeBlockVerdict::NoNodeTarget`].
+pub fn classify_blocked_by_edge(
+    entry_repo: &str,
+    edge: &BlockedBy,
+    block_status: &HashMap<String, Option<String>>,
+) -> BlockedByEdgeClassification {
+    match edge {
+        BlockedBy::External(_) => BlockedByEdgeClassification {
+            edge_type: BlockedByEdgeType::External,
+            target_key: None,
+            target_status: None,
+            verdict: EdgeBlockVerdict::NoNodeTarget,
+        },
+        BlockedBy::Operator(_) => BlockedByEdgeClassification {
+            edge_type: BlockedByEdgeType::Operator,
+            target_key: None,
+            target_status: None,
+            verdict: EdgeBlockVerdict::NoNodeTarget,
+        },
+        BlockedBy::Approval(_) => BlockedByEdgeClassification {
+            edge_type: BlockedByEdgeType::Approval,
+            target_key: None,
+            target_status: None,
+            verdict: EdgeBlockVerdict::NoNodeTarget,
+        },
+        BlockedBy::Block(BlockDep { repo, id, .. }) => {
+            let target_repo = if repo.is_empty() {
+                entry_repo
+            } else {
+                repo.as_str()
+            };
+            let key = format!("{target_repo}:{id}");
+            match block_status.get(&key) {
+                None => BlockedByEdgeClassification {
+                    edge_type: BlockedByEdgeType::Block,
+                    target_key: Some(key),
+                    target_status: None,
+                    verdict: EdgeBlockVerdict::Unresolvable,
+                },
+                Some(status_opt) => {
+                    let status = status_opt.clone();
+                    let verdict = match status.as_deref() {
+                        Some("closed") => EdgeBlockVerdict::Closed,
+                        Some("wontfix") => EdgeBlockVerdict::Wontfix,
+                        _ => EdgeBlockVerdict::Blocking,
+                    };
+                    BlockedByEdgeClassification {
+                        edge_type: BlockedByEdgeType::Block,
+                        target_key: Some(key),
+                        target_status: status,
+                        verdict,
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Unmet `blocks[]` keys for one carryover entry.
 ///
 /// Mirrors `has_unmet_dep`'s predicate shape verbatim
@@ -2567,13 +2711,21 @@ pub fn carryover_effective_priorities(
 /// resolve), and a [`BlockedBy::Block`] edge is unmet unless its target's
 /// authored status in `block_status` is exactly `"closed"` — an
 /// unresolvable target (absent from `block_status` entirely) counts as
-/// unmet too. An empty `repo` on a `Block` edge falls back to the entry's
-/// own `repo`, mirroring [`block_refs_from_related`]'s fallback.
+/// unmet too, and so (unchanged from before `--would-block`'s wontfix
+/// carve-out existed) does a `"wontfix"` target: this function's contract
+/// predates that distinction and must keep treating both as unmet for its
+/// existing callers (`rank_carryover`, the triage lanes).
 ///
 /// `External` edges are keyed `"external:{what}"` (matching the display
 /// convention already used for `depends_on` at
 /// `crate::brain::emit::render_wave_table`) so every returned string is a
 /// stable, human-readable identifier — never an empty string.
+///
+/// The `Block`-edge resolution itself (empty-`repo` fallback, target-status
+/// lookup) is delegated to [`classify_blocked_by_edge`] so this function and
+/// `--would-block`'s report can never resolve the same edge differently;
+/// only the closed-vs-not-closed collapse into "unmet" below is specific to
+/// this legacy, narrower contract.
 fn unmet_carryover_block_keys(
     entry: &CarryoverVerdict,
     block_status: &HashMap<String, Option<String>>,
@@ -2585,15 +2737,15 @@ fn unmet_carryover_block_keys(
             BlockedBy::External(ExternalDep { what }) => Some(format!("external:{what}")),
             BlockedBy::Operator(OperatorDep { slug, .. }) => Some(okf_core::op_id(slug)),
             BlockedBy::Approval(ApprovalDep { slug, .. }) => Some(okf_core::op_id(slug)),
-            BlockedBy::Block(BlockDep { repo, id, .. }) => {
-                let target_repo = if repo.is_empty() {
-                    entry.repo.as_str()
-                } else {
-                    repo.as_str()
-                };
-                let key = format!("{target_repo}:{id}");
-                let closed = block_status.get(&key).and_then(|s| s.as_deref()) == Some("closed");
-                if closed { None } else { Some(key) }
+            BlockedBy::Block(_) => {
+                let classification = classify_blocked_by_edge(&entry.repo, edge, block_status);
+                let key = classification
+                    .target_key
+                    .expect("a Block edge always resolves a target key");
+                match classification.verdict {
+                    EdgeBlockVerdict::Closed => None,
+                    _ => Some(key),
+                }
             }
         })
         .collect()
@@ -5659,6 +5811,127 @@ mod tests {
             id: id.to_string(),
             what: None,
         })
+    }
+
+    // -- classify_blocked_by_edge (MV.16.A, task 1) --------------------------
+
+    #[test]
+    fn classify_blocked_by_edge_open_target_is_blocking() {
+        let block_status = HashMap::from([("mev:MV.1.A".to_string(), Some("open".to_string()))]);
+        let edge = block_edge("mev", "MV.1.A");
+        let c = classify_blocked_by_edge("mev", &edge, &block_status);
+        assert_eq!(c.edge_type, BlockedByEdgeType::Block);
+        assert_eq!(c.target_key.as_deref(), Some("mev:MV.1.A"));
+        assert_eq!(c.target_status.as_deref(), Some("open"));
+        assert_eq!(c.verdict, EdgeBlockVerdict::Blocking);
+        assert!(c.is_blocking());
+    }
+
+    #[test]
+    fn classify_blocked_by_edge_closed_target_is_not_blocking() {
+        let block_status = HashMap::from([("mev:MV.1.A".to_string(), Some("closed".to_string()))]);
+        let edge = block_edge("mev", "MV.1.A");
+        let c = classify_blocked_by_edge("mev", &edge, &block_status);
+        assert_eq!(c.verdict, EdgeBlockVerdict::Closed);
+        assert!(!c.is_blocking());
+    }
+
+    #[test]
+    fn classify_blocked_by_edge_wontfix_target_is_not_blocking() {
+        let block_status = HashMap::from([("mev:JF.2.A".to_string(), Some("wontfix".to_string()))]);
+        let edge = block_edge("mev", "JF.2.A");
+        let c = classify_blocked_by_edge("mev", &edge, &block_status);
+        assert_eq!(c.verdict, EdgeBlockVerdict::Wontfix);
+        assert!(!c.is_blocking());
+    }
+
+    #[test]
+    fn classify_blocked_by_edge_unresolvable_target_is_not_blocking() {
+        let edge = block_edge("mev", "MV.99.Z");
+        let c = classify_blocked_by_edge("mev", &edge, &HashMap::new());
+        assert_eq!(c.target_key.as_deref(), Some("mev:MV.99.Z"));
+        assert_eq!(c.target_status, None);
+        assert_eq!(c.verdict, EdgeBlockVerdict::Unresolvable);
+        assert!(!c.is_blocking());
+    }
+
+    #[test]
+    fn classify_blocked_by_edge_external_has_no_node_target() {
+        let edge = BlockedBy::External(ExternalDep {
+            what: "waiting on vendor API".to_string(),
+        });
+        let c = classify_blocked_by_edge("mev", &edge, &HashMap::new());
+        assert_eq!(c.edge_type, BlockedByEdgeType::External);
+        assert_eq!(c.target_key, None);
+        assert_eq!(c.target_status, None);
+        assert_eq!(c.verdict, EdgeBlockVerdict::NoNodeTarget);
+        assert!(!c.is_blocking());
+    }
+
+    #[test]
+    fn classify_blocked_by_edge_operator_has_no_node_target() {
+        let edge = BlockedBy::Operator(OperatorDep {
+            slug: "some-session".to_string(),
+            exit: "some/artifact.md".to_string(),
+            start: "/begin-session some-session".to_string(),
+            what: None,
+        });
+        let c = classify_blocked_by_edge("mev", &edge, &HashMap::new());
+        assert_eq!(c.edge_type, BlockedByEdgeType::Operator);
+        assert_eq!(c.target_key, None);
+        assert_eq!(c.verdict, EdgeBlockVerdict::NoNodeTarget);
+        assert!(!c.is_blocking());
+    }
+
+    #[test]
+    fn classify_blocked_by_edge_approval_has_no_node_target() {
+        let edge = BlockedBy::Approval(ApprovalDep {
+            slug: "some-approval".to_string(),
+            what: "ship the thing".to_string(),
+            digest: "deadbeef".to_string(),
+        });
+        let c = classify_blocked_by_edge("mev", &edge, &HashMap::new());
+        assert_eq!(c.edge_type, BlockedByEdgeType::Approval);
+        assert_eq!(c.target_key, None);
+        assert_eq!(c.verdict, EdgeBlockVerdict::NoNodeTarget);
+        assert!(!c.is_blocking());
+    }
+
+    #[test]
+    fn classify_blocked_by_edge_empty_repo_falls_back_to_entry_repo() {
+        let block_status = HashMap::from([("mev:MV.1.A".to_string(), Some("open".to_string()))]);
+        let edge = block_edge("", "MV.1.A");
+        let c = classify_blocked_by_edge("mev", &edge, &block_status);
+        assert_eq!(c.target_key.as_deref(), Some("mev:MV.1.A"));
+        assert_eq!(c.verdict, EdgeBlockVerdict::Blocking);
+    }
+
+    // -- unmet_carryover_block_keys (delegates to classify_blocked_by_edge) --
+
+    #[test]
+    fn unmet_carryover_block_keys_treats_wontfix_as_unmet() {
+        let entry = ranking_verdict("mev", "gated", None, vec![block_edge("mev", "JF.2.A")]);
+        let block_status = HashMap::from([("mev:JF.2.A".to_string(), Some("wontfix".to_string()))]);
+        assert_eq!(
+            unmet_carryover_block_keys(&entry, &block_status),
+            vec!["mev:JF.2.A".to_string()]
+        );
+    }
+
+    #[test]
+    fn unmet_carryover_block_keys_treats_closed_as_met() {
+        let entry = ranking_verdict("mev", "gated", None, vec![block_edge("mev", "MV.1.A")]);
+        let block_status = HashMap::from([("mev:MV.1.A".to_string(), Some("closed".to_string()))]);
+        assert!(unmet_carryover_block_keys(&entry, &block_status).is_empty());
+    }
+
+    #[test]
+    fn unmet_carryover_block_keys_treats_unresolvable_as_unmet() {
+        let entry = ranking_verdict("mev", "gated", None, vec![block_edge("mev", "MV.99.Z")]);
+        assert_eq!(
+            unmet_carryover_block_keys(&entry, &HashMap::new()),
+            vec!["mev:MV.99.Z".to_string()]
+        );
     }
 
     #[test]
