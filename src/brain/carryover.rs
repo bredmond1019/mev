@@ -1931,6 +1931,94 @@ pub fn enumerate_historical_removals(
 }
 
 // ---------------------------------------------------------------------------
+// Reason derivation + archive row construction — `mev carryover --backfill`
+// (`MV.16.B` task 2)
+// ---------------------------------------------------------------------------
+//
+// `okf_core::DisposalReason` is a closed four-value enum with no `unknown`
+// fallback (see its doc comment in okf-core `src/state.rs`) — that type
+// lives in another repo and this block does not add a fifth member to it.
+// A removing commit whose subject names nothing definite maps to
+// `Withdrawn` ("retired without being resolved" — the only member that
+// asserts nothing unevidenced), and the uncertainty is recorded in the
+// archive row's `evidence` string instead.
+
+/// Derive a [`okf_core::DisposalReason`] from a removing commit's subject,
+/// plus whether the mapping was attributable to explicit wording (`true`)
+/// or defaulted for lack of any (`false`).
+///
+/// Matching is case-insensitive substring matching against a small,
+/// deliberately narrow keyword set per variant — a heuristic, and kept
+/// small and documented in this one place so it reads like one:
+///
+/// - `Cleared`: wording about the underlying condition resolving —
+///   "clear", "resolved", "resolve".
+/// - `Superseded`: wording about replacement — "supersede", "superseded",
+///   "replace", "replaced".
+/// - `Promoted`: wording about graduating into a tracked container —
+///   "promote", "promoted".
+/// - Anything else: `Withdrawn`, with `attributable: false`.
+///
+/// The order above is also the match priority when a subject happens to
+/// contain more than one keyword family (rare, but a commit message is free
+/// text) — `Cleared` is checked first, then `Superseded`, then `Promoted`.
+#[must_use]
+pub fn derive_disposal_reason(commit_subject: &str) -> (okf_core::DisposalReason, bool) {
+    let lower = commit_subject.to_lowercase();
+
+    const CLEARED_WORDS: &[&str] = &["clear", "resolved", "resolve"];
+    const SUPERSEDED_WORDS: &[&str] = &["supersede", "superseded", "replace", "replaced"];
+    const PROMOTED_WORDS: &[&str] = &["promote", "promoted"];
+
+    if CLEARED_WORDS.iter().any(|w| lower.contains(w)) {
+        (okf_core::DisposalReason::Cleared, true)
+    } else if SUPERSEDED_WORDS.iter().any(|w| lower.contains(w)) {
+        (okf_core::DisposalReason::Superseded, true)
+    } else if PROMOTED_WORDS.iter().any(|w| lower.contains(w)) {
+        (okf_core::DisposalReason::Promoted, true)
+    } else {
+        (okf_core::DisposalReason::Withdrawn, false)
+    }
+}
+
+/// Build the archive record for one [`HistoricalRemoval`] recovered by
+/// task 1's history walk.
+///
+/// The embedded entry is `removal.entry` unchanged — it was already loaded
+/// verbatim from the removing commit's PARENT blob by
+/// [`walk_removals_for_state_file`], including any key [`Carryover`] does
+/// not model (preserved via its own `#[serde(flatten)] extra`). This
+/// function never re-synthesizes the entry from selected fields.
+///
+/// `reconstructed` is always `true` — every row this pass emits is a
+/// backfill from history, never a disposal written at the moment it
+/// happened (that is [`build_archive_row`], the live `--dispose` path).
+///
+/// `evidence` always names the removing commit as `<short-sha> <subject>`;
+/// when [`derive_disposal_reason`] could not attribute the reason to
+/// explicit wording, a trailing note records that the reason was defaulted
+/// rather than observed, so a reader of the archive line can tell a
+/// confident mapping from a guessed one without re-deriving it.
+#[must_use]
+pub fn build_historical_archive_row(removal: &HistoricalRemoval) -> okf_core::CarryoverArchiveRow {
+    let (reason, attributable) = derive_disposal_reason(&removal.commit_subject);
+
+    let mut evidence = format!("{} {}", removal.commit_sha, removal.commit_subject);
+    if !attributable {
+        evidence.push_str(" (reason not attributable from commit subject; defaulted to withdrawn)");
+    }
+
+    okf_core::CarryoverArchiveRow {
+        entry: removal.entry.clone(),
+        disposed_at: removal.commit_date.clone(),
+        reason,
+        reconstructed: true,
+        evidence: Some(evidence),
+        amends: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // `--write` for `mev graph-findings` (`MV.ticket.graph-derived-carryover-findings`
 // task 5) — append mechanically-detected findings as typed `carryover[]` entries
 // ---------------------------------------------------------------------------
@@ -7236,6 +7324,99 @@ mod tests {
         assert!(!row.reconstructed);
         assert_eq!(row.evidence.as_deref(), Some("block repo-a:MV.3.A closed"));
         assert!(row.amends.is_none());
+    }
+
+    fn historical_removal(entry: Carryover, commit_subject: &str) -> HistoricalRemoval {
+        HistoricalRemoval {
+            repo: "repo-a".to_string(),
+            archive_path: PathBuf::from("/tmp/repo-a/planning/carryover-archive.jsonl"),
+            entry,
+            commit_sha: "abc1234".to_string(),
+            commit_subject: commit_subject.to_string(),
+            commit_date: "2026-08-01".to_string(),
+        }
+    }
+
+    #[test]
+    fn derive_disposal_reason_maps_clearing_wording_to_cleared() {
+        let (reason, attributable) = derive_disposal_reason("clear stale carryover entry");
+        assert_eq!(reason, okf_core::DisposalReason::Cleared);
+        assert!(attributable);
+
+        let (reason, attributable) = derive_disposal_reason("resolve the OK.4.A blocker note");
+        assert_eq!(reason, okf_core::DisposalReason::Cleared);
+        assert!(attributable);
+    }
+
+    #[test]
+    fn derive_disposal_reason_maps_replacement_wording_to_superseded() {
+        let (reason, attributable) =
+            derive_disposal_reason("supersede old constraint carryover with new one");
+        assert_eq!(reason, okf_core::DisposalReason::Superseded);
+        assert!(attributable);
+    }
+
+    #[test]
+    fn derive_disposal_reason_maps_promotion_wording_to_promoted() {
+        let (reason, attributable) = derive_disposal_reason("promote carryover to MV.9.C block");
+        assert_eq!(reason, okf_core::DisposalReason::Promoted);
+        assert!(attributable);
+    }
+
+    #[test]
+    fn derive_disposal_reason_defaults_to_withdrawn_when_unattributable() {
+        let (reason, attributable) =
+            derive_disposal_reason("move bastiel-registration carryover to business");
+        assert_eq!(reason, okf_core::DisposalReason::Withdrawn);
+        assert!(!attributable);
+    }
+
+    #[test]
+    fn build_historical_archive_row_is_verbatim_reconstructed_and_names_the_commit() {
+        let entry = item(
+            "withdrawn-one",
+            "deferred",
+            Some("some prose"),
+            vec![],
+            "2020-01-01",
+            None,
+            None,
+        );
+        let removal = historical_removal(
+            entry.clone(),
+            "move bastiel-registration carryover to business",
+        );
+        let row = build_historical_archive_row(&removal);
+
+        assert_eq!(row.entry.slug, entry.slug);
+        assert_eq!(row.entry.clears_when, entry.clears_when);
+        assert_eq!(row.disposed_at, "2026-08-01");
+        assert_eq!(row.reason, okf_core::DisposalReason::Withdrawn);
+        assert!(row.reconstructed);
+        let evidence = row.evidence.expect("evidence must be set");
+        assert!(evidence.starts_with("abc1234 move bastiel-registration carryover to business"));
+        assert!(evidence.contains("not attributable"));
+        assert!(row.amends.is_none());
+    }
+
+    #[test]
+    fn build_historical_archive_row_records_attributable_reason_without_the_defaulted_note() {
+        let entry = item(
+            "cleared-two",
+            "defect",
+            None,
+            vec![],
+            "2020-01-01",
+            None,
+            None,
+        );
+        let removal = historical_removal(entry, "clear the stale defect entry");
+        let row = build_historical_archive_row(&removal);
+
+        assert_eq!(row.reason, okf_core::DisposalReason::Cleared);
+        let evidence = row.evidence.expect("evidence must be set");
+        assert_eq!(evidence, "abc1234 clear the stale defect entry");
+        assert!(!evidence.contains("not attributable"));
     }
 
     #[test]
