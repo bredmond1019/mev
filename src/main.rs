@@ -704,6 +704,14 @@ enum Command {
         /// Write the JSON array to this file instead of stdout.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Cut the emitted set down to the interrupt subset only, per the
+        /// notification policy in `brain.toml`'s `[attention]` table (see
+        /// HQ's `docs/attention-triage-rule.md`). Without this flag the
+        /// output is the full ordered set, unchanged from before this flag
+        /// existed — depth limiting stays the queue's job, not this
+        /// command's.
+        #[arg(long)]
+        notify_only: bool,
     },
     /// Materialize brain documents and manage Opportunity records (Phase 9, Block MV.9.A).
     ///
@@ -3366,7 +3374,11 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::AttentionQueue { path, out } => {
+        Command::AttentionQueue {
+            path,
+            out,
+            notify_only,
+        } => {
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,
                 Err(e) => {
@@ -3374,7 +3386,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match mev::attention_queue(&root) {
+            match mev::attention_queue(&root, notify_only) {
                 Ok(json) => {
                     if let Some(out_path) = out {
                         if let Err(err) = std::fs::write(&out_path, format!("{json}\n")) {

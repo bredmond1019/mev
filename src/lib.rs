@@ -22,7 +22,8 @@ pub use brain::carryover::{
     CarryoverAudit, CarryoverLane, CarryoverRanking, CarryoverRef, CarryoverReport,
     CarryoverVerdict, ClusterMember, DedupSuggestion, FindingCluster, GraphFindingsWrite,
     NotEvaluableReason, TriageLane, audit_carryover, carryover_entry_for_finding,
-    evaluate_carryover, rank_carryover, slug_for_finding, write_graph_findings_for_repo,
+    evaluate_carryover, notify_subset, rank_carryover, slug_for_finding,
+    write_graph_findings_for_repo,
 };
 pub use brain::conformance::{
     CheckOutcome, CheckResult, CheckStatus, ConformanceCheck, ConformanceCtx, ConformanceReport,
@@ -1803,7 +1804,19 @@ fn apply_with_rollback_on_regression(
 /// own stability guarantee (task 4).
 ///
 /// An empty board returns `"[]"` — never an error.
-pub fn attention_queue(root: &std::path::Path) -> anyhow::Result<String> {
+///
+/// `notify_only`: when `true`, cuts the full ordered set down to the
+/// interrupt subset via [`brain::carryover::notify_subset`], applying the
+/// notification policy read from `brain.toml`'s `[attention]` table
+/// (`AttentionThresholds::notify_lanes`/`notify_priority_floor`/
+/// `notify_blocking_any_priority`). When `false` (the default), the output
+/// is the full ordered set, byte-identical to before this parameter existed
+/// — depth limiting stays the queue's job, not this command's.
+///
+/// Decision (`MV.ticket.attention-notify-policy` task 3): of the two shapes
+/// left open by the block record — a `--notify-only` flag vs. an additive
+/// `notify: bool` per payload — this implements the flag.
+pub fn attention_queue(root: &std::path::Path, notify_only: bool) -> anyhow::Result<String> {
     use brain::attention_payload::{
         AttentionQueuePayload, item_id_for, options_for, render_summary,
     };
@@ -1985,6 +1998,43 @@ pub fn attention_queue(root: &std::path::Path) -> anyhow::Result<String> {
             .then_with(|| b.age.cmp(&a.age))
             .then_with(|| id_a.cmp(id_b))
     });
+
+    // `--notify-only`: cut the already-ranked, already-ordered set down to
+    // the interrupt subset via `notify_subset` (task 2) — the single place
+    // the policy in `AttentionThresholds` is applied, so this command can
+    // never diverge from `notify_subset`'s own fixture-pinned behaviour. A
+    // row from a non-carryover lane (backlog, capture, distilled — `lane:
+    // None`) has no `TriageLane` at all, so it is never eligible and is
+    // excluded outright rather than passed through the filter. Ordering is
+    // preserved: `notify_subset` keeps input order, and `keyed` is already
+    // in this command's final sorted order.
+    if notify_only {
+        let proxy: Vec<brain::carryover::CarryoverRanking> = keyed
+            .iter()
+            .filter_map(|(item_id, row)| {
+                let lane = row.lane?;
+                Some(brain::carryover::CarryoverRanking {
+                    repo: row.repo.clone(),
+                    slug: item_id.clone(),
+                    kind: row.kind.clone(),
+                    lane,
+                    priority: row.priority,
+                    effective_priority: row.effective_priority,
+                    age_days: row.age,
+                    stale: false,
+                    unmet_blocks: Vec::new(),
+                    clears_when_satisfied: false,
+                    finding_id: None,
+                })
+            })
+            .collect();
+        let allowed: std::collections::HashSet<String> =
+            brain::carryover::notify_subset(&proxy, thresholds)
+                .into_iter()
+                .map(|r| r.slug)
+                .collect();
+        keyed.retain(|(item_id, _)| allowed.contains(item_id));
+    }
 
     let payloads: Vec<AttentionQueuePayload> = keyed
         .into_iter()
