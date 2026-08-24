@@ -2569,7 +2569,7 @@ pub fn carryover_effective_priorities(
 
 /// Which kind of `BlockedBy` edge a row reports — independent of the
 /// payload, for display and grouping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BlockedByEdgeType {
     Block,
@@ -2587,7 +2587,7 @@ pub enum BlockedByEdgeType {
 /// 2026-08-22 — not anticipated by `sequence.md` SQ-A34), and
 /// `Unresolvable` is a data defect (a typo) that must never inflate a
 /// blocking count the way a false `Blocking` would.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EdgeBlockVerdict {
     /// A `block` edge whose target resolved with a status that is neither
@@ -2822,6 +2822,194 @@ pub fn build_lane_residency_index(
         }
     }
     (LaneResidencyIndex { by_target }, diags)
+}
+
+// ---------------------------------------------------------------------------
+// `--would-block` report (MV.16.A, task 3) — the honest blast radius, with
+// enforcement off. One row per `carryover[].blocks[]` edge in the swept
+// corpus, built purely from [`classify_blocked_by_edge`] (task 1) and
+// [`LaneResidencyIndex`] (task 2) — no resolution logic is re-derived here.
+// This report writes nothing; it only reads already-evaluated state.
+// ---------------------------------------------------------------------------
+
+/// One row of the `--would-block` report: one `carryover[].blocks[]` edge,
+/// fully classified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WouldBlockRow {
+    /// The owning entry, `"{repo}:{slug}"`.
+    pub owner: String,
+    pub edge_type: BlockedByEdgeType,
+    /// The resolved target key (`"{repo}:{id}"`), or `None` for a
+    /// non-`Block` edge, which has no node target.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_key: Option<String>,
+    /// The target's live authored status, or `None` when the edge has no
+    /// node target, or the target resolved but carries no status value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_status: Option<String>,
+    /// `true` iff `target_key` appears in at least one lane discovered by
+    /// [`build_lane_residency_index`]. Always `false` for a non-`Block`
+    /// edge (no target to look up). Independent of `verdict` — an `open`
+    /// target in no lane and an `open` target someone is actively driving
+    /// are both `Blocking`; this field is what tells them apart.
+    pub lane_resident: bool,
+    /// The lane identifiers (`"{roadmap}/lane-{lane}.json"`) that list the
+    /// target, if any. Empty when `lane_resident` is `false`.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub lanes: Vec<String>,
+    pub verdict: EdgeBlockVerdict,
+}
+
+/// Summary counts over a [`WouldBlockReport`]'s rows: the headline blocking
+/// count plus a breakdown of every non-blocking reason, so a reader can see
+/// at a glance how many edges were excluded and why — never just a bare
+/// total that hides the classification.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WouldBlockSummary {
+    pub total_edges: usize,
+    pub blocking: usize,
+    pub closed: usize,
+    pub wontfix: usize,
+    pub unresolvable: usize,
+    pub no_node_target: usize,
+}
+
+/// The full `--would-block` report: every row plus its summary. Produced by
+/// [`compute_would_block_report`]; rendered by [`render_would_block_table`]
+/// (human) and [`render_would_block_json`] (machine) — both pure functions
+/// over this type, so the two renderers can never independently derive a
+/// different verdict for the same row.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WouldBlockReport {
+    pub rows: Vec<WouldBlockRow>,
+    pub summary: WouldBlockSummary,
+}
+
+/// Walks every `carryover[].blocks[]` edge across `entries` and classifies
+/// each one via [`classify_blocked_by_edge`] and `lane_index`, producing one
+/// [`WouldBlockRow`] per edge plus the [`WouldBlockSummary`] breakdown.
+///
+/// Pure and read-only: this function opens no file handle and writes
+/// nothing — it only reads `entries` (already evaluated by
+/// [`evaluate_carryover`]), `block_status`, and `lane_index` (built once by
+/// [`build_lane_residency_index`] and reused, per that function's own
+/// contract, across the whole run rather than rebuilt per edge).
+///
+/// Row order matches `entries`' order, and within an entry, `entry.blocks`'
+/// order — deterministic given deterministic inputs.
+pub fn compute_would_block_report(
+    entries: &[CarryoverVerdict],
+    block_status: &HashMap<String, Option<String>>,
+    lane_index: &LaneResidencyIndex,
+) -> WouldBlockReport {
+    let mut rows = Vec::new();
+    let mut summary = WouldBlockSummary::default();
+
+    for entry in entries {
+        let owner = format!("{}:{}", entry.repo, entry.slug);
+        for edge in &entry.blocks {
+            let classification = classify_blocked_by_edge(&entry.repo, edge, block_status);
+
+            summary.total_edges += 1;
+            match classification.verdict {
+                EdgeBlockVerdict::Blocking => summary.blocking += 1,
+                EdgeBlockVerdict::Closed => summary.closed += 1,
+                EdgeBlockVerdict::Wontfix => summary.wontfix += 1,
+                EdgeBlockVerdict::Unresolvable => summary.unresolvable += 1,
+                EdgeBlockVerdict::NoNodeTarget => summary.no_node_target += 1,
+            }
+
+            let lanes = classification
+                .target_key
+                .as_deref()
+                .map(|key| lane_index.lanes_for(key).to_vec())
+                .unwrap_or_default();
+            let lane_resident = !lanes.is_empty();
+
+            rows.push(WouldBlockRow {
+                owner: owner.clone(),
+                edge_type: classification.edge_type,
+                target_key: classification.target_key,
+                target_status: classification.target_status,
+                lane_resident,
+                lanes,
+                verdict: classification.verdict,
+            });
+        }
+    }
+
+    WouldBlockReport { rows, summary }
+}
+
+/// `EdgeBlockVerdict` as the short label used by both renderers.
+fn would_block_verdict_label(verdict: EdgeBlockVerdict) -> &'static str {
+    match verdict {
+        EdgeBlockVerdict::Blocking => "blocking",
+        EdgeBlockVerdict::Closed => "closed",
+        EdgeBlockVerdict::Wontfix => "wontfix",
+        EdgeBlockVerdict::Unresolvable => "unresolvable",
+        EdgeBlockVerdict::NoNodeTarget => "no-node-target",
+    }
+}
+
+/// `BlockedByEdgeType` as the short label used by both renderers.
+fn would_block_edge_type_label(edge_type: BlockedByEdgeType) -> &'static str {
+    match edge_type {
+        BlockedByEdgeType::Block => "block",
+        BlockedByEdgeType::External => "external",
+        BlockedByEdgeType::Operator => "operator",
+        BlockedByEdgeType::Approval => "approval",
+    }
+}
+
+/// Renders a [`WouldBlockReport`] as a human-readable table plus a summary
+/// footer — one line per row, in the report's row order, followed by the
+/// blocking headline and the non-blocking breakdown. Pure: reads only
+/// `report`, prints nothing itself.
+pub fn render_would_block_table(report: &WouldBlockReport) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "{:<28} {:<10} {:<28} {:<12} {:<7} {:<14} lanes",
+        "owner", "edge-type", "target", "status", "lane?", "verdict"
+    ));
+
+    for row in &report.rows {
+        lines.push(format!(
+            "{:<28} {:<10} {:<28} {:<12} {:<7} {:<14} {}",
+            row.owner,
+            would_block_edge_type_label(row.edge_type),
+            row.target_key.as_deref().unwrap_or("-"),
+            row.target_status.as_deref().unwrap_or("-"),
+            row.lane_resident,
+            would_block_verdict_label(row.verdict),
+            if row.lanes.is_empty() {
+                "-".to_string()
+            } else {
+                row.lanes.join(",")
+            }
+        ));
+    }
+
+    lines.push(String::new());
+    lines.push(format!(
+        "total: {}  blocking: {}  closed: {}  wontfix: {}  unresolvable: {}  no-node-target: {}",
+        report.summary.total_edges,
+        report.summary.blocking,
+        report.summary.closed,
+        report.summary.wontfix,
+        report.summary.unresolvable,
+        report.summary.no_node_target,
+    ));
+
+    lines.join("\n")
+}
+
+/// Renders a [`WouldBlockReport`] as pretty-printed JSON — the same rows and
+/// the same verdicts as [`render_would_block_table`], serialized directly
+/// from `report` rather than re-derived, so the two renderers can never
+/// disagree.
+pub fn render_would_block_json(report: &WouldBlockReport) -> serde_json::Result<String> {
+    serde_json::to_string_pretty(report)
 }
 
 /// `TriageLane` sort rank: BLOCKING first, then HOT, AGING, STANDING.
@@ -6106,6 +6294,192 @@ mod tests {
         assert!(index.is_resident("mev:MV.1.A"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- compute_would_block_report / renderers (MV.16.A, task 3) -----------
+
+    fn would_block_fixture_entries() -> Vec<CarryoverVerdict> {
+        vec![
+            ranking_verdict(
+                "mev",
+                "blocking-entry",
+                None,
+                vec![block_edge("mev", "MV.1.A")],
+            ),
+            ranking_verdict(
+                "mev",
+                "closed-entry",
+                None,
+                vec![block_edge("mev", "MV.2.B")],
+            ),
+            ranking_verdict(
+                "mev",
+                "wontfix-entry",
+                None,
+                vec![block_edge("mev", "JF.2.A")],
+            ),
+            ranking_verdict(
+                "mev",
+                "unresolvable-entry",
+                None,
+                vec![block_edge("mev", "MV.99.Z")],
+            ),
+            ranking_verdict(
+                "mev",
+                "external-entry",
+                None,
+                vec![BlockedBy::External(ExternalDep {
+                    what: "waiting on vendor API".to_string(),
+                })],
+            ),
+        ]
+    }
+
+    fn would_block_fixture_status() -> HashMap<String, Option<String>> {
+        HashMap::from([
+            ("mev:MV.1.A".to_string(), Some("open".to_string())),
+            ("mev:MV.2.B".to_string(), Some("closed".to_string())),
+            ("mev:JF.2.A".to_string(), Some("wontfix".to_string())),
+        ])
+    }
+
+    #[test]
+    fn compute_would_block_report_summary_counts_one_of_each_verdict() {
+        let entries = would_block_fixture_entries();
+        let status = would_block_fixture_status();
+        let lane_index = LaneResidencyIndex::default();
+
+        let report = compute_would_block_report(&entries, &status, &lane_index);
+
+        assert_eq!(report.summary.total_edges, 5);
+        assert_eq!(report.summary.blocking, 1);
+        assert_eq!(report.summary.closed, 1);
+        assert_eq!(report.summary.wontfix, 1);
+        assert_eq!(report.summary.unresolvable, 1);
+        assert_eq!(report.summary.no_node_target, 1);
+        assert_eq!(report.rows.len(), 5);
+    }
+
+    #[test]
+    fn compute_would_block_report_row_carries_owner_and_lane_residency() {
+        let entries = vec![ranking_verdict(
+            "mev",
+            "blocking-entry",
+            None,
+            vec![block_edge("mev", "MV.1.A")],
+        )];
+        let status = HashMap::from([("mev:MV.1.A".to_string(), Some("open".to_string()))]);
+        let mut by_target: HashMap<String, Vec<String>> = HashMap::new();
+        by_target.insert(
+            "mev:MV.1.A".to_string(),
+            vec!["alpha/lane-substrate.json".to_string()],
+        );
+        let lane_index = LaneResidencyIndex { by_target };
+
+        let report = compute_would_block_report(&entries, &status, &lane_index);
+
+        assert_eq!(report.rows.len(), 1);
+        let row = &report.rows[0];
+        assert_eq!(row.owner, "mev:blocking-entry");
+        assert_eq!(row.edge_type, BlockedByEdgeType::Block);
+        assert_eq!(row.target_key.as_deref(), Some("mev:MV.1.A"));
+        assert_eq!(row.target_status.as_deref(), Some("open"));
+        assert!(row.lane_resident);
+        assert_eq!(row.lanes, vec!["alpha/lane-substrate.json".to_string()]);
+        assert_eq!(row.verdict, EdgeBlockVerdict::Blocking);
+    }
+
+    #[test]
+    fn compute_would_block_report_open_target_in_no_lane_is_blocking_but_not_resident() {
+        let entries = vec![ranking_verdict(
+            "mev",
+            "blocking-entry",
+            None,
+            vec![block_edge("mev", "MV.1.A")],
+        )];
+        let status = HashMap::from([("mev:MV.1.A".to_string(), Some("open".to_string()))]);
+        let lane_index = LaneResidencyIndex::default();
+
+        let report = compute_would_block_report(&entries, &status, &lane_index);
+
+        let row = &report.rows[0];
+        assert_eq!(row.verdict, EdgeBlockVerdict::Blocking);
+        assert!(!row.lane_resident);
+        assert!(row.lanes.is_empty());
+    }
+
+    #[test]
+    fn compute_would_block_report_non_block_edges_have_no_target_and_are_not_resident() {
+        let entries = vec![ranking_verdict(
+            "mev",
+            "external-entry",
+            None,
+            vec![BlockedBy::External(ExternalDep {
+                what: "waiting on vendor API".to_string(),
+            })],
+        )];
+        let lane_index = LaneResidencyIndex::default();
+
+        let report = compute_would_block_report(&entries, &HashMap::new(), &lane_index);
+
+        let row = &report.rows[0];
+        assert_eq!(row.edge_type, BlockedByEdgeType::External);
+        assert_eq!(row.target_key, None);
+        assert_eq!(row.target_status, None);
+        assert!(!row.lane_resident);
+        assert_eq!(row.verdict, EdgeBlockVerdict::NoNodeTarget);
+    }
+
+    #[test]
+    fn compute_would_block_report_writes_nothing() {
+        let dir = crate::testsupport::unique_temp_dir("mev-carryover-would-block-no-write");
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("untouched.txt");
+        std::fs::write(&marker, "before").unwrap();
+        let before = std::fs::read_to_string(&marker).unwrap();
+
+        let entries = would_block_fixture_entries();
+        let status = would_block_fixture_status();
+        let (lane_index, _diags) = build_lane_residency_index(&dir);
+        let report = compute_would_block_report(&entries, &status, &lane_index);
+        let _ = render_would_block_table(&report);
+        let _ = render_would_block_json(&report).unwrap();
+
+        let after = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(before, after, "compute/render must never write to disk");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn would_block_json_and_table_renderers_agree_row_for_row() {
+        let entries = would_block_fixture_entries();
+        let status = would_block_fixture_status();
+        let lane_index = LaneResidencyIndex::default();
+        let report = compute_would_block_report(&entries, &status, &lane_index);
+
+        let json = render_would_block_json(&report).unwrap();
+        let table = render_would_block_table(&report);
+
+        let parsed: WouldBlockReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, report);
+
+        for row in &report.rows {
+            let target = row.target_key.as_deref().unwrap_or("-");
+            assert!(
+                table.contains(&row.owner) && table.contains(target),
+                "table missing row for {} -> {}",
+                row.owner,
+                target
+            );
+            assert!(
+                table.contains(would_block_verdict_label(row.verdict)),
+                "table missing verdict label {:?}",
+                row.verdict
+            );
+        }
+
+        assert!(table.contains(&format!("total: {}", report.summary.total_edges)));
     }
 
     #[test]
