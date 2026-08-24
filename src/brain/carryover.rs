@@ -3856,6 +3856,64 @@ pub fn rank_carryover(
     ranked
 }
 
+// ---------------------------------------------------------------------------
+// Notification policy filter (MV.ticket.attention-notify-policy, task 2)
+// ---------------------------------------------------------------------------
+
+/// Apply the notification policy read from `brain.toml`'s `[attention]`
+/// table ([`AttentionThresholds`]'s `notify_*`/`digest_everything_else`
+/// fields) as a filter over an already-ranked, already-ordered slice of
+/// [`CarryoverRanking`] — the interrupt subset `bastion:BA.21.D`'s digest
+/// consumes. Pure: no corpus load, no config discovery, no I/O, and it never
+/// re-ranks, re-sorts, or re-derives anything — the caller's ordering
+/// (`rank_carryover`'s deterministic sort) survives untouched, since
+/// [`Iterator::filter`] preserves relative order.
+///
+/// Rules, evaluated per entry in this order:
+/// 1. [`TriageLane::Blocking`] is included whenever
+///    `thresholds.notify_blocking_any_priority` is `true`, **regardless of
+///    `priority`** (including `None`) — blocking-ness alone is the signal,
+///    and `notify_lanes` is not consulted for this lane (see the doc comment
+///    on [`AttentionThresholds::notify_priority_floor`]).
+/// 2. [`TriageLane::Hot`] is included only if `"hot"` is present in
+///    `thresholds.notify_lanes` **and** the entry's `priority` is
+///    `<= thresholds.notify_priority_floor`. `Hot` membership is always
+///    authored priority `0` or `1` ([`assign_triage_lane`]), so with the
+///    documented default floor of `0` a hot `P1` is excluded even though
+///    it's in the `Hot` lane — this is deliberate, not a bug (D43
+///    over-assignment of P1).
+/// 3. Any other lane ([`TriageLane::Aging`], [`TriageLane::Standing`]) is
+///    excluded — it still shows on `/attention` and still warns, it simply
+///    waits for the once-daily digest ([`AttentionThresholds::
+///    digest_everything_else`]).
+///
+/// A `blocking` item at P3 is included (rule 1 never looks at `priority`); a
+/// `hot` item at P1 is excluded (rule 2's floor check) — the two cases that
+/// distinguish this from a naive "priority <= floor" filter applied across
+/// every lane.
+pub fn notify_subset(
+    entries: &[CarryoverRanking],
+    thresholds: &AttentionThresholds,
+) -> Vec<CarryoverRanking> {
+    entries
+        .iter()
+        .filter(|entry| match entry.lane {
+            TriageLane::Blocking => thresholds.notify_blocking_any_priority,
+            TriageLane::Hot => {
+                thresholds
+                    .notify_lanes
+                    .iter()
+                    .any(|lane| lane.eq_ignore_ascii_case("hot"))
+                    && entry
+                        .priority
+                        .is_some_and(|p| p <= thresholds.notify_priority_floor)
+            }
+            TriageLane::Aging | TriageLane::Standing => false,
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8536,6 +8594,91 @@ mod tests {
             dry_run: false,
         };
         assert!(!with_failure.succeeded());
+    }
+
+    // -- notify_subset (`MV.ticket.attention-notify-policy` task 2) ---------
+
+    fn ranking(lane: TriageLane, priority: Option<u8>, slug: &str) -> CarryoverRanking {
+        CarryoverRanking {
+            repo: "mev".to_string(),
+            slug: slug.to_string(),
+            kind: "deferred".to_string(),
+            lane,
+            priority,
+            effective_priority: priority,
+            age_days: Some(1),
+            stale: false,
+            unmet_blocks: vec![],
+            clears_when_satisfied: false,
+            finding_id: None,
+        }
+    }
+
+    #[test]
+    fn notify_subset_includes_blocking_at_p3() {
+        let entries = vec![ranking(TriageLane::Blocking, Some(3), "a")];
+        let out = notify_subset(&entries, &thresholds());
+        assert_eq!(out.len(), 1, "blocking is included regardless of priority");
+    }
+
+    #[test]
+    fn notify_subset_includes_blocking_with_no_priority() {
+        let entries = vec![ranking(TriageLane::Blocking, None, "a")];
+        let out = notify_subset(&entries, &thresholds());
+        assert_eq!(out.len(), 1, "blocking with no priority is still included");
+    }
+
+    #[test]
+    fn notify_subset_excludes_blocking_when_flag_off() {
+        let mut t = thresholds();
+        t.notify_blocking_any_priority = false;
+        let entries = vec![ranking(TriageLane::Blocking, Some(0), "a")];
+        assert!(notify_subset(&entries, &t).is_empty());
+    }
+
+    #[test]
+    fn notify_subset_includes_hot_at_p0() {
+        let entries = vec![ranking(TriageLane::Hot, Some(0), "a")];
+        let out = notify_subset(&entries, &thresholds());
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn notify_subset_excludes_hot_at_p1_by_default() {
+        let entries = vec![ranking(TriageLane::Hot, Some(1), "a")];
+        assert!(
+            notify_subset(&entries, &thresholds()).is_empty(),
+            "default floor is 0 (P0 only), so hot P1 must be excluded"
+        );
+    }
+
+    #[test]
+    fn notify_subset_excludes_hot_when_lane_not_in_notify_lanes() {
+        let mut t = thresholds();
+        t.notify_lanes = vec!["blocking".to_string()];
+        let entries = vec![ranking(TriageLane::Hot, Some(0), "a")];
+        assert!(notify_subset(&entries, &t).is_empty());
+    }
+
+    #[test]
+    fn notify_subset_excludes_aging_and_standing() {
+        let entries = vec![
+            ranking(TriageLane::Aging, Some(2), "a"),
+            ranking(TriageLane::Standing, None, "b"),
+        ];
+        assert!(notify_subset(&entries, &thresholds()).is_empty());
+    }
+
+    #[test]
+    fn notify_subset_preserves_input_order() {
+        let entries = vec![
+            ranking(TriageLane::Blocking, Some(3), "z-blocking"),
+            ranking(TriageLane::Aging, Some(2), "skip"),
+            ranking(TriageLane::Hot, Some(0), "a-hot"),
+        ];
+        let out = notify_subset(&entries, &thresholds());
+        let slugs: Vec<&str> = out.iter().map(|r| r.slug.as_str()).collect();
+        assert_eq!(slugs, vec!["z-blocking", "a-hot"]);
     }
 
     // -- enumerate_historical_removals (`MV.16.B` task 1) -------------------
