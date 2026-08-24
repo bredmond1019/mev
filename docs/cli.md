@@ -2428,7 +2428,7 @@ mev graph-findings ~/Dev/agentic-portfolio
 
 ---
 
-### `attention-queue [--out <path>] [path]`
+### `attention-queue [--out <path>] [--notify-only] [path]`
 
 Emits every Attention-board item — across all four lanes (stale carryover's `Blocking`/`Hot`/
 `Aging`/`Standing` sub-lanes, aging backlog, orphaned captures, and stale distilled knowledge) —
@@ -2447,6 +2447,28 @@ different item, or a different order, than `/attention` itself would show.
 |---|---|---|
 | `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it). |
 | `--out <path>` | stdout | Write the JSON array to this file instead of printing it. |
+| `--notify-only` | off | Cut the emitted set down to the interrupt subset only (see "Notification policy" below). Without this flag the output is the full ordered set, byte-identical to before this flag existed — depth limiting stays the queue's job, not this command's. |
+
+#### Notification policy
+
+`--notify-only` filters the already-ranked, already-ordered set down to the items allowed to
+interrupt the operator, per the policy in `brain.toml`'s `[attention]` table. The rule itself —
+why these four keys, and what the interrupt-vs-digest split is for — is decided in HQ's
+[`docs/attention-triage-rule.md`](../../docs/attention-triage-rule.md); this section documents
+only the mev-side surface, not the rule's rationale or its (dated, drifting) measurements.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `notify_lanes` | `Vec<String>` | `["blocking", "hot"]` | `TriageLane` names eligible to interrupt at all. A lane not named here is excluded from `--notify-only` regardless of the other three keys — it still shows on `/attention` and still rolls into the digest. |
+| `notify_priority_floor` | `u8` | `0` | Within the `hot` lane only, the highest (least urgent) priority number still eligible. Does not affect `blocking`. |
+| `notify_blocking_any_priority` | `bool` | `true` | Whether `blocking` items interrupt regardless of priority, including items with no priority set. |
+| `digest_everything_else` | `bool` | `true` | Whether the non-interrupt remainder is bundled into a once-daily digest rather than dropped; assembling that digest is `bastion:BA.21.D`'s side, not mev's. |
+
+**The defaults fail closed.** An absent `[attention]` table, or a present one with none of these
+four keys set, yields the documented rule — `blocking` at any priority plus `hot` at P0 only —
+never "notify everything." A consumer (`bastion:BA.21.D`) should call `--notify-only` rather than
+re-deriving this cut itself: a re-derived cut can diverge from what `/attention` and this command
+agree on, which is the exact failure `attention-queue` exists to prevent.
 
 #### Payload shape
 
@@ -2522,6 +2544,9 @@ mev attention-queue ~/Dev/agentic-portfolio
 
 # Write to a file instead of stdout
 mev attention-queue --out /tmp/attention-queue.json
+
+# Interrupt subset only, per brain.toml's [attention] notification policy
+mev attention-queue --notify-only
 ```
 
 ---
