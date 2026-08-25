@@ -134,6 +134,28 @@ Setting `enabled = false` disables snapshotting entirely. The write itself stays
 
 ---
 
+## `[carryover]`
+
+Block-level startability enforcement knob for `carryover[].blocks[]` edges (`MV.16.C`). When on, a
+block named by a carryover entry's `blocks[]` is held out of `next`/the frontier even if its own
+`depends_on` is fully met — see `docs/cli.md`'s `[carryover]` subsection for the full mechanism
+(the three escape hatches, the cap-exceeded reporting, and `--would-block`'s enforcement header).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enforce_blocks` | bool | `false` | Whether `carryover[].blocks[]` edges actually hold their target block out of readiness. Off by default; flipping it on for the real corpus is a separate operator decision (HQ.7.C), not this section landing. |
+| `max_gates_per_repo` | integer | `10` | Cap on how many carryover-sourced gates apply per target repo per derivation pass; excess candidates are reported (`cap_exceeded`), never silently applied. |
+
+```toml
+[carryover]
+enforce_blocks     = false
+max_gates_per_repo = 10
+```
+
+An absent `[carryover]` table is equivalent to the example above — enforcement off, cap of 10.
+
+---
+
 ## Lookup order
 
 `find_brain_config(root)` walks up from `root`, checking for `brain.toml` at each level:
