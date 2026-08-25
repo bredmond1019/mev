@@ -349,6 +349,7 @@ mod tests {
         BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig { layer, status },
             crawl: CrawlConfig::default(),
             repos,

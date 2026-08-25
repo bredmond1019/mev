@@ -276,6 +276,43 @@ impl Default for HistoryConfig {
     }
 }
 
+/// `[carryover]` section of `brain.toml` — the block-level startability
+/// enforcement knob for `carryover[].blocks[]` edges (`MV.16.C`).
+///
+/// Today `blocks[]` edges propagate priority but gate nothing; this section
+/// turns them into real holds in the block-level derivation (`derive_focus`/
+/// `ready_order`), behind an off-by-default flag and a per-repo cap. An
+/// absent `[carryover]` table yields all defaults via [`Default`]:
+/// enforcement is off, so no gates are applied and no derived surface
+/// changes. Flipping `enforce_blocks` on for the real corpus is HQ's
+/// `HQ.7.C`, not this shipping of the mechanism — see `MV.16.C`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CarryoverConfig {
+    /// Whether `carryover[].blocks[]` edges actually hold their target block
+    /// in the block-level startability derivation (default `false`). Off by
+    /// default: this section ships the mechanism, not the flip.
+    #[serde(default)]
+    pub enforce_blocks: bool,
+    /// Maximum number of gating edges applied per repo (default 10). Edges
+    /// beyond the cap are reported (`cap exceeded — N of M gates applied`),
+    /// never silently applied — see `mev carryover --would-block`.
+    #[serde(default = "default_max_gates_per_repo")]
+    pub max_gates_per_repo: usize,
+}
+
+fn default_max_gates_per_repo() -> usize {
+    10
+}
+
+impl Default for CarryoverConfig {
+    fn default() -> Self {
+        Self {
+            enforce_blocks: false,
+            max_gates_per_repo: default_max_gates_per_repo(),
+        }
+    }
+}
+
 /// One `[[repos]]` entry in `brain.toml`.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct RepoEntry {
@@ -330,6 +367,10 @@ pub struct BrainConfig {
     /// revision-history writer.
     #[serde(default)]
     pub history: HistoryConfig,
+    /// `[carryover]` section — block-level startability enforcement knob for
+    /// `carryover[].blocks[]` edges (default: off).
+    #[serde(default)]
+    pub carryover: CarryoverConfig,
     /// `[[repos]]` entries.
     #[serde(default)]
     pub repos: Vec<RepoEntry>,
@@ -772,6 +813,71 @@ keep = 25
         );
     }
 
+    // -----------------------------------------------------------------------
+    // CarryoverConfig (MV.16.C task 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn carryover_config_default_when_section_absent() {
+        // The fixture brain.toml has no [carryover] table -> enforcement off,
+        // default cap. An absent section must yield today's behaviour exactly.
+        let cfg = load_brain_config(&fixture_path()).expect("should parse fixture");
+        assert!(
+            !cfg.carryover.enforce_blocks,
+            "enforce_blocks should default to false"
+        );
+        assert_eq!(cfg.carryover.max_gates_per_repo, 10);
+    }
+
+    #[test]
+    fn carryover_config_default_impl_matches_absent_section() {
+        // BrainConfig::default() (used wherever no file is loaded at all) must
+        // agree with the absent-section case above.
+        let cfg = CarryoverConfig::default();
+        assert!(!cfg.enforce_blocks);
+        assert_eq!(cfg.max_gates_per_repo, 10);
+    }
+
+    #[test]
+    fn carryover_config_explicit_table_overrides_both() {
+        let toml = r#"
+[carryover]
+enforce_blocks = true
+max_gates_per_repo = 3
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert!(cfg.carryover.enforce_blocks);
+        assert_eq!(cfg.carryover.max_gates_per_repo, 3);
+    }
+
+    #[test]
+    fn carryover_config_partial_table_keeps_enforce_blocks_default() {
+        let toml = r#"
+[carryover]
+max_gates_per_repo = 25
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.carryover.max_gates_per_repo, 25);
+        assert!(
+            !cfg.carryover.enforce_blocks,
+            "unset enforce_blocks keeps its default of false"
+        );
+    }
+
+    #[test]
+    fn carryover_config_enforce_blocks_true_keeps_default_cap() {
+        let toml = r#"
+[carryover]
+enforce_blocks = true
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert!(cfg.carryover.enforce_blocks);
+        assert_eq!(
+            cfg.carryover.max_gates_per_repo, 10,
+            "unset max_gates_per_repo keeps its default of 10"
+        );
+    }
+
     fn run_git(dir: &Path, args: &[&str]) {
         let status = crate::shared::git_command()
             .arg("-C")
@@ -860,6 +966,7 @@ keep = 25
             crawl: CrawlConfig::default(),
             attention: AttentionThresholds::default(),
             history: HistoryConfig::default(),
+            carryover: CarryoverConfig::default(),
             repos: vec![
                 RepoEntry {
                     slug: "brain".to_string(),

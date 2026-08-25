@@ -100,6 +100,7 @@ mod tests {
         BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -220,6 +221,7 @@ mod tests {
         let cfg = BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             repos: vec![
                 RepoEntry {
                     slug: "brain".to_string(),

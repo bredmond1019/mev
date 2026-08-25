@@ -3822,6 +3822,7 @@ mod tests {
         BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -3907,6 +3908,7 @@ mod tests {
         let config = BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -3988,6 +3990,7 @@ mod tests {
         let config = BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -4031,6 +4034,7 @@ mod tests {
         let config = BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -4145,6 +4149,7 @@ mod tests {
         let config = BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -7792,6 +7797,7 @@ mod tests {
         BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -7881,6 +7887,7 @@ mod tests {
         let config = BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -8374,6 +8381,7 @@ mod tests {
         let config = BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -8556,6 +8564,7 @@ mod tests {
         let config = BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -9769,6 +9778,7 @@ mod check_epics_tests {
         BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
