@@ -2240,10 +2240,12 @@ mev carryover --backfill --repo mev
 
 `mev carryover --would-block` (`MV.16.A`) answers, before any enforcement ships, the one question
 nobody could answer before this block: **if `carryover[].blocks[]` actually gated work today,
-what would stop?** `blocks[]` today only propagates priority — the only thing that actually holds
-a block back is a `depends_on {type: "block"}` edge — so this report changes nothing; it previews
-what `MV.16.C`'s enforcement, gated behind `enforce_blocks` and a per-repo cap, would do once
-turned on.
+what would stop?** Enforcement shipped in `MV.16.C`, gated behind `enforce_blocks` and a per-repo
+cap and **off by default** — so with the default configuration `blocks[]` still only propagates
+priority, and the only thing that actually holds a block back is a `depends_on {type: "block"}`
+edge. This report previews exactly what turning `enforce_blocks` on would hold, and stays
+read-only whether enforcement is on or off. It reports the current state in its header as
+`enforcement: ON (cap N/repo)` or `enforcement: OFF`.
 
 It walks every `carryover[].blocks[]` edge in the swept corpus (the identical corpus the plain
 sweep and `--audit` already load — no second discovery walk) and emits one row per edge:
@@ -2283,9 +2285,9 @@ same ownership rule the plain sweep uses.
 
 **Never writes, never gates.** `--would-block` opens no file handle for writing on this path,
 leaves every `state.json` and `carryover-archive.jsonl` byte-identical, and is **not** part of
-`planning/harness.json` — nothing in this fleet's push gate depends on what it finds. Enforcement,
-when it ships, is `MV.16.C`, behind an `enforce_blocks` flag and a per-repo cap; until then this
-flag only ever previews.
+`planning/harness.json` — nothing in this fleet's push gate depends on what it finds. Enforcement itself
+is `MV.16.C`'s, behind the `enforce_blocks` flag and a per-repo cap and off by default; this flag
+only ever previews, and never applies a gate regardless of how `enforce_blocks` is set.
 
 **Cannot be combined with `--dispose`, `--dry-run`, or `--audit`** — pass it alone (optionally
 with `--repo`/`--json`); combining reports the misuse and exits non-zero rather than silently

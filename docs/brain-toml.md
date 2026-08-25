@@ -134,6 +134,80 @@ Setting `enabled = false` disables snapshotting entirely. The write itself stays
 
 ---
 
+## `[attention]`
+
+Two different things share this table: the per-`kind` **staleness thresholds** that decide when an
+item is surfaced on the Attention board at all, and the **notification policy** that decides which
+of the surfaced items may interrupt a human. They are separate axes — an item can be stale (and so
+on the board) without being interruptible.
+
+### Staleness thresholds
+
+A `carryover[]` or `backlog[]` item is stale — surfaced on the Attention board and via the
+`W_STATE_*_STALE` warnings — once its age exceeds the threshold for its kind, unless it is
+snoozed. Both the validator and the emit planner read this one struct, so the board shows exactly
+what the warnings fire on.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `env_days` | integer | `3` | `carryover` kind `env` — transient environmental caveats. |
+| `deferred_days` | integer | `5` | `carryover` kind `deferred` — unticketed follow-ons. |
+| `defect_days` | integer | `10` | `carryover` kind `defect`. |
+| `drift_days` | integer | `10` | `carryover` kind `drift`. |
+| `known_issue_days` | integer | `10` | Retired kind (D72); still read so legacy entries round-trip. |
+| `constraint_days` | integer | `10` | Retired kind (D72); same. |
+| `backlog_days` | integer | `7` | `backlog[]` rows. |
+
+An unrecognised kind falls back to the longest carryover threshold, so a novel kind surfaces but
+not eagerly.
+
+### Notification policy (`MV.ticket.attention-notify-policy`)
+
+Decides which Attention items may **interrupt** the operator; everything else waits for a digest.
+Read by `mev attention-queue --notify-only`, and by any consumer that would otherwise re-derive the
+cut — `bastion`'s operator queue calls it rather than re-implementing it, because a re-derived cut
+diverges the phone from `/attention`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `notify_lanes` | list | `["blocking", "hot"]` | Triage lanes eligible to interrupt. |
+| `notify_priority_floor` | integer | `0` | Within `hot` only, the highest priority number still eligible. `0` is hottest, so the default is P0-only. |
+| `notify_blocking_any_priority` | bool | `true` | `blocking` interrupts regardless of priority — including an unset one. |
+| `digest_everything_else` | bool | `true` | Everything not selected above goes to the daily digest. |
+
+```toml
+[attention]
+env_days      = 3
+deferred_days = 5
+backlog_days  = 7
+
+notify_lanes                 = ["blocking", "hot"]
+notify_priority_floor        = 0
+notify_blocking_any_priority = true
+digest_everything_else       = true
+```
+
+**The defaults fail closed.** An absent `[attention]` table, or one carrying no policy keys at all,
+yields the documented rule — *blocking at any priority, plus hot at P0* — never notify-everything.
+That direction matters: measured 2026-08-25 the board held **415** items and the interrupt set was
+**7**, so a policy that failed open would deliver hundreds of notifications on its first run and be
+muted the same day.
+
+**It is not a priority floor applied across all lanes.** Two cases distinguish the rule, and both
+are pinned by tests: a `blocking` item at **P3 is included**, and a `hot` item at **P1 is
+excluded**. A single `priority <= floor` test over every lane gets both wrong.
+
+**Sizing note:** size this policy off the *arrival rate*, not the standing count. `hot` membership
+is authored priority 0 or 1 with no age component, so it is a stock that never drains into `aging` —
+the standing total is a number that structurally cannot go down. Between 2026-08-24 and 2026-08-25
+the board grew 395 -> 415 while the interrupt set stayed at 7.
+
+**Unknown keys in this table are silently ignored** — `AttentionThresholds` does not set
+`serde(deny_unknown_fields)`. A misspelled key therefore does nothing and reports nothing; check
+the spelling against the tables above rather than trusting that a key took effect.
+
+---
+
 ## `[carryover]`
 
 Block-level startability enforcement knob for `carryover[].blocks[]` edges (`MV.16.C`). When on, a

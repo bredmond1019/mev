@@ -107,9 +107,15 @@ pub struct LaneFile {
 /// caller that matches on individual fields must not be able to mistake "declared
 /// nothing" for "declared an empty constraint".
 ///
-/// **Frozen contract**: this type's field set and serialized shape must not change
-/// without updating `core/engine-rs`'s `chain.rs`, which re-declares it as a
-/// `deny_unknown_fields` mirror.
+/// **Hand-mirrored contract**: `core/engine-rs`'s
+/// `crates/engine-core/src/workflows/orchestration/chain.rs` re-declares this type as a
+/// reading-side mirror, with no shared dependency to enforce the mirror — so the two must be
+/// kept in lockstep by hand. That mirror is deliberately **not** `deny_unknown_fields`
+/// (`EN.12.E` task 1): an unrecognised key there parses and is dropped rather than
+/// hard-failing the whole lane-segments read, so mev shipping a new field first degrades
+/// gracefully instead of breaking every un-rebuilt engine on every lane segment. Adding a
+/// field here is therefore safe; **renaming or removing one is not**, and still requires
+/// updating that file.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct LaneDirectives {
     #[serde(skip_serializing_if = "Option::is_none")]
