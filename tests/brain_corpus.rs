@@ -48,6 +48,7 @@ fn three_unit_config() -> BrainConfig {
     BrainConfig {
         attention: Default::default(),
         history: Default::default(),
+        carryover: Default::default(),
         vocab: VocabConfig::default(),
         crawl: CrawlConfig {
             skip_dirs: vec![

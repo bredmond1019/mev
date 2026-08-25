@@ -1047,7 +1047,7 @@ pub fn plan_availability(root: &Path, loaded: &[(StateSource, StateFile)]) -> Em
     }
 
     let effective = effective_priorities(&graph, loaded);
-    let frontier = compute_frontier(&lane_positions, &graph, loaded, &effective);
+    let frontier = compute_frontier(&lane_positions, &graph, loaded, &effective, None);
 
     let (live_runs, live_run_diags) = discover_live_runs(root, &config.repos);
     plan.diagnostics.extend(live_run_diags);
@@ -1186,6 +1186,24 @@ mod tests {
         let (avail, reason) = intrinsic_status(&e);
         assert_eq!(avail, SegmentAvailability::Startable);
         assert_eq!(reason, None);
+    }
+
+    /// `MV.16.C` task 4: availability recomputes nothing about carryover gating
+    /// itself — it only ever reads `FrontierEntry::unmet_gates`/`startable`, so a
+    /// carryover-held head (`"carryover:{owner}"`, the shape
+    /// [`crate::brain::frontier::compute_frontier`] now emits) must flow through
+    /// as `HeldOperator` with the owner named in the reason, with no availability
+    /// code change required — proving this module consumes the derivation rather
+    /// than recomputing held-ness from `depends_on`.
+    #[test]
+    fn carryover_gate_reason_flows_through_as_held_operator() {
+        let e = entry(vec![], vec!["carryover:mev:finding-1"]);
+        let (avail, reason) = intrinsic_status(&e);
+        assert_eq!(avail, SegmentAvailability::HeldOperator);
+        assert_eq!(
+            reason.as_deref(),
+            Some("blocked by carryover:mev:finding-1")
+        );
     }
 
     #[test]

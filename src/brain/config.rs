@@ -113,6 +113,32 @@ pub struct AttentionThresholds {
     /// `ticket-operator-edge-graph`.
     #[serde(default = "default_operator_days")]
     pub operator_days: i64,
+    /// Which `TriageLane` names may interrupt the operator (default
+    /// `["blocking", "hot"]`). Decided 2026-08-24 via
+    /// `/begin-session operator-attention-triage-rule` (see
+    /// `docs/attention-triage-rule.md` in the brain repo). A lane not named
+    /// here never interrupts, regardless of `notify_priority_floor` or
+    /// `notify_blocking_any_priority` — it still shows on `/attention` and
+    /// still warns, it simply waits for the once-daily digest.
+    #[serde(default = "default_notify_lanes")]
+    pub notify_lanes: Vec<String>,
+    /// Within the `hot` lane only, the highest (i.e. least urgent) priority
+    /// number still eligible to interrupt (default `0` — P0 only; `0` is
+    /// hottest). Does not affect `blocking`, which is governed solely by
+    /// `notify_blocking_any_priority`.
+    #[serde(default = "default_notify_priority_floor")]
+    pub notify_priority_floor: u8,
+    /// Whether `blocking` items interrupt regardless of priority, including
+    /// items with no priority set at all (default `true`).
+    #[serde(default = "default_notify_blocking_any_priority")]
+    pub notify_blocking_any_priority: bool,
+    /// Whether everything not selected to interrupt still rolls into a
+    /// once-daily digest rather than being dropped (default `true`).
+    /// Nothing surfaced by `/attention` is ever silently discarded by this
+    /// policy — this flag only controls whether the non-interrupt remainder
+    /// is bundled into a digest.
+    #[serde(default = "default_digest_everything_else")]
+    pub digest_everything_else: bool,
 }
 
 fn default_env_days() -> i64 {
@@ -145,6 +171,18 @@ fn default_memory_days() -> i64 {
 fn default_operator_days() -> i64 {
     7
 }
+fn default_notify_lanes() -> Vec<String> {
+    vec!["blocking".to_string(), "hot".to_string()]
+}
+fn default_notify_priority_floor() -> u8 {
+    0
+}
+fn default_notify_blocking_any_priority() -> bool {
+    true
+}
+fn default_digest_everything_else() -> bool {
+    true
+}
 
 impl Default for AttentionThresholds {
     fn default() -> Self {
@@ -159,6 +197,10 @@ impl Default for AttentionThresholds {
             knowledge_days: default_knowledge_days(),
             memory_days: default_memory_days(),
             operator_days: default_operator_days(),
+            notify_lanes: default_notify_lanes(),
+            notify_priority_floor: default_notify_priority_floor(),
+            notify_blocking_any_priority: default_notify_blocking_any_priority(),
+            digest_everything_else: default_digest_everything_else(),
         }
     }
 }
@@ -234,6 +276,43 @@ impl Default for HistoryConfig {
     }
 }
 
+/// `[carryover]` section of `brain.toml` — the block-level startability
+/// enforcement knob for `carryover[].blocks[]` edges (`MV.16.C`).
+///
+/// Today `blocks[]` edges propagate priority but gate nothing; this section
+/// turns them into real holds in the block-level derivation (`derive_focus`/
+/// `ready_order`), behind an off-by-default flag and a per-repo cap. An
+/// absent `[carryover]` table yields all defaults via [`Default`]:
+/// enforcement is off, so no gates are applied and no derived surface
+/// changes. Flipping `enforce_blocks` on for the real corpus is HQ's
+/// `HQ.7.C`, not this shipping of the mechanism — see `MV.16.C`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CarryoverConfig {
+    /// Whether `carryover[].blocks[]` edges actually hold their target block
+    /// in the block-level startability derivation (default `false`). Off by
+    /// default: this section ships the mechanism, not the flip.
+    #[serde(default)]
+    pub enforce_blocks: bool,
+    /// Maximum number of gating edges applied per repo (default 10). Edges
+    /// beyond the cap are reported (`cap exceeded — N of M gates applied`),
+    /// never silently applied — see `mev carryover --would-block`.
+    #[serde(default = "default_max_gates_per_repo")]
+    pub max_gates_per_repo: usize,
+}
+
+fn default_max_gates_per_repo() -> usize {
+    10
+}
+
+impl Default for CarryoverConfig {
+    fn default() -> Self {
+        Self {
+            enforce_blocks: false,
+            max_gates_per_repo: default_max_gates_per_repo(),
+        }
+    }
+}
+
 /// One `[[repos]]` entry in `brain.toml`.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct RepoEntry {
@@ -288,6 +367,10 @@ pub struct BrainConfig {
     /// revision-history writer.
     #[serde(default)]
     pub history: HistoryConfig,
+    /// `[carryover]` section — block-level startability enforcement knob for
+    /// `carryover[].blocks[]` edges (default: off).
+    #[serde(default)]
+    pub carryover: CarryoverConfig,
     /// `[[repos]]` entries.
     #[serde(default)]
     pub repos: Vec<RepoEntry>,
@@ -616,6 +699,54 @@ mod tests {
     }
 
     #[test]
+    fn notify_policy_fail_closed_when_attention_table_absent() {
+        // An absent [attention] table must yield the documented rule --
+        // blocking any priority + hot P0 -- never notify-everything.
+        // Getting this backwards reproduces the 395-item notification burst
+        // this ticket exists to prevent.
+        let cfg = load_brain_config(&fixture_path()).expect("should parse fixture");
+        assert_eq!(cfg.attention.notify_lanes, vec!["blocking", "hot"]);
+        assert_eq!(cfg.attention.notify_priority_floor, 0);
+        assert!(cfg.attention.notify_blocking_any_priority);
+        assert!(cfg.attention.digest_everything_else);
+    }
+
+    #[test]
+    fn notify_policy_fail_closed_when_table_present_but_no_policy_keys() {
+        // A present [attention] table that only sets an unrelated staleness
+        // field must also yield the documented default rule.
+        let toml = r#"
+[attention]
+deferred_days = 2
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.attention.notify_lanes, vec!["blocking", "hot"]);
+        assert_eq!(cfg.attention.notify_priority_floor, 0);
+        assert!(cfg.attention.notify_blocking_any_priority);
+        assert!(cfg.attention.digest_everything_else);
+    }
+
+    #[test]
+    fn notify_policy_each_key_is_actually_read() {
+        // Each of the four keys must demonstrably change what's parsed --
+        // pins that they are read, not silently ignored (no
+        // deny_unknown_fields means a typo'd/unread key parses clean and
+        // does nothing, which looks identical to success).
+        let toml = r#"
+[attention]
+notify_lanes = ["blocking"]
+notify_priority_floor = 1
+notify_blocking_any_priority = false
+digest_everything_else = false
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.attention.notify_lanes, vec!["blocking"]);
+        assert_eq!(cfg.attention.notify_priority_floor, 1);
+        assert!(!cfg.attention.notify_blocking_any_priority);
+        assert!(!cfg.attention.digest_everything_else);
+    }
+
+    #[test]
     fn attention_thresholds_partial_override_keeps_other_defaults() {
         let toml = r#"
 [attention]
@@ -679,6 +810,71 @@ keep = 25
         assert!(
             cfg.history.enabled,
             "unset enabled keeps its default of true"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CarryoverConfig (MV.16.C task 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn carryover_config_default_when_section_absent() {
+        // The fixture brain.toml has no [carryover] table -> enforcement off,
+        // default cap. An absent section must yield today's behaviour exactly.
+        let cfg = load_brain_config(&fixture_path()).expect("should parse fixture");
+        assert!(
+            !cfg.carryover.enforce_blocks,
+            "enforce_blocks should default to false"
+        );
+        assert_eq!(cfg.carryover.max_gates_per_repo, 10);
+    }
+
+    #[test]
+    fn carryover_config_default_impl_matches_absent_section() {
+        // BrainConfig::default() (used wherever no file is loaded at all) must
+        // agree with the absent-section case above.
+        let cfg = CarryoverConfig::default();
+        assert!(!cfg.enforce_blocks);
+        assert_eq!(cfg.max_gates_per_repo, 10);
+    }
+
+    #[test]
+    fn carryover_config_explicit_table_overrides_both() {
+        let toml = r#"
+[carryover]
+enforce_blocks = true
+max_gates_per_repo = 3
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert!(cfg.carryover.enforce_blocks);
+        assert_eq!(cfg.carryover.max_gates_per_repo, 3);
+    }
+
+    #[test]
+    fn carryover_config_partial_table_keeps_enforce_blocks_default() {
+        let toml = r#"
+[carryover]
+max_gates_per_repo = 25
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.carryover.max_gates_per_repo, 25);
+        assert!(
+            !cfg.carryover.enforce_blocks,
+            "unset enforce_blocks keeps its default of false"
+        );
+    }
+
+    #[test]
+    fn carryover_config_enforce_blocks_true_keeps_default_cap() {
+        let toml = r#"
+[carryover]
+enforce_blocks = true
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert!(cfg.carryover.enforce_blocks);
+        assert_eq!(
+            cfg.carryover.max_gates_per_repo, 10,
+            "unset max_gates_per_repo keeps its default of 10"
         );
     }
 
@@ -770,6 +966,7 @@ keep = 25
             crawl: CrawlConfig::default(),
             attention: AttentionThresholds::default(),
             history: HistoryConfig::default(),
+            carryover: CarryoverConfig::default(),
             repos: vec![
                 RepoEntry {
                     slug: "brain".to_string(),

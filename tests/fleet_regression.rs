@@ -131,7 +131,7 @@ fn fleet_readiness_is_unchanged_for_blocks_without_a_new_edge() {
                 ids(&file.focus.blocked),
             )
         } else {
-            let derived = derive_focus(src, file, &graph, &files);
+            let derived = derive_focus(src, file, &graph, &files, None);
             let derived_blocked: HashSet<String> =
                 derived.blocked.iter().map(|(id, _)| id.clone()).collect();
             (

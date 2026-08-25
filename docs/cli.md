@@ -2296,6 +2296,89 @@ that is the whole point of shipping this before enforcement exists. Non-zero onl
 `brain.toml`/`--repo`/serialization failures the plain sweep can hit, or on an incoherent flag
 combination as above.
 
+#### `[carryover]` — turning `blocks[]` edges into real gates (`MV.16.C`)
+
+`--would-block` above only previews. `MV.16.C` is the enforcement it previews: a `brain.toml`
+`[carryover]` section that, when turned on, makes a `carryover[].blocks[]` edge actually hold the
+block it names, in the same derivation every generated board and both validators read.
+
+```toml
+[carryover]
+enforce_blocks = true   # default: false
+max_gates_per_repo = 10 # default: 10
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enforce_blocks` | `false` | Master switch. `false` (or an absent `[carryover]` table entirely) reproduces today's behaviour exactly — no gates, no change to any derived surface. `true` turns every qualifying `carryover[].blocks[]` edge into a real hold |
+| `max_gates_per_repo` | `10` | Per-repo cap on how many gates `enforce_blocks = true` may apply. Exceeding it never silently truncates — see **The cap** below |
+
+**An absent `[carryover]` table is not a degraded mode — it is identical to `enforce_blocks =
+false`.** Shipping this section and flipping it on for the real corpus are different acts: this
+block ships the mechanism only. Turning it on for the fleet is HQ's `HQ.7.C`, gated behind an
+install-closure edge and an operator approval, because an older installed `mev` binary silently
+ignores an unknown `enforce_blocks` key (`BrainConfig` deliberately has no `deny_unknown_fields` —
+closing that is a separate, fleet-wide change, out of scope here) and the Mini's nightly
+`routine.sh` would regenerate boards with enforcement silently absent on a stale install — a flap
+with no error anywhere.
+
+**Enforcement's home is the block-level startability derivation (`derive_focus` / `ready_order` in
+`src/brain/state.rs`), never `compute_frontier`.** `compute_frontier` is lane-head-scoped and
+represents a closed block by its *absence*, so a gated block that sits in no lane would be held
+invisibly there — measured on the live corpus, most of the block edges that exist point at
+targets in no lane. `derive_focus` is what `emit-block-graph`, `validate-brain --state`, and every
+generated board actually read; `compute_frontier` and the availability derivation are downstream
+**consumers** of its held-ness, not a second place that recomputes it. A gated block reported held
+carries a reason naming the owning carryover entry's slug, so a board says *why* a block is held,
+not merely that it is — and the flag off, `derive_focus`/`ready_order`/the frontier/availability
+output is byte-identical to a build with no `[carryover]` table at all.
+
+**Only a live `block` edge whose target resolves and is neither `closed` nor `wontfix` gates.**
+This reuses the exact same edge-classification predicate `--would-block` reports with (`src/brain/
+carryover.rs`) — the enforcement and its own dry-run are built on one shared function, not two, so
+they cannot drift apart. `external`/`operator`/`approval` edges never gate (they have no block
+target to hold), and an edge that fails to resolve to any node in the loaded corpus (a typo'd
+repo/id) gates nothing either — a data defect must never hold real work.
+
+**Three independent ways out of a wedge — the risk this section exists to bound is one bad edge
+holding a lane nobody can unstick, and each of these breaks that on its own, without touching the
+other two:**
+
+1. **The flag.** Set `enforce_blocks = false` (or delete the `[carryover]` table) and every gate
+   this section applies disappears fleet-wide, instantly.
+2. **The per-repo cap.** `max_gates_per_repo` bounds how many gates any one repo's edges may apply
+   at once, regardless of how many qualifying edges exist.
+3. **The per-entry `enforce: false` opt-out.** Any single `carryover[]` entry can opt its own
+   `blocks[]` edges out without touching the flag or the cap. This is okf-core's rule
+   (`core/okf-core/src/state.rs`) — `mev` consumes the edges okf-core already suppressed rather
+   than re-implementing the check; `None` and `Some(true)` both enforce, only an explicit
+   `enforce: false` opts out.
+
+All three are covered by `tests/brain_carryover_enforcement.rs`.
+
+**The cap is reported when exceeded, never silently applied.** If a repo's qualifying edges exceed
+`max_gates_per_repo`, enforcement applies none of the excess — only the first `max_gates_per_repo`
+gates take effect — and `mev carryover --would-block` prints `cap exceeded — {repo}: N of M gates
+applied` for that repo. Silent truncation would read as "enforcement is on and nothing is held",
+which is indistinguishable from the flag being off; this section never lets that ambiguity stand.
+
+**`--would-block` reports the live enforcement state**, so the same dry-run output can no longer
+mean two different things depending on config nobody can see from the report:
+
+```bash
+mev carryover --would-block
+# enforcement: OFF                              (no [carryover] table, or enforce_blocks = false)
+# enforcement: ON (cap 10/repo)                  (enforce_blocks = true, default cap)
+# enforcement: ON (cap 2/repo)
+# cap exceeded — mev: 2 of 3 gates applied
+```
+
+**`blocked` is derived, never authored.** No code path in this section ever writes a `blocked`
+value onto a `tracks[]` block's `status`, and never synthesizes a `depends_on` entry to represent
+a carryover gate. Doing either would be `E_BLOCK_BAD_STATUS`-class misuse and would turn a
+derived fact into a permanent, hand-editable one — `tests/brain_carryover_enforcement.rs` sweeps
+the fixture corpus after every derive to assert this never happens.
+
 ---
 
 ### `graph-findings [--json] [--write] [path]`
@@ -2428,7 +2511,7 @@ mev graph-findings ~/Dev/agentic-portfolio
 
 ---
 
-### `attention-queue [--out <path>] [path]`
+### `attention-queue [--out <path>] [--notify-only] [path]`
 
 Emits every Attention-board item — across all four lanes (stale carryover's `Blocking`/`Hot`/
 `Aging`/`Standing` sub-lanes, aging backlog, orphaned captures, and stale distilled knowledge) —
@@ -2447,6 +2530,28 @@ different item, or a different order, than `/attention` itself would show.
 |---|---|---|
 | `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it). |
 | `--out <path>` | stdout | Write the JSON array to this file instead of printing it. |
+| `--notify-only` | off | Cut the emitted set down to the interrupt subset only (see "Notification policy" below). Without this flag the output is the full ordered set, byte-identical to before this flag existed — depth limiting stays the queue's job, not this command's. |
+
+#### Notification policy
+
+`--notify-only` filters the already-ranked, already-ordered set down to the items allowed to
+interrupt the operator, per the policy in `brain.toml`'s `[attention]` table. The rule itself —
+why these four keys, and what the interrupt-vs-digest split is for — is decided in HQ's
+[`docs/attention-triage-rule.md`](../../docs/attention-triage-rule.md); this section documents
+only the mev-side surface, not the rule's rationale or its (dated, drifting) measurements.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `notify_lanes` | `Vec<String>` | `["blocking", "hot"]` | `TriageLane` names eligible to interrupt at all. A lane not named here is excluded from `--notify-only` regardless of the other three keys — it still shows on `/attention` and still rolls into the digest. |
+| `notify_priority_floor` | `u8` | `0` | Within the `hot` lane only, the highest (least urgent) priority number still eligible. Does not affect `blocking`. |
+| `notify_blocking_any_priority` | `bool` | `true` | Whether `blocking` items interrupt regardless of priority, including items with no priority set. |
+| `digest_everything_else` | `bool` | `true` | Whether the non-interrupt remainder is bundled into a once-daily digest rather than dropped; assembling that digest is `bastion:BA.21.D`'s side, not mev's. |
+
+**The defaults fail closed.** An absent `[attention]` table, or a present one with none of these
+four keys set, yields the documented rule — `blocking` at any priority plus `hot` at P0 only —
+never "notify everything." A consumer (`bastion:BA.21.D`) should call `--notify-only` rather than
+re-deriving this cut itself: a re-derived cut can diverge from what `/attention` and this command
+agree on, which is the exact failure `attention-queue` exists to prevent.
 
 #### Payload shape
 
@@ -2522,6 +2627,9 @@ mev attention-queue ~/Dev/agentic-portfolio
 
 # Write to a file instead of stdout
 mev attention-queue --out /tmp/attention-queue.json
+
+# Interrupt subset only, per brain.toml's [attention] notification policy
+mev attention-queue --notify-only
 ```
 
 ---

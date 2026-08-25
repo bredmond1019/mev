@@ -298,6 +298,7 @@ mod tests {
         BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![RepoEntry {

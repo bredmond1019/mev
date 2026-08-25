@@ -62,6 +62,7 @@
 //! - `E_STATE_REFERENCE_CARRYOVER_COLLISION` — a slug appears in both `reference[]`
 //!   and `carryover[]` within the same file.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
 #[cfg(test)]
@@ -69,6 +70,7 @@ use std::path::PathBuf;
 
 use crate::Diagnostic;
 use crate::brain::carryover::clears_when_display;
+use crate::brain::carryover::{CarryoverGate, RepoGatingReport};
 use crate::brain::config::BrainConfig;
 
 // ---------------------------------------------------------------------------
@@ -2470,8 +2472,19 @@ pub fn effective_priorities(
 /// to query graph structure; the current implementation derives all information from `files`.
 /// Callers should always pass the graph built from the same `files` slice.
 ///
+/// `gating` (`MV.16.C`) is the per-repo carryover-enforcement gating set from
+/// [`crate::brain::carryover::build_carryover_gating_sets`], keyed by the *target*
+/// block's repo. `None` (or a repo absent from the map) means "no carryover gate
+/// applies here" — exactly today's behaviour, since the builder itself already
+/// returns an empty map whenever `enforce_blocks` is off. A block held by a gate is
+/// excluded from the ready set even though its authored `depends_on` is fully met.
+///
 /// This function is **standalone and public** — do not inline it into any check function.
-pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> Vec<String> {
+pub fn ready_order(
+    _graph: &StateGraph,
+    files: &[(StateSource, StateFile)],
+    gating: Option<&BTreeMap<String, RepoGatingReport>>,
+) -> Vec<String> {
     // Status lookup: "repo:id" → authored status (None = absent = open).
     let status_map = block_status_map(files);
 
@@ -2515,11 +2528,25 @@ pub fn ready_order(_graph: &StateGraph, files: &[(StateSource, StateFile)]) -> V
                     }
                 });
 
-                if all_block_deps_closed {
-                    let wave = block.wave.unwrap_or(i64::MAX);
-                    let key = format!("{}:{}", src.repo_slug, block.id);
-                    ready.push((wave, current_order, key));
+                if !all_block_deps_closed {
+                    continue;
                 }
+
+                let key = format!("{}:{}", src.repo_slug, block.id);
+
+                // Carryover-enforcement gate (`MV.16.C`): a block otherwise ready by
+                // depends_on can still be held by a `carryover[].blocks[]` edge. Looked
+                // up by the target's own repo, matching how `build_carryover_gating_sets`
+                // groups its `RepoGatingReport`s.
+                let carryover_gated = gating
+                    .and_then(|sets| sets.get(&src.repo_slug))
+                    .is_some_and(|report| report.gates.contains_key(&key));
+                if carryover_gated {
+                    continue;
+                }
+
+                let wave = block.wave.unwrap_or(i64::MAX);
+                ready.push((wave, current_order, key));
             }
         }
     }
@@ -2551,6 +2578,14 @@ pub struct DerivedFocus {
     /// Plain IDs, like `now`: a deferred block carries no `blocked_by`, because
     /// deferral is a terminal lane assignment that never consults dependencies.
     pub deferred: Vec<String>,
+    /// `MV.16.C`: block id -> the [`CarryoverGate`](crate::brain::carryover::CarryoverGate)s
+    /// holding it, for every `open` block that is a member of `blocked` **because of** a
+    /// carryover-enforcement gate (with or without an additional unmet `depends_on`
+    /// entry). This is how a caller (a board renderer, a test) recovers the "reason
+    /// names the owning carryover slug" requirement without okf-core needing a new
+    /// `BlockedBy` variant for a mev-only concept. Empty whenever no gate applies —
+    /// in particular always empty when `gating` was `None` or `enforce_blocks` is off.
+    pub carryover_gates: BTreeMap<String, Vec<CarryoverGate>>,
 }
 
 /// Derive the expected `focus` from a file's `tracks[]`.
@@ -2590,11 +2625,20 @@ pub struct DerivedFocus {
 /// *readiness*, so it wins over whatever the DAG says. Conversely, deferral does not
 /// propagate: an `open` block that depends on a deferred block is still `blocked`,
 /// because the dep is not `closed`.
+///
+/// `gating` (`MV.16.C`): same contract as [`ready_order`]'s parameter — the per-repo
+/// carryover-enforcement gating set, or `None` for today's unenforced behaviour. An
+/// `open` block held by a gate lands in `blocked` (with a `carryover_gates` entry
+/// naming the owning slug) even when its authored `depends_on` is otherwise fully
+/// met — this is precisely the invisibility case `MV.16.C` exists to close: a block
+/// gated only by a carryover edge, in no lane, with no `depends_on` of its own, must
+/// still surface as blocked from this derivation.
 pub fn derive_focus(
     src: &StateSource,
     file: &StateFile,
     graph: &StateGraph,
     files: &[(StateSource, StateFile)],
+    gating: Option<&BTreeMap<String, RepoGatingReport>>,
 ) -> DerivedFocus {
     if file.tracks.is_empty() {
         return DerivedFocus::default();
@@ -2602,10 +2646,12 @@ pub fn derive_focus(
 
     // Status map: "repo:id" → authored status (None = absent = open).
     let status_map = block_status_map(files);
+    let repo_gates = gating.and_then(|sets| sets.get(&src.repo_slug));
 
     let mut now: Vec<String> = Vec::new();
     let mut blocked: Vec<(String, Vec<BlockedBy>)> = Vec::new();
     let mut deferred: Vec<String> = Vec::new();
+    let mut carryover_gates: BTreeMap<String, Vec<CarryoverGate>> = BTreeMap::new();
 
     for track in &file.tracks {
         for block in &track.blocks {
@@ -2639,8 +2685,17 @@ pub fn derive_focus(
                         })
                         .cloned()
                         .collect();
-                    if !unmet.is_empty() {
+
+                    // Carryover-enforcement gate (`MV.16.C`) — never written back onto
+                    // `depends_on`, only consulted here to decide the derived lane.
+                    let key = format!("{}:{}", src.repo_slug, block.id);
+                    let gate = repo_gates.and_then(|report| report.gates.get(&key));
+
+                    if !unmet.is_empty() || gate.is_some() {
                         blocked.push((block.id.clone(), unmet));
+                    }
+                    if let Some(gate) = gate {
+                        carryover_gates.insert(block.id.clone(), vec![gate.clone()]);
                     }
                 }
                 // `closed` and `blocked` (invalid authored, caught by
@@ -2654,7 +2709,7 @@ pub fn derive_focus(
     }
 
     // next = ready_order filtered to this file's blocks (returns canonical "repo:id" keys).
-    let ready = ready_order(graph, files);
+    let ready = ready_order(graph, files, gating);
     let this_prefix = format!("{}:", src.repo_slug);
     let next: Vec<String> = ready
         .into_iter()
@@ -2667,6 +2722,7 @@ pub fn derive_focus(
         next,
         blocked,
         deferred,
+        carryover_gates,
     }
 }
 
@@ -2726,7 +2782,7 @@ pub fn check_focus_drift(
             ids(&derived.deferred),
         ]
     } else {
-        let derived = derive_focus(src, file, graph, files);
+        let derived = derive_focus(src, file, graph, files, None);
         [
             derived.now.clone(),
             derived.next.clone(),
@@ -3053,7 +3109,7 @@ pub fn derive_rollup(
             let child = resolve_repo_state_file(files, &entry.slug);
 
             if let Some((src, file)) = child {
-                let derived = derive_focus(src, file, graph, files);
+                let derived = derive_focus(src, file, graph, files, None);
 
                 // Build a title lookup from this child's tracks[].
                 let mut title_map: std::collections::HashMap<String, String> =
@@ -3255,7 +3311,7 @@ pub fn derive_brain_focus(
             continue;
         };
 
-        let derived = derive_focus(src, file, graph, files);
+        let derived = derive_focus(src, file, graph, files, None);
 
         // Index this child's tracks[] for the title/priority/due/epics lookups.
         let index = track_block_index(file);
@@ -3318,7 +3374,7 @@ pub fn derive_brain_focus(
     // children via the same seen_* sets. A brain with empty own tracks[] folds
     // nothing here (derive_focus short-circuits to DerivedFocus::default()),
     // so this is a byte-identical no-op for the pure tier sub-brains.
-    let self_derived = derive_focus(self_src, self_file, graph, files);
+    let self_derived = derive_focus(self_src, self_file, graph, files, None);
     let self_slug = &self_src.repo_slug;
 
     // Index the self file's own tracks[] for the same lookups.
@@ -3822,6 +3878,7 @@ mod tests {
         BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -3907,6 +3964,7 @@ mod tests {
         let config = BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -3988,6 +4046,7 @@ mod tests {
         let config = BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -4031,6 +4090,7 @@ mod tests {
         let config = BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -4145,6 +4205,7 @@ mod tests {
         let config = BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -6075,12 +6136,114 @@ mod tests {
         let files = vec![pair];
         let graph = build_state_graph(&files);
 
-        let order = ready_order(&graph, &files);
+        let order = ready_order(&graph, &files, None);
         assert_eq!(
             order,
             vec!["alpha:AL.1.A"],
             "open block with no deps should appear in ready_order, got: {order:?}"
         );
+    }
+
+    /// `MV.16.C` task 3 sanity: builds a one-gate `RepoGatingReport` map holding
+    /// `alpha:AL.1.A`, exactly the shape [`build_carryover_gating_sets`] returns.
+    fn one_gate_map(target_key: &str, owner: &str) -> BTreeMap<String, RepoGatingReport> {
+        let repo = target_key
+            .split_once(':')
+            .map(|(repo, _)| repo)
+            .unwrap_or(target_key)
+            .to_string();
+        let mut gates = BTreeMap::new();
+        gates.insert(
+            target_key.to_string(),
+            CarryoverGate {
+                target_key: target_key.to_string(),
+                owner: owner.to_string(),
+            },
+        );
+        let mut sets = BTreeMap::new();
+        sets.insert(
+            repo,
+            RepoGatingReport {
+                gates,
+                candidate_count: 1,
+                applied_count: 1,
+                cap: 10,
+                cap_exceeded: false,
+            },
+        );
+        sets
+    }
+
+    #[test]
+    fn ready_order_carryover_gate_excludes_an_otherwise_ready_block() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("open"), None, vec![])],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let gating = one_gate_map("alpha:AL.1.A", "alpha:finding-1");
+
+        let order = ready_order(&graph, &files, Some(&gating));
+        assert!(
+            order.is_empty(),
+            "a carryover-gated block must not appear in ready_order, got: {order:?}"
+        );
+
+        // The same fixture with gating absent stays ready — confirms the gate,
+        // not some other change, is what excluded it.
+        let order_unenforced = ready_order(&graph, &files, None);
+        assert_eq!(order_unenforced, vec!["alpha:AL.1.A"]);
+    }
+
+    #[test]
+    fn derive_focus_carryover_gate_holds_a_block_with_no_depends_on_and_names_owner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("open"), None, vec![])],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+        let gating = one_gate_map("alpha:AL.1.A", "alpha:finding-1");
+
+        let d = derive_focus(src, file, &graph, &files, Some(&gating));
+
+        assert_eq!(
+            d.blocked
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["AL.1.A"],
+            "a block with no depends_on but a carryover gate must still be blocked: {:?}",
+            d.blocked
+        );
+        assert!(
+            d.next.is_empty(),
+            "a gated block must not also appear in next: {:?}",
+            d.next
+        );
+        let names = d
+            .carryover_gates
+            .get("AL.1.A")
+            .expect("carryover_gates must name the gate holding AL.1.A");
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].owner, "alpha:finding-1");
+
+        // Flip the flag back off (no gating passed): the shown-failing pair —
+        // the same fixture must now report the block startable.
+        let d_unenforced = derive_focus(src, file, &graph, &files, None);
+        assert!(
+            d_unenforced.blocked.is_empty(),
+            "with enforcement absent the block must not be blocked: {:?}",
+            d_unenforced.blocked
+        );
+        assert_eq!(d_unenforced.next, vec!["AL.1.A"]);
+        assert!(d_unenforced.carryover_gates.is_empty());
     }
 
     #[test]
@@ -6095,7 +6258,7 @@ mod tests {
         let graph = build_state_graph(&files);
         let (src, file) = &files[0];
 
-        let d = derive_focus(src, file, &graph, &files);
+        let d = derive_focus(src, file, &graph, &files, None);
 
         assert_eq!(d.deferred, vec!["AL.1.A"]);
         assert!(d.now.is_empty(), "deferred must not be now: {:?}", d.now);
@@ -6139,7 +6302,7 @@ mod tests {
         let graph = build_state_graph(&files);
         let (src, file) = &files[0];
 
-        let d = derive_focus(src, file, &graph, &files);
+        let d = derive_focus(src, file, &graph, &files, None);
 
         assert_eq!(d.deferred, vec!["AL.1.A"]);
         assert!(
@@ -6176,7 +6339,7 @@ mod tests {
         let graph = build_state_graph(&files);
         let (src, file) = &files[0];
 
-        let d = derive_focus(src, file, &graph, &files);
+        let d = derive_focus(src, file, &graph, &files, None);
 
         assert_eq!(d.deferred, vec!["AL.1.A"]);
         assert_eq!(d.blocked.len(), 1, "dependent must be blocked");
@@ -6221,7 +6384,7 @@ mod tests {
         let graph = build_state_graph(&files);
         let (src, file) = &files[0];
 
-        let d = derive_focus(src, file, &graph, &files);
+        let d = derive_focus(src, file, &graph, &files, None);
 
         assert!(
             d.deferred.is_empty(),
@@ -6259,7 +6422,7 @@ mod tests {
         let files = vec![pair];
         let graph = build_state_graph(&files);
 
-        let order = ready_order(&graph, &files);
+        let order = ready_order(&graph, &files, None);
         assert_eq!(
             order,
             vec!["alpha:AL.1.B"],
@@ -6275,7 +6438,7 @@ mod tests {
         let files = vec![pair];
         let graph = build_state_graph(&files);
 
-        let order = ready_order(&graph, &files);
+        let order = ready_order(&graph, &files, None);
         assert_eq!(
             order,
             vec!["alpha:AL.1.A"],
@@ -6294,7 +6457,7 @@ mod tests {
         let files = vec![pair];
         let graph = build_state_graph(&files);
 
-        let order = ready_order(&graph, &files);
+        let order = ready_order(&graph, &files, None);
         assert!(
             order.is_empty(),
             "closed block must not appear in ready_order, got: {order:?}"
@@ -6312,7 +6475,7 @@ mod tests {
         let files = vec![pair];
         let graph = build_state_graph(&files);
 
-        let order = ready_order(&graph, &files);
+        let order = ready_order(&graph, &files, None);
         assert!(
             order.is_empty(),
             "in_progress block must not appear in ready_order, got: {order:?}"
@@ -6333,7 +6496,7 @@ mod tests {
         let files = vec![pair];
         let graph = build_state_graph(&files);
 
-        let order = ready_order(&graph, &files);
+        let order = ready_order(&graph, &files, None);
         assert!(
             order.is_empty(),
             "open block with external dep must not appear in ready_order, got: {order:?}"
@@ -6363,7 +6526,7 @@ mod tests {
         let files = vec![pair_a, pair_b];
         let graph = build_state_graph(&files);
 
-        let order = ready_order(&graph, &files);
+        let order = ready_order(&graph, &files, None);
         // beta:BE.1.A is open → alpha:AL.1.A is not ready
         // beta:BE.1.A has no deps → it IS ready
         assert!(
@@ -6398,7 +6561,7 @@ mod tests {
         let files = vec![pair_a, pair_b];
         let graph = build_state_graph(&files);
 
-        let order = ready_order(&graph, &files);
+        let order = ready_order(&graph, &files, None);
         assert!(
             order.contains(&"alpha:AL.1.A".to_string()),
             "alpha:AL.1.A should be ready when its only dep is closed; order={order:?}"
@@ -6429,7 +6592,7 @@ mod tests {
         let files = vec![pair_a, pair_b];
         let graph = build_state_graph(&files);
 
-        let order = ready_order(&graph, &files);
+        let order = ready_order(&graph, &files, None);
         assert!(
             order.contains(&"alpha:AL.1.A".to_string()),
             "alpha:AL.1.A should be ready when its only dep is wontfix; order={order:?}"
@@ -6470,7 +6633,7 @@ mod tests {
         let files = vec![pair];
         let graph = build_state_graph(&files);
 
-        let order = ready_order(&graph, &files);
+        let order = ready_order(&graph, &files, None);
         assert_eq!(
             order,
             vec!["alpha:AL.1.A", "alpha:AL.1.B", "alpha:AL.1.C"],
@@ -6493,7 +6656,7 @@ mod tests {
         let files = vec![pair];
         let graph = build_state_graph(&files);
 
-        let order = ready_order(&graph, &files);
+        let order = ready_order(&graph, &files, None);
         assert_eq!(
             order,
             vec!["alpha:AL.1.A", "alpha:AL.1.B"],
@@ -6517,7 +6680,7 @@ mod tests {
         let files = vec![pair];
         let graph = build_state_graph(&files);
 
-        let order = ready_order(&graph, &files);
+        let order = ready_order(&graph, &files, None);
         assert_eq!(
             order,
             vec!["alpha:AL.1.A", "alpha:AL.1.B", "alpha:AL.1.C"],
@@ -7792,6 +7955,7 @@ mod tests {
         BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -7881,6 +8045,7 @@ mod tests {
         let config = BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -8374,6 +8539,7 @@ mod tests {
         let config = BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -8556,6 +8722,7 @@ mod tests {
         let config = BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![
@@ -9769,6 +9936,7 @@ mod check_epics_tests {
         BrainConfig {
             attention: Default::default(),
             history: Default::default(),
+            carryover: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![

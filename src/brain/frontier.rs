@@ -14,11 +14,12 @@
 //! record exactly why a head is not yet startable, so downstream consumers (bastion's
 //! `/lanes` endpoint, the cockpit board) never re-derive the closure themselves.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use crate::Diagnostic;
 use crate::brain::block_graph::BlockGraphExport;
+use crate::brain::carryover::RepoGatingReport;
 use crate::brain::emit::{EmitAction, EmitPlan, effective_priority_for, global_status_map};
 use crate::brain::lane_segments::DerivedBlockPosition;
 use crate::brain::state::{
@@ -47,7 +48,9 @@ pub struct FrontierEntry {
     pub unmet_blocks: Vec<String>,
     /// Every unmet `BlockedBy::Operator`/`Approval`/`External` dependency, rendered
     /// `"OP.<slug>"` (D76, both operator and approval edges — see
-    /// [`okf_core::op_id`]) / `"external:<what>"`.
+    /// [`okf_core::op_id`]) / `"external:<what>"`, plus (`MV.16.C` task 4) a
+    /// `"carryover:{repo}:{slug}"` entry when this head is itself held by a
+    /// `carryover[].blocks[]` enforcement gate.
     pub unmet_gates: Vec<String>,
     /// `true` iff both `unmet_blocks` and `unmet_gates` are empty.
     pub startable: bool,
@@ -177,11 +180,25 @@ fn track_block_index(files: &[(StateSource, StateFile)]) -> HashMap<String, &Tra
 /// `effective` is the [`crate::brain::state::effective_priorities`] map
 /// (keyed `"repo:id"`) — threaded through so [`gate_ranks`] can derive a rank
 /// for the targetless operator/approval gates that map itself never reaches.
+///
+/// `gating` (`MV.16.C` task 4) is the same per-repo carryover-enforcement gating
+/// set [`crate::brain::state::derive_focus`]/[`crate::brain::state::ready_order`]
+/// consume — built once by
+/// [`crate::brain::carryover::build_carryover_gating_sets`] and passed in here
+/// rather than recomputed, so the frontier can never disagree with the
+/// block-level derivation about which blocks are held. `None` (today's every
+/// production call site, matching [`crate::brain::block_graph`]'s and
+/// [`crate::brain::emit`]'s own `derive_focus`/`ready_order` calls) means "no
+/// carryover gate applies here" — exactly today's behaviour. A segment head
+/// directly named by a gate (looked up by the head's own `"repo:id"` key,
+/// under its own repo) gets an `unmet_gates` entry of `"carryover:{owner}"`
+/// naming the owning carryover slug, and is therefore never `startable`.
 pub fn compute_frontier(
     lane_positions: &[DerivedBlockPosition],
     graph: &StateGraph,
     files: &[(StateSource, StateFile)],
     effective: &HashMap<String, u8>,
+    gating: Option<&BTreeMap<String, RepoGatingReport>>,
 ) -> Frontier {
     let node_titles: HashMap<&str, &str> = graph
         .nodes
@@ -263,6 +280,18 @@ pub fn compute_frontier(
                     }
                 }
             }
+        }
+
+        // Carryover-enforcement gate (`MV.16.C` task 4) — a segment head can be
+        // held directly by a `carryover[].blocks[]` edge even when every
+        // authored `depends_on` entry is met, exactly as `derive_focus` treats
+        // it. Looked up by the head's own repo, matching
+        // `build_carryover_gating_sets`' grouping by target repo.
+        if let Some(gate) = gating
+            .and_then(|sets| sets.get(&head.repo))
+            .and_then(|report| report.gates.get(&block_key))
+        {
+            unmet_gates.push(format!("carryover:{}", gate.owner));
         }
 
         let startable = unmet_blocks.is_empty() && unmet_gates.is_empty();
@@ -478,7 +507,7 @@ fn assemble_frontier_plan(
     }
 
     let effective = effective_priorities(graph, loaded);
-    let frontier = compute_frontier(lane_positions, graph, loaded, &effective);
+    let frontier = compute_frontier(lane_positions, graph, loaded, &effective, None);
 
     let entry_count = frontier.entries.len();
     let gate_count = frontier.gate_ranks.len();
@@ -609,7 +638,13 @@ mod tests {
                 track_block("A.2", Some("open"), vec![]),
             ],
         )];
-        let frontier = compute_frontier(&lane_positions, &empty_graph(), &files, &HashMap::new());
+        let frontier = compute_frontier(
+            &lane_positions,
+            &empty_graph(),
+            &files,
+            &HashMap::new(),
+            None,
+        );
         assert_eq!(frontier.entries.len(), 1);
         assert_eq!(frontier.entries[0].id, "A.2");
         assert!(frontier.entries[0].startable);
@@ -622,8 +657,106 @@ mod tests {
             "repo",
             vec![track_block("A.1", Some("closed"), vec![])],
         )];
-        let frontier = compute_frontier(&lane_positions, &empty_graph(), &files, &HashMap::new());
+        let frontier = compute_frontier(
+            &lane_positions,
+            &empty_graph(),
+            &files,
+            &HashMap::new(),
+            None,
+        );
         assert!(frontier.entries.is_empty());
+    }
+
+    /// `MV.16.C` task 4: builds a one-gate `RepoGatingReport` map holding
+    /// `target_key`, exactly the shape
+    /// [`crate::brain::carryover::build_carryover_gating_sets`] returns.
+    fn one_gate_map(target_key: &str, owner: &str) -> BTreeMap<String, RepoGatingReport> {
+        let repo = target_key
+            .split_once(':')
+            .map(|(repo, _)| repo)
+            .unwrap_or(target_key)
+            .to_string();
+        let mut gates = BTreeMap::new();
+        gates.insert(
+            target_key.to_string(),
+            crate::brain::carryover::CarryoverGate {
+                target_key: target_key.to_string(),
+                owner: owner.to_string(),
+            },
+        );
+        let mut sets = BTreeMap::new();
+        sets.insert(
+            repo,
+            RepoGatingReport {
+                gates,
+                candidate_count: 1,
+                applied_count: 1,
+                cap: 10,
+                cap_exceeded: false,
+            },
+        );
+        sets
+    }
+
+    #[test]
+    fn carryover_gate_holds_an_otherwise_startable_head_and_names_owner() {
+        let lane_positions = vec![pos("r1", "lane-a", 0, 0, "repo", "A.1")];
+        let files = vec![state_file(
+            "repo",
+            vec![track_block("A.1", Some("open"), vec![])],
+        )];
+        let gating = one_gate_map("repo:A.1", "repo:finding-1");
+
+        let frontier = compute_frontier(
+            &lane_positions,
+            &empty_graph(),
+            &files,
+            &HashMap::new(),
+            Some(&gating),
+        );
+
+        assert_eq!(frontier.entries.len(), 1);
+        let entry = &frontier.entries[0];
+        assert!(
+            !entry.startable,
+            "a carryover-gated head must not be startable: {entry:?}"
+        );
+        assert_eq!(entry.unmet_gates, vec!["carryover:repo:finding-1"]);
+        assert!(
+            entry.unmet_blocks.is_empty(),
+            "the gate is not a depends_on entry, so unmet_blocks stays empty: {entry:?}"
+        );
+    }
+
+    #[test]
+    fn carryover_gate_absent_is_a_byte_identical_no_op() {
+        let lane_positions = vec![pos("r1", "lane-a", 0, 0, "repo", "A.1")];
+        let files = vec![state_file(
+            "repo",
+            vec![track_block("A.1", Some("open"), vec![])],
+        )];
+
+        let unenforced = compute_frontier(
+            &lane_positions,
+            &empty_graph(),
+            &files,
+            &HashMap::new(),
+            None,
+        );
+        let empty_map: BTreeMap<String, RepoGatingReport> = BTreeMap::new();
+        let enforced_but_empty = compute_frontier(
+            &lane_positions,
+            &empty_graph(),
+            &files,
+            &HashMap::new(),
+            Some(&empty_map),
+        );
+
+        assert_eq!(
+            unenforced, enforced_but_empty,
+            "gating: None and gating: Some(empty map) must derive byte-identical frontiers"
+        );
+        assert!(unenforced.entries[0].startable);
     }
 
     #[test]
@@ -638,7 +771,13 @@ mod tests {
             state_file("repoA", vec![track_block("A.1", Some("open"), vec![dep])]),
             state_file("repoB", vec![track_block("B.1", Some("open"), vec![])]),
         ];
-        let frontier = compute_frontier(&lane_positions, &empty_graph(), &files, &HashMap::new());
+        let frontier = compute_frontier(
+            &lane_positions,
+            &empty_graph(),
+            &files,
+            &HashMap::new(),
+            None,
+        );
         assert_eq!(frontier.entries.len(), 1);
         let entry = &frontier.entries[0];
         assert!(!entry.startable);
@@ -659,7 +798,13 @@ mod tests {
             "repo",
             vec![track_block("A.1", Some("open"), vec![dep])],
         )];
-        let frontier = compute_frontier(&lane_positions, &empty_graph(), &files, &HashMap::new());
+        let frontier = compute_frontier(
+            &lane_positions,
+            &empty_graph(),
+            &files,
+            &HashMap::new(),
+            None,
+        );
         assert_eq!(frontier.entries.len(), 1);
         let entry = &frontier.entries[0];
         assert!(!entry.startable);
@@ -780,7 +925,13 @@ mod tests {
             "repo",
             vec![track_block_with_priority("A.1", Some(1), vec![dep])],
         )];
-        let frontier = compute_frontier(&lane_positions, &empty_graph(), &files, &HashMap::new());
+        let frontier = compute_frontier(
+            &lane_positions,
+            &empty_graph(),
+            &files,
+            &HashMap::new(),
+            None,
+        );
         assert_eq!(frontier.gate_ranks.len(), 1);
         assert_eq!(frontier.gate_ranks[0].slug, "review-plan");
         assert_eq!(frontier.gate_ranks[0].rank, 1);
