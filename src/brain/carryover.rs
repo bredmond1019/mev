@@ -3902,6 +3902,83 @@ pub fn render_would_block_json(report: &WouldBlockReport) -> serde_json::Result<
     serde_json::to_string_pretty(report)
 }
 
+// ---------------------------------------------------------------------------
+// Enforcement-state reporting on `--would-block` (`MV.16.C`, task 5) — makes
+// the dry-run honest once enforcement exists: without this, the same
+// `--would-block` output means two different things ("this would hold
+// nothing" vs. "this actually holds these blocks") depending on
+// `[carryover]` config nobody can see from the report itself.
+// ---------------------------------------------------------------------------
+
+/// One repo's cap-exceeded line: `applied` of `candidates` gates were kept,
+/// the rest reported rather than silently dropped (mirrors
+/// [`RepoGatingReport::cap_exceeded`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CapExceededRepo {
+    pub repo: String,
+    pub applied: usize,
+    pub candidates: usize,
+}
+
+/// Renders the `--would-block` enforcement header: `enforcement: ON (cap
+/// N/repo)` when `enforce_blocks` is on, `enforcement: OFF` otherwise —
+/// plus one `cap exceeded — {repo}: N of M gates applied` line per repo
+/// whose [`RepoGatingReport::cap_exceeded`] is `true`. `gating` is expected
+/// to already reflect `enforce_blocks`/`max_gates_per_repo` (i.e. built via
+/// [`build_carryover_gating_sets`] with the same config) — when
+/// `enforce_blocks` is `false`, `gating` is the empty map that builder
+/// itself returns, so no cap lines are ever printed for a disabled flag.
+///
+/// Pure: takes only its arguments, prints nothing itself. Callers own
+/// whether this precedes or follows the row table.
+pub fn render_would_block_enforcement_summary(
+    enforce_blocks: bool,
+    max_gates_per_repo: usize,
+    gating: &BTreeMap<String, RepoGatingReport>,
+) -> String {
+    let mut lines = Vec::new();
+    if enforce_blocks {
+        lines.push(format!("enforcement: ON (cap {max_gates_per_repo}/repo)"));
+    } else {
+        lines.push("enforcement: OFF".to_string());
+    }
+    for (repo, report) in gating {
+        if report.cap_exceeded {
+            lines.push(format!(
+                "cap exceeded — {repo}: {} of {} gates applied",
+                report.applied_count, report.candidate_count
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+/// The same enforcement state as [`render_would_block_enforcement_summary`],
+/// shaped as a `serde_json::Value` for embedding under an `"enforcement"`
+/// key alongside the `--would-block --json` report — so the JSON output
+/// carries the identical posture as structured fields rather than only the
+/// human-readable string.
+pub fn would_block_enforcement_json(
+    enforce_blocks: bool,
+    max_gates_per_repo: usize,
+    gating: &BTreeMap<String, RepoGatingReport>,
+) -> serde_json::Value {
+    let cap_exceeded: Vec<CapExceededRepo> = gating
+        .iter()
+        .filter(|(_, report)| report.cap_exceeded)
+        .map(|(repo, report)| CapExceededRepo {
+            repo: repo.clone(),
+            applied: report.applied_count,
+            candidates: report.candidate_count,
+        })
+        .collect();
+    serde_json::json!({
+        "enforce_blocks": enforce_blocks,
+        "max_gates_per_repo": max_gates_per_repo,
+        "cap_exceeded": cap_exceeded,
+    })
+}
+
 /// `TriageLane` sort rank: BLOCKING first, then HOT, AGING, STANDING.
 fn triage_lane_rank(lane: TriageLane) -> u8 {
     match lane {
@@ -7702,6 +7779,114 @@ mod tests {
         assert_eq!(
             gate.owner, "mev:first",
             "the first-discovered entry should be recorded as owner"
+        );
+    }
+
+    // -- render_would_block_enforcement_summary / would_block_enforcement_json
+    // (MV.16.C, task 5) ------------------------------------------------------
+
+    #[test]
+    fn enforcement_summary_reports_off_with_no_gating() {
+        let summary = render_would_block_enforcement_summary(false, 10, &BTreeMap::new());
+        assert_eq!(summary, "enforcement: OFF");
+    }
+
+    #[test]
+    fn enforcement_summary_reports_on_with_cap() {
+        let summary = render_would_block_enforcement_summary(true, 10, &BTreeMap::new());
+        assert_eq!(summary, "enforcement: ON (cap 10/repo)");
+    }
+
+    #[test]
+    fn enforcement_summary_reports_cap_exceeded_line_per_repo() {
+        let entries = vec![verdict_with_enforce(
+            "mev",
+            "e1",
+            vec![
+                block_edge("mev", "MV.1.A"),
+                block_edge("mev", "MV.1.B"),
+                block_edge("mev", "MV.1.C"),
+            ],
+            None,
+        )];
+        let status = HashMap::from([
+            ("mev:MV.1.A".to_string(), Some("open".to_string())),
+            ("mev:MV.1.B".to_string(), Some("open".to_string())),
+            ("mev:MV.1.C".to_string(), Some("open".to_string())),
+        ]);
+        let sets = build_carryover_gating_sets(&entries, &status, true, 2);
+        let summary = render_would_block_enforcement_summary(true, 2, &sets);
+        assert!(summary.contains("enforcement: ON (cap 2/repo)"));
+        assert!(
+            summary.contains("cap exceeded — mev: 2 of 3 gates applied"),
+            "unexpected summary: {summary}"
+        );
+    }
+
+    #[test]
+    fn enforcement_summary_omits_cap_exceeded_line_when_under_cap() {
+        let entries = vec![verdict_with_enforce(
+            "mev",
+            "e1",
+            vec![block_edge("mev", "MV.1.A")],
+            None,
+        )];
+        let status = HashMap::from([("mev:MV.1.A".to_string(), Some("open".to_string()))]);
+        let sets = build_carryover_gating_sets(&entries, &status, true, 10);
+        let summary = render_would_block_enforcement_summary(true, 10, &sets);
+        assert_eq!(summary, "enforcement: ON (cap 10/repo)");
+    }
+
+    #[test]
+    fn enforcement_summary_empty_gating_when_flag_off_never_prints_cap_line() {
+        let entries = vec![verdict_with_enforce(
+            "mev",
+            "e1",
+            vec![block_edge("mev", "MV.1.A")],
+            None,
+        )];
+        let status = HashMap::from([("mev:MV.1.A".to_string(), Some("open".to_string()))]);
+        // enforce_blocks=false -> build_carryover_gating_sets returns an empty map,
+        // so even though this fixture would otherwise exceed a cap of 0, no cap
+        // line is possible: the flag alone must fully explain the output.
+        let sets = build_carryover_gating_sets(&entries, &status, false, 0);
+        let summary = render_would_block_enforcement_summary(false, 0, &sets);
+        assert_eq!(summary, "enforcement: OFF");
+    }
+
+    #[test]
+    fn enforcement_json_carries_flag_cap_and_cap_exceeded_repos() {
+        let entries = vec![verdict_with_enforce(
+            "mev",
+            "e1",
+            vec![block_edge("mev", "MV.1.A"), block_edge("mev", "MV.1.B")],
+            None,
+        )];
+        let status = HashMap::from([
+            ("mev:MV.1.A".to_string(), Some("open".to_string())),
+            ("mev:MV.1.B".to_string(), Some("open".to_string())),
+        ]);
+        let sets = build_carryover_gating_sets(&entries, &status, true, 1);
+        let value = would_block_enforcement_json(true, 1, &sets);
+        assert_eq!(value["enforce_blocks"], serde_json::json!(true));
+        assert_eq!(value["max_gates_per_repo"], serde_json::json!(1));
+        let cap_exceeded = value["cap_exceeded"]
+            .as_array()
+            .expect("cap_exceeded should be an array");
+        assert_eq!(cap_exceeded.len(), 1);
+        assert_eq!(cap_exceeded[0]["repo"], serde_json::json!("mev"));
+        assert_eq!(cap_exceeded[0]["applied"], serde_json::json!(1));
+        assert_eq!(cap_exceeded[0]["candidates"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn enforcement_json_cap_exceeded_empty_when_off() {
+        let value = would_block_enforcement_json(false, 10, &BTreeMap::new());
+        assert_eq!(value["enforce_blocks"], serde_json::json!(false));
+        assert_eq!(
+            value["cap_exceeded"].as_array().map(Vec::len),
+            Some(0),
+            "no repo should be reported over cap when enforcement is off"
         );
     }
 

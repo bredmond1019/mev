@@ -1786,8 +1786,9 @@ fn run_carryover_would_block(
     as_json: bool,
 ) -> ExitCode {
     use mev::brain::carryover::{
-        build_lane_residency_index, compute_would_block_report, render_would_block_json,
-        render_would_block_table,
+        build_carryover_gating_sets, build_lane_residency_index, compute_would_block_report,
+        render_would_block_enforcement_summary, render_would_block_table,
+        would_block_enforcement_json,
     };
 
     let (_loaded, load_errors, report) =
@@ -1837,8 +1838,37 @@ fn run_carryover_would_block(
     let would_block_report =
         compute_would_block_report(&report.entries, &real_status_map, &lane_index);
 
+    // Enforcement state (`MV.16.C` task 5): the same `--would-block` report
+    // used to mean two different things depending on `[carryover]` config
+    // nobody could see from the output. Built from the same `entries` /
+    // `real_status_map` the report itself used, so the gating set and the
+    // dry-run agree edge-for-edge (the differential test's contract).
+    let gating_sets = build_carryover_gating_sets(
+        &report.entries,
+        &real_status_map,
+        config.carryover.enforce_blocks,
+        config.carryover.max_gates_per_repo,
+    );
+
     if as_json {
-        match render_would_block_json(&would_block_report) {
+        let mut value = match serde_json::to_value(&would_block_report) {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!("error serializing --would-block report: {err:#}");
+                return ExitCode::FAILURE;
+            }
+        };
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "enforcement".to_string(),
+                would_block_enforcement_json(
+                    config.carryover.enforce_blocks,
+                    config.carryover.max_gates_per_repo,
+                    &gating_sets,
+                ),
+            );
+        }
+        match serde_json::to_string_pretty(&value) {
             Ok(s) => println!("{s}"),
             Err(err) => {
                 eprintln!("error serializing --would-block report: {err:#}");
@@ -1847,6 +1877,15 @@ fn run_carryover_would_block(
         }
     } else {
         println!("{}", render_would_block_table(&would_block_report));
+        println!();
+        println!(
+            "{}",
+            render_would_block_enforcement_summary(
+                config.carryover.enforce_blocks,
+                config.carryover.max_gates_per_repo,
+                &gating_sets,
+            )
+        );
     }
 
     ExitCode::SUCCESS
