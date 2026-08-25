@@ -205,6 +205,15 @@ pub struct CarryoverVerdict {
     /// [`carryover_effective_priorities`] (priority propagation).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub blocks: Vec<BlockedBy>,
+    /// Per-entry enforcement opt-out, passed through verbatim from the
+    /// source [`Carryover`] item's `enforce` field (`MV.16.C` task 2).
+    /// `None` and `Some(true)` both enforce; only `Some(false)` suppresses
+    /// every edge this entry's `blocks[]` would otherwise contribute to
+    /// [`build_carryover_gating_sets`] — mirroring okf-core's own
+    /// `enforce == Some(false)` suppression in its `StateGraph` edge
+    /// derivation (`okf-core/src/state.rs:1226`) rather than re-deriving it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enforce: Option<bool>,
 }
 
 /// The full fleet-wide sweep result.
@@ -1035,6 +1044,7 @@ pub fn evaluate_carryover_with_dedup(
                 priority: item.priority,
                 finding_id: item.finding_id.clone(),
                 blocks: item.blocks.clone(),
+                enforce: item.enforce,
             });
         }
     }
@@ -3674,6 +3684,151 @@ pub fn compute_would_block_report(
     }
 
     WouldBlockReport { rows, summary }
+}
+
+// ---------------------------------------------------------------------------
+// Block-level enforcement gating set (`MV.16.C`, task 2) — turns
+// `carryover[].blocks[]` edges into real holds, behind `enforce_blocks` and
+// `max_gates_per_repo`. Built on `classify_blocked_by_edge` (the same
+// predicate `--would-block` uses) so the gate and its own dry-run can never
+// classify the same edge differently.
+// ---------------------------------------------------------------------------
+
+/// One applied gate: `target_key` (`"{repo}:{id}"`) held by `owner`
+/// (`"{repo}:{slug}"` of the carryover entry whose `blocks[]` edge gates
+/// it) — the reason the block-level derivation (`MV.16.C` task 3) names on
+/// `focus.blocked[]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CarryoverGate {
+    pub target_key: String,
+    pub owner: String,
+}
+
+/// The gating verdict for one repo (the repo the *target* block belongs
+/// to — `derive_focus`/`ready_order` run per repo, so the cap is scoped to
+/// match): the gates actually applied, plus enough of the cap decision for
+/// a caller to report `cap exceeded — N of M gates applied` rather than
+/// silently truncating.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepoGatingReport {
+    /// Applied gates, keyed by target block key. Never more than `cap`
+    /// entries.
+    pub gates: BTreeMap<String, CarryoverGate>,
+    /// How many distinct target blocks this repo had `Blocking` edges onto,
+    /// before the cap was applied.
+    pub candidate_count: usize,
+    /// `min(candidate_count, cap)` — how many gates were actually applied.
+    pub applied_count: usize,
+    /// The configured `max_gates_per_repo` this report was computed under.
+    pub cap: usize,
+    /// `true` iff `candidate_count > cap` — some candidates were reported
+    /// but not applied. Never silently dropped: the caller has
+    /// `candidate_count - applied_count` to say so.
+    pub cap_exceeded: bool,
+}
+
+/// Builds the per-repo gating set from every `entries[]` carryover's
+/// `blocks[]` edges, classified through [`classify_blocked_by_edge`] (never
+/// a second predicate) and capped per target repo by `max_gates_per_repo`.
+///
+/// - When `enforce_blocks` is `false`, returns an empty map — one place
+///   decides enforcement is off, so no consumer can accidentally apply a
+///   gate.
+/// - An entry carrying `enforce: Some(false)` (`MV.16.C` task requirement;
+///   mirrors okf-core's own `StateGraph` edge suppression at
+///   `okf-core/src/state.rs:1226`) contributes no gate from any of its
+///   edges, even with `enforce_blocks` on. `None` and `Some(true)` both
+///   enforce.
+/// - Only edges classified [`EdgeBlockVerdict::Blocking`] contribute a
+///   candidate gate — `Closed`, `Wontfix`, `Unresolvable`, and
+///   `NoNodeTarget` (external/operator/approval) all contribute none,
+///   exactly matching `--would-block`'s verdicts.
+/// - A target gated by more than one edge (from the same or different
+///   entries) is counted once, attributed to whichever entry's edge is
+///   discovered first (`entries` order, then each entry's own `blocks[]`
+///   order) — deterministic given deterministic inputs.
+/// - Candidates are grouped by the *target* block's repo (parsed from the
+///   `"{repo}:{id}"` key), since that is the repo whose
+///   `derive_focus`/`ready_order` run the cap must bound. Within a repo,
+///   candidates beyond `max_gates_per_repo` are excluded from `gates`
+///   entirely — `RepoGatingReport::cap_exceeded` and the candidate/applied
+///   counts are how a caller reports the excess; nothing here truncates
+///   silently.
+pub fn build_carryover_gating_sets(
+    entries: &[CarryoverVerdict],
+    block_status: &HashMap<String, Option<String>>,
+    enforce_blocks: bool,
+    max_gates_per_repo: usize,
+) -> BTreeMap<String, RepoGatingReport> {
+    let mut result: BTreeMap<String, RepoGatingReport> = BTreeMap::new();
+    if !enforce_blocks {
+        return result;
+    }
+
+    // First pass: dedupe candidate gates by target key, in deterministic
+    // discovery order, recording which entry's edge first named each one.
+    let mut owner_by_target: BTreeMap<String, String> = BTreeMap::new();
+    let mut discovery_order: Vec<String> = Vec::new();
+
+    for entry in entries {
+        if entry.enforce == Some(false) {
+            continue;
+        }
+        let owner = format!("{}:{}", entry.repo, entry.slug);
+        for edge in &entry.blocks {
+            let classification = classify_blocked_by_edge(&entry.repo, edge, block_status);
+            if classification.verdict != EdgeBlockVerdict::Blocking {
+                continue;
+            }
+            let target_key = classification
+                .target_key
+                .expect("a Blocking verdict always carries a resolved target key");
+            owner_by_target
+                .entry(target_key.clone())
+                .or_insert_with(|| {
+                    discovery_order.push(target_key.clone());
+                    owner.clone()
+                });
+        }
+    }
+
+    // Second pass: group discovery-ordered candidates by target repo, then
+    // cap per repo.
+    let mut by_repo: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for target_key in &discovery_order {
+        let repo = target_key
+            .split_once(':')
+            .map(|(repo, _)| repo)
+            .unwrap_or(target_key.as_str())
+            .to_string();
+        by_repo.entry(repo).or_default().push(target_key.clone());
+    }
+
+    for (repo, targets) in by_repo {
+        let candidate_count = targets.len();
+        let applied_count = candidate_count.min(max_gates_per_repo);
+        let cap_exceeded = candidate_count > max_gates_per_repo;
+        let mut gates = BTreeMap::new();
+        for target_key in targets.into_iter().take(applied_count) {
+            let owner = owner_by_target
+                .get(&target_key)
+                .cloned()
+                .unwrap_or_default();
+            gates.insert(target_key.clone(), CarryoverGate { target_key, owner });
+        }
+        result.insert(
+            repo,
+            RepoGatingReport {
+                gates,
+                candidate_count,
+                applied_count,
+                cap: max_gates_per_repo,
+                cap_exceeded,
+            },
+        );
+    }
+
+    result
 }
 
 /// `EdgeBlockVerdict` as the short label used by both renderers.
@@ -6428,6 +6583,7 @@ mod tests {
             priority,
             finding_id: finding_id.map(str::to_string),
             blocks: Vec::new(),
+            enforce: None,
         }
     }
 
@@ -6581,6 +6737,7 @@ mod tests {
             priority: None,
             finding_id: finding_id.map(str::to_string),
             blocks: Vec::new(),
+            enforce: None,
         }
     }
 
@@ -6764,6 +6921,7 @@ mod tests {
             priority,
             finding_id: None,
             blocks: Vec::new(),
+            enforce: None,
         }
     }
 
@@ -6856,6 +7014,7 @@ mod tests {
             priority,
             finding_id: None,
             blocks,
+            enforce: None,
         }
     }
 
@@ -7370,6 +7529,224 @@ mod tests {
         );
     }
 
+    // -- build_carryover_gating_sets (MV.16.C, task 2) ------------------------
+
+    fn verdict_with_enforce(
+        repo: &str,
+        slug: &str,
+        blocks: Vec<BlockedBy>,
+        enforce: Option<bool>,
+    ) -> CarryoverVerdict {
+        CarryoverVerdict {
+            enforce,
+            ..ranking_verdict(repo, slug, None, blocks)
+        }
+    }
+
+    #[test]
+    fn gating_set_empty_when_enforce_blocks_is_false() {
+        let entries = vec![verdict_with_enforce(
+            "mev",
+            "e1",
+            vec![block_edge("mev", "MV.1.A")],
+            None,
+        )];
+        let status = HashMap::from([("mev:MV.1.A".to_string(), Some("open".to_string()))]);
+        let sets = build_carryover_gating_sets(&entries, &status, false, 10);
+        assert!(
+            sets.is_empty(),
+            "enforce_blocks=false must yield an empty gating set regardless of edges"
+        );
+    }
+
+    #[test]
+    fn gating_set_holds_open_target_and_names_owner() {
+        let entries = vec![verdict_with_enforce(
+            "mev",
+            "finding-1",
+            vec![block_edge("mev", "MV.1.A")],
+            None,
+        )];
+        let status = HashMap::from([("mev:MV.1.A".to_string(), Some("open".to_string()))]);
+        let sets = build_carryover_gating_sets(&entries, &status, true, 10);
+        let repo_report = sets.get("mev").expect("mev repo should have a report");
+        assert_eq!(repo_report.candidate_count, 1);
+        assert_eq!(repo_report.applied_count, 1);
+        assert!(!repo_report.cap_exceeded);
+        let gate = repo_report
+            .gates
+            .get("mev:MV.1.A")
+            .expect("mev:MV.1.A should be gated");
+        assert_eq!(gate.owner, "mev:finding-1");
+    }
+
+    #[test]
+    fn gating_set_skips_closed_and_wontfix_and_unresolvable_targets() {
+        let entries = vec![
+            verdict_with_enforce("mev", "closed-e", vec![block_edge("mev", "MV.2.B")], None),
+            verdict_with_enforce("mev", "wontfix-e", vec![block_edge("mev", "JF.2.A")], None),
+            verdict_with_enforce(
+                "mev",
+                "unresolvable-e",
+                vec![block_edge("mev", "MV.99.Z")],
+                None,
+            ),
+        ];
+        let status = HashMap::from([
+            ("mev:MV.2.B".to_string(), Some("closed".to_string())),
+            ("mev:JF.2.A".to_string(), Some("wontfix".to_string())),
+        ]);
+        let sets = build_carryover_gating_sets(&entries, &status, true, 10);
+        assert!(
+            sets.is_empty(),
+            "closed/wontfix/unresolvable targets must never contribute a gate"
+        );
+    }
+
+    #[test]
+    fn gating_set_honours_per_entry_enforce_false_opt_out() {
+        let entries = vec![verdict_with_enforce(
+            "mev",
+            "opted-out",
+            vec![block_edge("mev", "MV.1.A")],
+            Some(false),
+        )];
+        let status = HashMap::from([("mev:MV.1.A".to_string(), Some("open".to_string()))]);
+        let sets = build_carryover_gating_sets(&entries, &status, true, 10);
+        assert!(
+            sets.is_empty(),
+            "an entry with enforce: Some(false) must contribute no gate even with enforce_blocks on"
+        );
+    }
+
+    #[test]
+    fn gating_set_enforce_some_true_behaves_like_none() {
+        let status = HashMap::from([
+            ("mev:MV.1.A".to_string(), Some("open".to_string())),
+            ("mev:MV.1.B".to_string(), Some("open".to_string())),
+        ]);
+        let none_entries = vec![verdict_with_enforce(
+            "mev",
+            "e1",
+            vec![block_edge("mev", "MV.1.A")],
+            None,
+        )];
+        let true_entries = vec![verdict_with_enforce(
+            "mev",
+            "e2",
+            vec![block_edge("mev", "MV.1.B")],
+            Some(true),
+        )];
+        let none_sets = build_carryover_gating_sets(&none_entries, &status, true, 10);
+        let true_sets = build_carryover_gating_sets(&true_entries, &status, true, 10);
+        assert_eq!(none_sets["mev"].applied_count, 1);
+        assert_eq!(true_sets["mev"].applied_count, 1);
+    }
+
+    #[test]
+    fn gating_set_cap_zero_applies_nothing_and_reports_cap_exceeded() {
+        let entries = vec![verdict_with_enforce(
+            "mev",
+            "e1",
+            vec![block_edge("mev", "MV.1.A")],
+            None,
+        )];
+        let status = HashMap::from([("mev:MV.1.A".to_string(), Some("open".to_string()))]);
+        let sets = build_carryover_gating_sets(&entries, &status, true, 0);
+        let repo_report = &sets["mev"];
+        assert_eq!(repo_report.candidate_count, 1);
+        assert_eq!(repo_report.applied_count, 0);
+        assert!(repo_report.gates.is_empty());
+        assert!(repo_report.cap_exceeded);
+    }
+
+    #[test]
+    fn gating_set_cap_between_zero_and_count_applies_exactly_cap_and_reports_remainder() {
+        let entries = vec![verdict_with_enforce(
+            "mev",
+            "e1",
+            vec![
+                block_edge("mev", "MV.1.A"),
+                block_edge("mev", "MV.1.B"),
+                block_edge("mev", "MV.1.C"),
+            ],
+            None,
+        )];
+        let status = HashMap::from([
+            ("mev:MV.1.A".to_string(), Some("open".to_string())),
+            ("mev:MV.1.B".to_string(), Some("open".to_string())),
+            ("mev:MV.1.C".to_string(), Some("open".to_string())),
+        ]);
+        let sets = build_carryover_gating_sets(&entries, &status, true, 2);
+        let repo_report = &sets["mev"];
+        assert_eq!(repo_report.candidate_count, 3);
+        assert_eq!(repo_report.applied_count, 2);
+        assert_eq!(repo_report.gates.len(), 2);
+        assert!(repo_report.cap_exceeded);
+    }
+
+    #[test]
+    fn gating_set_duplicate_target_from_two_entries_counts_once() {
+        let entries = vec![
+            verdict_with_enforce("mev", "first", vec![block_edge("mev", "MV.1.A")], None),
+            verdict_with_enforce("mev", "second", vec![block_edge("mev", "MV.1.A")], None),
+        ];
+        let status = HashMap::from([("mev:MV.1.A".to_string(), Some("open".to_string()))]);
+        let sets = build_carryover_gating_sets(&entries, &status, true, 10);
+        let repo_report = &sets["mev"];
+        assert_eq!(
+            repo_report.candidate_count, 1,
+            "the same target gated by two entries should count once"
+        );
+        let gate = &repo_report.gates["mev:MV.1.A"];
+        assert_eq!(
+            gate.owner, "mev:first",
+            "the first-discovered entry should be recorded as owner"
+        );
+    }
+
+    #[test]
+    fn gating_set_agrees_with_would_block_on_shared_fixture() {
+        let entries = vec![
+            verdict_with_enforce("mev", "open-entry", vec![block_edge("mev", "MV.1.A")], None),
+            verdict_with_enforce(
+                "mev",
+                "closed-entry",
+                vec![block_edge("mev", "MV.2.B")],
+                None,
+            ),
+            verdict_with_enforce(
+                "mev",
+                "wontfix-entry",
+                vec![block_edge("mev", "JF.2.A")],
+                None,
+            ),
+        ];
+        let status = HashMap::from([
+            ("mev:MV.1.A".to_string(), Some("open".to_string())),
+            ("mev:MV.2.B".to_string(), Some("closed".to_string())),
+            ("mev:JF.2.A".to_string(), Some("wontfix".to_string())),
+        ]);
+        let lane_index = LaneResidencyIndex::default();
+        let would_block = compute_would_block_report(&entries, &status, &lane_index);
+        let gating = build_carryover_gating_sets(&entries, &status, true, 10);
+
+        let blocking_targets: BTreeSet<String> = would_block
+            .rows
+            .iter()
+            .filter(|r| r.verdict == EdgeBlockVerdict::Blocking)
+            .filter_map(|r| r.target_key.clone())
+            .collect();
+        let gated_targets: BTreeSet<String> = gating
+            .values()
+            .flat_map(|report| report.gates.keys().cloned())
+            .collect();
+        assert_eq!(
+            blocking_targets, gated_targets,
+            "the gating set must agree edge-for-edge with --would-block's Blocking verdicts"
+        );
+    }
+
     #[test]
     fn carryover_effective_priorities_p3_blocking_p0_block_resolves_to_zero() {
         let entries = vec![ranking_verdict(
@@ -7683,6 +8060,7 @@ mod tests {
             priority: None,
             finding_id: None,
             blocks: vec![],
+            enforce: None,
         };
         assert_eq!(
             describe_clearing_evidence(&verdict),

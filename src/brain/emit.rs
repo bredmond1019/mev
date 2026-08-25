@@ -1812,6 +1812,7 @@ pub(crate) fn collect_attention_rows(
             priority: item.priority,
             finding_id: item.finding_id.clone(),
             blocks: item.blocks.clone(),
+            enforce: item.enforce,
         });
         item_by_key.insert(key, item);
     }
