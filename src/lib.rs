@@ -2340,6 +2340,7 @@ pub fn frontier_brain(root: &std::path::Path) -> anyhow::Result<brain::frontier:
         &graph,
         &loaded,
         &effective,
+        None,
     ))
 }
 
@@ -2399,7 +2400,7 @@ pub fn lanes_brain(
     ensure_untruncated(&export).map_err(|d| anyhow::anyhow!("{}", d.message))?;
 
     let effective = brain::state::effective_priorities(&graph, &loaded);
-    let frontier = compute_frontier(&lane_positions, &graph, &loaded, &effective);
+    let frontier = compute_frontier(&lane_positions, &graph, &loaded, &effective, None);
 
     let (live_runs, _live_run_diags) = discover_live_runs(root, &config.repos);
     let all_segments = discover_segments(&lane_positions);
