@@ -39,6 +39,7 @@ fn verdict(
         priority,
         finding_id: None,
         blocks,
+        enforce: None,
     }
 }
 

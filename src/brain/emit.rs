@@ -2129,7 +2129,7 @@ fn derived_focus_for(
     files: &[(StateSource, StateFile)],
 ) -> Focus {
     let idx = id_index(file);
-    let d = derive_focus(src, file, graph, files);
+    let d = derive_focus(src, file, graph, files, None);
     let title_of = |id: &str| idx.get(id).map(|(t, ..)| t.clone()).unwrap_or_default();
     let priority_of = |id: &str| idx.get(id).and_then(|(_, _, p, _)| *p);
     let due_of = |id: &str| idx.get(id).and_then(|(_, _, _, d)| d.clone());

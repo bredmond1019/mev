@@ -118,6 +118,7 @@ fn mixed_kind_config() -> BrainConfig {
     BrainConfig {
         attention: Default::default(),
         history: Default::default(),
+        carryover: Default::default(),
         vocab: VocabConfig::default(),
         crawl: CrawlConfig::default(),
         repos: vec![
@@ -260,7 +261,7 @@ fn all_status_consumers_agree_on_one_fixture() {
 
     // --- ready_order: GA.1.B is open with its sole block-dep (GA.1.A) closed,
     // so it must be ready — proving ready_order also resolved GA.1.A as closed.
-    let ready = ready_order(&graph, &files);
+    let ready = ready_order(&graph, &files, None);
     assert!(
         ready.contains(&"gamma:GA.1.B".to_string()),
         "GA.1.B's dependency GA.1.A is closed, so GA.1.B must be ready, got: {ready:?}"
@@ -273,7 +274,7 @@ fn all_status_consumers_agree_on_one_fixture() {
     // --- derive_focus: GA.1.C (in_progress) lands in `now`, GA.1.B (open, dep
     // closed) lands in `next` — the same GA.1.A-is-closed resolution once more,
     // this time through derive_focus's own status_map lookup.
-    let focus = derive_focus(src, file, &graph, &files);
+    let focus = derive_focus(src, file, &graph, &files, None);
     assert!(
         focus.now.contains(&"GA.1.C".to_string()),
         "GA.1.C is in_progress, expected in derive_focus.now, got: {:?}",

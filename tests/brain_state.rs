@@ -949,7 +949,7 @@ fn derive_focus_regression_check_focus_drift_still_passes_existing_fixtures() {
     let files = vec![(src.clone(), file.clone())];
     let graph = build_state_graph(&files);
 
-    let derived = derive_focus(&src, &file, &graph, &files);
+    let derived = derive_focus(&src, &file, &graph, &files, None);
 
     // derive_focus: A in now, B in next (open, no deps), blocked empty.
     assert_eq!(derived.now, vec!["AL.1.A".to_string()]);
@@ -990,7 +990,7 @@ fn derive_focus_blocked_carries_unmet_subset() {
     let files = vec![(src.clone(), file.clone())];
     let graph = build_state_graph(&files);
 
-    let derived = derive_focus(&src, &file, &graph, &files);
+    let derived = derive_focus(&src, &file, &graph, &files, None);
 
     assert!(derived.now.is_empty(), "no in_progress blocks");
     // AL.1.B is blocked by AL.1.A (open, not closed).
@@ -1038,7 +1038,7 @@ fn derive_focus_external_dep_goes_to_blocked() {
     let files = vec![(src.clone(), file.clone())];
     let graph = build_state_graph(&files);
 
-    let derived = derive_focus(&src, &file, &graph, &files);
+    let derived = derive_focus(&src, &file, &graph, &files, None);
 
     assert_eq!(derived.blocked.len(), 1);
     assert_eq!(derived.blocked[0].0, "AL.1.A");
@@ -1078,7 +1078,7 @@ fn derive_focus_operator_dep_goes_to_blocked() {
     let files = vec![(src.clone(), file.clone())];
     let graph = build_state_graph(&files);
 
-    let derived = derive_focus(&src, &file, &graph, &files);
+    let derived = derive_focus(&src, &file, &graph, &files, None);
 
     assert_eq!(derived.blocked.len(), 1);
     assert_eq!(derived.blocked[0].0, "AL.1.A");
@@ -1100,7 +1100,7 @@ fn derive_focus_approval_dep_goes_to_blocked() {
     let files = vec![(src.clone(), file.clone())];
     let graph = build_state_graph(&files);
 
-    let derived = derive_focus(&src, &file, &graph, &files);
+    let derived = derive_focus(&src, &file, &graph, &files, None);
 
     assert_eq!(derived.blocked.len(), 1);
     assert_eq!(derived.blocked[0].0, "AL.1.A");
@@ -1137,7 +1137,7 @@ fn derive_focus_removing_operator_dep_makes_block_ready_again() {
     let files = vec![(src.clone(), file.clone())];
     let graph = build_state_graph(&files);
 
-    let derived = derive_focus(&src, &file, &graph, &files);
+    let derived = derive_focus(&src, &file, &graph, &files, None);
 
     assert!(
         derived.blocked.is_empty(),
@@ -1335,7 +1335,7 @@ fn derive_focus_empty_tracks_returns_empty() {
     let files = vec![(src.clone(), file.clone())];
     let graph = StateGraph::default();
 
-    let derived = derive_focus(&src, &file, &graph, &files);
+    let derived = derive_focus(&src, &file, &graph, &files, None);
     assert!(derived.now.is_empty());
     assert!(derived.next.is_empty());
     assert!(derived.blocked.is_empty());
@@ -1422,6 +1422,7 @@ fn make_config_with_repo(slug: &str, tier: &str) -> mev::brain::config::BrainCon
     BrainConfig {
         attention: Default::default(),
         history: Default::default(),
+        carryover: Default::default(),
         vocab: VocabConfig::default(),
         crawl: CrawlConfig::default(),
         repos: vec![RepoEntry {

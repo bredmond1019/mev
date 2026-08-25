@@ -29,6 +29,7 @@ fn verdict(repo: &str, slug: &str, text: &str) -> CarryoverVerdict {
         priority: None,
         finding_id: None,
         blocks: Vec::new(),
+        enforce: None,
     }
 }
 
