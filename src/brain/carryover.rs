@@ -2739,6 +2739,145 @@ pub fn audit_carryover(
     }
 }
 
+/// Per-[`okf_core::DisposalReason`] disposition count, split by whether the row was
+/// observed at disposal time (`observed`) or reconstructed after the fact from git
+/// history by MV.16.B's one-time backfill (`reconstructed`). The two are kept apart
+/// deliberately: a reconstructed row carries `reason: unknown`-grade evidence and may
+/// include a relocation rather than a true disposal (at least one backfilled removal's
+/// commit subject is *"move bastiel-registration carryover to business"*), so blending
+/// it into the observed count would inflate a figure a downstream post quotes verbatim.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ReasonSplit {
+    /// Rows written at live disposal time (`--dispose`).
+    pub observed: usize,
+    /// Rows backfilled from git history (`--backfill`, MV.16.B).
+    pub reconstructed: usize,
+}
+
+impl ReasonSplit {
+    /// `observed + reconstructed`.
+    pub fn total(&self) -> usize {
+        self.observed + self.reconstructed
+    }
+}
+
+/// The measured disposition record over `planning/carryover-archive.jsonl` — a direct
+/// count of what actually left `carryover[]` and why, as opposed to [`CarryoverAudit`]'s
+/// `outflow` field (a proxy over entries still present in `carryover[]`). See
+/// [`read_archive_outflow`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ArchiveOutflow {
+    /// Total archive rows read across every selected repo's archive.
+    pub rows_total: usize,
+    /// Of `rows_total`, the rows whose `disposed_at` falls within `window_days` of
+    /// `today`. A row whose `disposed_at` fails to parse counts toward `rows_total`
+    /// but never toward `rows_in_window`.
+    pub rows_in_window: usize,
+    /// Disposition counts keyed on the row's `reason`, rendered in the same
+    /// lowercase form the enum serializes to (`cleared`/`superseded`/`promoted`/
+    /// `withdrawn`), each split observed vs. reconstructed.
+    pub per_reason: BTreeMap<String, ReasonSplit>,
+    /// Number of `carryover-archive.jsonl` files found and read for the selected
+    /// repos.
+    pub archives_read: usize,
+    /// Number of selected repos with no `carryover-archive.jsonl` on disk yet — the
+    /// normal case until `--backfill` or `--dispose` has run once.
+    pub archives_missing: usize,
+    /// `"<path>:<1-based-line-no>"` for every archive line that failed to parse as
+    /// an [`okf_core::CarryoverArchiveRow`]. Never fatal — a malformed line is
+    /// named and skipped, not dropped silently and not aborted on.
+    pub malformed_lines: Vec<String>,
+}
+
+/// Read every selected repo's `planning/carryover-archive.jsonl` (derived from its
+/// `planning/state.json` path via [`archive_path_for`]) and tally disposition counts.
+///
+/// `repo_filter` mirrors [`audit_carryover`]'s own filter: a `Some` value restricts the
+/// read to files whose `StateSource::repo_slug` matches, so `--audit --repo X` never
+/// reports outflow for a repo whose inflow it excluded. A path already visited (a repo
+/// appearing more than once in `files`) is read only once.
+///
+/// This is the ONE filesystem read this pass introduces, and it is intended to run only
+/// on the `--audit` path — see [`audit_carryover`], which is the sole caller.
+pub fn read_archive_outflow(
+    files: &[(
+        crate::brain::state::StateSource,
+        crate::brain::state::StateFile,
+    )],
+    today: &str,
+    window_days: i64,
+    repo_filter: Option<&str>,
+) -> ArchiveOutflow {
+    let today_date = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d").ok();
+
+    let mut outflow = ArchiveOutflow::default();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+
+    for (src, _file) in files {
+        if let Some(filter) = repo_filter
+            && src.repo_slug != filter
+        {
+            continue;
+        }
+
+        let archive_path = archive_path_for(&src.abs_path);
+        if !visited.insert(archive_path.clone()) {
+            continue;
+        }
+
+        let Ok(content) = std::fs::read_to_string(&archive_path) else {
+            outflow.archives_missing += 1;
+            continue;
+        };
+        outflow.archives_read += 1;
+
+        for (idx, line) in content.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let row: okf_core::CarryoverArchiveRow = match serde_json::from_str(line) {
+                Ok(row) => row,
+                Err(_) => {
+                    outflow
+                        .malformed_lines
+                        .push(format!("{}:{}", archive_path.display(), idx + 1));
+                    continue;
+                }
+            };
+
+            outflow.rows_total += 1;
+
+            if let (Some(today_d), Some(anchor)) = (
+                today_date,
+                crate::brain::state::parse_state_date(&row.disposed_at),
+            ) {
+                let age = (today_d - anchor).num_days();
+                if (0..=window_days).contains(&age) {
+                    outflow.rows_in_window += 1;
+                }
+            }
+
+            let reason_key = match row.reason {
+                okf_core::DisposalReason::Cleared => "cleared",
+                okf_core::DisposalReason::Superseded => "superseded",
+                okf_core::DisposalReason::Promoted => "promoted",
+                okf_core::DisposalReason::Withdrawn => "withdrawn",
+            };
+            let split = outflow
+                .per_reason
+                .entry(reason_key.to_string())
+                .or_default();
+            if row.reconstructed {
+                split.reconstructed += 1;
+            } else {
+                split.observed += 1;
+            }
+        }
+    }
+
+    outflow
+}
+
 // --- Dedup: tokenization + similarity ---
 //
 // `MV.ticket.carryover-dedup-clusters` task 1. Pure, dependency-free primitives that
