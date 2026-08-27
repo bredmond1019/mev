@@ -256,18 +256,17 @@ fn find_brain_root_walks_up_from_subdirectory() {
 #[test]
 fn find_brain_root_canonicalizes_relative_input() {
     // Passing a relative path that resolves to the fixture dir should still find brain.toml.
-    // We change into the fixture dir and pass "." to exercise the canonicalize branch.
-    let original = std::env::current_dir().unwrap();
-    std::env::set_current_dir(fixture_dir()).expect("could not cd to fixture dir");
-
-    let root = find_brain_root(std::path::Path::new("."))
-        .expect("find_brain_root('.') should find brain.toml after canonicalize");
+    // `cargo test`/`cargo nextest run` always run with CWD == CARGO_MANIFEST_DIR, and
+    // fixture_dir() is CARGO_MANIFEST_DIR/tests/fixtures, so "tests/fixtures" is already a
+    // relative path to it — no need to mutate the process-wide CWD (unsafe once this file
+    // shares a test binary with every other integration-test module).
+    let relative = std::path::Path::new("tests").join("fixtures");
+    let root = find_brain_root(&relative)
+        .expect("find_brain_root(relative) should find brain.toml after canonicalize");
     assert!(
         root.join("brain.toml").exists(),
         "canonicalized root should contain brain.toml; got {root:?}"
     );
-
-    std::env::set_current_dir(original).expect("could not restore cwd");
 }
 
 #[test]

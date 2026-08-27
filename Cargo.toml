@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
+[profile.dev]
+# Keep panic/backtrace line numbers; drop full DWARF type descriptions (biggest link-time cost).
+debug = "line-tables-only"
+# Skip macOS's dsymutil debug-info-bundling pass (a slow post-link step run once per binary);
+# leave debug info split across .o files instead. Backtraces still resolve correctly.
+split-debuginfo = "unpacked"
+
 [dependencies]
 anyhow = "1.0.102"
 colored = "2"
