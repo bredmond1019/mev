@@ -11,6 +11,26 @@ related: [status]
 timestamp: "2026-08-23T09:17:53-03:00"
 ---
 
+## [run: 2026-08-27]
+
+Build/security cleanup, no feature work. Removed the dead `rustc-wrapper = "sccache"` from
+`.cargo/config.toml` (measured 0 cache hits — sccache refuses to cache incremental builds, same
+root cause engine-rs found 2026-07-29); added `[profile.dev]` (`line-tables-only` + unpacked
+split-debuginfo) to `Cargo.toml`; consolidated the 58 `tests/*.rs` files into one
+`tests/it/main.rs` binary (58 separate relinks -> 1), removing a global `env::set_current_dir`
+mutation from `brain_config.rs` that only stayed safe as its own binary. `target/` went 12G -> 1.0G
+after `cargo clean`. Then `cargo update -p anyhow` for `RUSTSEC-2026-0190` (unsound
+`downcast_mut()`) — `cargo audit` is now fully clean (0 vulnerabilities, 0 warnings). Full gate
+chain green throughout (fmt, clippy, nextest, full `cargo test`, release build). Same pass ran
+across the whole `core/*` Rust fleet — see HQ's `docs/rust-dependency-audit.md` and
+`docs/infrastructure.md`'s "Rust build artifacts" section for the cross-repo writeup.
+
+```
+373e306 perf(build): fix dead sccache config and consolidate integration tests into one binary
+d4285a9 fix(build): add missing tests/it/main.rs from prior commit
+aaa2dc2 security(deps): bump anyhow for RustSec fix
+```
+
 ## [run: 2026-08-25]
 
 Closed `MV.16.C` end to end via `/sdlc-flow` (8 of 8 tasks, PASS). Enforcement now lives in the block-level startability derivation (`derive_focus`/`ready_order`), not `compute_frontier` — the latter and `plan_availability` consume the derivation rather than recomputing it, so a gated block held with no lane residency is still visible. Task 1 added `[carryover]` to `brain.toml`/`BrainConfig` (`enforce_blocks` default false, `max_gates_per_repo` default 10). Task 2 added `build_carryover_gating_sets`, reusing `classify_blocked_by_edge` and honouring `enforce_blocks`, the per-entry `enforce: false` opt-out, and the cap with report-not-truncate semantics (excess gates are reported, never silently applied). Task 3 wired the gating set into `derive_focus`/`ready_order` via a new optional `gating` parameter and a `DerivedFocus.carryover_gates` field naming the owning slug — `blocked` stays derived, never authored. Task 4 threaded the same optional gating through `compute_frontier`/`plan_availability`. Task 5 added an `enforcement: ON (cap N/repo) | OFF` header plus cap-exceeded lines to `mev carryover --would-block` (table and JSON). Task 6 added `tests/brain_carryover_enforcement.rs` — 6 fixture integration tests covering flag on/off, the no-lane case, the cap (zero and partial), the `enforce: false` opt-out with deferred/in_progress terminal lanes, and an edge-for-edge differential test against `--would-block`. Task 7 documented the `[carryover]` section and all three escape hatches in `docs/cli.md`. Task 8 (validate) confirmed fmt, clippy `-D warnings`, full `cargo test` (1171+ tests), and release build all clean, after one retry on a transient background-run interruption (not a code defect). Production CLI entry points, `emit-state`, and `validate-brain` all pass `gating: None` for now — full config-driven wiring is deferred; enforcement stays off fleet-wide until HQ's `HQ.7.C` flips it. Review verdict PASS on first pass, no findings. Next: `HQ.7.C` (the real-corpus flip) or the next master-plan/HQ backlog item.
