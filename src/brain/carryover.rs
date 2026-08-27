@@ -2577,11 +2577,14 @@ pub fn write_graph_findings_for_repo(
 /// Census of the two triage containers (`carryover[]` and `reference[]`) across the
 /// already-loaded corpus, for `mev carryover --audit`.
 ///
-/// Composed entirely from the same `files` slice [`evaluate_carryover`] was given and
-/// the [`CarryoverReport`] it already produced — no new filesystem read, no new corpus
-/// walk. `reference[]` entries are never evaluated by `evaluate_carryover` (D72 — they
-/// are permanently-true material with no clock and no lane), so their counts are
-/// gathered here directly from `files` instead.
+/// Composed mostly from the same `files` slice [`evaluate_carryover`] was given and the
+/// [`CarryoverReport`] it already produced — no new corpus walk. `reference[]` entries
+/// are never evaluated by `evaluate_carryover` (D72 — they are permanently-true material
+/// with no clock and no lane), so their counts are gathered here directly from `files`
+/// instead. The one exception is `archive_outflow`: composing it performs one
+/// `planning/carryover-archive.jsonl` read per selected repo via
+/// [`read_archive_outflow`] — the only filesystem read this function performs, and it
+/// happens only here, on the `--audit` path.
 ///
 /// The audit only recommends; it never deletes or rewrites anything.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -2624,6 +2627,11 @@ pub struct CarryoverAudit {
     /// clear-timestamp: no container here records when an entry was actually
     /// deleted, only when it was last authored or re-affirmed.
     pub outflow: usize,
+    /// The measured disposition record over `planning/carryover-archive.jsonl` —
+    /// per-`reason` counts of what actually left `carryover[]`, split observed vs.
+    /// reconstructed. Distinct from `outflow` above, which is a proxy over entries
+    /// still present in `carryover[]` and cannot see a disposal at all.
+    pub archive_outflow: ArchiveOutflow,
 }
 
 /// Compose a [`CarryoverAudit`] from the same loaded corpus and [`CarryoverReport`]
@@ -2723,6 +2731,8 @@ pub fn audit_carryover(
         })
         .count();
 
+    let archive_outflow = read_archive_outflow(files, today, window_days, repo_filter);
+
     CarryoverAudit {
         total: carryover_count + reference_count,
         carryover_count,
@@ -2736,6 +2746,7 @@ pub fn audit_carryover(
         window_days,
         inflow,
         outflow,
+        archive_outflow,
     }
 }
 
