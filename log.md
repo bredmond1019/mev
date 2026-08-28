@@ -11,6 +11,36 @@ related: [status]
 timestamp: "2026-08-23T09:17:53-03:00"
 ---
 
+## [run: 2026-08-28]
+
+Closed `MV.16.E` end to end via `/sdlc-flow` (6 of 6 tasks, PASS). `mev carryover --audit` now reads
+`planning/carryover-archive.jsonl` and reports per-`DisposalReason` outflow counts split into
+`observed`/`reconstructed` columns, keyed on `CarryoverArchiveRow.reconstructed`. Task 1 added
+`ArchiveOutflow` and `read_archive_outflow(files, today, window_days, repo_filter)` in
+`src/brain/carryover.rs`, parsing each repo's archive line-by-line. Task 2 composed the new field
+into `CarryoverAudit.archive_outflow` inside `audit_carryover` — the one filesystem read this block
+introduces, gated behind `--audit`; the plain sweep, `--dispose`, `--backfill`, `--would-block` still
+perform no archive read. Task 3 relabelled the printed `clear_rate` line "deletions only" and added
+a new OUTFLOW (archive) section in `src/main.rs` via a `print_archive_outflow` helper. Task 4 added 7
+fixture tests covering per-reason totals, the observed/reconstructed split, the shown-failing
+`superseded`-doesn't-move-`cleared` case, absent archive, a malformed line, `--repo` scoping, and
+window membership. Task 5 documented the new section in `docs/cli.md` and corrected a stale
+"no new filesystem read" claim. Task 6 (validation) confirmed fmt, clippy `-D warnings`,
+`cargo nextest run --lib --bins` (1171 pass), full `cargo test` (687 pass), and a live-corpus
+`carryover --audit` run exits 0 printing the relabelled clear-rate line and the expected no-archive
+OUTFLOW line — no repo has run `MV.16.B`'s one-time backfill yet, so an empty archive is the correct
+live state. Review verdict PASS on the second pass (one review-fix round). Next: `MV.16.F` (`mev
+carryover --trajectory`, now unblocked) or the next master-plan/HQ backlog item.
+
+```
+c98f84f feat: implement MV.16.E-task1
+5ca7d8b feat: implement MV.16.E-task2
+4ecc1cb feat: implement MV.16.E-task3
+63b0d20 feat: implement MV.16.E-task4
+b9165f2 docs: document archive-outflow section and correct --audit filesystem-read claim
+f0d4537 fix: review pass 1 for MV.16.E
+```
+
 ## [run: 2026-08-27]
 
 Build/security cleanup, no feature work. Removed the dead `rustc-wrapper = "sccache"` from
