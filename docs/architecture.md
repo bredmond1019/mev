@@ -1175,6 +1175,38 @@ own bug.** A consumer can fail to evaluate because of its own uncommitted work (
 stale lockfile it owns (`lockfile_stale`), or a sibling repo's unrelated change (`not_evaluable`),
 and the classification exists precisely so none of those gets conflated with a real break.
 
+### What a green exit actually means
+
+A zero exit from `check_consumers.sh` means **no consumer was proven broken** — it does NOT mean
+every consumer was checked. `pass` is the only verdict that constitutes real evidence; the other
+three (`skipped_dirty`, `lockfile_stale`, `not_evaluable`) all decline to evaluate and still exit 0,
+because a decline is bookkeeping about someone else's repo, not evidence mev broke anything (see the
+exit-code rationale two sections up). What distinguishes a run that verified everything from a run
+that verified nothing is the coverage line the script now prints on every run, immediately before it
+exits:
+
+```
+check_consumers: verified <P> of <N> consumers
+```
+
+`<P>` counts only `pass` outcomes; `<N>` is every consumer reported. When `P < N`, the line also
+names each unverified consumer and its outcome, e.g. `check_consumers: verified 0 of 2 consumers
+(bastion: skipped_dirty, engine-rs: lockfile_stale)`. Its absence on a run is itself a signal an old
+copy of the script is running. Each declining outcome and who clears it:
+
+- `skipped_dirty` — the consumer's git tree was dirty when the gate ran; cleared by whoever is
+  mid-edit in that consumer committing or stashing their work.
+- `lockfile_stale` — the consumer's own `Cargo.lock` is out of date against its `Cargo.toml`;
+  cleared by that consumer's owner regenerating the lockfile (`MV.ticket.locked-lockfile-check`
+  removes this cause for mev's own lockfile at the source).
+- `not_evaluable` — cargo's failure matched no known signature, including a lockfile hash that
+  moved mid-run; cleared by re-running once the consumer's tree is stable.
+
+This distinction is documented rather than assumed because of a real 2026-08-28 case: a consumer
+break reached mev's `main` while this gate printed green twice in a row, first as `skipped_dirty`
+then as `lockfile_stale`, because green had always been read as "checked" rather than "not proven
+broken."
+
 ### Guarding against mev's own stale lockfile
 
 A stale `Cargo.lock` here — a `Cargo.toml` dependency added or bumped without regenerating the
