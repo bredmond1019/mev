@@ -1175,6 +1175,19 @@ own bug.** A consumer can fail to evaluate because of its own uncommitted work (
 stale lockfile it owns (`lockfile_stale`), or a sibling repo's unrelated change (`not_evaluable`),
 and the classification exists precisely so none of those gets conflated with a real break.
 
+### Guarding against mev's own stale lockfile
+
+A stale `Cargo.lock` here — a `Cargo.toml` dependency added or bumped without regenerating the
+lock — breaks nothing in mev's own build, which is exactly why it is worth gating locally: a
+`--locked` build doesn't fail partway through compiling, it refuses to **start**. That matters
+because `check-consumers` above runs each consumer with `--locked`, so a stale lock in mev itself
+would make every consumer report `lockfile_stale` and be skipped, and the gate would report green
+having compiled nothing. The `locked-lockfile` row in `planning/harness.json` (paired with the
+`locked-lockfile-tests` fixture suite in `scripts/test_locked_lockfile.sh`) catches this in mev
+before it can blind a downstream gate the way engine-rs's did on 2026-08-28, when a `regex`
+dependency landed without a matching lockfile regeneration. The fix is one command:
+`cargo generate-lockfile --offline` (or `cargo update -w --offline`), then commit the lockfile.
+
 ### Waivers
 
 `scripts/consumer-gate-waivers.txt` is the only sanctioned way to keep mev pushable while a
