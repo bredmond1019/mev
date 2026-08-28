@@ -19,11 +19,11 @@ pub use brain::block_graph::{
     BlockLane, build_block_graph_export,
 };
 pub use brain::carryover::{
-    CarryoverAudit, CarryoverLane, CarryoverRanking, CarryoverRef, CarryoverReport,
-    CarryoverVerdict, ClusterMember, DedupSuggestion, FindingCluster, GraphFindingsWrite,
-    NotEvaluableReason, TriageLane, audit_carryover, carryover_entry_for_finding,
-    evaluate_carryover, notify_subset, rank_carryover, slug_for_finding,
-    write_graph_findings_for_repo,
+    COMMAND_EXEC_TIMEOUT, CarryoverAudit, CarryoverLane, CarryoverRanking, CarryoverRef,
+    CarryoverReport, CarryoverVerdict, ClusterMember, DedupSuggestion, FindingCluster,
+    GraphFindingsWrite, NotEvaluableReason, TriageLane, audit_carryover,
+    carryover_entry_for_finding, evaluate_carryover, notify_subset, rank_carryover,
+    slug_for_finding, write_graph_findings_for_repo,
 };
 pub use brain::conformance::{
     CheckOutcome, CheckResult, CheckStatus, ConformanceCheck, ConformanceCtx, ConformanceReport,
@@ -2452,7 +2452,10 @@ pub fn visualize_brain(root: &std::path::Path, out_dir: Option<PathBuf>) -> anyh
 /// local wall clock; thresholds come from the resolved config's `[attention]` section.
 /// `allow_exec` is passed straight through to [`evaluate_carryover`] as the opt-in gate
 /// for the `CommandExitsZero` predicate — off by default, and this function never turns
-/// it on implicitly.
+/// it on implicitly. `exec_timeout` is the wall-clock bound the in-process watchdog
+/// enforces on such a command (`mev carryover --exec-timeout`, default
+/// [`brain::carryover::COMMAND_EXEC_TIMEOUT`]); it has no effect when `allow_exec` is
+/// `false`.
 ///
 /// Never writes anything — this is a pure read + report. `allow_exec: true` does run an
 /// external command when a loaded entry has a `CommandExitsZero` predicate, but the
@@ -2462,8 +2465,10 @@ pub fn carryover_sweep(
     root: &std::path::Path,
     repo_filter: Option<&str>,
     allow_exec: bool,
+    exec_timeout: std::time::Duration,
 ) -> anyhow::Result<brain::carryover::CarryoverReport> {
-    let (_loaded, report) = load_and_evaluate_carryover_corpus(root, repo_filter, allow_exec)?;
+    let (_loaded, report) =
+        load_and_evaluate_carryover_corpus(root, repo_filter, allow_exec, exec_timeout)?;
     Ok(report)
 }
 
@@ -2477,6 +2482,7 @@ fn load_and_evaluate_carryover_corpus(
     root: &std::path::Path,
     repo_filter: Option<&str>,
     allow_exec: bool,
+    exec_timeout: std::time::Duration,
 ) -> anyhow::Result<(
     Vec<(brain::state::StateSource, brain::state::StateFile)>,
     brain::carryover::CarryoverReport,
@@ -2550,6 +2556,7 @@ fn load_and_evaluate_carryover_corpus(
         &config.attention,
         repo_filter,
         allow_exec,
+        exec_timeout,
     );
     Ok((loaded, report))
 }
@@ -2567,11 +2574,13 @@ pub fn carryover_audit(
     repo_filter: Option<&str>,
     allow_exec: bool,
     window_days: i64,
+    exec_timeout: std::time::Duration,
 ) -> anyhow::Result<(
     brain::carryover::CarryoverReport,
     brain::carryover::CarryoverAudit,
 )> {
-    let (loaded, report) = load_and_evaluate_carryover_corpus(root, repo_filter, allow_exec)?;
+    let (loaded, report) =
+        load_and_evaluate_carryover_corpus(root, repo_filter, allow_exec, exec_timeout)?;
     let today = chrono::Local::now()
         .date_naive()
         .format("%Y-%m-%d")

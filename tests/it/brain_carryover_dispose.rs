@@ -222,6 +222,7 @@ fn load_and_evaluate_for_dispose(
         &config.attention,
         None,
         allow_exec,
+        mev::COMMAND_EXEC_TIMEOUT,
     );
 
     (loaded, load_errors, report)
@@ -245,7 +246,7 @@ fn cleared_entry_is_archived_and_removed_others_survive_state_untouched_otherwis
     let (loaded, load_errors, report) = load_and_evaluate_for_dispose(&dir, false);
     assert!(load_errors.is_empty(), "no repo should fail to load here");
 
-    let plan = compute_disposal_plan(&report, &loaded, &load_errors);
+    let plan = compute_disposal_plan(&report, &loaded, &load_errors, mev::COMMAND_EXEC_TIMEOUT);
     assert_eq!(
         plan.candidates.len(),
         1,
@@ -353,7 +354,7 @@ fn malformed_sibling_repo_is_skipped_others_still_disposed() {
         "gamma must not appear among successfully-loaded repos"
     );
 
-    let plan = compute_disposal_plan(&report, &loaded, &load_errors);
+    let plan = compute_disposal_plan(&report, &loaded, &load_errors, mev::COMMAND_EXEC_TIMEOUT);
     assert!(
         plan.skipped.iter().any(|s| s.repo == "gamma"),
         "gamma should be recorded as SKIPPED, got: {:#?}",
@@ -430,7 +431,7 @@ fn command_exits_zero_without_allow_exec_survives_dispose() {
         "without --allow-exec, a command_exits_zero entry must stay NotEvaluable"
     );
 
-    let plan = compute_disposal_plan(&report, &loaded, &load_errors);
+    let plan = compute_disposal_plan(&report, &loaded, &load_errors, mev::COMMAND_EXEC_TIMEOUT);
     assert!(
         plan.candidates.is_empty(),
         "a command_exits_zero entry without --allow-exec must never be disposal-eligible, got: {:#?}",
@@ -451,7 +452,7 @@ fn dry_run_reports_identical_plan_and_writes_nothing() {
     let original_state = fs::read_to_string(&alpha_state_path).unwrap();
 
     let (loaded, load_errors, report) = load_and_evaluate_for_dispose(&dir, false);
-    let plan = compute_disposal_plan(&report, &loaded, &load_errors);
+    let plan = compute_disposal_plan(&report, &loaded, &load_errors, mev::COMMAND_EXEC_TIMEOUT);
 
     let real_report = run_dispose(&plan, &loaded, "2026-08-22", false);
     // Reset the fixture and re-run under dry-run to compare the disposal list on a clean
@@ -464,7 +465,7 @@ fn dry_run_reports_identical_plan_and_writes_nothing() {
     let original_state2 = fs::read_to_string(&alpha_state_path).unwrap();
 
     let (loaded2, load_errors2, report2) = load_and_evaluate_for_dispose(&dir, false);
-    let plan2 = compute_disposal_plan(&report2, &loaded2, &load_errors2);
+    let plan2 = compute_disposal_plan(&report2, &loaded2, &load_errors2, mev::COMMAND_EXEC_TIMEOUT);
     assert_eq!(
         plan.candidates.len(),
         plan2.candidates.len(),
@@ -523,7 +524,7 @@ fn non_ascii_in_surviving_entries_round_trips_unchanged() {
     let alpha_state_path = dir.join("repos/alpha/planning/state.json");
 
     let (loaded, load_errors, report) = load_and_evaluate_for_dispose(&dir, false);
-    let plan = compute_disposal_plan(&report, &loaded, &load_errors);
+    let plan = compute_disposal_plan(&report, &loaded, &load_errors, mev::COMMAND_EXEC_TIMEOUT);
     let dispose_report = run_dispose(&plan, &loaded, "2026-08-22", false);
     assert!(dispose_report.succeeded());
 
@@ -558,7 +559,7 @@ fn printed_output_carries_full_text_and_commit_pathspec() {
     write_alpha_beta_fixture(&dir);
 
     let (loaded, load_errors, report) = load_and_evaluate_for_dispose(&dir, false);
-    let plan = compute_disposal_plan(&report, &loaded, &load_errors);
+    let plan = compute_disposal_plan(&report, &loaded, &load_errors, mev::COMMAND_EXEC_TIMEOUT);
 
     let preamble = render_dispose_preamble(&plan);
     assert!(
@@ -600,7 +601,7 @@ fn write_failure_between_the_two_writes_leaves_no_orphaned_removal() {
     let original_state = fs::read_to_string(&alpha_state_path).unwrap();
 
     let (loaded, load_errors, report) = load_and_evaluate_for_dispose(&dir, false);
-    let plan = compute_disposal_plan(&report, &loaded, &load_errors);
+    let plan = compute_disposal_plan(&report, &loaded, &load_errors, mev::COMMAND_EXEC_TIMEOUT);
     let alpha_candidates: Vec<DisposalCandidate> = plan
         .candidates
         .iter()

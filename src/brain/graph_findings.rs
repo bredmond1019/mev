@@ -1601,6 +1601,7 @@ mod tests {
             &AttentionThresholds::default(),
             None,
             false,
+            crate::brain::carryover::COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(
             report.entries.len(),

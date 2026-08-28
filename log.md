@@ -13,6 +13,39 @@ timestamp: "2026-08-23T09:17:53-03:00"
 
 ## [run: 2026-08-27]
 
+Closed `MV.16.G` end to end via `/sdlc-flow` (7 of 7 tasks, PASS). Fixed the typed `clears_when`
+evaluator's soundness in `src/brain/carryover.rs` without extending predicate coverage. Task 1
+replaced `command_exit_zero_satisfied`'s bare bool with a typed `CommandOutcome`
+(`ExitZero`/`ExitNonZero`/`SpawnFailed`/`TimedOut`) and made the watchdog bound configurable via
+`mev carryover --exec-timeout <secs>` (default 2s), threaded through every public evaluation entry
+point. Task 2 made `resolve_existing_path` return a `PathResolution` (`None`/`Unique`/`Ambiguous`)
+built on `is_file()` instead of `exists()`, so `file_exists` rejects directories and a path resolving
+under both the brain root and the repo root pushes no ref rather than silently guessing. Task 3 added
+a `FileContainsOutcome` enum so `file_contains` distinguishes read failure (missing/oversized/
+unreadable/non-UTF-8/ambiguous) and regex-shaped patterns from a genuine pattern-absent negative —
+all land in `NotEvaluable` instead of a false `Actionable`/`Cleared`. Task 4 made `clears_when_display`
+render every typed `ClearsWhenPredicate` variant (was aliasing `None`) and had
+`describe_clearing_evidence`/`compute_disposal_plan` record the `exec_timeout` actually in force.
+Task 5 added two retro-fixture unit tests reproducing the C141 (network `command_exits_zero` outrunning
+the bound) and C180 (upstream non-zero exit, never `Cleared`) finding shapes. Task 6 documented
+`--exec-timeout`, the five new not-evaluable outcomes, and the two behavior changes in `docs/cli.md`.
+Task 7 (full-suite validation) confirmed fmt, clippy `-D warnings`, `cargo test` (695 pass incl.
+`live_corpus_evaluable_floor_and_cleared_ceiling`), release build, and `cargo audit` (0 vulnerabilities
+across 107 crates) all clean. No new `ClearsWhenPredicate` variant, no new closure verb, no `regex`
+crate added — per the block's explicit out-of-scope list. Review verdict PASS, first attempt, no
+fixes needed. Next: pull the next item from the master-plan or HQ backlog.
+
+```
+2032077 docs: document --exec-timeout and new not-evaluable outcomes (MV.16.G task 6)
+42c0cd3 test: retro-fixtures for C141/C180 predicate soundness (MV.16.G task 5)
+d372567 feat: render typed clears_when predicates in the human report (MV.16.G task 4)
+a5ca401 feat: implement MV.16.G-task3
+9822680 feat: implement MV.16.G-task2
+bc54fb2 feat: implement MV.16.G-task1
+```
+
+## [run: 2026-08-27]
+
 Closed `MV.16.F` end to end via `/sdlc-flow` (6 of 6 tasks, PASS). `mev carryover --trajectory
 [--weeks N]` (default 8) buckets `planning/carryover-archive.jsonl` rows by the ISO week of their
 `disposed_at` and prints a weekly outflow table, deliberately reusing MV.16.E's archive reader

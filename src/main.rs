@@ -805,6 +805,13 @@ enum Command {
         /// running the command, regardless of what it would have exited.
         #[arg(long)]
         allow_exec: bool,
+        /// Wall-clock bound, in seconds, the in-process watchdog enforces on
+        /// a `command_exits_zero` predicate's child process before killing
+        /// it and reporting the entry NotEvaluable (reason:
+        /// command-timed-out) rather than a genuine failure. Ignored without
+        /// `--allow-exec`.
+        #[arg(long, default_value_t = 2)]
+        exec_timeout: u64,
         /// Report a fleet-wide `carryover[]`/`reference[]` census instead of the
         /// per-entry sweep: total, per-container and per-class/per-kind counts,
         /// typed-predicate coverage, and inflow/outflow over `--window` days. The
@@ -1597,6 +1604,7 @@ fn load_and_evaluate_carryover_corpus_for_dispose(
     root: &std::path::Path,
     repo_filter: Option<&str>,
     allow_exec: bool,
+    exec_timeout: std::time::Duration,
 ) -> anyhow::Result<(
     Vec<(mev::brain::state::StateSource, mev::brain::state::StateFile)>,
     Vec<(String, String)>,
@@ -1667,6 +1675,7 @@ fn load_and_evaluate_carryover_corpus_for_dispose(
         &config.attention,
         repo_filter,
         allow_exec,
+        exec_timeout,
     );
 
     Ok((loaded, load_errors, report))
@@ -1687,22 +1696,27 @@ fn run_carryover_dispose(
     root: &std::path::Path,
     repo_filter: Option<&str>,
     allow_exec: bool,
+    exec_timeout: std::time::Duration,
     dry_run: bool,
 ) -> ExitCode {
     use mev::brain::carryover::{
         compute_disposal_plan, render_dispose_preamble, render_dispose_summary, run_dispose,
     };
 
-    let (loaded, load_errors, report) =
-        match load_and_evaluate_carryover_corpus_for_dispose(root, repo_filter, allow_exec) {
-            Ok(v) => v,
-            Err(err) => {
-                eprintln!("error: {err:#}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let (loaded, load_errors, report) = match load_and_evaluate_carryover_corpus_for_dispose(
+        root,
+        repo_filter,
+        allow_exec,
+        exec_timeout,
+    ) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            return ExitCode::FAILURE;
+        }
+    };
 
-    let plan = compute_disposal_plan(&report, &loaded, &load_errors);
+    let plan = compute_disposal_plan(&report, &loaded, &load_errors, exec_timeout);
 
     let preamble = render_dispose_preamble(&plan);
     if !preamble.is_empty() {
@@ -1795,6 +1809,7 @@ fn run_carryover_would_block(
     root: &std::path::Path,
     repo_filter: Option<&str>,
     allow_exec: bool,
+    exec_timeout: std::time::Duration,
     as_json: bool,
 ) -> ExitCode {
     use mev::brain::carryover::{
@@ -1803,14 +1818,18 @@ fn run_carryover_would_block(
         would_block_enforcement_json,
     };
 
-    let (_loaded, load_errors, report) =
-        match load_and_evaluate_carryover_corpus_for_dispose(root, repo_filter, allow_exec) {
-            Ok(v) => v,
-            Err(err) => {
-                eprintln!("error: {err:#}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let (_loaded, load_errors, report) = match load_and_evaluate_carryover_corpus_for_dispose(
+        root,
+        repo_filter,
+        allow_exec,
+        exec_timeout,
+    ) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     for (repo_slug, msg) in &load_errors {
         eprintln!("warning: {repo_slug}: failed to load state: {msg}");
@@ -1922,17 +1941,22 @@ fn run_carryover_trajectory(
     root: &std::path::Path,
     repo_filter: Option<&str>,
     allow_exec: bool,
+    exec_timeout: std::time::Duration,
     weeks: usize,
     as_json: bool,
 ) -> ExitCode {
-    let (loaded, load_errors, _report) =
-        match load_and_evaluate_carryover_corpus_for_dispose(root, repo_filter, allow_exec) {
-            Ok(v) => v,
-            Err(err) => {
-                eprintln!("error: {err:#}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let (loaded, load_errors, _report) = match load_and_evaluate_carryover_corpus_for_dispose(
+        root,
+        repo_filter,
+        allow_exec,
+        exec_timeout,
+    ) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     for (repo_slug, msg) in &load_errors {
         eprintln!("warning: {repo_slug}: failed to load state: {msg}");
@@ -2105,6 +2129,14 @@ fn print_carryover_report(report: &mev::CarryoverReport) {
                         Some(mev::NotEvaluableReason::NoClosureVerb) => "no-closure-verb",
                         Some(mev::NotEvaluableReason::ExecutionNotAllowed) => {
                             "execution-not-allowed (rerun with --allow-exec)"
+                        }
+                        Some(mev::NotEvaluableReason::CommandTimedOut) => {
+                            "command-timed-out (rerun with a higher --exec-timeout, or the command genuinely never finishes)"
+                        }
+                        Some(mev::NotEvaluableReason::CommandSpawnFailed) => "command-spawn-failed",
+                        Some(mev::NotEvaluableReason::FileUnreadable) => "file-unreadable",
+                        Some(mev::NotEvaluableReason::PatternNotLiteral) => {
+                            "pattern-not-literal (authored as a regex; only literal substring matching is supported)"
                         }
                         Some(mev::NotEvaluableReason::GateMentionNotCheckable) => {
                             "gate-mention-not-checkable (candidate for a typed command_exits_zero predicate)"
@@ -3359,6 +3391,7 @@ fn main() -> ExitCode {
             repo,
             json,
             allow_exec,
+            exec_timeout,
             audit,
             window,
             trajectory,
@@ -3399,22 +3432,31 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::FAILURE;
             }
+            let exec_timeout = std::time::Duration::from_secs(exec_timeout);
             if trajectory {
                 run_carryover_trajectory(
                     &root,
                     repo.as_deref(),
                     allow_exec,
+                    exec_timeout,
                     weeks,
                     json || cli.json,
                 )
             } else if would_block {
-                run_carryover_would_block(&root, repo.as_deref(), allow_exec, json || cli.json)
+                run_carryover_would_block(
+                    &root,
+                    repo.as_deref(),
+                    allow_exec,
+                    exec_timeout,
+                    json || cli.json,
+                )
             } else if backfill {
                 run_carryover_backfill(&root, repo.as_deref(), dry_run)
             } else if dispose {
-                run_carryover_dispose(&root, repo.as_deref(), allow_exec, dry_run)
+                run_carryover_dispose(&root, repo.as_deref(), allow_exec, exec_timeout, dry_run)
             } else if audit {
-                match mev::carryover_audit(&root, repo.as_deref(), allow_exec, window) {
+                match mev::carryover_audit(&root, repo.as_deref(), allow_exec, window, exec_timeout)
+                {
                     Ok((_report, audit)) => {
                         if json || cli.json {
                             match serde_json::to_string(&audit) {
@@ -3438,7 +3480,7 @@ fn main() -> ExitCode {
                     }
                 }
             } else {
-                match mev::carryover_sweep(&root, repo.as_deref(), allow_exec) {
+                match mev::carryover_sweep(&root, repo.as_deref(), allow_exec, exec_timeout) {
                     Ok(report) => {
                         if json || cli.json {
                             match serde_json::to_string(&report) {

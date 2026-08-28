@@ -163,7 +163,8 @@ fn cross_repo_closed_block_lands_in_cleared() {
     let dir = temp_dir("cleared");
     write_fixture(&dir);
 
-    let report = mev::carryover_sweep(&dir, None, false).expect("carryover_sweep should not error");
+    let report = mev::carryover_sweep(&dir, None, false, mev::COMMAND_EXEC_TIMEOUT)
+        .expect("carryover_sweep should not error");
 
     let entry = report
         .entries
@@ -189,7 +190,8 @@ fn cross_repo_open_block_lands_in_actionable_naming_the_unmet_block() {
     let dir = temp_dir("actionable");
     write_fixture(&dir);
 
-    let report = mev::carryover_sweep(&dir, None, false).expect("carryover_sweep should not error");
+    let report = mev::carryover_sweep(&dir, None, false, mev::COMMAND_EXEC_TIMEOUT)
+        .expect("carryover_sweep should not error");
 
     let entry = report
         .entries
@@ -215,7 +217,8 @@ fn prose_only_predicate_lands_in_not_evaluable_prose() {
     let dir = temp_dir("prose");
     write_fixture(&dir);
 
-    let report = mev::carryover_sweep(&dir, None, false).expect("carryover_sweep should not error");
+    let report = mev::carryover_sweep(&dir, None, false, mev::COMMAND_EXEC_TIMEOUT)
+        .expect("carryover_sweep should not error");
 
     let entry = report
         .entries
@@ -239,8 +242,8 @@ fn repo_filter_returns_only_that_repos_entries() {
     let dir = temp_dir("repo-filter");
     write_fixture(&dir);
 
-    let report =
-        mev::carryover_sweep(&dir, Some("alpha"), false).expect("carryover_sweep should not error");
+    let report = mev::carryover_sweep(&dir, Some("alpha"), false, mev::COMMAND_EXEC_TIMEOUT)
+        .expect("carryover_sweep should not error");
 
     assert!(
         !report.entries.is_empty(),
@@ -256,8 +259,8 @@ fn repo_filter_returns_only_that_repos_entries() {
             .collect::<Vec<_>>()
     );
 
-    let beta_only =
-        mev::carryover_sweep(&dir, Some("beta"), false).expect("carryover_sweep should not error");
+    let beta_only = mev::carryover_sweep(&dir, Some("beta"), false, mev::COMMAND_EXEC_TIMEOUT)
+        .expect("carryover_sweep should not error");
     assert_eq!(
         beta_only.total, 0,
         "beta has no carryover[] entries of its own, expected total == 0, got: {:#?}",
@@ -272,7 +275,8 @@ fn total_equals_sum_of_lanes_and_entries() {
     let dir = temp_dir("total");
     write_fixture(&dir);
 
-    let report = mev::carryover_sweep(&dir, None, false).expect("carryover_sweep should not error");
+    let report = mev::carryover_sweep(&dir, None, false, mev::COMMAND_EXEC_TIMEOUT)
+        .expect("carryover_sweep should not error");
 
     assert_eq!(
         report.total, 3,
@@ -350,7 +354,7 @@ fn live_corpus_evaluable_floor_and_cleared_ceiling() {
         return;
     }
 
-    let report = match mev::carryover_sweep(live_root, None, false) {
+    let report = match mev::carryover_sweep(live_root, None, false, mev::COMMAND_EXEC_TIMEOUT) {
         Ok(r) => r,
         Err(e) => {
             eprintln!(
@@ -516,8 +520,8 @@ fn audit_counts_sum_to_totals_and_split_by_container() {
     let dir = temp_dir("audit-sum");
     write_audit_fixture(&dir);
 
-    let (_report, audit) =
-        mev::carryover_audit(&dir, None, false, 30).expect("carryover_audit should not error");
+    let (_report, audit) = mev::carryover_audit(&dir, None, false, 30, mev::COMMAND_EXEC_TIMEOUT)
+        .expect("carryover_audit should not error");
 
     assert_eq!(
         audit.carryover_count, 3,
@@ -558,8 +562,8 @@ fn audit_typed_predicate_coverage_counts_only_typed_clears_when() {
     let dir = temp_dir("audit-typed");
     write_audit_fixture(&dir);
 
-    let (_report, audit) =
-        mev::carryover_audit(&dir, None, false, 30).expect("carryover_audit should not error");
+    let (_report, audit) = mev::carryover_audit(&dir, None, false, 30, mev::COMMAND_EXEC_TIMEOUT)
+        .expect("carryover_audit should not error");
 
     // Two of the three carryover[] entries carry a typed `block_closed`
     // predicate; the third carries free prose.
@@ -573,8 +577,8 @@ fn audit_clear_rate_denominator_excludes_reference_entries() {
     let dir = temp_dir("audit-clear-rate");
     write_audit_fixture(&dir);
 
-    let (_report, audit) =
-        mev::carryover_audit(&dir, None, false, 30).expect("carryover_audit should not error");
+    let (_report, audit) = mev::carryover_audit(&dir, None, false, 30, mev::COMMAND_EXEC_TIMEOUT)
+        .expect("carryover_audit should not error");
 
     // `reference[]` entries (3 of them) must never inflate the clear-rate
     // denominator: it is scoped to carryover[] only, not `total`.
@@ -607,8 +611,8 @@ fn audit_inflow_outflow_respect_the_window() {
 
     // Every fixture entry is dated 2020-01-01 — far outside a 30-day window
     // from today, so nothing should count as inflow or outflow.
-    let (_report, narrow) =
-        mev::carryover_audit(&dir, None, false, 30).expect("carryover_audit should not error");
+    let (_report, narrow) = mev::carryover_audit(&dir, None, false, 30, mev::COMMAND_EXEC_TIMEOUT)
+        .expect("carryover_audit should not error");
     assert_eq!(
         narrow.inflow, 0,
         "no entry should fall inside a 30-day window"
@@ -621,7 +625,8 @@ fn audit_inflow_outflow_respect_the_window() {
     // A window wide enough to cover 2020-01-01 through today should count
     // every entry as inflow, and the one Cleared entry as outflow.
     let (_report, wide) =
-        mev::carryover_audit(&dir, None, false, 20_000).expect("carryover_audit should not error");
+        mev::carryover_audit(&dir, None, false, 20_000, mev::COMMAND_EXEC_TIMEOUT)
+            .expect("carryover_audit should not error");
     assert_eq!(
         wide.inflow, wide.total,
         "every fixture entry should count as inflow with a wide-enough window"
@@ -639,8 +644,9 @@ fn audit_respects_repo_filter() {
     let dir = temp_dir("audit-repo-filter");
     write_audit_fixture(&dir);
 
-    let (_report, audit) = mev::carryover_audit(&dir, Some("beta"), false, 30)
-        .expect("carryover_audit should not error");
+    let (_report, audit) =
+        mev::carryover_audit(&dir, Some("beta"), false, 30, mev::COMMAND_EXEC_TIMEOUT)
+            .expect("carryover_audit should not error");
 
     assert_eq!(
         audit.carryover_count, 0,

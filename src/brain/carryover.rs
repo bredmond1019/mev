@@ -96,6 +96,13 @@ pub enum NotEvaluableReason {
     /// A bare block ID in the prose matched nodes in more than one repo and did
     /// not resolve to the carryover's own scope repo either — dropped rather
     /// than guessed at.
+    ///
+    /// Also produced for a `file_exists`/`file_contains` path that resolves
+    /// to two DIFFERENT files under the brain root and the owning repo's
+    /// root (or where either candidate's canonicalization fails, the safe
+    /// direction) — silently preferring the brain-root candidate would guess
+    /// at which file the author meant, so it is dropped rather than guessed
+    /// at instead. See [`PathResolution::Ambiguous`].
     AmbiguousReference,
     /// `clears_when` names a block ID but never says the block must *close* —
     /// e.g. *"one of the two BA.0.A blocks is renamed"* or *"BL.2.A's
@@ -108,6 +115,37 @@ pub enum NotEvaluableReason {
     /// `Cleared` regardless of what the command would have exited — an
     /// unrun command is unknown, and unknown must never read as cleared.
     ExecutionNotAllowed,
+    /// A `CommandExitsZero` predicate's child process was still running when
+    /// the configured bound elapsed and was killed by the in-process
+    /// watchdog. Distinct from a genuine non-zero exit: a timeout tells us
+    /// nothing about what the command would have exited, so it is unknown,
+    /// not failed, and unknown must never read as `Cleared` — the same
+    /// safe-direction rule as [`Self::ExecutionNotAllowed`]. See C141
+    /// (`clears-when-network-predicates-can-never-clear`): a network-touching
+    /// command can outrun any reasonable in-process bound, and folding that
+    /// into a plain `false` reported it as a permanent, indistinguishable
+    /// false red.
+    CommandTimedOut,
+    /// A `CommandExitsZero` predicate's child process could not be spawned at
+    /// all. Evidence about the environment the sweep ran in (e.g. `sh` not on
+    /// `PATH`), never evidence about the predicate's subject — never
+    /// `Cleared`.
+    CommandSpawnFailed,
+    /// A `FileContains` predicate's target could not be read to completion —
+    /// missing, resolved ambiguously under the two-root strategy, larger
+    /// than [`FILE_CONTAINS_MAX_BYTES`], or not valid UTF-8. Evidence about
+    /// the file, never evidence that the pattern is genuinely absent — only
+    /// a file that was read successfully is checkable, so this is never
+    /// `Cleared` or `Actionable` alongside a genuine negative.
+    FileUnreadable,
+    /// A `FileContains` predicate's `pattern` carries a shape (`.*`, `\d`, a
+    /// `[...]` class, alternation, anchors, …) that cannot plausibly be the
+    /// author's literal intent. The evaluator does literal substring
+    /// matching only (see the module header) and a regex-shaped pattern can
+    /// therefore never match — evaluating it literally would report a
+    /// permanent, indistinguishable false red instead of naming the actual
+    /// problem: the pattern was authored as a regex.
+    PatternNotLiteral,
     /// `clears_when` mentions a validator/gate/CI concept (see
     /// [`GATE_MENTION_WORDS`]) but no path or block reference could be
     /// extracted from it — e.g. *"the validator is green"* alone. Not
@@ -149,10 +187,15 @@ pub enum CarryoverRef {
     /// identical "unmet: key" line.
     UnresolvedBlock { key: String },
     /// A typed `file_contains` predicate. Satisfied when the path resolves
-    /// (same two-root strategy as [`Self::Path`]) and its contents contain
-    /// `pattern` as a literal substring. Every failure mode — missing file,
-    /// unreadable file, non-UTF8 contents, oversized file — is `satisfied:
-    /// false`, never a panic.
+    /// uniquely (same two-root strategy as [`Self::Path`]) and its contents
+    /// contain `pattern` as a literal substring; unsatisfied when the file
+    /// was read successfully and the pattern is genuinely absent. Produced
+    /// only for [`FileContainsOutcome::Found`]/[`FileContainsOutcome::NotFound`]
+    /// — a read failure (missing, ambiguous, oversized, unreadable, non-UTF8)
+    /// or a regex-shaped pattern produces NO ref at all and forces
+    /// `NotEvaluable` instead (see [`NotEvaluableReason::FileUnreadable`] /
+    /// [`NotEvaluableReason::PatternNotLiteral`]), so this variant is never a
+    /// stand-in for "could not tell".
     FileContains {
         path: String,
         pattern: String,
@@ -379,13 +422,45 @@ pub fn clears_when_prose(cw: &ClearsWhen) -> Option<&str> {
 
 /// Human-facing display string for a `clears_when`, for the report/summary
 /// sites (`CarryoverVerdict.clears_when`, the staleness-warning and
-/// Attention-section formatters). Currently identical to
-/// [`clears_when_prose`] — `Predicate` entries have no display string yet —
-/// kept as a separate name so those call sites read as "what do I show a
-/// human" rather than "what do I evaluate", and so a future predicate
-/// summary (`MV.ticket.clears-when-evaluation`) has one place to land.
-pub fn clears_when_display(cw: &ClearsWhen) -> Option<&str> {
-    clears_when_prose(cw)
+/// Attention-section formatters).
+///
+/// Unlike [`clears_when_prose`] — which stays `None` for every
+/// `ClearsWhen::Predicate` because the EVALUATION sites depend on that
+/// `None` — this renders a compact, unambiguous string for every typed
+/// predicate variant too, so an operator hand-verifying a `--dispose`
+/// candidate can see what the entry claims to be waiting on straight from
+/// the report. Returns an owned `String` (rather than `&str`, like
+/// [`clears_when_prose`]) because the predicate branch has nothing to borrow
+/// from — it is always freshly formatted.
+pub fn clears_when_display(cw: &ClearsWhen) -> Option<String> {
+    match cw {
+        ClearsWhen::Prose(s) => Some(s.clone()),
+        ClearsWhen::Predicate(p) => Some(predicate_display(p)),
+    }
+}
+
+/// Render one typed [`ClearsWhenPredicate`] compactly and unambiguously for
+/// [`clears_when_display`]. The predicate's `note`, when present, is
+/// appended so an author's gloss is never silently dropped from the report.
+fn predicate_display(p: &ClearsWhenPredicate) -> String {
+    let (body, note) = match p {
+        ClearsWhenPredicate::BlockClosed { repo, id, note } => {
+            (format!("block_closed {repo}:{id}"), note)
+        }
+        ClearsWhenPredicate::FileExists { path, note } => (format!("file_exists {path}"), note),
+        ClearsWhenPredicate::FileContains {
+            path,
+            pattern,
+            note,
+        } => (format!("file_contains {path} ~ \"{pattern}\""), note),
+        ClearsWhenPredicate::CommandExitsZero { command, note } => {
+            (format!("command_exits_zero \"{command}\""), note)
+        }
+    };
+    match note {
+        Some(n) => format!("{body} — {n}"),
+        None => body,
+    }
 }
 
 /// Verbs that turn a block ID mentioned in `clears_when` into a *closure*
@@ -591,34 +666,87 @@ pub fn mentions_gate(clears_when: &str) -> bool {
 // Evaluator — assign a lane per entry
 // ---------------------------------------------------------------------------
 
-/// Whether a path token resolves to an existing file, relative to the brain
-/// root or the owning repo's `repo_path` (either is sufficient).
+/// Outcome of resolving a path reference against the two-root strategy (brain
+/// root and the owning repo's `repo_path`). Kept distinct from a bare
+/// `Option<PathBuf>` so a caller can tell "resolved to exactly one file"
+/// apart from "resolved to two DIFFERENT files under the two roots" —
+/// collapsing the latter into "the brain-root candidate wins" silently
+/// guesses at which file the author meant, which is exactly the false-clear
+/// shape `MV.16.G` exists to remove.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PathResolution {
+    /// Neither root has a FILE at this path. Note: a directory of the same
+    /// name does not count — see [`Self::Unique`].
+    None,
+    /// Exactly one root resolves the path to a file, or both roots resolve
+    /// it to the SAME underlying file (canonicalized paths equal) — e.g. a
+    /// repo directory reachable through the brain root. Not ambiguous.
+    Unique(PathBuf),
+    /// Both roots resolve the path to a file, and they are not the same
+    /// underlying file (or canonicalization failed for either candidate,
+    /// the safe direction) — dropped rather than guessed at. See
+    /// [`NotEvaluableReason::AmbiguousReference`].
+    Ambiguous { brain: PathBuf, repo: PathBuf },
+}
+
+/// Whether a path token resolves, unambiguously, to an existing FILE
+/// (never a directory), relative to the brain root or the owning repo's
+/// `repo_path`. An [`PathResolution::Ambiguous`] resolution is NOT
+/// satisfied — the caller cannot tell which file was meant, so it must not
+/// read as "the path exists" any more than as "the path is absent".
 fn path_ref_satisfied(
     path: &str,
     brain_root: &Path,
     repo_paths: &HashMap<String, PathBuf>,
     owning_repo: &str,
 ) -> bool {
-    resolve_existing_path(path, brain_root, repo_paths, owning_repo).is_some()
+    matches!(
+        resolve_existing_path(path, brain_root, repo_paths, owning_repo),
+        PathResolution::Unique(_)
+    )
 }
 
-/// Resolve a path reference against the same two-root strategy
-/// [`path_ref_satisfied`] uses (brain root first, then the owning repo's
-/// `repo_path`), returning the first candidate that actually exists.
+/// Resolve a path reference against both roots — the brain root and the
+/// owning repo's `repo_path` — and report whether the result is absent,
+/// unique, or ambiguous. Requires `is_file()`, not `.exists()`, so a
+/// directory of the same name never satisfies a `file_exists`/`file_contains`
+/// predicate (symlinks are still followed, which `is_file()` already does).
+/// Two candidates that resolve to the SAME file (canonicalized paths equal)
+/// are [`PathResolution::Unique`], not ambiguous — a repo directory reachable
+/// through the brain root must not produce a spurious ambiguity. If
+/// canonicalization fails for either candidate, the result is
+/// [`PathResolution::Ambiguous`] — the safe direction.
 fn resolve_existing_path(
     path: &str,
     brain_root: &Path,
     repo_paths: &HashMap<String, PathBuf>,
     owning_repo: &str,
-) -> Option<PathBuf> {
+) -> PathResolution {
     let brain_candidate = brain_root.join(path);
-    if brain_candidate.exists() {
-        return Some(brain_candidate);
-    }
-    repo_paths.get(owning_repo).and_then(|repo_path| {
+    let brain_hit = brain_candidate.is_file().then_some(brain_candidate);
+
+    let repo_hit = repo_paths.get(owning_repo).and_then(|repo_path| {
         let candidate = repo_path.join(path);
-        candidate.exists().then_some(candidate)
-    })
+        candidate.is_file().then_some(candidate)
+    });
+
+    match (brain_hit, repo_hit) {
+        (Some(brain), Some(repo)) => {
+            let same_file = match (brain.canonicalize(), repo.canonicalize()) {
+                (Ok(b), Ok(r)) => b == r,
+                // Canonicalization failure on either side: don't guess.
+                _ => false,
+            };
+            if same_file {
+                PathResolution::Unique(brain)
+            } else {
+                PathResolution::Ambiguous { brain, repo }
+            }
+        }
+        (Some(brain), None) => PathResolution::Unique(brain),
+        (None, Some(repo)) => PathResolution::Unique(repo),
+        (None, None) => PathResolution::None,
+    }
 }
 
 /// Bound on how much of a `file_contains` target we will read into memory —
@@ -627,53 +755,154 @@ fn resolve_existing_path(
 /// this predicate is meant to check.
 const FILE_CONTAINS_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
-/// Whether a `file_contains` predicate is satisfied: the path resolves (same
+/// The observed outcome of evaluating a `file_contains` predicate. Kept
+/// distinct from a bare `bool` so a caller can tell "the file was read and
+/// the pattern is genuinely absent" (`NotFound`) apart from "we never got a
+/// real answer" (`Unreadable`/`PatternNotLiteral`) — collapsing every
+/// failure mode (missing, oversized, unreadable, non-UTF-8, resolves
+/// ambiguously) into one `false` is exactly the unsoundness `MV.16.G` exists
+/// to remove: an unknown outcome must never read as satisfied, and a broken
+/// predicate must never be indistinguishable from a real signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FileContainsOutcome {
+    /// The path resolved to a unique, readable, UTF-8 file within the size
+    /// bound, and `pattern` appears in it as a literal substring.
+    Found,
+    /// The path resolved to a unique, readable, UTF-8 file within the size
+    /// bound, and `pattern` does NOT appear in it — a genuine negative.
+    NotFound,
+    /// The path did not resolve to a unique file (missing, ambiguous under
+    /// the two-root strategy, oversized, unreadable, or not valid UTF-8).
+    /// Evidence about the file, not about the pattern — see
+    /// [`NotEvaluableReason::FileUnreadable`].
+    Unreadable,
+    /// `pattern` carries a shape (`.*`, `\d`, a `[...]` class, alternation,
+    /// anchors, …) that cannot plausibly be the author's literal intent —
+    /// the evaluator does literal substring matching only and never adds a
+    /// `regex` dependency (see the module header), so a regex-shaped
+    /// pattern can never match and would otherwise read as a permanent
+    /// false red. See [`NotEvaluableReason::PatternNotLiteral`].
+    PatternNotLiteral,
+}
+
+/// Detect a pattern shape that cannot plausibly be an author's literal
+/// intent — composite regex metacharacter sequences only, never a single
+/// bare metacharacter, so a legitimate literal like `docs/cli.md` or
+/// `exit $?` is never refused. Deliberately conservative: false negatives
+/// (a real regex slipping through as "literal") are cheaper here than false
+/// positives (a working literal predicate turned permanently
+/// not-evaluable) — the caller only ever falls back to literal substring
+/// matching, never to actual regex evaluation, so a slip-through just keeps
+/// today's (already sound) literal-match behavior.
+fn pattern_is_regex_shaped(pattern: &str) -> bool {
+    const COMPOSITE_MARKERS: &[&str] = &[".*", ".+", "\\d", "\\w", "\\s", "\\S", "\\D", "\\W"];
+    if COMPOSITE_MARKERS.iter().any(|m| pattern.contains(m)) {
+        return true;
+    }
+    // A bracket class: an unescaped `[` followed somewhere later by `]`.
+    if pattern.contains('[') && pattern.contains(']') {
+        return true;
+    }
+    // An alternation group: `(...|...)`.
+    if pattern.contains('(') && pattern.contains('|') && pattern.contains(')') {
+        return true;
+    }
+    // Anchors are only refused when they open/close the whole pattern —
+    // that is the shape that means "match the whole line/string", not a
+    // bare `$` or `^` embedded in prose (e.g. `exit $?`).
+    if pattern.starts_with('^') || pattern.ends_with('$') {
+        return true;
+    }
+    false
+}
+
+/// Evaluate a `file_contains` predicate: the path resolves uniquely (same
 /// two-root strategy as [`path_ref_satisfied`]), its size is within
-/// [`FILE_CONTAINS_MAX_BYTES`], its contents decode as UTF-8, and `pattern`
+/// [`FILE_CONTAINS_MAX_BYTES`], its contents decode as UTF-8, `pattern` is
+/// not regex-shaped (see [`pattern_is_regex_shaped`]), and `pattern`
 /// appears as a literal substring (never a regex — see the module header).
-/// Every failure mode — missing file, oversized file, unreadable file,
-/// non-UTF8 contents, IO error — returns `false`, never panics.
-fn file_contains_satisfied(
+/// Never panics — every failure mode is a [`FileContainsOutcome`] variant.
+fn file_contains_outcome(
     path: &str,
     pattern: &str,
     brain_root: &Path,
     repo_paths: &HashMap<String, PathBuf>,
     owning_repo: &str,
-) -> bool {
-    let Some(resolved) = resolve_existing_path(path, brain_root, repo_paths, owning_repo) else {
-        return false;
+) -> FileContainsOutcome {
+    if pattern_is_regex_shaped(pattern) {
+        return FileContainsOutcome::PatternNotLiteral;
+    }
+    let resolved = match resolve_existing_path(path, brain_root, repo_paths, owning_repo) {
+        PathResolution::Unique(resolved) => resolved,
+        PathResolution::None | PathResolution::Ambiguous { .. } => {
+            return FileContainsOutcome::Unreadable;
+        }
     };
     let Ok(metadata) = std::fs::metadata(&resolved) else {
-        return false;
+        return FileContainsOutcome::Unreadable;
     };
     if metadata.len() > FILE_CONTAINS_MAX_BYTES {
-        return false;
+        return FileContainsOutcome::Unreadable;
     }
     let Ok(bytes) = std::fs::read(&resolved) else {
-        return false;
+        return FileContainsOutcome::Unreadable;
     };
     let Ok(contents) = String::from_utf8(bytes) else {
-        return false;
+        return FileContainsOutcome::Unreadable;
     };
-    contents.contains(pattern)
+    if contents.contains(pattern) {
+        FileContainsOutcome::Found
+    } else {
+        FileContainsOutcome::NotFound
+    }
 }
 
 /// Wall-clock bound for a `command_exits_zero` child process. `timeout(1)`
 /// does not exist on this macOS shell, so the bound is enforced in-process
 /// by polling `try_wait` and killing the child on expiry — never by
 /// shelling out to `timeout`.
-const COMMAND_EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+pub const COMMAND_EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Poll interval for the in-process watchdog.
 const COMMAND_EXEC_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Whether a `command_exits_zero` predicate is satisfied: spawns `sh -c
-/// <command>` in `cwd`, and returns `true` only on a clean exit status of 0
-/// observed within [`COMMAND_EXEC_TIMEOUT`]. Spawn failure, non-zero exit,
-/// signal death, and timeout (the child is killed and reaped) all return
-/// `false` — never `true`, and never a panic that aborts the sweep. Only
-/// called when the caller has already confirmed `allow_exec` is set.
-fn command_exit_zero_satisfied(command: &str, cwd: &Path) -> bool {
+/// The observed outcome of running a `command_exits_zero` predicate's child
+/// process. Kept distinct from a bare `bool` so a caller can tell "the
+/// command ran and told us something" (`ExitZero`/`ExitNonZero`) apart from
+/// "we never got a real answer" (`SpawnFailed`/`TimedOut`) — collapsing the
+/// four into one `false` is exactly the unsoundness `MV.16.G` exists to
+/// remove: an unknown outcome must never read as satisfied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommandOutcome {
+    /// The child exited with status 0 within the bound.
+    ExitZero,
+    /// The child exited with a non-zero status (or was killed by a signal)
+    /// within the bound — a genuine, observed failure.
+    ExitNonZero,
+    /// The child could not be spawned at all (e.g. `sh` not on `PATH`). Not
+    /// evidence about the predicate's subject — evidence about the
+    /// environment the sweep ran in.
+    SpawnFailed,
+    /// The child was still running when the configured bound elapsed and was
+    /// killed and reaped by the in-process watchdog. Unknown, not failed —
+    /// see [`NotEvaluableReason::CommandTimedOut`].
+    TimedOut,
+}
+
+/// Run a `command_exits_zero` predicate's command: spawns `sh -c <command>`
+/// in `cwd` and observes its outcome within `timeout`, via an in-process
+/// watchdog (`timeout(1)` does not exist on this macOS shell, so the bound
+/// is enforced by polling `try_wait` and killing the child on expiry — never
+/// by shelling out to `timeout`). Never panics — every failure mode is a
+/// [`CommandOutcome`] variant, never an abort of the sweep. Only called when
+/// the caller has already confirmed `allow_exec` is set.
+fn command_exit_zero_outcome(
+    command: &str,
+    cwd: &Path,
+    timeout: std::time::Duration,
+) -> CommandOutcome {
     use std::process::Stdio;
 
     let mut child = match std::process::Command::new("sh")
@@ -686,22 +915,28 @@ fn command_exit_zero_satisfied(command: &str, cwd: &Path) -> bool {
         .spawn()
     {
         Ok(child) => child,
-        Err(_) => return false,
+        Err(_) => return CommandOutcome::SpawnFailed,
     };
 
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(status)) => {
+                return if status.success() {
+                    CommandOutcome::ExitZero
+                } else {
+                    CommandOutcome::ExitNonZero
+                };
+            }
             Ok(None) => {
-                if start.elapsed() >= COMMAND_EXEC_TIMEOUT {
+                if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return false;
+                    return CommandOutcome::TimedOut;
                 }
                 std::thread::sleep(COMMAND_EXEC_POLL_INTERVAL);
             }
-            Err(_) => return false,
+            Err(_) => return CommandOutcome::SpawnFailed,
         }
     }
 }
@@ -730,7 +965,10 @@ fn lane_rank(lane: CarryoverLane) -> u8 {
 /// `StateSource::repo_slug`). `allow_exec` is the opt-in gate for the
 /// `CommandExitsZero` typed predicate — see that arm's doc comment for the
 /// safe-direction reasoning; it has no effect on any other predicate or on
-/// prose extraction.
+/// prose extraction. `exec_timeout` is the wall-clock bound the in-process
+/// watchdog enforces on a `CommandExitsZero` child process when `allow_exec`
+/// is set — pass [`COMMAND_EXEC_TIMEOUT`] for the default 2s bound; it has no
+/// effect when `allow_exec` is `false`.
 ///
 /// **References are combined conjunctively (AND), even when the source prose
 /// reads as a disjunction ("or").** This is a deliberate safe-direction bias:
@@ -749,6 +987,7 @@ pub fn evaluate_carryover(
     thresholds: &AttentionThresholds,
     repo_filter: Option<&str>,
     allow_exec: bool,
+    exec_timeout: std::time::Duration,
 ) -> CarryoverReport {
     evaluate_carryover_with_dedup(
         files,
@@ -760,6 +999,7 @@ pub fn evaluate_carryover(
         repo_filter,
         allow_exec,
         true,
+        exec_timeout,
     )
 }
 
@@ -812,6 +1052,7 @@ pub fn evaluate_carryover_with_dedup(
     repo_filter: Option<&str>,
     allow_exec: bool,
     include_dedup: bool,
+    exec_timeout: std::time::Duration,
 ) -> CarryoverReport {
     let known_keys: HashSet<String> = status_map.keys().cloned().collect();
     let today_date = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d").ok();
@@ -915,29 +1156,62 @@ pub fn evaluate_carryover_with_dedup(
                     }
                 }
                 Some(ClearsWhen::Predicate(ClearsWhenPredicate::FileExists { path, .. })) => {
-                    // Reuse `path_ref_satisfied` verbatim — no second
-                    // resolution strategy for the typed form.
-                    let satisfied = path_ref_satisfied(path, brain_root, repo_paths, own_repo);
-                    refs.push(CarryoverRef::Path {
-                        path: path.clone(),
-                        satisfied,
-                    });
+                    // Reuse `resolve_existing_path` verbatim — no second
+                    // resolution strategy for the typed form. An ambiguous
+                    // resolution pushes no ref and forces `NotEvaluable`
+                    // rather than guessing which candidate the author meant.
+                    match resolve_existing_path(path, brain_root, repo_paths, own_repo) {
+                        PathResolution::Unique(_) => {
+                            refs.push(CarryoverRef::Path {
+                                path: path.clone(),
+                                satisfied: true,
+                            });
+                        }
+                        PathResolution::None => {
+                            refs.push(CarryoverRef::Path {
+                                path: path.clone(),
+                                satisfied: false,
+                            });
+                        }
+                        PathResolution::Ambiguous { .. } => {
+                            forced_reason = Some(NotEvaluableReason::AmbiguousReference);
+                        }
+                    }
                 }
                 Some(ClearsWhen::Predicate(ClearsWhenPredicate::FileContains {
                     path,
                     pattern,
                     ..
                 })) => {
-                    // Same two-root resolution strategy as `FileExists`;
-                    // every failure mode (missing/oversized/unreadable/
-                    // non-UTF8) folds into `satisfied: false`.
-                    let satisfied =
-                        file_contains_satisfied(path, pattern, brain_root, repo_paths, own_repo);
-                    refs.push(CarryoverRef::FileContains {
-                        path: path.clone(),
-                        pattern: pattern.clone(),
-                        satisfied,
-                    });
+                    // Same two-root resolution strategy as `FileExists`.
+                    // `Found`/`NotFound` push a ref as today; `Unreadable`
+                    // and `PatternNotLiteral` push none and force
+                    // `NotEvaluable` — the same shape `FileExists`'s
+                    // `Ambiguous` arm already uses, so a read failure or a
+                    // regex-shaped pattern is never indistinguishable from
+                    // a genuine negative.
+                    match file_contains_outcome(path, pattern, brain_root, repo_paths, own_repo) {
+                        FileContainsOutcome::Found => {
+                            refs.push(CarryoverRef::FileContains {
+                                path: path.clone(),
+                                pattern: pattern.clone(),
+                                satisfied: true,
+                            });
+                        }
+                        FileContainsOutcome::NotFound => {
+                            refs.push(CarryoverRef::FileContains {
+                                path: path.clone(),
+                                pattern: pattern.clone(),
+                                satisfied: false,
+                            });
+                        }
+                        FileContainsOutcome::Unreadable => {
+                            forced_reason = Some(NotEvaluableReason::FileUnreadable);
+                        }
+                        FileContainsOutcome::PatternNotLiteral => {
+                            forced_reason = Some(NotEvaluableReason::PatternNotLiteral);
+                        }
+                    }
                 }
                 Some(ClearsWhen::Predicate(ClearsWhenPredicate::CommandExitsZero {
                     command,
@@ -950,11 +1224,30 @@ pub fn evaluate_carryover_with_dedup(
                             // never a no-op.
                             brain_root,
                         );
-                        let satisfied = command_exit_zero_satisfied(command, cwd);
-                        refs.push(CarryoverRef::CommandExitsZero {
-                            command: command.clone(),
-                            satisfied,
-                        });
+                        match command_exit_zero_outcome(command, cwd, exec_timeout) {
+                            CommandOutcome::ExitZero => {
+                                refs.push(CarryoverRef::CommandExitsZero {
+                                    command: command.clone(),
+                                    satisfied: true,
+                                });
+                            }
+                            CommandOutcome::ExitNonZero => {
+                                refs.push(CarryoverRef::CommandExitsZero {
+                                    command: command.clone(),
+                                    satisfied: false,
+                                });
+                            }
+                            // Unknown outcomes: no ref, so the entry lands in
+                            // `NotEvaluable` rather than `Actionable` next to
+                            // a genuinely-failing command — the same shape
+                            // `ExecutionNotAllowed` already uses below.
+                            CommandOutcome::TimedOut => {
+                                forced_reason = Some(NotEvaluableReason::CommandTimedOut);
+                            }
+                            CommandOutcome::SpawnFailed => {
+                                forced_reason = Some(NotEvaluableReason::CommandSpawnFailed);
+                            }
+                        }
                     } else {
                         // Opt-in is off: this predicate is NOT evaluated at
                         // all — no ref is produced, and the entry is
@@ -1030,11 +1323,7 @@ pub fn evaluate_carryover_with_dedup(
                 slug: item.slug.clone(),
                 kind: carryover_kind_str(&item.kind).into_owned(),
                 text: item.text.clone(),
-                clears_when: item
-                    .clears_when
-                    .as_ref()
-                    .and_then(clears_when_display)
-                    .map(String::from),
+                clears_when: item.clears_when.as_ref().and_then(clears_when_display),
                 created: item.created.clone(),
                 age_days,
                 stale,
@@ -1175,7 +1464,9 @@ pub struct DisposalPlan {
 ///    practice: every verdict in `report.entries` was produced from exactly
 ///    one entry in `files` by [`evaluate_carryover_with_dedup`]) rather than
 ///    panicking or fabricating a record.
-/// 3. Renders the evidence string via [`describe_clearing_evidence`].
+/// 3. Renders the evidence string via [`describe_clearing_evidence`],
+///    passing `exec_timeout` through so a `command_exits_zero` disposal
+///    records the bound that was actually in force for this sweep.
 ///
 /// **Guard (4) — `--dispose` never implies `--allow-exec` — needs no special
 /// case here.** `evaluate_carryover_with_dedup` already refuses to mark a
@@ -1191,6 +1482,7 @@ pub fn compute_disposal_plan(
     report: &CarryoverReport,
     files: &[(StateSource, StateFile)],
     load_errors: &[(String, String)],
+    exec_timeout: std::time::Duration,
 ) -> DisposalPlan {
     let mut candidates = Vec::new();
 
@@ -1211,7 +1503,7 @@ pub fn compute_disposal_plan(
             repo: verdict.repo.clone(),
             slug: verdict.slug.clone(),
             entry: entry.clone(),
-            evidence: describe_clearing_evidence(verdict),
+            evidence: describe_clearing_evidence(verdict, exec_timeout),
         });
     }
 
@@ -1239,7 +1531,17 @@ pub fn compute_disposal_plan(
 /// `evaluate_carryover_with_dedup`'s lane assignment: the `Cleared`/
 /// `Actionable` split is only reached when `!refs.is_empty()`) — so this
 /// never returns an empty string for a genuine disposal candidate.
-pub fn describe_clearing_evidence(verdict: &CarryoverVerdict) -> String {
+///
+/// `exec_timeout` is the wall-clock bound that was actually in force for
+/// this sweep (see [`COMMAND_EXEC_TIMEOUT`] for the default). A
+/// `CommandExitsZero` clause records it, so an archived disposal names the
+/// watchdog that applied rather than the unfalsifiable `command X exited 0`
+/// this used to emit — without it, nothing on disk after the fact says a
+/// bound was even in force.
+pub fn describe_clearing_evidence(
+    verdict: &CarryoverVerdict,
+    exec_timeout: std::time::Duration,
+) -> String {
     verdict
         .refs
         .iter()
@@ -1252,7 +1554,10 @@ pub fn describe_clearing_evidence(verdict: &CarryoverVerdict) -> String {
                 format!("{path} contains \"{pattern}\"")
             }
             CarryoverRef::CommandExitsZero { command, .. } => {
-                format!("command `{command}` exited 0")
+                format!(
+                    "command `{command}` exited 0 (bound {}s)",
+                    exec_timeout.as_secs()
+                )
             }
         })
         .collect::<Vec<String>>()
@@ -2458,7 +2763,7 @@ pub fn slug_for_finding(finding: &crate::brain::graph_findings::GraphFinding) ->
 ///   predicate that is a genuine STAND-IN for "re-run the detector" — a
 ///   `file_exists`/`file_contains` check over the exact fact the detector
 ///   itself checked — spelled so `mev carryover`'s own evaluator
-///   (`path_ref_satisfied`/`file_contains_satisfied`) resolves it the same
+///   (`path_ref_satisfied`/`file_contains_outcome`) resolves it the same
 ///   way. `--write`'s idempotence (dedup on `finding_id`) still matters
 ///   independently: it is what keeps a repeated `--write` from duplicating
 ///   an entry, not what retires one — that is now the predicate's job.
@@ -4957,6 +5262,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.total, 1);
         assert_eq!(report.cleared, 1);
@@ -4997,6 +5303,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.total, 1);
         assert_eq!(report.actionable, 1);
@@ -5039,6 +5346,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.not_evaluable, 1);
         let entry = &report.entries[0];
@@ -5087,6 +5395,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.not_evaluable, 1);
         let entry = &report.entries[0];
@@ -5135,6 +5444,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 0, "a related[] edge must never clear");
         assert_eq!(report.not_evaluable, 1);
@@ -5195,6 +5505,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(
             report.cleared, 0,
@@ -5246,6 +5557,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 1);
         assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
@@ -5279,6 +5591,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.not_evaluable, 1);
         assert_eq!(
@@ -5320,6 +5633,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.actionable, 1, "one path missing -> actionable");
         let entry = &report.entries[0];
@@ -5374,6 +5688,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         let by_slug = |slug: &str| report.entries.iter().find(|e| e.slug == slug).unwrap();
         assert!(
@@ -5433,6 +5748,7 @@ mod tests {
             &thresholds(),
             Some("mev"),
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.total, 1);
         assert_eq!(report.entries[0].repo, "mev");
@@ -5534,6 +5850,7 @@ mod tests {
             &thresholds(),
             Some("base-template"),
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         let slugs: Vec<&str> = report.entries.iter().map(|e| e.slug.as_str()).collect();
         assert!(
@@ -5560,6 +5877,7 @@ mod tests {
             &thresholds(),
             Some("base-template"),
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         let slugs: Vec<&str> = report.entries.iter().map(|e| e.slug.as_str()).collect();
         assert!(slugs.contains(&"four-repos-still-narrow-clippy"));
@@ -5581,6 +5899,7 @@ mod tests {
             &thresholds(),
             Some("brain"),
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         let slugs: Vec<&str> = report.entries.iter().map(|e| e.slug.as_str()).collect();
         assert!(
@@ -5607,6 +5926,7 @@ mod tests {
                 &thresholds(),
                 Some(filter),
                 false,
+                COMMAND_EXEC_TIMEOUT,
             );
             let slugs: Vec<&str> = report.entries.iter().map(|e| e.slug.as_str()).collect();
             assert!(
@@ -5636,6 +5956,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.total, 6);
         let slugs: std::collections::HashSet<&str> =
@@ -5674,6 +5995,7 @@ mod tests {
                 &thresholds(),
                 filter,
                 false,
+                COMMAND_EXEC_TIMEOUT,
             );
             let audit = audit_carryover(&files, &report, "2026-08-03", 90, filter);
             assert_eq!(
@@ -5734,6 +6056,7 @@ mod tests {
             None,
             false,
             true,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert!(
             !with_dedup.suggestions.is_empty(),
@@ -5751,6 +6074,7 @@ mod tests {
             None,
             false,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert!(
             without_dedup.clusters.is_empty(),
@@ -5825,6 +6149,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         let report2 = evaluate_carryover(
             &files,
@@ -5835,6 +6160,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         let lanes1: Vec<CarryoverLane> = report1.entries.iter().map(|e| e.lane).collect();
         let lanes2: Vec<CarryoverLane> = report2.entries.iter().map(|e| e.lane).collect();
@@ -5888,6 +6214,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 1);
         assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
@@ -5928,6 +6255,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.actionable, 1);
         assert_eq!(report.entries[0].lane, CarryoverLane::Actionable);
@@ -5970,6 +6298,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 0);
         assert_eq!(report.actionable, 1);
@@ -6018,6 +6347,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 1);
         assert_eq!(
@@ -6069,6 +6399,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 1);
 
@@ -6102,6 +6433,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.actionable, 1);
         assert_eq!(
@@ -6111,6 +6443,208 @@ mod tests {
                 satisfied: false,
             }]
         );
+    }
+
+    #[test]
+    fn file_exists_predicate_naming_a_directory_is_never_cleared() {
+        let dir = std::env::temp_dir().join(format!(
+            "mev-carryover-file-exists-dir-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The predicate names a DIRECTORY, not a file — `.exists()` would
+        // say yes, but `is_file()` (what the evaluator must use) says no.
+        let target_dir = dir.join("marker-dir");
+        std::fs::create_dir_all(&target_dir).unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-exists-directory",
+                    "deferred",
+                    ClearsWhenPredicate::FileExists {
+                        path: "marker-dir".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        assert_eq!(
+            report.cleared, 0,
+            "a directory must never satisfy file_exists"
+        );
+        assert_eq!(report.actionable, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::Path {
+                path: "marker-dir".to_string(),
+                satisfied: false,
+            }]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_exists_predicate_ambiguous_across_both_roots_is_not_evaluable() {
+        let brain_dir = std::env::temp_dir().join(format!(
+            "mev-carryover-file-exists-ambig-brain-{}",
+            std::process::id()
+        ));
+        let repo_dir = std::env::temp_dir().join(format!(
+            "mev-carryover-file-exists-ambig-repo-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&brain_dir).unwrap();
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        // Two DIFFERENT files, same relative path, one under each root.
+        std::fs::write(brain_dir.join("marker.md"), "brain copy").unwrap();
+        std::fs::write(repo_dir.join("marker.md"), "repo copy").unwrap();
+
+        let mut repo_paths = HashMap::new();
+        repo_paths.insert("mev".to_string(), repo_dir.clone());
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-exists-ambiguous",
+                    "deferred",
+                    ClearsWhenPredicate::FileExists {
+                        path: "marker.md".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &brain_dir,
+            &repo_paths,
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        assert_eq!(
+            report.cleared, 0,
+            "an ambiguous two-root resolution must never read as Cleared"
+        );
+        assert_eq!(report.not_evaluable, 1);
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::AmbiguousReference)
+        );
+        assert!(
+            report.entries[0].refs.is_empty(),
+            "an ambiguous resolution pushes no ref — dropped rather than guessed at"
+        );
+
+        std::fs::remove_dir_all(&brain_dir).ok();
+        std::fs::remove_dir_all(&repo_dir).ok();
+    }
+
+    #[test]
+    fn file_exists_predicate_present_under_only_repo_root_still_clears() {
+        // Positive control for the two tests above: proves the new rejection
+        // is specific to the directory/ambiguity shapes, not a blanket
+        // regression of the existing repo-root resolution path.
+        let brain_dir = std::env::temp_dir().join(format!(
+            "mev-carryover-file-exists-repo-only-brain-{}",
+            std::process::id()
+        ));
+        let repo_dir = std::env::temp_dir().join(format!(
+            "mev-carryover-file-exists-repo-only-repo-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&brain_dir).unwrap();
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::write(repo_dir.join("marker.md"), "present").unwrap();
+
+        let mut repo_paths = HashMap::new();
+        repo_paths.insert("mev".to_string(), repo_dir.clone());
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-exists-repo-only",
+                    "deferred",
+                    ClearsWhenPredicate::FileExists {
+                        path: "marker.md".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &brain_dir,
+            &repo_paths,
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        assert_eq!(report.cleared, 1);
+        assert_eq!(report.not_evaluable, 0);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::Path {
+                path: "marker.md".to_string(),
+                satisfied: true,
+            }]
+        );
+
+        std::fs::remove_dir_all(&brain_dir).ok();
+        std::fs::remove_dir_all(&repo_dir).ok();
+    }
+
+    #[test]
+    fn resolve_existing_path_same_file_under_both_roots_is_unique_not_ambiguous() {
+        // A repo directory reachable through the brain root (e.g. brain root
+        // == repo root, or a symlink) resolves to the SAME underlying file
+        // under both candidates and must not be flagged ambiguous.
+        let dir = std::env::temp_dir().join(format!(
+            "mev-carryover-resolve-same-file-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("marker.md"), "present").unwrap();
+
+        let mut repo_paths = HashMap::new();
+        repo_paths.insert("mev".to_string(), dir.clone());
+
+        let resolution = resolve_existing_path("marker.md", &dir, &repo_paths, "mev");
+        assert_eq!(resolution, PathResolution::Unique(dir.join("marker.md")));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Scratch dir helper for `file_contains` fixtures — mirrors the
@@ -6155,6 +6689,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 1);
         assert_eq!(
@@ -6200,6 +6735,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.actionable, 1);
         assert_eq!(
@@ -6215,7 +6751,10 @@ mod tests {
     }
 
     #[test]
-    fn file_contains_predicate_absent_file_is_actionable_never_panics() {
+    fn file_contains_predicate_absent_file_is_not_evaluable_never_panics() {
+        // Was `Actionable` with `satisfied: false` before MV.16.G task 3 —
+        // updated because a missing file is unreadable, not a genuine
+        // negative (a false red, never a false clear).
         let files = vec![(
             src("mev"),
             state_file(
@@ -6242,20 +6781,19 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
-        assert_eq!(report.actionable, 1);
+        assert_eq!(report.not_evaluable, 1);
+        assert!(report.entries[0].refs.is_empty());
         assert_eq!(
-            report.entries[0].refs,
-            vec![CarryoverRef::FileContains {
-                path: "definitely/does/not/exist.md".to_string(),
-                pattern: "anything".to_string(),
-                satisfied: false,
-            }]
+            report.entries[0].reason,
+            Some(NotEvaluableReason::FileUnreadable)
         );
     }
 
     #[test]
-    fn file_contains_predicate_oversized_file_is_actionable_never_panics() {
+    fn file_contains_predicate_oversized_file_is_not_evaluable_never_panics() {
+        // Was `Actionable` with `satisfied: false` before MV.16.G task 3.
         let dir = scratch_dir("oversized");
         // One byte past FILE_CONTAINS_MAX_BYTES — must be rejected, not read.
         let oversized = vec![b'x'; (FILE_CONTAINS_MAX_BYTES + 1) as usize];
@@ -6271,7 +6809,7 @@ mod tests {
                     "deferred",
                     ClearsWhenPredicate::FileContains {
                         path: "huge.md".to_string(),
-                        pattern: "x".to_string(),
+                        pattern: "z".to_string(),
                         note: None,
                     },
                 )],
@@ -6287,23 +6825,24 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
-        assert_eq!(report.actionable, 1);
-        assert_eq!(
-            report.entries[0].refs,
-            vec![CarryoverRef::FileContains {
-                path: "huge.md".to_string(),
-                pattern: "x".to_string(),
-                satisfied: false,
-            }],
+        assert_eq!(report.not_evaluable, 1);
+        assert!(
+            report.entries[0].refs.is_empty(),
             "an oversized file must never be read into memory to satisfy the predicate"
+        );
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::FileUnreadable)
         );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn file_contains_predicate_non_utf8_file_is_actionable_never_panics() {
+    fn file_contains_predicate_non_utf8_file_is_not_evaluable_never_panics() {
+        // Was `Actionable` before MV.16.G task 3.
         let dir = scratch_dir("non-utf8");
         // 0xFF is never valid as a UTF-8 lead byte.
         std::fs::write(dir.join("binary.md"), [0xFFu8, 0xFE, 0x00, 0x01]).unwrap();
@@ -6334,9 +6873,111 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
-        assert_eq!(report.actionable, 1);
         assert!(!matches!(report.entries[0].lane, CarryoverLane::Cleared));
+        assert_eq!(report.not_evaluable, 1);
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::FileUnreadable)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_contains_predicate_regex_shaped_pattern_is_not_evaluable() {
+        // Live corpus shape: `bastion:session-qa-chat-about-never-tapped-live`
+        // authors `"pattern": "ChatAbout .*live"`, which the literal-match
+        // evaluator can never satisfy — a permanent false red that must be
+        // named, not evaluated as a literal.
+        let dir = scratch_dir("regex-shaped");
+        std::fs::write(dir.join("target.md"), "ChatAbout something live").unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-contains-regex-shaped",
+                    "deferred",
+                    ClearsWhenPredicate::FileContains {
+                        path: "target.md".to_string(),
+                        pattern: "ChatAbout .*live".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        assert_eq!(report.not_evaluable, 1);
+        assert!(report.entries[0].refs.is_empty());
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::PatternNotLiteral)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_contains_predicate_literal_single_dot_still_matches() {
+        // A bare `.` is NOT enough to be treated as regex-shaped — refusing
+        // a legitimate literal like `docs/cli.md` would turn a working
+        // predicate into a permanent not-evaluable. Positive control for
+        // `file_contains_predicate_regex_shaped_pattern_is_not_evaluable`.
+        let dir = scratch_dir("literal-dot");
+        std::fs::write(dir.join("target.md"), "see docs/cli.md for details").unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-contains-literal-dot",
+                    "deferred",
+                    ClearsWhenPredicate::FileContains {
+                        path: "target.md".to_string(),
+                        pattern: "docs/cli.md".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        assert_eq!(report.cleared, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::FileContains {
+                path: "target.md".to_string(),
+                pattern: "docs/cli.md".to_string(),
+                satisfied: true,
+            }]
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -6368,6 +7009,7 @@ mod tests {
             &thresholds(),
             None,
             true, // allow_exec
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 1);
         assert_eq!(
@@ -6406,6 +7048,7 @@ mod tests {
             &thresholds(),
             None,
             true,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.actionable, 1);
         assert_eq!(
@@ -6444,6 +7087,7 @@ mod tests {
             &thresholds(),
             None,
             true,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.actionable, 1);
         assert!(!matches!(report.entries[0].lane, CarryoverLane::Cleared));
@@ -6451,9 +7095,15 @@ mod tests {
 
     #[test]
     fn command_exits_zero_with_opt_in_and_slow_command_times_out_and_is_actionable() {
-        // Exceeds COMMAND_EXEC_TIMEOUT; the in-process watchdog must kill it
-        // and report not-satisfied within roughly the bound rather than
-        // hanging the sweep. `timeout(1)` is never invoked to enforce this.
+        // MV.16.G: exceeds COMMAND_EXEC_TIMEOUT; the in-process watchdog must
+        // kill it within roughly the bound rather than hanging the sweep.
+        // `timeout(1)` is never invoked to enforce this. UPDATED by MV.16.G:
+        // a timeout is now UNKNOWN, not a genuine failure — before this
+        // block it collapsed into the same `Actionable`/`satisfied: false`
+        // shape as a real non-zero exit (asserted below as the pre-fix
+        // baseline), which is indistinguishable from C141's exact failure
+        // mode. It now lands in `NotEvaluable` with a dedicated reason and
+        // produces no ref at all.
         let files = vec![(
             src("mev"),
             state_file(
@@ -6481,16 +7131,24 @@ mod tests {
             &thresholds(),
             None,
             true,
+            COMMAND_EXEC_TIMEOUT,
         );
         let elapsed = start.elapsed();
 
-        assert_eq!(report.actionable, 1);
+        // Pre-fix baseline (what this test asserted before MV.16.G): `report.actionable == 1`
+        // with `refs == [CarryoverRef::CommandExitsZero { satisfied: false, .. }]` — a timeout
+        // was indistinguishable from a genuine non-zero exit.
         assert_eq!(
-            report.entries[0].refs,
-            vec![CarryoverRef::CommandExitsZero {
-                command: "sleep 30".to_string(),
-                satisfied: false,
-            }]
+            report.not_evaluable, 1,
+            "a timed-out command must be NotEvaluable, not Actionable"
+        );
+        assert!(
+            report.entries[0].refs.is_empty(),
+            "a timeout produces no ref"
+        );
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::CommandTimedOut)
         );
         assert!(
             elapsed < std::time::Duration::from_secs(10),
@@ -6528,6 +7186,7 @@ mod tests {
             &thresholds(),
             None,
             false, // allow_exec off
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 0);
         assert_eq!(report.not_evaluable, 1);
@@ -6536,6 +7195,197 @@ mod tests {
         assert_eq!(
             report.entries[0].reason,
             Some(NotEvaluableReason::ExecutionNotAllowed)
+        );
+    }
+
+    #[test]
+    fn command_exits_zero_predicate_raised_exec_timeout_lets_a_slow_command_reach_exit_zero() {
+        // Proves `exec_timeout` is the bound the watchdog actually enforces,
+        // not a value threaded through and ignored: a command that sleeps
+        // past the module's own 2s default (`COMMAND_EXEC_TIMEOUT`) but
+        // inside a raised bound must complete and be observed as a clean
+        // exit, not killed.
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-command-raised-bound",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        command: "sleep 3 && true".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            std::env::temp_dir().as_path(),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            true,
+            std::time::Duration::from_secs(10),
+        );
+        assert_eq!(
+            report.cleared, 1,
+            "a raised --exec-timeout must let a >2s command finish and clear"
+        );
+        assert_eq!(report.entries[0].reason, None);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::CommandExitsZero {
+                command: "sleep 3 && true".to_string(),
+                satisfied: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn c141_clears_when_network_predicates_can_never_clear_retro_fixture() {
+        // MV.16.G task 5 retro-fixture for finding C141, slug
+        // `clears-when-network-predicates-can-never-clear` (engine-rs). C141's
+        // real evidence is `git -C core/engine-rs push --dry-run origin main`
+        // exiting 0 in 19.5s against a 2s bound — a network call this suite
+        // must never make. This reproduces the SHAPE without the network: a
+        // command that reliably outruns the configured bound.
+        //
+        // Pre-fix baseline (what this exact shape produced before MV.16.G):
+        // `command_exit_zero_satisfied` returned a bare `bool`, so a timeout
+        // and a genuine non-zero exit both collapsed to `satisfied: false`
+        // and both landed in `report.actionable` with an identical
+        // `CarryoverRef::CommandExitsZero { satisfied: false, .. }` — exactly
+        // C141's complaint: a network-touching predicate that can never
+        // clear reads identically to a real, actionable failure.
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "c141-network-predicate-shape",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        command: "sleep 30".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let start = std::time::Instant::now();
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            std::env::temp_dir().as_path(),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            true,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            report.not_evaluable, 1,
+            "post-fix: a timed-out command must be NotEvaluable, never Actionable"
+        );
+        assert_eq!(report.actionable, 0);
+        assert!(report.entries[0].refs.is_empty());
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::CommandTimedOut),
+            "the timeout must carry a dedicated reason, distinct from a genuine non-zero exit"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "watchdog should kill the child at roughly COMMAND_EXEC_TIMEOUT, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn c180_command_exits_zero_predicates_are_unsound_across_a_live_fleet_retro_fixture() {
+        // MV.16.G task 5 retro-fixture for finding C180, slug
+        // `command-exits-zero-predicates-are-unsound-across-a-live-fleet`
+        // (okf-core). C180's real evidence is `--manifest-path core/bastion`,
+        // which compiles bastion, mev AND okf-core together — a multi-crate
+        // build this suite must never invoke. This reproduces the SHAPE
+        // without the build: a command whose non-zero exit is caused by
+        // something other than the entry's own subject (an "upstream"
+        // failure, standing in for an unrelated crate breaking the shared
+        // build).
+        //
+        // C180's own conclusion, restated here because it is the reason this
+        // fixture exists: a false (non-zero) result from a command that
+        // exercises more than the entry's subject is evidence that
+        // *something upstream* is red, and is never evidence about the entry
+        // it is attached to — so it must be reported as Actionable (a human
+        // has to look), never silently as Cleared, and its outcome must be
+        // distinguishable from a timeout so an operator does not mistake one
+        // failure mode for the other.
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "c180-upstream-failure-shape",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        // Stands in for "cargo build --manifest-path
+                        // core/bastion" failing because an unrelated sibling
+                        // crate (okf-core) is red, not because of this
+                        // entry's own subject.
+                        command: "sh -c 'exit 1'".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let start = std::time::Instant::now();
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            std::env::temp_dir().as_path(),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            true,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            report.actionable, 1,
+            "an upstream-caused non-zero exit is Actionable, a human must look"
+        );
+        assert_eq!(
+            report.cleared, 0,
+            "never Cleared on an unsound upstream signal"
+        );
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::CommandExitsZero {
+                command: "sh -c 'exit 1'".to_string(),
+                satisfied: false,
+            }],
+            "an upstream ExitNonZero still carries a ref, distinguishing it from a TimedOut/SpawnFailed which carries none"
+        );
+        assert_eq!(
+            report.entries[0].reason, None,
+            "an ExitNonZero is not forced into NotEvaluable the way TimedOut/SpawnFailed are"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "a genuine non-zero exit must resolve fast, unlike a bound-outrunning timeout: took {elapsed:?}"
         );
     }
 
@@ -6582,6 +7432,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         let by_slug = |slug: &str| {
             report
@@ -6637,6 +7488,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
         assert_eq!(report.entries[0].reason, Some(NotEvaluableReason::Prose));
@@ -6684,6 +7536,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.entries[0].lane, CarryoverLane::Actionable);
         assert_eq!(
@@ -6733,6 +7586,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
 
@@ -6770,6 +7624,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
         assert_eq!(report.entries[0].reason, Some(NotEvaluableReason::Prose));
@@ -6807,6 +7662,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
         assert!(report.entries[0].refs.is_empty());
@@ -6848,6 +7704,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
     }
@@ -6884,6 +7741,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_ne!(report.entries[0].lane, CarryoverLane::Cleared);
     }
@@ -8471,11 +9329,12 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 1);
         assert_eq!(report.actionable, 1);
 
-        let plan = compute_disposal_plan(&report, &files, &[]);
+        let plan = compute_disposal_plan(&report, &files, &[], COMMAND_EXEC_TIMEOUT);
         assert_eq!(plan.candidates.len(), 1);
         assert!(plan.skipped.is_empty());
 
@@ -8522,13 +9381,14 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
 
         let load_errors = vec![(
             "repo-broken".to_string(),
             "invalid type: string, expected a boolean at line 4 column 12".to_string(),
         )];
-        let plan = compute_disposal_plan(&report, &files, &load_errors);
+        let plan = compute_disposal_plan(&report, &files, &load_errors, COMMAND_EXEC_TIMEOUT);
 
         assert_eq!(plan.candidates.len(), 1);
         assert_eq!(plan.skipped.len(), 1);
@@ -8579,6 +9439,7 @@ mod tests {
             &thresholds(),
             None,
             false, // allow_exec: false, as --dispose alone must leave it
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 0);
         assert_eq!(
@@ -8586,7 +9447,7 @@ mod tests {
             Some(NotEvaluableReason::ExecutionNotAllowed)
         );
 
-        let plan = compute_disposal_plan(&report, &files, &[]);
+        let plan = compute_disposal_plan(&report, &files, &[], COMMAND_EXEC_TIMEOUT);
         assert!(plan.candidates.is_empty());
     }
 
@@ -8619,9 +9480,130 @@ mod tests {
             enforce: None,
         };
         assert_eq!(
-            describe_clearing_evidence(&verdict),
+            describe_clearing_evidence(&verdict, COMMAND_EXEC_TIMEOUT),
             "block repo-a:MV.1.A closed; path docs/x.md exists"
         );
+    }
+
+    #[test]
+    fn describe_clearing_evidence_records_the_exec_timeout_in_force() {
+        let verdict = CarryoverVerdict {
+            repo: "repo-a".to_string(),
+            slug: "cmd-cleared".to_string(),
+            kind: "deferred".to_string(),
+            text: "text".to_string(),
+            clears_when: Some("true exits 0".to_string()),
+            created: "2020-01-01".to_string(),
+            age_days: None,
+            stale: false,
+            lane: CarryoverLane::Cleared,
+            refs: vec![CarryoverRef::CommandExitsZero {
+                command: "true".to_string(),
+                satisfied: true,
+            }],
+            reason: None,
+            priority: None,
+            finding_id: None,
+            blocks: vec![],
+            enforce: None,
+        };
+        assert_eq!(
+            describe_clearing_evidence(&verdict, std::time::Duration::from_secs(5)),
+            "command `true` exited 0 (bound 5s)"
+        );
+    }
+
+    // -- clears_when_display (task 4) --------------------------------------------
+
+    #[test]
+    fn clears_when_display_prose_is_byte_identical_to_pre_task4_behaviour() {
+        // Regression floor: `clears_when_display` for `Prose` must render
+        // exactly the string it always has, unchanged by this task's
+        // `Predicate` widening.
+        let cw = ClearsWhen::Prose("MV.3.A lands and docs/x.md exists".to_string());
+        assert_eq!(
+            clears_when_display(&cw).as_deref(),
+            Some("MV.3.A lands and docs/x.md exists")
+        );
+    }
+
+    #[test]
+    fn clears_when_display_renders_block_closed_predicate() {
+        let cw = ClearsWhen::Predicate(ClearsWhenPredicate::BlockClosed {
+            repo: "mev".to_string(),
+            id: "MV.16.G".to_string(),
+            note: None,
+        });
+        assert_eq!(
+            clears_when_display(&cw).as_deref(),
+            Some("block_closed mev:MV.16.G")
+        );
+    }
+
+    #[test]
+    fn clears_when_display_renders_file_exists_predicate() {
+        let cw = ClearsWhen::Predicate(ClearsWhenPredicate::FileExists {
+            path: "docs/x.md".to_string(),
+            note: None,
+        });
+        assert_eq!(
+            clears_when_display(&cw).as_deref(),
+            Some("file_exists docs/x.md")
+        );
+    }
+
+    #[test]
+    fn clears_when_display_renders_file_contains_predicate() {
+        let cw = ClearsWhen::Predicate(ClearsWhenPredicate::FileContains {
+            path: "docs/x.md".to_string(),
+            pattern: "done".to_string(),
+            note: None,
+        });
+        assert_eq!(
+            clears_when_display(&cw).as_deref(),
+            Some("file_contains docs/x.md ~ \"done\"")
+        );
+    }
+
+    #[test]
+    fn clears_when_display_renders_command_exits_zero_predicate_with_note() {
+        let cw = ClearsWhen::Predicate(ClearsWhenPredicate::CommandExitsZero {
+            command: "true".to_string(),
+            note: Some("sanity check".to_string()),
+        });
+        assert_eq!(
+            clears_when_display(&cw).as_deref(),
+            Some("command_exits_zero \"true\" — sanity check")
+        );
+    }
+
+    #[test]
+    fn clears_when_display_is_none_only_when_clears_when_itself_is_none() {
+        // Every typed predicate variant now produces Some(..) — the None-
+        // for-Predicate behaviour stays on `clears_when_prose` only.
+        for cw in [
+            ClearsWhen::Predicate(ClearsWhenPredicate::BlockClosed {
+                repo: "mev".to_string(),
+                id: "MV.1.A".to_string(),
+                note: None,
+            }),
+            ClearsWhen::Predicate(ClearsWhenPredicate::FileExists {
+                path: "x".to_string(),
+                note: None,
+            }),
+            ClearsWhen::Predicate(ClearsWhenPredicate::FileContains {
+                path: "x".to_string(),
+                pattern: "y".to_string(),
+                note: None,
+            }),
+            ClearsWhen::Predicate(ClearsWhenPredicate::CommandExitsZero {
+                command: "true".to_string(),
+                note: None,
+            }),
+        ] {
+            assert!(clears_when_display(&cw).is_some());
+            assert!(clears_when_prose(&cw).is_none());
+        }
     }
 
     // -- dispose write path (task 2) --------------------------------------------

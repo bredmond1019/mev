@@ -366,7 +366,8 @@ fn carryover_sweep_clusters_shared_finding_id_across_repos_and_flags_single_repo
     let dir = temp_dir("e2e");
     write_dedup_fixture(&dir);
 
-    let report = mev::carryover_sweep(&dir, None, false).expect("carryover_sweep should not error");
+    let report = mev::carryover_sweep(&dir, None, false, mev::COMMAND_EXEC_TIMEOUT)
+        .expect("carryover_sweep should not error");
 
     // The shared finding_id spans both repos and forms exactly one cluster with both
     // members, priorities preserved verbatim (never reconciled).
