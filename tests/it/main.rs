@@ -22,6 +22,7 @@ mod attention_queue;
 mod blog_validate;
 mod brain_block_graph;
 mod brain_carryover;
+mod brain_carryover_archive_outflow;
 mod brain_carryover_backfill;
 mod brain_carryover_dedup;
 mod brain_carryover_dispose;
