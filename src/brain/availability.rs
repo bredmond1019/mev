@@ -480,7 +480,10 @@ struct FleetLockRaw {
     started_at: Option<f64>,
 }
 
-fn now_unix_seconds() -> f64 {
+// `pub(crate)`: reused by `crate::brain::lease` (`MV.ticket.write-verbs-ignore-the-quiesce-lease`
+// Task 1) so the quiesce-lease staleness check shares this exact time source rather than
+// inventing a second one.
+pub(crate) fn now_unix_seconds() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())

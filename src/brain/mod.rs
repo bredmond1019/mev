@@ -25,6 +25,7 @@ pub mod graph_findings;
 pub mod history;
 pub mod lane_segments;
 pub mod last_touched;
+pub mod lease;
 pub mod links;
 pub mod lock;
 pub mod manifest;
