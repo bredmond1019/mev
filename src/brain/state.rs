@@ -61,6 +61,12 @@
 //!   `file_contains`) names an absolute path. Well-formedness only — never evaluation.
 //! - `E_STATE_REFERENCE_CARRYOVER_COLLISION` — a slug appears in both `reference[]`
 //!   and `carryover[]` within the same file.
+//! - `W_STATE_CARRYOVER_ALREADY_SATISFIED` — a carryover `clears_when` predicate
+//!   evaluates satisfied (the sweep's `Cleared` lane) while the entry is still
+//!   present and un-disposed — an author error, distinct from the sweep's healthy
+//!   CLEARED report: either the entry should never have been filed, or it is
+//!   predicated on the wrong observable. Warning severity only — never fails the
+//!   state pass.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -501,6 +507,158 @@ pub fn check_carryover_staleness(
                 ),
             ));
         }
+    }
+    diags
+}
+
+/// Case-insensitive substring words that mark an entry's prose as scoping the
+/// finding to another machine — sub-class B of
+/// [`check_carryover_already_satisfied`]. Deliberately plain substring
+/// matching (no regex crate; this module is hand-scanned by convention).
+const OTHER_MACHINE_WORDS: &[&str] = &[
+    "mini",
+    "mac mini",
+    "on that machine",
+    "remote",
+    "another machine",
+];
+
+/// Sub-class A — an unanchored `file_contains` pattern that may be matching
+/// prose elsewhere in the same file rather than the specific field it names.
+/// "Anchored" here means the pattern carries a leading newline (the
+/// convention this corpus uses to pin a YAML frontmatter field) — a bare
+/// substring with no such anchor is the exact shape that cleared
+/// `postgres-14-17-cleanup-pending` on 2026-08-19 by matching the runbook's
+/// own prose instead of the frontmatter it was meant to observe.
+fn is_unanchored_file_contains(predicate: &ClearsWhenPredicate) -> bool {
+    matches!(
+        predicate,
+        ClearsWhenPredicate::FileContains { pattern, .. } if !pattern.starts_with('\n')
+    )
+}
+
+/// Sub-class B — a satisfied path predicate (`file_exists`/`file_contains`)
+/// on an entry whose own prose (`text`) scopes the finding to a different
+/// machine than the one currently evaluating it. This is exactly the shape
+/// that cleared `client-wild-trail-photo-missing-on-mini` on 2026-08-19: a
+/// repo-relative path resolved on the dev checkout while the finding was
+/// about the Mac Mini.
+fn is_path_predicate_scoped_elsewhere(predicate: &ClearsWhenPredicate, text: &str) -> bool {
+    let is_path_predicate = matches!(
+        predicate,
+        ClearsWhenPredicate::FileExists { .. } | ClearsWhenPredicate::FileContains { .. }
+    );
+    if !is_path_predicate {
+        return false;
+    }
+    let text_lower = text.to_lowercase();
+    OTHER_MACHINE_WORDS.iter().any(|w| text_lower.contains(w))
+}
+
+/// Human-facing summary of why an already-satisfied verdict's refs matched, for
+/// [`check_carryover_already_satisfied`]. Every ref in a `Cleared` verdict is, by
+/// construction, satisfied — this renders what each one observed, not whether it
+/// passed (that part is a given).
+fn describe_matched_refs(refs: &[crate::brain::carryover::CarryoverRef]) -> String {
+    use crate::brain::carryover::CarryoverRef;
+    refs.iter()
+        .map(|r| match r {
+            CarryoverRef::Block { key, .. } => format!("block {key} is closed"),
+            CarryoverRef::Path { path, .. } => format!("{path} exists"),
+            CarryoverRef::PathAbsent { path, .. } => format!("{path} is absent"),
+            CarryoverRef::UnresolvedBlock { key } => format!("{key} unresolved"),
+            CarryoverRef::FileContains { path, pattern, .. } => {
+                format!("{path} contains \"{pattern}\"")
+            }
+            CarryoverRef::CommandExitsZero { command, .. } => format!("`{command}` exited 0"),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Already-satisfied gate over `carryover[].clears_when` — `W_STATE_CARRYOVER_ALREADY_SATISFIED`.
+///
+/// For every `carryover[]` entry in `file` whose evaluated verdict in `report`
+/// landed in [`crate::brain::carryover::CarryoverLane::Cleared`] (the predicate is
+/// satisfied *right now*, while the entry is still present and un-disposed), emit a
+/// warning. That combination is by construction an author error: either (a) the
+/// entry was already resolved when it was filed and should never have been added,
+/// or (b) it is predicated on the wrong observable. Neither is "healthy CLEARED" —
+/// `mev carryover`'s sweep reports `Cleared` as a normal, actionable-for-disposal
+/// outcome; here, on an entry that is still live, the same fact means the predicate
+/// never should have matched yet. See CLAUDE.md's carryover-routing section: "Never
+/// author a typed `clears_when` that is already satisfied — it retires the entry on
+/// its first `mev carryover` sweep while the finding is still live."
+///
+/// An entry with no matching verdict in `report` (e.g. it was filtered out, or the
+/// report was built with a `repo_filter` that excluded it) is silently skipped —
+/// this check only ever speaks to entries the report actually evaluated.
+///
+/// **Severity is Warning and must stay Warning.** [`crate::Report::is_failure`] only
+/// counts `Error`, so `validate-brain --state` keeps exiting 0 in this diagnostic's
+/// presence. Promoting to error is a separate, later call once the fleet's
+/// predicate-less entries have been triaged (see the owning ticket).
+pub fn check_carryover_already_satisfied(
+    src: &StateSource,
+    file: &StateFile,
+    report: &crate::brain::carryover::CarryoverReport,
+) -> Vec<Diagnostic> {
+    use crate::brain::carryover::CarryoverLane;
+
+    let mut diags = Vec::new();
+    let path = &src.abs_path;
+
+    for item in &file.carryover {
+        let Some(verdict) = report
+            .entries
+            .iter()
+            .find(|v| v.repo == src.repo_slug && v.slug == item.slug)
+        else {
+            continue;
+        };
+        if verdict.lane != CarryoverLane::Cleared {
+            continue;
+        }
+
+        let predicate = item
+            .clears_when
+            .as_ref()
+            .and_then(clears_when_display)
+            .unwrap_or_default();
+        let why = describe_matched_refs(&verdict.refs);
+
+        let mut sub_class = String::new();
+        if let Some(ClearsWhen::Predicate(p)) = &item.clears_when {
+            if is_unanchored_file_contains(p) {
+                sub_class.push_str(
+                    " SUB-CLASS A (unanchored file_contains): this pattern has no leading \
+                     newline / line anchor, so it may be matching prose elsewhere in the same \
+                     file rather than the specific field it was meant to observe — anchor it \
+                     (a leading '\\n' pins a YAML frontmatter field).",
+                );
+            }
+            if is_path_predicate_scoped_elsewhere(p, &verdict.text) {
+                sub_class.push_str(
+                    " SUB-CLASS B (path resolves locally, finding is remote): the entry's text \
+                     scopes this finding to another machine, but the path predicate resolved on \
+                     THIS checkout — re-predicate on something the running host can actually \
+                     observe.",
+                );
+            }
+        }
+
+        diags.push(Diagnostic::warning(
+            path,
+            "W_STATE_CARRYOVER_ALREADY_SATISFIED",
+            format!(
+                "carryover '{}' clears_when is ALREADY satisfied ({predicate}) while the entry \
+                 is still present and un-disposed — matched: {why}. This is NOT the sweep's \
+                 healthy CLEARED lane: an entry that is live and already satisfied is either (a) \
+                 already resolved, so it should not have been filed, or (b) predicated on the \
+                 wrong observable. Re-predicate it — do not delete it.{sub_class}",
+                item.slug
+            ),
+        ));
     }
     diags
 }
@@ -4344,6 +4502,95 @@ mod tests {
         assert!(
             check_carryover_staleness(&src, &snoozed, today, &cfg).is_empty(),
             "future snoozed_until suppresses the warning"
+        );
+    }
+
+    // ---- W_STATE_CARRYOVER_ALREADY_SATISFIED (smoke; the retro-fixtures for
+    // the two real 2026-08-19 incidents and the sub-class heuristics live in
+    // the integration suite, added by a later task in this spec) ----
+
+    /// Build a one-file `CarryoverReport` the way `validate_brain_state` does,
+    /// for a single `(src, file)` pair, with exec disabled.
+    fn evaluate_one(
+        src: &StateSource,
+        file: &StateFile,
+        brain_root: &std::path::Path,
+    ) -> crate::brain::carryover::CarryoverReport {
+        let files = vec![(src.clone(), file.clone())];
+        let status_map: HashMap<String, Option<String>> = HashMap::new();
+        let repo_paths: HashMap<String, std::path::PathBuf> =
+            HashMap::from([(src.repo_slug.clone(), brain_root.to_path_buf())]);
+        let cfg = crate::brain::config::AttentionThresholds::default();
+        crate::brain::carryover::evaluate_carryover(
+            &files,
+            &status_map,
+            brain_root,
+            &repo_paths,
+            "2026-08-19",
+            &cfg,
+            None,
+            false,
+            crate::brain::carryover::COMMAND_EXEC_TIMEOUT,
+        )
+    }
+
+    #[test]
+    fn already_satisfied_fires_for_a_cleared_typed_predicate_on_a_live_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("marker.txt"), "hello").unwrap();
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let file = parse_file(
+            r#"{"repo":"mev","kind":"project","updated":"2026-08-19",
+                "carryover":[{"slug":"already-done","scope":{"repo":"test"},"kind":"deferred",
+                              "text":"x","created":"2026-08-19",
+                              "clears_when":{"type":"file_exists","path":"marker.txt"}}]}"#,
+        );
+
+        let report = evaluate_one(&src, &file, dir.path());
+        let d = check_carryover_already_satisfied(&src, &file, &report);
+        assert_eq!(
+            d.len(),
+            1,
+            "a live entry whose predicate is already satisfied must warn: {d:?}"
+        );
+        assert_eq!(d[0].locator, "W_STATE_CARRYOVER_ALREADY_SATISFIED");
+        assert_eq!(d[0].severity, crate::Severity::Warning);
+        assert!(d[0].message.contains("already-done"), "{}", d[0].message);
+        assert!(
+            d[0].message.contains("marker.txt"),
+            "message should name why it matched: {}",
+            d[0].message
+        );
+
+        let mut rep = crate::Report::default();
+        rep.diagnostics.extend(d);
+        assert!(
+            !rep.is_failure(),
+            "warning severity must never fail the state pass"
+        );
+    }
+
+    #[test]
+    fn already_satisfied_is_silent_for_a_healthy_unsatisfied_predicate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No marker.txt on disk — the predicate is unsatisfied.
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let file = parse_file(
+            r#"{"repo":"mev","kind":"project","updated":"2026-08-19",
+                "carryover":[{"slug":"still-pending","scope":{"repo":"test"},"kind":"deferred",
+                              "text":"x","created":"2026-08-19",
+                              "clears_when":{"type":"file_exists","path":"marker.txt"}}]}"#,
+        );
+
+        let report = evaluate_one(&src, &file, dir.path());
+        let d = check_carryover_already_satisfied(&src, &file, &report);
+        assert!(
+            d.is_empty(),
+            "a live entry with an unsatisfied predicate must not warn: {d:?}"
         );
     }
 

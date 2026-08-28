@@ -7,7 +7,7 @@ layer: [meta]
 project: mev
 status: active
 keywords: [documentation, index, navigation, mev, reference]
-related: [mev-readme, cli-reference, architecture, brain-toml-config, okf-schema, carryover-contract]
+related: [cli-reference, architecture, brain-toml-config, okf-schema, carryover-contract]
 ---
 
 # mev — Documentation Index

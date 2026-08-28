@@ -421,10 +421,10 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     use brain::distill::check_distill_staleness;
     use brain::state::{
         StateLoadError, build_state_graph, check_backlog_integrity, check_backlog_staleness,
-        check_carryover_staleness, check_epics, check_field_policy, check_focus_drift,
-        check_op_slug_stutter, check_operator_staleness, check_rollup, check_schema,
-        check_state_graph, check_status_consistency, detect_cycles, discover_state_files,
-        load_state,
+        check_carryover_already_satisfied, check_carryover_staleness, check_epics,
+        check_field_policy, check_focus_drift, check_op_slug_stutter, check_operator_staleness,
+        check_rollup, check_schema, check_state_graph, check_status_consistency, detect_cycles,
+        discover_state_files, load_state,
     };
     use std::collections::HashMap;
 
@@ -527,12 +527,53 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     //     HQ backlog. WARNING severity only (never flips exit code); malformed
     //     dates are surfaced as E_STATE_DATE_FORMAT by check_schema above.
     let today = chrono::Local::now().date_naive();
+    let today_str = today.format("%Y-%m-%d").to_string();
+    let status_map = brain::state::block_status_map(&loaded);
+    let repo_paths: HashMap<String, PathBuf> = config
+        .repos
+        .iter()
+        .map(|repo| {
+            let repo_root = if repo.repo_path == "." || repo.repo_path.is_empty() {
+                root.to_path_buf()
+            } else {
+                root.join(&repo.repo_path)
+            };
+            (repo.slug.clone(), repo_root)
+        })
+        .collect();
+    // `allow_exec: false` is deliberate and must never be flipped for this call site: a
+    // validator that runs on every `validate-brain --state` invocation (locally, in CI, in
+    // the nightly Mac Mini routine) must never execute a corpus-authored
+    // `command_exits_zero` predicate's shell command. With exec disabled those entries
+    // simply evaluate `NotEvaluable` and the already-satisfied gate (added in a later task
+    // in this spec) never fires for them — the correct and safe outcome, not a bug.
+    //
+    // `evaluate_carryover` combines multiple references CONJUNCTIVELY (AND) even where the
+    // source prose reads as "or" — a deliberate bias against false `Cleared` verdicts (see
+    // that function's doc comment). Any diagnostic built on `lane == CarryoverLane::Cleared`
+    // therefore inherits that same safe-direction bias.
+    let carryover_report = brain::carryover::evaluate_carryover(
+        &loaded,
+        &status_map,
+        root,
+        &repo_paths,
+        &today_str,
+        &config.attention,
+        None,
+        false,
+        brain::carryover::COMMAND_EXEC_TIMEOUT,
+    );
     for (src, file) in &loaded {
         report.diagnostics.extend(check_carryover_staleness(
             src,
             file,
             today,
             &config.attention,
+        ));
+        report.diagnostics.extend(check_carryover_already_satisfied(
+            src,
+            file,
+            &carryover_report,
         ));
         report
             .diagnostics

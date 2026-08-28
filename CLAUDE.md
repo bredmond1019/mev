@@ -82,6 +82,14 @@ cargo test
 cargo fmt --check
 cargo clippy -- -D warnings
 
+# consumer compile gate — compiles bastion/engine-rs TEST targets against THIS working
+# tree's mev (cargo run --release, never an installed binary); perTask: false, gates at
+# reconcile/push, not per-task
+scripts/check_consumers.sh
+
+# fixture suite for the consumer compile gate itself — cargo/git shimmed, no real build
+scripts/test_check_consumers.sh
+
 # run    — validate the learn-ai content tree (defaults to ../learn-ai/content/learn)
 cargo run -- validate ../learn-ai/content/learn
 ```

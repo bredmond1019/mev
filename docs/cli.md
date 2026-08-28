@@ -1179,6 +1179,55 @@ A second concurrent `--write` polls briefly for the lock to free up, then fails 
 lockfile whose owning process is no longer alive is reclaimed automatically instead of blocking
 forever. Dry-run (no `--write`) never takes the lock and is unaffected by contention.
 
+#### Quiesce lease on `--write` (`--agent`, `--lock-dir`)
+
+`.mev-emit.lock` only stops two writers from landing at the same instant — it has no way to
+express "I am reconciling `state.json` files right now and validating the result; do not
+regenerate the corpus out from under me." A sibling lane declares exactly that by holding an
+exclusive **lease** (`.claude/workflows/lease.schema.json`, owned by base-template) at
+`<lock_dir>/leases/*.json`. Every corpus-wide write verb now consults that lease store
+immediately before it would take `.mev-emit.lock`, and refuses instead of writing when a
+`scope: fleet` (or matching `scope: repo`) exclusive lease is held by someone else.
+
+**Covered verbs** — every command in this doc that takes the advisory lock takes this check
+first: `emit-state --write`, `set-block-status --write`, `defer-epic`/`resume-epic`/
+`complete-epic`/`sync-epics --write`, `close-operator-gate`, `approve`, `reject`,
+`state-history --restore`, and `normalize-op-slugs --write`.
+
+**`--agent <name>`** — identifies the calling lane/agent to the quiesce check. A lease whose
+`agent` field matches this value **never refuses that caller**, even while the lease is held and
+non-stale (the self-exemption `fleet_concurrency_check.py`'s `register --agent` already
+implements — a lane reconciling state under its own lease must still be able to write). **Omit
+`--agent` and any live exclusive lease refuses the call, including one the caller itself holds
+under a different identity** — an unidentified caller can never be self-exempted, by design;
+silently exempting it would defeat the guard.
+
+**`--lock-dir <path>`** — where the lease store (and `.mev-emit.lock`) live. Resolved in this
+order, identical to `check_lane_agents.py::resolve_lock_dir` (do not expect a different answer
+from the two tools): explicit `--lock-dir`, else the `FLEET_LOCK_DIR` environment variable, else
+`<brain_root>/.fleet-locks`.
+
+**Two degrade rules, both deliberate — read as bugs if you don't know they're rules:**
+- A missing or unreadable `leases/` directory resolves to **clear**, never to a hold. An
+  unreadable lease store must not wedge every write verb in the fleet.
+- A **stale** lease (past its staleness threshold, judged on `heartbeat` when present else
+  `acquired_at`) never refuses. A lease that looks live but is actually abandoned is not a quiet
+  window.
+
+A refusal prints and exits non-zero **before anything is written** — the quiesce check runs
+ahead of `.mev-emit.lock` being taken, so a quiesced write never touches the lock either.
+
+```bash
+# Reconciling state.json under your own lease: still writes, because --agent self-exempts it
+mev emit-state --write --agent engine-rs-e3
+
+# No --agent: refused by ANY live exclusive lease, even your own
+mev emit-state --write
+
+# Point at a scratch lease store instead of the real fleet .fleet-locks
+mev set-block-status mev:MV.10.A closed --write --lock-dir /tmp/fixture-locks --agent test-agent
+```
+
 #### Derived views updated
 
 - **Leaf `state.json`** (`kind == "project"`): regenerates `focus` — `now` = blocks with `status: in_progress`; `next` = ready open blocks in `wave` order; `blocked` = open blocks with an unmet `depends_on`, each carrying the unmet `blocked_by[]` subset. Authored `tracks[]` and all other fields survive the round-trip unchanged.
@@ -1261,7 +1310,8 @@ The other planners use their own markers in the same document types: `project-ca
 | `E_EMIT_LINKED_WORKTREE` | Error | `--write` invoked from inside a linked git worktree; causes exit 1 |
 | `E_EMIT_INCOMPLETE_CORPUS` | Error | `--write` refused because one or more discovered `state.json` files failed to load; causes exit 1 |
 | `E_EMIT_UNKNOWN_SCOPE` | Error | `--scope` names a slug with no matching `[[repos]]` entry in `brain.toml`; the message names every valid slug; causes exit 1 |
-| `E_EMIT_LOCK_HELD` | Error | `--write` could not acquire the advisory lock at `<root>/.mev-emit.lock` within the timeout because another live process already holds it (names the holder pid); causes exit 1. A lockfile whose owning process is no longer alive is reclaimed automatically instead of blocking forever. Dry-run never takes the lock. |
+| `E_EMIT_LOCK_HELD` | Error | `--write` could not acquire the advisory lock at `<root>/.mev-emit.lock` within the timeout because another live process already holds it (names the holder pid); causes exit 1. A lockfile whose owning process is no longer alive is reclaimed automatically instead of blocking forever. Dry-run never takes the lock. **Retry shortly** — this is ordinary contention. |
+| `E_QUIESCE_LEASE_HELD` | Error | `--write` refused because a sibling lane's exclusive lease (`.claude/workflows/lease.schema.json`) declares a quiet window over this write (names the holding lane, agent, scope and lease path); causes exit 1, nothing written. **Do NOT retry** — wait for the lease to be released, or pass `--agent <name>` to self-exempt a lease this same caller holds. Distinct condition from `E_EMIT_LOCK_HELD`: that is momentary contention, this is a declared quiet window. See [Quiesce lease on `--write`](#quiesce-lease-on---write---agent---lock-dir). |
 | `E_TOOLCHAIN_STALE` | Error | `--write` refused because `toolchain-freshness` reported `Drift` and `MEV_REQUIRE_FRESH`/`--require-fresh` is set; causes exit 1, no write performed. Checked before any plan is computed or applied. See [Toolchain freshness check on `--write`](#toolchain-freshness-check-on-write). |
 
 `--write` refuses to run when `path` resolves to a linked git worktree (e.g. `trees/<slug>/` under a
@@ -1377,13 +1427,14 @@ nothing to restore.
 | `W_HISTORY_FAILED` | Warning | The pre-restore snapshot could not be recorded; the restore itself still proceeds (history is a safety net, never a new way for restore to fail) |
 | `E_EMIT_LINKED_WORKTREE` | Error | `--restore` invoked from inside a linked git worktree; refused before the lock is taken |
 | `E_EMIT_LOCK_HELD` | Error | `--restore` could not acquire the advisory lock because another live write process already holds it (names the holder pid); a stale lock (owning process no longer alive) is reclaimed automatically instead |
+| `E_QUIESCE_LEASE_HELD` | Error | `--restore` refused because a sibling lane's exclusive lease declares a quiet window (names lane/agent/scope/path); checked before the advisory lock is taken. Do not retry — wait for release or pass `--agent` to self-exempt. See [Quiesce lease on `--write`](#quiesce-lease-on---write---agent---lock-dir). |
 
 #### Exit codes
 
 | Code | Meaning |
 |---|---|
 | `0` | Revisions listed, "no revisions recorded", or restore applied |
-| `1` | No revision `<seq>` on disk (names the valid seq range), `E_EMIT_LOCK_HELD`, a linked-worktree refusal, or an IO failure reading/writing the file |
+| `1` | No revision `<seq>` on disk (names the valid seq range), `E_EMIT_LOCK_HELD`, `E_QUIESCE_LEASE_HELD`, a linked-worktree refusal, or an IO failure reading/writing the file |
 
 **Examples:**
 
@@ -1447,7 +1498,11 @@ share one dispatch function, so one lock acquisition covers all four. If another
 already holds it, the command fails with `E_EMIT_LOCK_HELD` (naming the holder's
 pid) and writes nothing; a lockfile whose owning process is no longer alive is
 reclaimed automatically instead of blocking forever. Dry-run (no `--write`) never
-takes the lock and is unaffected by contention.
+takes the lock and is unaffected by contention. **The same quiesce-lease check
+`emit-state --write` runs also runs here, before the lock is taken** — a sibling
+lane's exclusive lease refuses with `E_QUIESCE_LEASE_HELD` instead; pass `--agent`
+to self-exempt a lease this same caller holds. See [Quiesce lease on
+`--write`](#quiesce-lease-on---write---agent---lock-dir).
 
 > **These, plus [`set-block-status`](#set-block-status-repoid-status---write-path),
 > are the only commands that write *authored* state.** Everything else mev writes is
@@ -1474,7 +1529,9 @@ mev complete-epic bastion-tui --write
 Exit codes: `0` planned/applied successfully · `1` unknown epic slug
 (`E_EPIC_UNKNOWN`), no HQ registry (`E_EPIC_NO_REGISTRY`), an unreadable
 state.json (`E_EPIC_INCOMPLETE_CORPUS` on `--write`), the advisory lock already
-held (`E_EMIT_LOCK_HELD` on `--write`), or a write failure.
+held (`E_EMIT_LOCK_HELD` on `--write`), a sibling lane's quiesce lease
+(`E_QUIESCE_LEASE_HELD` on `--write` — see [Quiesce lease on
+`--write`](#quiesce-lease-on---write---agent---lock-dir)), or a write failure.
 
 ---
 
@@ -1576,6 +1633,7 @@ any error-severity diagnostic or a write failure.
 | `E_BLOCK_NOT_FOUND` | no loaded `state.json` owns that `repo:id`; the message lists the known repo slugs when the repo half is the problem |
 | `E_EMIT_INCOMPLETE_CORPUS` | `--write` attempted while at least one `state.json` failed to load |
 | `E_EMIT_LOCK_HELD` | another mev write holds the brain-root advisory lock |
+| `E_QUIESCE_LEASE_HELD` | a sibling lane's exclusive lease declares a quiet window; do not retry — see [Quiesce lease on `--write`](#quiesce-lease-on---write---agent---lock-dir) |
 | `E_BLOCK_OPERATOR_GATED` | `--write`ing a block to `in_progress` while it carries an unmet `Operator` `depends_on` edge, without `--force-operator-gate` |
 | `E_FORCE_OPERATOR_GATE_NOT_TTY` | `--force-operator-gate` was passed but stdin is not a TTY |
 | `E_EMIT_UNKNOWN_SCOPE` | `--scope` names a slug with no matching `[[repos]]` entry in `brain.toml`; the message names every valid slug |
@@ -1602,6 +1660,7 @@ mev close-operator-gate deploy-approval-2 --exit-verified ~/Dev/agentic-portfoli
 | `E_OPERATOR_GATE_NOT_VERIFIED` | `--exit-verified` was not passed |
 | `E_OPERATOR_GATE_UNKNOWN` | no loaded `state.json` has an `Operator` edge matching `slug` |
 | `E_EMIT_LOCK_HELD` | another mev write holds the brain-root advisory lock |
+| `E_QUIESCE_LEASE_HELD` | a sibling lane's exclusive lease declares a quiet window over this write; `close-operator-gate` keeps its verified-or-refused shape — this refusal is already that vocabulary, no dry-run was added. See [Quiesce lease on `--write`](#quiesce-lease-on---write---agent---lock-dir). |
 
 Exit codes: `0` applied · `1` refused or a write failure.
 
@@ -1651,9 +1710,10 @@ mev normalize-op-slugs ~/Dev/agentic-portfolio --write
 | `E_NORMALIZE_OP_SLUG_COLLISION` | two distinct slugs would normalize to the same target — aborts the whole run, nothing written |
 | `E_EMIT_INCOMPLETE_CORPUS` | `--write` attempted while at least one `state.json` failed to load |
 | `E_EMIT_LOCK_HELD` | another mev write holds the brain-root advisory lock |
+| `E_QUIESCE_LEASE_HELD` | a sibling lane's exclusive lease declares a quiet window; do not retry — see [Quiesce lease on `--write`](#quiesce-lease-on---write---agent---lock-dir) |
 
 Exit codes: `0` planned (dry-run) or applied cleanly · `1` a collision, a
-write failure, `E_EMIT_LOCK_HELD`, or a linked-worktree refusal.
+write failure, `E_EMIT_LOCK_HELD`, `E_QUIESCE_LEASE_HELD`, or a linked-worktree refusal.
 
 **Rendering note (D76).** Operator and approval `depends_on` edges now render
 as `OP.<slug>` everywhere mev prints them (boards, `frontier`, `carryover`,
@@ -1691,6 +1751,7 @@ mev reject ship-decision-1 ~/Dev/agentic-portfolio --write
 | `E_APPROVAL_DIGEST_MISMATCH` | (`approve` only) `--digest` does not match a matching edge's stored digest |
 | `E_OPERATOR_GATE_UNKNOWN` | no loaded `state.json` has an `Approval` edge matching `slug` |
 | `E_EMIT_LOCK_HELD` | another mev write holds the brain-root advisory lock |
+| `E_QUIESCE_LEASE_HELD` | a sibling lane's exclusive lease declares a quiet window; do not retry — see [Quiesce lease on `--write`](#quiesce-lease-on---write---agent---lock-dir) |
 
 Exit codes: `0` applied · `1` refused or a write failure.
 

@@ -431,7 +431,12 @@ pub fn segment_statuses(
 
 /// Name of the fleet lock directory, relative to the brain root. Mirrors
 /// `LOCK_SUBDIR` in `base-template/scripts/fleet_concurrency_check.py`.
-const FLEET_LOCK_SUBDIR: &str = ".fleet-locks";
+///
+/// `pub` (not `pub(crate)`) so `src/main.rs` — a separate crate from this library —
+/// can resolve `--lock-dir`'s fallback precedence with the identical constant
+/// rather than a re-derived literal (`MV.ticket.write-verbs-ignore-the-quiesce-lease`
+/// Task 2 requires reuse, not re-derivation).
+pub const FLEET_LOCK_SUBDIR: &str = ".fleet-locks";
 
 /// Mirrors `DEFAULT_TTL_SECONDS` in `fleet_concurrency_check.py` — an entry older
 /// than this, regardless of pid liveness, is stale.
@@ -480,7 +485,10 @@ struct FleetLockRaw {
     started_at: Option<f64>,
 }
 
-fn now_unix_seconds() -> f64 {
+// `pub(crate)`: reused by `crate::brain::lease` (`MV.ticket.write-verbs-ignore-the-quiesce-lease`
+// Task 1) so the quiesce-lease staleness check shares this exact time source rather than
+// inventing a second one.
+pub(crate) fn now_unix_seconds() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())

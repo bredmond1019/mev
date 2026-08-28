@@ -1133,3 +1133,91 @@ tree, and is out of scope for this spec; it is handled as a separate direct edit
 after this block closes. `mev conformance`'s own gate remains deliberately non-gating in every
 repo's `harness.json` for the reason above — this check is loud where it matters (a live `--write`)
 without redening CI for drift that is normal mid-flight.
+
+## Consumer compile gate (`MV.18.A`)
+
+mev sits in the middle of the fleet's Cargo path-dependency graph: `okf-core -> mev -> bastion` /
+`engine-rs`. `mev check-consumers` already discovers those consumers from `brain.toml`, compiles
+their **test targets** (`cargo nextest run --no-run --locked`, into a fresh `CARGO_TARGET_DIR`),
+short-circuits a dirty consumer, refuses a verdict if `Cargo.lock` moved mid-run, and classifies the
+result by stderr signature rather than exit code — exit 101 has been observed for both a real break
+and a stale lock. It compiles test targets and never source, because every one of the three prior
+invisible consumer breaks (most recently the 2026-08-18 outage: `bastion` red with `cannot find
+function lanes_brain in crate mev`, purely because mev sat 23 commits unpushed) lived in code a
+plain `cargo build` walks straight past — struct literals and match arms that only test targets
+construct. It never runs the compiled tests (`--no-run`): the gate exists to prove the code still
+compiles against mev's current shape, not to re-execute a consumer's test suite from a sibling repo.
+
+`scripts/check_consumers.sh` is a thin wrapper around that existing tool, not a reimplementation —
+discovery, spawning, lockfile hashing and classification all stay in `src/consumers/mod.rs` and
+`src/lib.rs`'s `check_consumers`. The wrapper's only job is to invoke
+`cargo run --release --quiet -- check-consumers --json` **from the source tree**, apply the waiver
+list, and decide the exit code. It never resolves a `mev` from `PATH`: the gate's whole purpose is
+"does the mev in THIS working tree break its consumers", and an installed binary answers a different
+question about a different revision — the exact divergence class `mev conformance`'s toolchain
+writer-stamp check (above) exists to catch for the *self* case; this gate is the analogous concern
+pointed outward at consumers. `cargo build --release` is already a gating check, so the release
+artifact the wrapper's `cargo run` reuses is paid for either way.
+
+### Verdicts
+
+| Verdict | Meaning | Fails the gate? |
+|---|---|---|
+| `pass` | The consumer's test targets compiled clean. | No |
+| `broken` | Compilation failed with rustc `error[E....]` diagnostics, sited by file:line. | Yes, unless waived |
+| `lockfile_stale` | Cargo refused with "cannot update the lock file" (`--locked` was violated), decided by the stderr signature, never by exit code. | No |
+| `skipped_dirty` | The consumer's git tree was dirty; its compile result would not be evidence about mev either way, so cargo is never even spawned. | No |
+| `not_evaluable` | A failure matched no known signature (including a `Cargo.lock` hash that moved across the run), so it is reported rather than guessed as `broken`. | No |
+
+Only `broken` (unwaived) fails the gate. The other four verdicts are bookkeeping about someone
+else's repo, not evidence that mev broke anything — **a red consumer gate is not necessarily mev's
+own bug.** A consumer can fail to evaluate because of its own uncommitted work (`skipped_dirty`), a
+stale lockfile it owns (`lockfile_stale`), or a sibling repo's unrelated change (`not_evaluable`),
+and the classification exists precisely so none of those gets conflated with a real break.
+
+### Waivers
+
+`scripts/consumer-gate-waivers.txt` is the only sanctioned way to keep mev pushable while a
+consumer is knowingly broken by something outside this repo. Each row is
+`<slug> | <owning-block-id> | <reason>`; `#` comments and blank lines are ignored. Two rules govern
+the file:
+
+1. **All three fields are mandatory.** A row missing any of them is a hard error naming the
+   offending line number — a waiver with no owning block is how debt becomes permanent.
+2. **A waiver naming a consumer that now passes fails the gate as a stale waiver.** This is what
+   stops the file from rotting: once the owning block lands and the consumer compiles again, the
+   waiver row must be *deleted*, not left "just in case" — its mere presence is what now breaks the
+   gate.
+
+The file is seeded empty. A waiver written before anything is measured as broken is
+indistinguishable from a permanent exemption, so nothing is pre-populated. A knowingly-broken
+consumer is always waived with an owning block, never exempted by flipping the check's `gates` flag
+to `false` in `planning/harness.json`.
+
+### Concurrency hazard and its mitigation
+
+This gate compiles sibling repos it does not own, and this fleet routinely runs three or four lanes
+at once — a consumer can be mid-edit at the exact moment the gate runs against it. Two mechanisms
+make that safe:
+
+- **The dirty short-circuit.** `check_consumers` runs `git status --porcelain` on a consumer before
+  spawning cargo at all; a dirty tree is reported `skipped_dirty` and never compiled, so a consumer
+  mid-lane is skipped rather than blamed for a result that reflects unfinished work.
+- **The before/after `Cargo.lock` hash.** The tool hashes each consumer's lockfile before and after
+  the `--locked` compile and returns `not_evaluable` if it moved, so the gate can never mutate a
+  lock file it does not own, and a lockfile that changed underneath the run is never silently
+  trusted.
+
+`perTask: false` on `consumer-compile-gate` in `planning/harness.json` keeps this off the per-task
+hot path — it runs two real cold cargo builds over other repos, which would make every mev task
+minutes slower for a signal that cannot change between tasks in the same spec. It gates at the
+reconcile/review boundary instead, the same choice `okf-core`'s `OK.5.A` made for its own upstream
+half of this same graph edge.
+
+### Relationship to `MV.ticket.consumer-dependency-parity`
+
+`MV.ticket.consumer-dependency-parity` is a deliberately different, non-gating check: it diffs
+mev's declared dependencies against each consumer's `Cargo.lock` — pure data comparison, no
+compiler invoked, no cargo spawned. `consumer-compile-gate` actually compiles the consumers' test
+targets and is the only one of the two registered as a gating check; do not merge them or treat one
+as a substitute for the other.

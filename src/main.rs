@@ -8,6 +8,102 @@ use clap::{Parser, Subcommand, ValueEnum};
 use mev::Severity;
 use mev::theme;
 
+/// Diagnostic code for a corpus-wide write refused because a sibling lane's exclusive
+/// lease declares a quiet window over this write — distinct from `E_EMIT_LOCK_HELD`
+/// (another writer is mid-write, retry shortly) because the remedy is the opposite: do
+/// NOT retry, wait for the lease to be released or contact the holding lane.
+/// `MV.ticket.write-verbs-ignore-the-quiesce-lease` Task 2.
+const E_QUIESCE_LEASE_HELD: &str = "E_QUIESCE_LEASE_HELD";
+
+/// Resolve the fleet lock directory a write verb's `--agent`/`--lock-dir` options and
+/// the quiesce-lease check both consult, per the SAME precedence
+/// `base-template/scripts/check_lane_agents.py::resolve_lock_dir` uses (do not
+/// re-derive this differently): explicit `--lock-dir`, else the `FLEET_LOCK_DIR`
+/// environment variable, else `<brain_root>/.fleet-locks` — the exact
+/// [`mev::brain::availability::FLEET_LOCK_SUBDIR`] constant `availability.rs` already
+/// defines for the sibling `.fleet-locks` fleet-lock-slot reader, so the two mechanisms
+/// can never silently disagree on which directory is "the" lock dir.
+fn resolve_lock_dir(explicit: Option<&std::path::Path>, root: &std::path::Path) -> PathBuf {
+    if let Some(p) = explicit {
+        return p.to_path_buf();
+    }
+    if let Ok(env_dir) = std::env::var("FLEET_LOCK_DIR")
+        && !env_dir.is_empty()
+    {
+        return PathBuf::from(env_dir);
+    }
+    root.join(mev::brain::availability::FLEET_LOCK_SUBDIR)
+}
+
+/// Resolve which `[[repos]]` slug `dir` belongs to, for the quiesce check's `repo`
+/// parameter — mirrors `check_lane_agents.py::resolve_own_repo`'s brain.toml-lookup
+/// path (no explicit `--repo` flag exists on mev's write verbs, so there is no
+/// "explicit" branch to mirror here): find the registered `[[repos]]` entry whose
+/// `repo_path` (joined onto `root`) canonicalizes to the same place as `dir`.
+///
+/// Returns `""` when the config can't be loaded or no entry matches — this is a
+/// fail-OPEN default for repo-scoped leases specifically (an unresolvable identity
+/// can never equal any real lease's `repo` field, so a `scope: repo` lease simply
+/// won't quiesce an unidentified caller). This does not weaken the primary guard: a
+/// `scope: fleet` lease quiesces regardless of `repo`, and that is the scope the
+/// incident this ticket fixes actually needed.
+fn resolve_own_repo(root: &std::path::Path, dir: &std::path::Path) -> String {
+    let Ok(config) = mev::brain::config::load_brain_config(&root.join("brain.toml")) else {
+        return String::new();
+    };
+    let dir_canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    for entry in &config.repos {
+        let entry_path = if entry.repo_path.is_empty() || entry.repo_path == "." {
+            root.to_path_buf()
+        } else {
+            root.join(&entry.repo_path)
+        };
+        let entry_canon = entry_path
+            .canonicalize()
+            .unwrap_or_else(|_| entry_path.clone());
+        if entry_canon == dir_canon {
+            return entry.slug.clone();
+        }
+    }
+    String::new()
+}
+
+/// Consult the quiesce-lease store immediately before a write verb would take
+/// `<root>/.mev-emit.lock`, and print + return a refusal (`Some`) when a sibling
+/// lane's exclusive lease quiesces this write. `Ok(())`-shaped `None` means proceed —
+/// take the lock as normal. `verb` names the CLI command for the refusal message;
+/// `dir` is the same directory the caller already resolved `root` from (used to
+/// derive this call's own repo identity, so the self-exemption and `scope: repo`
+/// rules in [`mev::brain::lease::check_quiesce`] have something concrete to compare
+/// against). Never itself touches `<root>/.mev-emit.lock` — the two locks are
+/// independent gates checked in sequence, this one first.
+fn refuse_if_quiesced(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    agent: Option<&str>,
+    lock_dir: Option<&std::path::Path>,
+    verb: &str,
+) -> Option<ExitCode> {
+    let resolved_lock_dir = resolve_lock_dir(lock_dir, root);
+    let repo = resolve_own_repo(root, dir);
+    match mev::brain::lease::check_quiesce(&resolved_lock_dir, &repo, agent) {
+        mev::brain::lease::Quiesce::Clear => None,
+        mev::brain::lease::Quiesce::Held(held) => {
+            eprintln!(
+                "error [{E_QUIESCE_LEASE_HELD}] refusing to {verb}: lane '{}' (agent '{}') holds \
+                 a {}-scope exclusive lease at {} — this is a declared quiet window, a different \
+                 condition from E_EMIT_LOCK_HELD (contention; retry shortly). Do NOT retry: wait \
+                 for the lease to be released, or contact the holding lane. Nothing was written.",
+                held.lane,
+                held.agent,
+                held.scope,
+                held.path.display()
+            );
+            Some(ExitCode::FAILURE)
+        }
+    }
+}
+
 /// `--scope` mode for `mev emit-block-graph`. Maps onto
 /// [`mev::brain::block_graph::BlockGraphScope`]'s `tier`/`epic`/`repo` fields.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -202,6 +298,13 @@ enum Command {
     ///                            already holds it (exit 1); a stale lock (owning process
     ///                            no longer alive) is reclaimed automatically instead.
     ///                            Dry-run never takes the lock.
+    ///   E_QUIESCE_LEASE_HELD — --write refused because a sibling lane's exclusive
+    ///                            lease declares a quiet window over this write (exit
+    ///                            1), checked before the advisory lock above is ever
+    ///                            taken. Distinct from E_EMIT_LOCK_HELD: retry does
+    ///                            NOT help here — wait for the lease to release, or
+    ///                            pass --agent to self-exempt a lease this same
+    ///                            caller holds. Dry-run never checks it.
     EmitState {
         /// Path to search from when locating brain.toml (walks up to find it).
         /// Defaults to the current directory.
@@ -223,6 +326,19 @@ enum Command {
         /// doc comment. `NotEvaluable` never triggers this; only a genuine Drift does.
         #[arg(long)]
         require_fresh: bool,
+        /// Identity of the calling agent for the quiesce-lease self-exemption: a
+        /// `scope: fleet`/`scope: repo` exclusive lease held by this same agent never
+        /// refuses this call. Omitting it means this call cannot be self-exempted and
+        /// is refused by any live exclusive lease that would otherwise apply,
+        /// including one this same caller holds — the same trap `--agent` guards
+        /// against on `fleet_concurrency_check.py`'s `register`.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override the fleet lock directory consulted for the quiesce-lease store
+        /// (and, unchanged, `.mev-emit.lock`'s own directory search). Defaults to the
+        /// `FLEET_LOCK_DIR` environment variable, else `<brain_root>/.fleet-locks`.
+        #[arg(long, value_name = "PATH")]
+        lock_dir: Option<PathBuf>,
     },
     /// List (or restore) the append-only revision history `apply_plan()` records for
     /// one file every time it overwrites existing content (see `emit-state`'s
@@ -247,6 +363,10 @@ enum Command {
     ///                            another live write process already holds it (exit 1);
     ///                            a stale lock (owning process no longer alive) is
     ///                            reclaimed automatically instead.
+    ///   E_QUIESCE_LEASE_HELD   — --restore refused because a sibling lane's exclusive
+    ///                            lease declares a quiet window (exit 1), checked
+    ///                            before the advisory lock above. Do NOT retry; wait
+    ///                            for release or pass --agent to self-exempt.
     ///   W_HISTORY_FAILED       — the pre-restore snapshot could not be recorded; the
     ///                            restore itself still proceeds (history is a safety
     ///                            net, never a new way for restore to fail).
@@ -254,13 +374,23 @@ enum Command {
     /// Exit codes:
     ///   0 — revisions listed, "no revisions recorded", or restore applied
     ///   1 — no revision `<SEQ>` on disk (names the valid seq range), E_EMIT_LOCK_HELD,
-    ///       a linked-worktree refusal, or an IO failure reading/writing the file
+    ///       E_QUIESCE_LEASE_HELD, a linked-worktree refusal, or an IO failure
+    ///       reading/writing the file
     StateHistory {
         /// The file whose revision history to list or restore (e.g. planning/state.json).
         path: PathBuf,
         /// Restore revision SEQ's content back to `path` instead of listing.
         #[arg(long, value_name = "SEQ")]
         restore: Option<u32>,
+        /// Calling agent's identity, consulted only when `--restore` mutates the file
+        /// (listing is read-only and never checks the quiesce-lease store). See
+        /// `emit-state --agent`'s doc comment for the self-exemption rule.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override the fleet lock directory the quiesce-lease check (and
+        /// `.mev-emit.lock`) consult. See `emit-state --lock-dir`.
+        #[arg(long, value_name = "PATH")]
+        lock_dir: Option<PathBuf>,
     },
     /// Emit the `scope:doc_id` knowledge graph as a JSON artifact (Phase 3B, Block R).
     ///
@@ -356,11 +486,15 @@ enum Command {
     /// live process already holds it, this fails with E_EMIT_LOCK_HELD (naming the
     /// holder's pid) and writes nothing; a stale lock (owning process no longer
     /// alive) is reclaimed automatically instead of blocking. Dry-run never takes
-    /// the lock and is unaffected by contention.
+    /// the lock and is unaffected by contention. Checked before the lock,
+    /// `--write` also refuses with E_QUIESCE_LEASE_HELD when a sibling lane's
+    /// exclusive lease declares a quiet window — a different condition from
+    /// E_EMIT_LOCK_HELD (do not retry; wait, or pass --agent to self-exempt).
     ///
     /// Exit codes:
     ///   0 — planned (dry-run) or applied successfully
-    ///   1 — unknown epic slug, no HQ registry, a write failure, or E_EMIT_LOCK_HELD
+    ///   1 — unknown epic slug, no HQ registry, a write failure, E_EMIT_LOCK_HELD,
+    ///       or E_QUIESCE_LEASE_HELD
     DeferEpic {
         /// Epic slug as it appears in the HQ `epics[]` registry (e.g. `bastion-tui`).
         slug: String,
@@ -370,6 +504,14 @@ enum Command {
         /// Apply the edits. Without this the command prints what it would change.
         #[arg(long)]
         write: bool,
+        /// Calling agent's identity for the quiesce-lease self-exemption, consulted
+        /// only when `--write` mutates. See `emit-state --agent`.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override the fleet lock directory the quiesce-lease check consults.
+        /// See `emit-state --lock-dir`.
+        #[arg(long, value_name = "PATH")]
+        lock_dir: Option<PathBuf>,
     },
     /// Un-park an epic: set its registry status to `active` and return every
     /// `deferred` member block to `open`. The inverse of `defer-epic`.
@@ -379,7 +521,9 @@ enum Command {
     /// `--write` takes the same advisory lock at <root>/.mev-emit.lock as
     /// `defer-epic`/`emit-state`/`set-block-status`; a held lock fails this with
     /// E_EMIT_LOCK_HELD and writes nothing, a stale lock is reclaimed automatically,
-    /// and dry-run never takes the lock.
+    /// and dry-run never takes the lock. Checked first, a sibling lane's declared
+    /// quiet window fails this with the distinct E_QUIESCE_LEASE_HELD instead —
+    /// do not retry; wait, or pass --agent to self-exempt.
     ResumeEpic {
         /// Epic slug as it appears in the HQ `epics[]` registry.
         slug: String,
@@ -389,6 +533,14 @@ enum Command {
         /// Apply the edits. Without this the command prints what it would change.
         #[arg(long)]
         write: bool,
+        /// Calling agent's identity for the quiesce-lease self-exemption, consulted
+        /// only when `--write` mutates. See `emit-state --agent`.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override the fleet lock directory the quiesce-lease check consults.
+        /// See `emit-state --lock-dir`.
+        #[arg(long, value_name = "PATH")]
+        lock_dir: Option<PathBuf>,
     },
     /// Declare an initiative finished: set its registry status to `complete`.
     ///
@@ -410,12 +562,16 @@ enum Command {
     /// `defer-epic`/`resume-epic`/`sync-epics`/`emit-state`; a held lock fails this
     /// with E_EMIT_LOCK_HELD and writes nothing, a stale lock is reclaimed
     /// automatically, and dry-run never takes the lock. Refused the same way as its
-    /// siblings when run from inside a linked git worktree.
+    /// siblings when run from inside a linked git worktree. Checked first, a
+    /// sibling lane's declared quiet window fails this with the distinct
+    /// E_QUIESCE_LEASE_HELD instead — do not retry; wait, or pass --agent to
+    /// self-exempt.
     ///
     /// Exit codes:
     ///   0 — planned (dry-run) or applied successfully, including a no-op on an
     ///       epic already `complete`
-    ///   1 — unknown epic slug, no HQ registry, a write failure, or E_EMIT_LOCK_HELD
+    ///   1 — unknown epic slug, no HQ registry, a write failure, E_EMIT_LOCK_HELD,
+    ///       or E_QUIESCE_LEASE_HELD
     CompleteEpic {
         /// Epic slug as it appears in the HQ `epics[]` registry.
         slug: String,
@@ -425,6 +581,14 @@ enum Command {
         /// Apply the edits. Without this the command prints what it would change.
         #[arg(long)]
         write: bool,
+        /// Calling agent's identity for the quiesce-lease self-exemption, consulted
+        /// only when `--write` mutates. See `emit-state --agent`.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override the fleet lock directory the quiesce-lease check consults.
+        /// See `emit-state --lock-dir`.
+        #[arg(long, value_name = "PATH")]
+        lock_dir: Option<PathBuf>,
     },
     /// Reconcile every epic's registry status against its blocks, in both directions.
     ///
@@ -441,7 +605,10 @@ enum Command {
     /// `--write` takes the same advisory lock at <root>/.mev-emit.lock as
     /// `defer-epic`/`resume-epic`/`emit-state`/`set-block-status`; a held lock fails
     /// this with E_EMIT_LOCK_HELD and writes nothing, a stale lock is reclaimed
-    /// automatically, and dry-run never takes the lock.
+    /// automatically, and dry-run never takes the lock. Checked first, a sibling
+    /// lane's declared quiet window fails this with the distinct
+    /// E_QUIESCE_LEASE_HELD instead — do not retry; wait, or pass --agent to
+    /// self-exempt.
     SyncEpics {
         /// Path to search from when locating brain.toml. Defaults to the current directory.
         #[arg(default_value = ".")]
@@ -449,6 +616,14 @@ enum Command {
         /// Apply the edits. Without this the command prints what it would change.
         #[arg(long)]
         write: bool,
+        /// Calling agent's identity for the quiesce-lease self-exemption, consulted
+        /// only when `--write` mutates. See `emit-state --agent`.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override the fleet lock directory the quiesce-lease check consults.
+        /// See `emit-state --lock-dir`.
+        #[arg(long, value_name = "PATH")]
+        lock_dir: Option<PathBuf>,
     },
     /// Set one block's authored `status` in its repo's `planning/state.json`.
     ///
@@ -482,11 +657,17 @@ enum Command {
     /// agent can never pass it to clear its own gate. There is no priority
     /// threshold or other bypass.
     ///
+    /// A `--write` also refuses with `E_QUIESCE_LEASE_HELD` when a sibling lane's
+    /// exclusive lease declares a quiet window, checked before the advisory lock
+    /// (`E_EMIT_LOCK_HELD` on the lock itself) — a different condition: do not
+    /// retry, wait for release or pass --agent to self-exempt.
+    ///
     /// Exit codes:
     ///   0 — planned (dry-run), applied, or already at the target status
     ///   1 — bad key, unauthorable status, unknown block, a write failure,
     ///       an unmet operator gate without --force-operator-gate,
-    ///       --force-operator-gate on non-TTY stdin, or E_EMIT_UNKNOWN_SCOPE
+    ///       --force-operator-gate on non-TTY stdin, E_EMIT_UNKNOWN_SCOPE,
+    ///       E_EMIT_LOCK_HELD, or E_QUIESCE_LEASE_HELD
     ///
     /// **Fleet coupling (unchanged by `--scope`).** `E_EMIT_INCOMPLETE_CORPUS` still
     /// aborts the whole write whenever ANY state.json fleet-wide fails to load — the
@@ -519,6 +700,14 @@ enum Command {
         /// --scope`; an unknown or blank slug exits with `E_EMIT_UNKNOWN_SCOPE`.
         #[arg(long, value_name = "REPO")]
         scope: Option<String>,
+        /// Calling agent's identity for the quiesce-lease self-exemption, consulted
+        /// only when `--write` mutates. See `emit-state --agent`.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override the fleet lock directory the quiesce-lease check consults.
+        /// See `emit-state --lock-dir`.
+        #[arg(long, value_name = "PATH")]
+        lock_dir: Option<PathBuf>,
     },
     /// Close an operator gate fleet-wide: remove every `depends_on` `{type:"operator"}`
     /// entry carrying SLUG, across every loaded `state.json`.
@@ -541,12 +730,16 @@ enum Command {
     /// cleared gate, under the same `<root>/.mev-emit.lock` advisory lock every other
     /// authored-state writer takes (E_EMIT_LOCK_HELD on contention; a stale lock from
     /// a dead pid is reclaimed automatically). Refused the same way as its siblings
-    /// when run from inside a linked git worktree.
+    /// when run from inside a linked git worktree. Checked before that lock, a
+    /// sibling lane's declared quiet window refuses with the distinct
+    /// `E_QUIESCE_LEASE_HELD` instead — a quiesce refusal is already this verb's
+    /// vocabulary (verified-or-refused, no dry-run); do not retry, wait for
+    /// release or pass --agent to self-exempt.
     ///
     /// Exit codes:
     ///   0 — every matching edge removed and emit-state re-run cleanly
     ///   1 — missing --exit-verified, unknown slug, a write failure, E_EMIT_LOCK_HELD,
-    ///       or a linked-worktree refusal
+    ///       E_QUIESCE_LEASE_HELD, or a linked-worktree refusal
     CloseOperatorGate {
         /// Operator gate slug, e.g. `session-mac-mini`.
         slug: String,
@@ -556,6 +749,15 @@ enum Command {
         /// Required. Asserts the operator confirmed the edge's `exit` artifact exists.
         #[arg(long = "exit-verified")]
         exit_verified: bool,
+        /// Calling agent's identity for the quiesce-lease self-exemption. This verb
+        /// always writes (no dry-run), so the check always runs. See
+        /// `emit-state --agent`.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override the fleet lock directory the quiesce-lease check consults.
+        /// See `emit-state --lock-dir`.
+        #[arg(long, value_name = "PATH")]
+        lock_dir: Option<PathBuf>,
     },
     /// Normalize every stuttering operator/approval slug (D76) fleet-wide:
     /// `mev normalize-op-slugs [--write]`.
@@ -586,11 +788,14 @@ enum Command {
     /// contention), then re-runs `emit-state --write` on success so rendered
     /// boards (`OP.<slug>`) reflect the renamed slugs immediately. Refused the
     /// same way as its siblings when run from inside a linked git worktree.
+    /// Checked before that lock, a sibling lane's declared quiet window
+    /// refuses `--write` with the distinct E_QUIESCE_LEASE_HELD instead — do
+    /// not retry; wait for release or pass --agent to self-exempt.
     ///
     /// Exit codes:
     ///   0 — planned (dry-run) or applied cleanly
-    ///   1 — a collision, a write failure, E_EMIT_LOCK_HELD, or a
-    ///       linked-worktree refusal
+    ///   1 — a collision, a write failure, E_EMIT_LOCK_HELD,
+    ///       E_QUIESCE_LEASE_HELD, or a linked-worktree refusal
     NormalizeOpSlugs {
         /// Path to search from when locating brain.toml. Defaults to the current directory.
         #[arg(default_value = ".")]
@@ -600,6 +805,14 @@ enum Command {
         /// without touching any files.
         #[arg(long)]
         write: bool,
+        /// Calling agent's identity for the quiesce-lease self-exemption, consulted
+        /// only when `--write` mutates. See `emit-state --agent`.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override the fleet lock directory the quiesce-lease check consults.
+        /// See `emit-state --lock-dir`.
+        #[arg(long, value_name = "PATH")]
+        lock_dir: Option<PathBuf>,
     },
     /// Approve a pending decision gate: `mev approve <slug> --digest <d>`.
     ///
@@ -625,12 +838,15 @@ enum Command {
     /// `<root>/.mev-emit.lock` advisory lock every other authored-state writer
     /// takes (E_EMIT_LOCK_HELD on contention; a stale lock from a dead pid is
     /// reclaimed automatically). Refused the same way as its siblings when run
-    /// from inside a linked git worktree.
+    /// from inside a linked git worktree. Checked before that lock, a sibling
+    /// lane's declared quiet window refuses with the distinct
+    /// E_QUIESCE_LEASE_HELD instead — do not retry; wait for release or pass
+    /// --agent to self-exempt.
     ///
     /// Exit codes:
     ///   0 — every matching edge removed (digest verified) and emit-state re-run cleanly
     ///   1 — unknown slug, digest mismatch (alarmed), a write failure,
-    ///       E_EMIT_LOCK_HELD, or a linked-worktree refusal
+    ///       E_EMIT_LOCK_HELD, E_QUIESCE_LEASE_HELD, or a linked-worktree refusal
     Approve {
         /// Approval gate slug, e.g. `dev-to-cta-sweep`.
         slug: String,
@@ -640,6 +856,14 @@ enum Command {
         /// Path to search from when locating brain.toml. Defaults to the current directory.
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Calling agent's identity for the quiesce-lease self-exemption. This verb
+        /// always writes, so the check always runs. See `emit-state --agent`.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override the fleet lock directory the quiesce-lease check consults.
+        /// See `emit-state --lock-dir`.
+        #[arg(long, value_name = "PATH")]
+        lock_dir: Option<PathBuf>,
     },
     /// Reject a pending decision gate: `mev reject <slug>`.
     ///
@@ -655,18 +879,29 @@ enum Command {
     /// On success, re-runs `emit-state --write` so `focus`/the boards agree with
     /// the cleared gate, under the same `<root>/.mev-emit.lock` advisory lock
     /// every other authored-state writer takes. Refused the same way as its
-    /// siblings when run from inside a linked git worktree.
+    /// siblings when run from inside a linked git worktree. Checked before that
+    /// lock, a sibling lane's declared quiet window refuses with the distinct
+    /// E_QUIESCE_LEASE_HELD instead — do not retry; wait for release or pass
+    /// --agent to self-exempt.
     ///
     /// Exit codes:
     ///   0 — every matching edge removed and emit-state re-run cleanly
-    ///   1 — unknown slug, a write failure, E_EMIT_LOCK_HELD, or a linked-worktree
-    ///       refusal
+    ///   1 — unknown slug, a write failure, E_EMIT_LOCK_HELD,
+    ///       E_QUIESCE_LEASE_HELD, or a linked-worktree refusal
     Reject {
         /// Approval gate slug, e.g. `dev-to-cta-sweep`.
         slug: String,
         /// Path to search from when locating brain.toml. Defaults to the current directory.
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Calling agent's identity for the quiesce-lease self-exemption. This verb
+        /// always writes, so the check always runs. See `emit-state --agent`.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override the fleet lock directory the quiesce-lease check consults.
+        /// See `emit-state --lock-dir`.
+        #[arg(long, value_name = "PATH")]
+        lock_dir: Option<PathBuf>,
     },
     /// Generate an interactive HTML visualization of the knowledge graph (graph.html)
     GenerateGraph {
@@ -1159,7 +1394,13 @@ enum OpportunityCommand {
 /// worktree guard and the advisory lock, both of which shell out to `git`/read
 /// `brain.toml`, resolve from `path`'s *parent directory* instead — `git -C <file>`
 /// is not meaningful.
-fn run_state_history(path: &std::path::Path, restore: Option<u32>, json: bool) -> ExitCode {
+fn run_state_history(
+    path: &std::path::Path,
+    restore: Option<u32>,
+    json: bool,
+    agent: Option<&str>,
+    lock_dir: Option<&std::path::Path>,
+) -> ExitCode {
     match restore {
         None => {
             // Read-only: list revisions, newest first. Never takes the lock.
@@ -1207,6 +1448,14 @@ fn run_state_history(path: &std::path::Path, restore: Option<u32>, json: bool) -
                     return ExitCode::FAILURE;
                 }
             };
+
+            // Quiesce check: a sibling lane's declared quiet window refuses this
+            // write before it ever contends for the advisory lock.
+            if let Some(exit) =
+                refuse_if_quiesced(&root, dir, agent, lock_dir, "state-history --restore")
+            {
+                return exit;
+            }
 
             // Advisory lock: --restore mutates a derived file and must not interleave
             // with a concurrent `emit-state --write` (or another restore).
@@ -1341,6 +1590,8 @@ fn run_epic_status(
     op: EpicOp,
     write: bool,
     json: bool,
+    agent: Option<&str>,
+    lock_dir: Option<&std::path::Path>,
 ) -> ExitCode {
     // Same worktree guard as emit-state: a --write here chains into emit-state,
     // which resolves every repo's paths from brain.toml rather than CWD.
@@ -1368,6 +1619,12 @@ fn run_epic_status(
         (Some(_), EpicOp::Complete) => "complete-epic",
         (None, _) => "sync-epics",
     };
+
+    // Quiesce check: only --write mutates, so only --write is gated — mirrors the
+    // lock's own write-only mutual exclusion below.
+    if write && let Some(exit) = refuse_if_quiesced(&root, path, agent, lock_dir, label) {
+        return exit;
+    }
 
     // Advisory lock, same contract as emit-state/set-block-status: only --write mutates
     // the corpus, so only --write needs mutual exclusion. This command writes an
@@ -2589,6 +2846,8 @@ fn main() -> ExitCode {
             write,
             scope,
             require_fresh,
+            agent,
+            lock_dir,
         } => {
             // Convenience alias: --require-fresh sets the same env var `emit_state`
             // reads, rather than threading a new parameter through its signature (see
@@ -2614,6 +2873,18 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            // Quiesce check: only --write mutates, so only --write is gated.
+            if write
+                && let Some(exit) = refuse_if_quiesced(
+                    &root,
+                    &path,
+                    agent.as_deref(),
+                    lock_dir.as_deref(),
+                    "emit-state --write",
+                )
+            {
+                return exit;
+            }
             // Advisory lock: only --write mutates derived files, so only --write needs
             // mutual exclusion. Dry-run stays lock-free (it never touches disk). The
             // guard is held for the rest of this match arm and releases on every exit
@@ -2704,19 +2975,77 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::StateHistory { path, restore } => run_state_history(&path, restore, cli.json),
-        Command::DeferEpic { slug, path, write } => {
-            run_epic_status(&path, Some(&slug), EpicOp::Defer, write, cli.json)
-        }
-        Command::ResumeEpic { slug, path, write } => {
-            run_epic_status(&path, Some(&slug), EpicOp::Resume, write, cli.json)
-        }
-        Command::CompleteEpic { slug, path, write } => {
-            run_epic_status(&path, Some(&slug), EpicOp::Complete, write, cli.json)
-        }
-        Command::SyncEpics { path, write } => {
-            run_epic_status(&path, None, EpicOp::Defer, write, cli.json)
-        }
+        Command::StateHistory {
+            path,
+            restore,
+            agent,
+            lock_dir,
+        } => run_state_history(
+            &path,
+            restore,
+            cli.json,
+            agent.as_deref(),
+            lock_dir.as_deref(),
+        ),
+        Command::DeferEpic {
+            slug,
+            path,
+            write,
+            agent,
+            lock_dir,
+        } => run_epic_status(
+            &path,
+            Some(&slug),
+            EpicOp::Defer,
+            write,
+            cli.json,
+            agent.as_deref(),
+            lock_dir.as_deref(),
+        ),
+        Command::ResumeEpic {
+            slug,
+            path,
+            write,
+            agent,
+            lock_dir,
+        } => run_epic_status(
+            &path,
+            Some(&slug),
+            EpicOp::Resume,
+            write,
+            cli.json,
+            agent.as_deref(),
+            lock_dir.as_deref(),
+        ),
+        Command::CompleteEpic {
+            slug,
+            path,
+            write,
+            agent,
+            lock_dir,
+        } => run_epic_status(
+            &path,
+            Some(&slug),
+            EpicOp::Complete,
+            write,
+            cli.json,
+            agent.as_deref(),
+            lock_dir.as_deref(),
+        ),
+        Command::SyncEpics {
+            path,
+            write,
+            agent,
+            lock_dir,
+        } => run_epic_status(
+            &path,
+            None,
+            EpicOp::Defer,
+            write,
+            cli.json,
+            agent.as_deref(),
+            lock_dir.as_deref(),
+        ),
         Command::SetBlockStatus {
             key,
             status,
@@ -2724,6 +3053,8 @@ fn main() -> ExitCode {
             write,
             force_operator_gate,
             scope,
+            agent,
+            lock_dir,
         } => {
             // --force-operator-gate is the only override that starts a block with an
             // unmet operator edge, and per D71 it is human-only. Refuse it outright
@@ -2772,6 +3103,18 @@ fn main() -> ExitCode {
                      refused on non-TTY stdin) to override."
                 );
                 return ExitCode::FAILURE;
+            }
+            // Quiesce check: only --write mutates, so only --write is gated.
+            if write
+                && let Some(exit) = refuse_if_quiesced(
+                    &root,
+                    &path,
+                    agent.as_deref(),
+                    lock_dir.as_deref(),
+                    "set-block-status",
+                )
+            {
+                return exit;
             }
             // Advisory lock, same contract as emit-state: only --write mutates the
             // corpus, so only --write needs mutual exclusion. This command writes an
@@ -2843,6 +3186,8 @@ fn main() -> ExitCode {
             slug,
             path,
             exit_verified,
+            agent,
+            lock_dir,
         } => {
             // Refuse before reading or touching anything — the whole point of
             // --exit-verified is that mev never infers the exit condition itself.
@@ -2874,6 +3219,18 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            // Quiesce check: this verb has no dry-run, so the check always runs
+            // (verified-or-refused is already this verb's vocabulary — a quiesce
+            // refusal is simply another refusal, not a new dry-run path).
+            if let Some(exit) = refuse_if_quiesced(
+                &root,
+                &path,
+                agent.as_deref(),
+                lock_dir.as_deref(),
+                "close-operator-gate",
+            ) {
+                return exit;
+            }
             // Advisory lock, same contract as every other authored-state writer: this
             // always mutates (there is no dry-run mode), so the lock is always taken.
             // Released via Drop on every exit path below.
@@ -2906,7 +3263,12 @@ fn main() -> ExitCode {
                 mev::close_operator_gate(&root, &slug, exit_verified),
             )
         }
-        Command::NormalizeOpSlugs { path, write } => {
+        Command::NormalizeOpSlugs {
+            path,
+            write,
+            agent,
+            lock_dir,
+        } => {
             // Same worktree guard as set-block-status/emit-state: a --write here
             // chains into emit-state, which resolves every repo's paths from
             // brain.toml rather than CWD.
@@ -2927,6 +3289,18 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            // Quiesce check: only --write mutates, so only --write is gated.
+            if write
+                && let Some(exit) = refuse_if_quiesced(
+                    &root,
+                    &path,
+                    agent.as_deref(),
+                    lock_dir.as_deref(),
+                    "normalize-op-slugs",
+                )
+            {
+                return exit;
+            }
             // Advisory lock, same contract as set-block-status: only --write
             // mutates the corpus, so only --write needs mutual exclusion.
             // Released via Drop on every exit path below.
@@ -2961,7 +3335,13 @@ fn main() -> ExitCode {
                 mev::normalize_op_slugs(&root, write),
             )
         }
-        Command::Approve { slug, digest, path } => {
+        Command::Approve {
+            slug,
+            digest,
+            path,
+            agent,
+            lock_dir,
+        } => {
             // Same worktree guard as close-operator-gate/emit-state: this chains
             // into emit-state, which resolves every repo's paths from brain.toml
             // rather than CWD.
@@ -2982,6 +3362,16 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            // Quiesce check: this verb has no dry-run, so the check always runs.
+            if let Some(exit) = refuse_if_quiesced(
+                &root,
+                &path,
+                agent.as_deref(),
+                lock_dir.as_deref(),
+                "approve",
+            ) {
+                return exit;
+            }
             // Advisory lock, same contract as every other authored-state writer.
             let _lock_guard = match mev::brain::lock::acquire_lock(
                 &root,
@@ -3012,7 +3402,12 @@ fn main() -> ExitCode {
                 mev::approve(&root, &slug, &digest),
             )
         }
-        Command::Reject { slug, path } => {
+        Command::Reject {
+            slug,
+            path,
+            agent,
+            lock_dir,
+        } => {
             // Same worktree guard as close-operator-gate/emit-state.
             if mev::brain::config::is_linked_worktree(&path) {
                 eprintln!(
@@ -3031,6 +3426,16 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            // Quiesce check: this verb has no dry-run, so the check always runs.
+            if let Some(exit) = refuse_if_quiesced(
+                &root,
+                &path,
+                agent.as_deref(),
+                lock_dir.as_deref(),
+                "reject",
+            ) {
+                return exit;
+            }
             let _lock_guard = match mev::brain::lock::acquire_lock(
                 &root,
                 mev::brain::lock::DEFAULT_LOCK_TIMEOUT,
