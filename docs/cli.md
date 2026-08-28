@@ -1849,7 +1849,7 @@ mev --json doc opportunity ingest --input company-brief.json
 
 ---
 
-### `carryover [--repo <slug>] [--json] [--allow-exec] [--audit] [--window <days>] [--dispose] [--backfill] [--dry-run] [--would-block] [--trajectory] [--weeks <days>] [path]`
+### `carryover [--repo <slug>] [--json] [--allow-exec] [--exec-timeout <secs>] [--audit] [--window <days>] [--dispose] [--backfill] [--dry-run] [--would-block] [--trajectory] [--weeks <days>] [path]`
 
 Fleet-wide sweep of every discovered `planning/state.json`'s `carryover[]` array. By default
 this is **read-only**: it evaluates each entry's `clears_when` predicate where it is
@@ -1866,7 +1866,7 @@ history-based write path instead — see [`--backfill` — one-time git reconstr
 removals](#--backfill--one-time-git-reconstruction-of-past-removals) below.
 
 ```bash
-mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>] [--dispose] [--backfill] [--dry-run] [--would-block] [--trajectory] [--weeks <DAYS>] [path]
+mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--exec-timeout <SECS>] [--audit] [--window <DAYS>] [--dispose] [--backfill] [--dry-run] [--would-block] [--trajectory] [--weeks <DAYS>] [path]
 ```
 
 | Argument / Flag | Default | Description |
@@ -1875,6 +1875,7 @@ mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>
 | `--repo <SLUG>` | unset | Restrict the sweep to one repo's `carryover[]` entries **by ownership**, not by which file an entry happens to be stored in — see below. An unknown slug is a hard error naming the valid slugs |
 | `--json` | off | Emit the `CarryoverReport` (or, under `--audit`, the `CarryoverAudit`; under `--would-block`, the `WouldBlockReport`; or, under `--trajectory`, the `TrajectoryReport`) as compact JSON instead of the human summary |
 | `--allow-exec` | off | Opt in to running `command_exits_zero` predicates. Without it, every such entry reports `not-evaluable` (reason `execution-not-allowed`) and **no command is ever run**. **`--dispose` does not imply this** — passing `--dispose` never turns on command execution, so a `command_exits_zero` entry that is `not-evaluable` for lack of `--allow-exec` is never disposal-eligible either |
+| `--exec-timeout <SECS>` | `2` | Wall-clock bound the in-process watchdog enforces on a `command_exits_zero` predicate's child process before killing it. This is a **mev-side** bound — a flag on this command, not a field on the predicate itself; a per-predicate timeout would be an okf-core `ClearsWhenPredicate` schema change and is explicitly out of scope for `MV.16.G`. Ignored without `--allow-exec`. Raising it lets a slower command (e.g. one that touches the network) finish instead of reporting `command-timed-out`; it does not change whether execution is opt-in |
 | `--audit` | off | Report a fleet-wide `carryover[]`/`reference[]` census instead of the per-entry sweep — total, per-container and per-kind/per-class counts, typed-predicate coverage, inflow/outflow over `--window` days, and a measured archive-outflow section (MV.16.E). The census figures are composed entirely from the same loaded corpus and `CarryoverReport` the ordinary sweep already produces — no second corpus *walk* — but `--audit` does perform one new read per selected repo, of that repo's `planning/carryover-archive.jsonl`, to produce the archive-outflow section; that read happens only under `--audit`. Shares the exact same `--repo` ownership rule as the ordinary sweep, so `mev carryover --audit --repo X` and `mev carryover --repo X` always agree on which entries are in scope |
 | `--window <DAYS>` | `30` | Window, in days, `--audit`'s inflow/outflow figures are measured over. Ignored without `--audit` |
 | `--dispose` | off | Move every CLEARED-lane entry out of its owning repo's `state.json` and into that repo's `planning/carryover-archive.jsonl`. The live write path this subcommand has — see below |
@@ -1910,7 +1911,7 @@ rewrite anything themselves.
 |---|---|
 | `cleared` | At least one reference was extracted from the entry and **every** extracted reference is currently satisfied — a recommendation to delete the entry |
 | `actionable` | At least one reference was extracted, but **at least one** is unsatisfied — the specific unmet reference(s) are named so a reader can act without re-reading the predicate |
-| `not-evaluable` | No reference could be extracted. Reason `prose` (`clears_when` is present but is pure prose), `no-closure-verb` (it names a block but never says the block must close), `ambiguous-reference` (a bare block ID matched more than one repo and was dropped), `execution-not-allowed` (a `command_exits_zero` predicate was present but `--allow-exec` was not passed), `gate-mention-not-checkable` (it names a validator/gate/CI concept but nothing checkable — no path, no block — could be extracted, flagged as a candidate for a typed `command_exits_zero` predicate), or `no-predicate` (`clears_when` is `None`) |
+| `not-evaluable` | No reference could be extracted, **or** a reference was extracted but its outcome is unknown rather than a genuine negative. Reason `prose` (`clears_when` is present but is pure prose), `no-closure-verb` (it names a block but never says the block must close), `ambiguous-reference` (a bare block ID matched more than one repo and was dropped, **or** a `file_exists`/`file_contains` path resolved to two different files under the brain root and the owning repo's root), `execution-not-allowed` (a `command_exits_zero` predicate was present but `--allow-exec` was not passed), `command-timed-out` (the child process outran `--exec-timeout` and was killed), `command-spawn-failed` (the child process could not be started at all), `file-unreadable` (a `file_contains` target was missing, larger than 5 MiB, or not valid UTF-8), `pattern-not-literal` (a `file_contains` `pattern` is shaped like a regex and can never match literally), `gate-mention-not-checkable` (it names a validator/gate/CI concept but nothing checkable — no path, no block — could be extracted, flagged as a candidate for a typed `command_exits_zero` predicate), or `no-predicate` (`clears_when` is `None`). **An unknown outcome is never `cleared` and never `actionable`** — a false red only wastes a sweep, but a false clear deletes a finding, so every reason above lands here rather than being folded into a plain unsatisfied reference (`MV.16.G`) |
 
 #### Typed `clears_when` predicates
 
@@ -1926,24 +1927,53 @@ etc.). All four typed predicate kinds are evaluated:
   typed form needs no [`CLOSURE_VERBS`](#the-two-evaluable-predicate-classes) gate: it is
   unambiguous by construction.
 - **`file_exists { path }`** — satisfied under the same two-root resolution as the prose Class B
-  reference below (brain root, then the owning repo's path).
+  reference below (brain root, then the owning repo's path), **requiring the resolved path to be
+  a file** — a directory of the same name no longer satisfies it (`MV.16.G`; previously any
+  `.exists()` match did, directory or not). A path present under **both** roots and resolving to
+  two different files is reported `not-evaluable` (reason `ambiguous-reference`) rather than
+  silently preferring the brain-root candidate; two candidates that resolve to the *same* file
+  (e.g. a repo directory reachable through the brain root) are not ambiguous.
 - **`file_contains { path, pattern }`** — satisfied when `path` resolves under that same
-  two-root strategy **and** its contents contain `pattern` as a literal substring (never a
-  regex). Every failure mode — missing file, unreadable file, non-UTF8 contents, or a file
-  larger than 5 MiB (never read into memory) — is `satisfied: false`, never a panic and never
-  `satisfied: true`.
+  two-root strategy (with the same file-not-directory and ambiguity rules as `file_exists` above)
+  **and** its contents contain `pattern` as a literal substring (never a regex). The read side and
+  the negative-match side are now reported distinctly rather than both folding into `false`:
+  - A file that was read successfully with the pattern genuinely absent is `satisfied: false` on
+    a `FileContains` reference — an ordinary, actionable unmet reference.
+  - A file that is missing, ambiguously resolved, larger than 5 MiB (never read into memory), or
+    not valid UTF-8 produces **no** `FileContains` reference at all and forces `not-evaluable`
+    (reason `file-unreadable`, or `ambiguous-reference` for the two-root case) — this is evidence
+    about the file, never evidence that the pattern is absent.
+  - **A `pattern` shaped like a regex is refused rather than matched literally**
+    (`MV.16.G`; previously it was matched literally and could therefore never match). The
+    evaluator does substring matching only and adds no `regex` dependency — it detects shape
+    (`.*`, `.+`, `\d`, `\w`, `\s`, a `[...]` class, `(...|...)` alternation, or a leading `^`/
+    trailing `$`) and reports `not-evaluable` (reason `pattern-not-literal`) instead. A bare `.`
+    or a lone `^`/`$` inside ordinary prose is deliberately **not** enough to trigger the guard —
+    only the composite shapes above do, so a legitimate literal pattern is never mistaken for a
+    regex.
 - **`command_exits_zero { command }`** — satisfied only when running `sh -c <command>` (cwd: the
   owning repo's path if known, else the brain root) exits with status `0` **and** `--allow-exec`
   was passed. This is the one predicate that executes arbitrary shell from a data file, so it
-  carries three deliberate safety properties:
+  carries four deliberate safety properties:
   1. **Opt-in, off by default.** Without `--allow-exec`, `command_exits_zero` entries are never
      run — they report `not-evaluable` with reason `execution-not-allowed` instead. An unrun
      command is unknown, and unknown must never read as `cleared`.
-  2. **In-process wall-clock timeout.** `timeout(1)` does not exist on macOS, so the ~2s bound is
-     enforced by polling `try_wait` and killing the child on expiry — a bad predicate cannot hang
-     a fleet-wide sweep.
-  3. **Failure is never success.** Spawn failure, non-zero exit, signal death, and timeout are
-     all `satisfied: false`; only a clean exit status of `0` satisfies.
+  2. **In-process wall-clock timeout, and it is configurable.** `timeout(1)` does not exist on
+     macOS, so the bound is enforced by polling `try_wait` and killing the child on expiry — a bad
+     predicate cannot hang a fleet-wide sweep. The bound defaults to 2s and is set per-invocation
+     with `--exec-timeout <SECS>` (see the flags table above).
+  3. **A timeout is reported distinctly from a failure.** A child process still running when the
+     bound elapses produces **no** `CommandExitsZero` reference and forces `not-evaluable`
+     (reason `command-timed-out`) — a timeout tells us nothing about what the command would have
+     exited, so it is unknown, not failed, and unknown must never read as `cleared`
+     (`MV.16.G`; previously a timeout collapsed into the same `satisfied: false` as a genuine
+     non-zero exit and was reported `actionable`, indistinguishable from a real failure). A
+     command that exits non-zero *within* the bound is still `satisfied: false` on a
+     `CommandExitsZero` reference and lands `actionable` as before.
+  4. **A spawn failure is reported distinctly too.** A child process that could not be started at
+     all (e.g. `sh` not on `PATH`) produces no reference and forces `not-evaluable` (reason
+     `command-spawn-failed`) — evidence about the environment the sweep ran in, never evidence
+     about the predicate's subject.
 
 #### The two evaluable prose predicate classes
 
@@ -2220,7 +2250,11 @@ acts on the `cleared` lane only:
   - `reconstructed` — always `false` (this row was produced live from a real sweep, not
     rebuilt from git history)
   - `evidence` — the clearing predicate that landed the entry in CLEARED, so the archive line
-    is self-explaining without cross-referencing the original `clears_when`
+    is self-explaining without cross-referencing the original `clears_when`. For a
+    `command_exits_zero` clearance this now also names the `--exec-timeout` bound that was in
+    force (`command \`X\` exited 0 (bound Ns)`) rather than a bare `command X exited 0`
+    (`MV.16.G`) — a disposal is otherwise unfalsifiable after the fact, since the archived row
+    alone couldn't say whether the command that cleared it ran under a 2s bound or a 200s one
   - Carryover entries are kept as data for history and analysis — the archive file is
     append-only and nothing is ever discarded.
 - **Both writes land together.** The `state.json` removal and the `carryover-archive.jsonl`
