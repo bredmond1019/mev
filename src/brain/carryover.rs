@@ -96,6 +96,13 @@ pub enum NotEvaluableReason {
     /// A bare block ID in the prose matched nodes in more than one repo and did
     /// not resolve to the carryover's own scope repo either — dropped rather
     /// than guessed at.
+    ///
+    /// Also produced for a `file_exists`/`file_contains` path that resolves
+    /// to two DIFFERENT files under the brain root and the owning repo's
+    /// root (or where either candidate's canonicalization fails, the safe
+    /// direction) — silently preferring the brain-root candidate would guess
+    /// at which file the author meant, so it is dropped rather than guessed
+    /// at instead. See [`PathResolution::Ambiguous`].
     AmbiguousReference,
     /// `clears_when` names a block ID but never says the block must *close* —
     /// e.g. *"one of the two BA.0.A blocks is renamed"* or *"BL.2.A's
@@ -607,34 +614,87 @@ pub fn mentions_gate(clears_when: &str) -> bool {
 // Evaluator — assign a lane per entry
 // ---------------------------------------------------------------------------
 
-/// Whether a path token resolves to an existing file, relative to the brain
-/// root or the owning repo's `repo_path` (either is sufficient).
+/// Outcome of resolving a path reference against the two-root strategy (brain
+/// root and the owning repo's `repo_path`). Kept distinct from a bare
+/// `Option<PathBuf>` so a caller can tell "resolved to exactly one file"
+/// apart from "resolved to two DIFFERENT files under the two roots" —
+/// collapsing the latter into "the brain-root candidate wins" silently
+/// guesses at which file the author meant, which is exactly the false-clear
+/// shape `MV.16.G` exists to remove.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PathResolution {
+    /// Neither root has a FILE at this path. Note: a directory of the same
+    /// name does not count — see [`Self::Unique`].
+    None,
+    /// Exactly one root resolves the path to a file, or both roots resolve
+    /// it to the SAME underlying file (canonicalized paths equal) — e.g. a
+    /// repo directory reachable through the brain root. Not ambiguous.
+    Unique(PathBuf),
+    /// Both roots resolve the path to a file, and they are not the same
+    /// underlying file (or canonicalization failed for either candidate,
+    /// the safe direction) — dropped rather than guessed at. See
+    /// [`NotEvaluableReason::AmbiguousReference`].
+    Ambiguous { brain: PathBuf, repo: PathBuf },
+}
+
+/// Whether a path token resolves, unambiguously, to an existing FILE
+/// (never a directory), relative to the brain root or the owning repo's
+/// `repo_path`. An [`PathResolution::Ambiguous`] resolution is NOT
+/// satisfied — the caller cannot tell which file was meant, so it must not
+/// read as "the path exists" any more than as "the path is absent".
 fn path_ref_satisfied(
     path: &str,
     brain_root: &Path,
     repo_paths: &HashMap<String, PathBuf>,
     owning_repo: &str,
 ) -> bool {
-    resolve_existing_path(path, brain_root, repo_paths, owning_repo).is_some()
+    matches!(
+        resolve_existing_path(path, brain_root, repo_paths, owning_repo),
+        PathResolution::Unique(_)
+    )
 }
 
-/// Resolve a path reference against the same two-root strategy
-/// [`path_ref_satisfied`] uses (brain root first, then the owning repo's
-/// `repo_path`), returning the first candidate that actually exists.
+/// Resolve a path reference against both roots — the brain root and the
+/// owning repo's `repo_path` — and report whether the result is absent,
+/// unique, or ambiguous. Requires `is_file()`, not `.exists()`, so a
+/// directory of the same name never satisfies a `file_exists`/`file_contains`
+/// predicate (symlinks are still followed, which `is_file()` already does).
+/// Two candidates that resolve to the SAME file (canonicalized paths equal)
+/// are [`PathResolution::Unique`], not ambiguous — a repo directory reachable
+/// through the brain root must not produce a spurious ambiguity. If
+/// canonicalization fails for either candidate, the result is
+/// [`PathResolution::Ambiguous`] — the safe direction.
 fn resolve_existing_path(
     path: &str,
     brain_root: &Path,
     repo_paths: &HashMap<String, PathBuf>,
     owning_repo: &str,
-) -> Option<PathBuf> {
+) -> PathResolution {
     let brain_candidate = brain_root.join(path);
-    if brain_candidate.exists() {
-        return Some(brain_candidate);
-    }
-    repo_paths.get(owning_repo).and_then(|repo_path| {
+    let brain_hit = brain_candidate.is_file().then_some(brain_candidate);
+
+    let repo_hit = repo_paths.get(owning_repo).and_then(|repo_path| {
         let candidate = repo_path.join(path);
-        candidate.exists().then_some(candidate)
-    })
+        candidate.is_file().then_some(candidate)
+    });
+
+    match (brain_hit, repo_hit) {
+        (Some(brain), Some(repo)) => {
+            let same_file = match (brain.canonicalize(), repo.canonicalize()) {
+                (Ok(b), Ok(r)) => b == r,
+                // Canonicalization failure on either side: don't guess.
+                _ => false,
+            };
+            if same_file {
+                PathResolution::Unique(brain)
+            } else {
+                PathResolution::Ambiguous { brain, repo }
+            }
+        }
+        (Some(brain), None) => PathResolution::Unique(brain),
+        (None, Some(repo)) => PathResolution::Unique(repo),
+        (None, None) => PathResolution::None,
+    }
 }
 
 /// Bound on how much of a `file_contains` target we will read into memory —
@@ -656,8 +716,13 @@ fn file_contains_satisfied(
     repo_paths: &HashMap<String, PathBuf>,
     owning_repo: &str,
 ) -> bool {
-    let Some(resolved) = resolve_existing_path(path, brain_root, repo_paths, owning_repo) else {
-        return false;
+    // `None` and `Ambiguous` both fold into `false` here — this bool-typed
+    // helper cannot express the distinction yet; `MV.16.G` task 3 replaces
+    // it with an outcome type that reports ambiguity (and unreadability)
+    // distinctly rather than as an indistinguishable negative.
+    let resolved = match resolve_existing_path(path, brain_root, repo_paths, owning_repo) {
+        PathResolution::Unique(resolved) => resolved,
+        PathResolution::None | PathResolution::Ambiguous { .. } => return false,
     };
     let Ok(metadata) = std::fs::metadata(&resolved) else {
         return false;
@@ -972,13 +1037,27 @@ pub fn evaluate_carryover_with_dedup(
                     }
                 }
                 Some(ClearsWhen::Predicate(ClearsWhenPredicate::FileExists { path, .. })) => {
-                    // Reuse `path_ref_satisfied` verbatim — no second
-                    // resolution strategy for the typed form.
-                    let satisfied = path_ref_satisfied(path, brain_root, repo_paths, own_repo);
-                    refs.push(CarryoverRef::Path {
-                        path: path.clone(),
-                        satisfied,
-                    });
+                    // Reuse `resolve_existing_path` verbatim — no second
+                    // resolution strategy for the typed form. An ambiguous
+                    // resolution pushes no ref and forces `NotEvaluable`
+                    // rather than guessing which candidate the author meant.
+                    match resolve_existing_path(path, brain_root, repo_paths, own_repo) {
+                        PathResolution::Unique(_) => {
+                            refs.push(CarryoverRef::Path {
+                                path: path.clone(),
+                                satisfied: true,
+                            });
+                        }
+                        PathResolution::None => {
+                            refs.push(CarryoverRef::Path {
+                                path: path.clone(),
+                                satisfied: false,
+                            });
+                        }
+                        PathResolution::Ambiguous { .. } => {
+                            forced_reason = Some(NotEvaluableReason::AmbiguousReference);
+                        }
+                    }
                 }
                 Some(ClearsWhen::Predicate(ClearsWhenPredicate::FileContains {
                     path,
@@ -6214,6 +6293,208 @@ mod tests {
                 satisfied: false,
             }]
         );
+    }
+
+    #[test]
+    fn file_exists_predicate_naming_a_directory_is_never_cleared() {
+        let dir = std::env::temp_dir().join(format!(
+            "mev-carryover-file-exists-dir-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The predicate names a DIRECTORY, not a file — `.exists()` would
+        // say yes, but `is_file()` (what the evaluator must use) says no.
+        let target_dir = dir.join("marker-dir");
+        std::fs::create_dir_all(&target_dir).unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-exists-directory",
+                    "deferred",
+                    ClearsWhenPredicate::FileExists {
+                        path: "marker-dir".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        assert_eq!(
+            report.cleared, 0,
+            "a directory must never satisfy file_exists"
+        );
+        assert_eq!(report.actionable, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::Path {
+                path: "marker-dir".to_string(),
+                satisfied: false,
+            }]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_exists_predicate_ambiguous_across_both_roots_is_not_evaluable() {
+        let brain_dir = std::env::temp_dir().join(format!(
+            "mev-carryover-file-exists-ambig-brain-{}",
+            std::process::id()
+        ));
+        let repo_dir = std::env::temp_dir().join(format!(
+            "mev-carryover-file-exists-ambig-repo-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&brain_dir).unwrap();
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        // Two DIFFERENT files, same relative path, one under each root.
+        std::fs::write(brain_dir.join("marker.md"), "brain copy").unwrap();
+        std::fs::write(repo_dir.join("marker.md"), "repo copy").unwrap();
+
+        let mut repo_paths = HashMap::new();
+        repo_paths.insert("mev".to_string(), repo_dir.clone());
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-exists-ambiguous",
+                    "deferred",
+                    ClearsWhenPredicate::FileExists {
+                        path: "marker.md".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &brain_dir,
+            &repo_paths,
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        assert_eq!(
+            report.cleared, 0,
+            "an ambiguous two-root resolution must never read as Cleared"
+        );
+        assert_eq!(report.not_evaluable, 1);
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::AmbiguousReference)
+        );
+        assert!(
+            report.entries[0].refs.is_empty(),
+            "an ambiguous resolution pushes no ref — dropped rather than guessed at"
+        );
+
+        std::fs::remove_dir_all(&brain_dir).ok();
+        std::fs::remove_dir_all(&repo_dir).ok();
+    }
+
+    #[test]
+    fn file_exists_predicate_present_under_only_repo_root_still_clears() {
+        // Positive control for the two tests above: proves the new rejection
+        // is specific to the directory/ambiguity shapes, not a blanket
+        // regression of the existing repo-root resolution path.
+        let brain_dir = std::env::temp_dir().join(format!(
+            "mev-carryover-file-exists-repo-only-brain-{}",
+            std::process::id()
+        ));
+        let repo_dir = std::env::temp_dir().join(format!(
+            "mev-carryover-file-exists-repo-only-repo-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&brain_dir).unwrap();
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::write(repo_dir.join("marker.md"), "present").unwrap();
+
+        let mut repo_paths = HashMap::new();
+        repo_paths.insert("mev".to_string(), repo_dir.clone());
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-exists-repo-only",
+                    "deferred",
+                    ClearsWhenPredicate::FileExists {
+                        path: "marker.md".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &brain_dir,
+            &repo_paths,
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        assert_eq!(report.cleared, 1);
+        assert_eq!(report.not_evaluable, 0);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::Path {
+                path: "marker.md".to_string(),
+                satisfied: true,
+            }]
+        );
+
+        std::fs::remove_dir_all(&brain_dir).ok();
+        std::fs::remove_dir_all(&repo_dir).ok();
+    }
+
+    #[test]
+    fn resolve_existing_path_same_file_under_both_roots_is_unique_not_ambiguous() {
+        // A repo directory reachable through the brain root (e.g. brain root
+        // == repo root, or a symlink) resolves to the SAME underlying file
+        // under both candidates and must not be flagged ambiguous.
+        let dir = std::env::temp_dir().join(format!(
+            "mev-carryover-resolve-same-file-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("marker.md"), "present").unwrap();
+
+        let mut repo_paths = HashMap::new();
+        repo_paths.insert("mev".to_string(), dir.clone());
+
+        let resolution = resolve_existing_path("marker.md", &dir, &repo_paths, "mev");
+        assert_eq!(resolution, PathResolution::Unique(dir.join("marker.md")));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Scratch dir helper for `file_contains` fixtures — mirrors the
