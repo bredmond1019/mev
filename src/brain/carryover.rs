@@ -284,6 +284,14 @@ pub struct CarryoverReport {
     /// nothing validates" defect class `MV.ticket.carryover-dedup-clusters`
     /// exists to remove from `finding_id` itself.
     pub single_repo_finding_ids: Vec<String>,
+    /// Count of `carryover[]` entries scoped `cross_repo: true` or to a
+    /// `tier` (no single owning repo) that an active `--repo` filter
+    /// excluded from this run. Always `0` when no `--repo` filter is active.
+    /// `MV.ticket.repo-filter-hides-cross-repo-entries` — powers the CLI's
+    /// filter-aware summary and empty-result lines, naming
+    /// `--include-cross-repo` as the way to widen the view.
+    #[serde(default)]
+    pub repo_filter_excluded_cross_repo: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -1054,33 +1062,90 @@ pub fn evaluate_carryover_with_dedup(
     include_dedup: bool,
     exec_timeout: std::time::Duration,
 ) -> CarryoverReport {
+    evaluate_carryover_with_dedup_and_widening(
+        files,
+        status_map,
+        brain_root,
+        repo_paths,
+        today,
+        thresholds,
+        repo_filter,
+        false,
+        allow_exec,
+        include_dedup,
+        exec_timeout,
+    )
+}
+
+/// Same as [`evaluate_carryover_with_dedup`], with `include_cross_repo` exposed —
+/// kept as a separate function (rather than a new parameter on
+/// `evaluate_carryover_with_dedup`) so that function's signature stays stable for
+/// its existing direct callers outside this crate (`bastion`'s `/api/attention`
+/// handler calls it by name). `--include-cross-repo` is CLI-only
+/// (`MV.ticket.repo-filter-hides-cross-repo-entries`) and reaches this function
+/// only via [`evaluate_carryover_with_grep`]'s unfiltered pass.
+///
+/// `include_cross_repo`, when `true` together with `repo_filter`, additionally
+/// matches entries scoped `cross_repo: true` — widening to the unattributable,
+/// never to a *different* named repo. `tier`-scoped entries stay excluded either
+/// way (pinned decision: a separate `--include-tier` is out of scope for now).
+/// Has no effect when `repo_filter` is `None`.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_carryover_with_dedup_and_widening(
+    files: &[(StateSource, StateFile)],
+    status_map: &HashMap<String, Option<String>>,
+    brain_root: &Path,
+    repo_paths: &HashMap<String, PathBuf>,
+    today: &str,
+    thresholds: &AttentionThresholds,
+    repo_filter: Option<&str>,
+    include_cross_repo: bool,
+    allow_exec: bool,
+    include_dedup: bool,
+    exec_timeout: std::time::Duration,
+) -> CarryoverReport {
     let known_keys: HashSet<String> = status_map.keys().cloned().collect();
     let today_date = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d").ok();
 
     let mut entries: Vec<CarryoverVerdict> = Vec::new();
+    // Count of entries scoped `cross_repo: true` or to a `tier` (no single
+    // owning repo) that `repo_filter` excluded from this run. `0` whenever
+    // `repo_filter` is `None`. Powers `mev carryover`'s filter-aware summary
+    // line — see `CarryoverReport::repo_filter_excluded_cross_repo`.
+    let mut repo_filter_excluded_cross_repo: usize = 0;
 
     for (src, file) in files {
         // Cheap pre-pass, kept for perf on a 25-file corpus: a file whose repo
         // doesn't match the filter can still contribute an entry when that
-        // entry carries its own `scope.repo` override. Only skip the whole
-        // file when NEITHER the file's own repo matches NOR any entry in it
-        // has a `scope.repo` override at all — such a file provably cannot
-        // contain an entry owned by a different repo (an entry with no
-        // override falls back to the file's own repo, which already failed
-        // the match).
+        // entry carries its own `scope.repo` override, or is scoped
+        // `cross_repo`/`tier` (no single owning repo — such an entry can live
+        // in ANY file, and skipping the file would hide it from both the
+        // `--include-cross-repo` widening and the excluded-count above). Only
+        // skip the whole file when NONE of those apply.
         if let Some(filter) = repo_filter
             && src.repo_slug != filter
-            && !file.carryover.iter().any(|item| item.scope.repo.is_some())
+            && !file.carryover.iter().any(|item| {
+                item.scope.repo.is_some()
+                    || item.scope.tier.is_some()
+                    || item.scope.cross_repo.is_some()
+            })
         {
             continue;
         }
 
         for item in &file.carryover {
             let filter_owner = carryover_filter_owner(&item.scope, src.repo_slug.as_str());
-            if let Some(filter) = repo_filter
-                && filter_owner != Some(filter)
-            {
-                continue;
+            if let Some(filter) = repo_filter {
+                let matches = match filter_owner {
+                    Some(owner) => owner == filter,
+                    None => include_cross_repo && item.scope.cross_repo == Some(true),
+                };
+                if !matches {
+                    if filter_owner.is_none() {
+                        repo_filter_excluded_cross_repo += 1;
+                    }
+                    continue;
+                }
             }
 
             let own_repo = item.scope.repo.as_deref().unwrap_or(src.repo_slug.as_str());
@@ -1393,6 +1458,7 @@ pub fn evaluate_carryover_with_dedup(
         clusters,
         suggestions,
         single_repo_finding_ids,
+        repo_filter_excluded_cross_repo,
     }
 }
 
@@ -1432,12 +1498,13 @@ pub fn evaluate_carryover_with_grep(
     today: &str,
     thresholds: &AttentionThresholds,
     repo_filter: Option<&str>,
+    include_cross_repo: bool,
     allow_exec: bool,
     exec_timeout: std::time::Duration,
     grep_pattern: Option<&str>,
 ) -> Result<CarryoverReport, regex::Error> {
     let Some(pattern) = grep_pattern else {
-        return Ok(evaluate_carryover(
+        return Ok(evaluate_carryover_with_dedup_and_widening(
             files,
             status_map,
             brain_root,
@@ -1445,12 +1512,14 @@ pub fn evaluate_carryover_with_grep(
             today,
             thresholds,
             repo_filter,
+            include_cross_repo,
             allow_exec,
+            true,
             exec_timeout,
         ));
     };
 
-    let unfiltered = evaluate_carryover_with_dedup(
+    let unfiltered = evaluate_carryover_with_dedup_and_widening(
         files,
         status_map,
         brain_root,
@@ -1458,6 +1527,7 @@ pub fn evaluate_carryover_with_grep(
         today,
         thresholds,
         repo_filter,
+        include_cross_repo,
         allow_exec,
         false,
         exec_timeout,
@@ -1487,6 +1557,11 @@ pub fn evaluate_carryover_with_grep(
         clusters: Vec::new(),
         suggestions: Vec::new(),
         single_repo_finding_ids: Vec::new(),
+        // Carried from the unfiltered pass, not recomputed over the
+        // grep-narrowed subset: this count describes what `--repo` excluded
+        // from the corpus, which `--grep` narrowing afterward neither adds
+        // to nor removes from.
+        repo_filter_excluded_cross_repo: unfiltered.repo_filter_excluded_cross_repo,
     })
 }
 
@@ -6279,6 +6354,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            false,
             COMMAND_EXEC_TIMEOUT,
             Some("synapse"),
         )
@@ -6316,6 +6392,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            false,
             COMMAND_EXEC_TIMEOUT,
             Some("no-such-pattern-anywhere"),
         )
@@ -6343,6 +6420,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
             false,
             COMMAND_EXEC_TIMEOUT,
             Some("(unclosed["),
@@ -6402,6 +6480,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            false,
             COMMAND_EXEC_TIMEOUT,
             None,
         )
@@ -6421,6 +6500,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             None,
+            false,
             false,
             COMMAND_EXEC_TIMEOUT,
             Some("similar-entry-a"),
@@ -6458,6 +6538,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            false,
             COMMAND_EXEC_TIMEOUT,
             Some("synapse"),
         )
@@ -6473,6 +6554,7 @@ mod tests {
             "2026-08-03",
             &thresholds(),
             Some("mev"),
+            false,
             false,
             COMMAND_EXEC_TIMEOUT,
             Some("synapse"),

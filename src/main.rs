@@ -1037,9 +1037,22 @@ enum Command {
         /// Defaults to the current directory.
         #[arg(default_value = ".")]
         path: PathBuf,
-        /// Restrict the sweep to one repo's carryover[] entries.
+        /// Restrict the sweep to one repo's carryover[] entries. A bare
+        /// `--repo` excludes entries scoped `cross_repo: true` or to a
+        /// `tier` — no single repo owns them, so they match no `--repo`
+        /// filter. Pass `--include-cross-repo` to widen the view to include
+        /// the `cross_repo`-scoped ones (not the tier-scoped ones).
         #[arg(long)]
         repo: Option<String>,
+        /// Widen a `--repo` filter to also match entries scoped
+        /// `cross_repo: true`. Requires `--repo` — passed alone, `mev
+        /// carryover` reports the misuse and exits non-zero rather than
+        /// silently ignoring it (`MV.ticket.repo-filter-hides-cross-repo-
+        /// entries`). Entries scoped to a *different* named repo, and
+        /// entries scoped to a `tier`, stay excluded either way — this
+        /// widens to the unattributable, it does not disable the filter.
+        #[arg(long)]
+        include_cross_repo: bool,
         /// Restrict the sweep to entries whose `slug` or `text` matches this
         /// pattern (case-insensitive regex). Composes with `--repo`: an
         /// entry must satisfy both. The reported total/cleared/actionable/
@@ -2325,7 +2338,23 @@ fn print_carryover_trajectory(report: &mev::brain::carryover::TrajectoryReport) 
 }
 
 /// Human-readable, lane-grouped summary for `mev carryover`'s default (non-`--json`) output.
-fn print_carryover_report(report: &mev::CarryoverReport, grep_pattern: Option<&str>) {
+///
+/// `repo_filter`, when set, makes both the summary line and (when the result
+/// is empty) the empty-result line name the active `--repo` filter and how
+/// many cross-repo/tier entries it excluded — the unqualified "swept the
+/// corpus" sentence is a false claim of corpus-wide coverage once `--repo`
+/// has narrowed the sweep (`MV.ticket.repo-filter-hides-cross-repo-entries`).
+fn print_carryover_report(
+    report: &mev::CarryoverReport,
+    grep_pattern: Option<&str>,
+    repo_filter: Option<&str>,
+) {
+    if let Some(filter) = repo_filter {
+        println!(
+            "carryover sweep: filter --repo '{filter}' applied ({} cross-repo/tier entries excluded by this filter; add --include-cross-repo to include the cross-repo-scoped ones)",
+            report.repo_filter_excluded_cross_repo
+        );
+    }
     if let Some(pattern) = grep_pattern {
         println!(
             "carryover sweep: filter --grep '{pattern}' applied (case-insensitive, slug+text)"
@@ -2336,9 +2365,16 @@ fn print_carryover_report(report: &mev::CarryoverReport, grep_pattern: Option<&s
         report.total, report.cleared, report.actionable, report.not_evaluable
     );
     if grep_pattern.is_some() && report.total == 0 {
-        println!(
-            "carryover sweep: swept the corpus and matched nothing for this pattern (not \"nothing to sweep\")"
-        );
+        if let Some(filter) = repo_filter {
+            println!(
+                "carryover sweep: swept 1 repo ({filter}) and matched nothing for this pattern (not \"nothing to sweep\"); {} cross-repo/tier entries are excluded by --repo, add --include-cross-repo to sweep them too",
+                report.repo_filter_excluded_cross_repo
+            );
+        } else {
+            println!(
+                "carryover sweep: swept the corpus and matched nothing for this pattern (not \"nothing to sweep\")"
+            );
+        }
     }
 
     for lane in [
@@ -3822,6 +3858,7 @@ fn main() -> ExitCode {
         Command::Carryover {
             path,
             repo,
+            include_cross_repo,
             grep,
             json,
             allow_exec,
@@ -3869,6 +3906,18 @@ fn main() -> ExitCode {
             if grep.is_some() && (audit || trajectory || dispose || backfill || would_block) {
                 eprintln!(
                     "error: --grep only applies to the plain per-entry sweep; it cannot be combined with --audit, --trajectory, --dispose, --backfill, or --would-block"
+                );
+                return ExitCode::FAILURE;
+            }
+            if include_cross_repo && repo.is_none() {
+                eprintln!(
+                    "error: --include-cross-repo has no effect without --repo; pass --repo <SLUG> --include-cross-repo"
+                );
+                return ExitCode::FAILURE;
+            }
+            if include_cross_repo && (audit || trajectory || dispose || backfill || would_block) {
+                eprintln!(
+                    "error: --include-cross-repo only applies to the plain per-entry sweep; it cannot be combined with --audit, --trajectory, --dispose, --backfill, or --would-block"
                 );
                 return ExitCode::FAILURE;
             }
@@ -3920,9 +3969,10 @@ fn main() -> ExitCode {
                     }
                 }
             } else {
-                match mev::carryover_sweep_with_grep(
+                match mev::carryover_sweep_with_grep_and_widening(
                     &root,
                     repo.as_deref(),
+                    include_cross_repo,
                     allow_exec,
                     exec_timeout,
                     grep.as_deref(),
@@ -3940,7 +3990,7 @@ fn main() -> ExitCode {
                                 }
                             }
                         } else {
-                            print_carryover_report(&report, grep.as_deref());
+                            print_carryover_report(&report, grep.as_deref(), repo.as_deref());
                             ExitCode::SUCCESS
                         }
                     }

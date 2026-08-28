@@ -2532,9 +2532,37 @@ pub fn carryover_sweep_with_grep(
     exec_timeout: std::time::Duration,
     grep_pattern: Option<&str>,
 ) -> anyhow::Result<brain::carryover::CarryoverReport> {
+    carryover_sweep_with_grep_and_widening(
+        root,
+        repo_filter,
+        false,
+        allow_exec,
+        exec_timeout,
+        grep_pattern,
+    )
+}
+
+/// Same as [`carryover_sweep_with_grep`], with `include_cross_repo`
+/// (`mev carryover --include-cross-repo`,
+/// `MV.ticket.repo-filter-hides-cross-repo-entries`) exposed. With
+/// `repo_filter` set, additionally matches entries scoped `cross_repo: true` —
+/// widening to the unattributable, never to a *different* named repo, and
+/// never to `tier`-scoped entries (pinned decision; a separate
+/// `--include-tier` is out of scope). Has no effect when `repo_filter` is
+/// `None` — the CLI reports that combination as a misuse rather than
+/// silently ignoring it.
+pub fn carryover_sweep_with_grep_and_widening(
+    root: &std::path::Path,
+    repo_filter: Option<&str>,
+    include_cross_repo: bool,
+    allow_exec: bool,
+    exec_timeout: std::time::Duration,
+    grep_pattern: Option<&str>,
+) -> anyhow::Result<brain::carryover::CarryoverReport> {
     let (_loaded, report) = load_and_evaluate_carryover_corpus(
         root,
         repo_filter,
+        include_cross_repo,
         allow_exec,
         exec_timeout,
         grep_pattern,
@@ -2551,6 +2579,7 @@ pub fn carryover_sweep_with_grep(
 fn load_and_evaluate_carryover_corpus(
     root: &std::path::Path,
     repo_filter: Option<&str>,
+    include_cross_repo: bool,
     allow_exec: bool,
     exec_timeout: std::time::Duration,
     grep_pattern: Option<&str>,
@@ -2626,6 +2655,7 @@ fn load_and_evaluate_carryover_corpus(
         &today,
         &config.attention,
         repo_filter,
+        include_cross_repo,
         allow_exec,
         exec_timeout,
         grep_pattern,
@@ -2657,8 +2687,14 @@ pub fn carryover_audit(
     brain::carryover::CarryoverReport,
     brain::carryover::CarryoverAudit,
 )> {
-    let (loaded, report) =
-        load_and_evaluate_carryover_corpus(root, repo_filter, allow_exec, exec_timeout, None)?;
+    let (loaded, report) = load_and_evaluate_carryover_corpus(
+        root,
+        repo_filter,
+        false,
+        allow_exec,
+        exec_timeout,
+        None,
+    )?;
     let today = chrono::Local::now()
         .date_naive()
         .format("%Y-%m-%d")
