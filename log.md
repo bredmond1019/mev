@@ -8,10 +8,32 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-23T09:17:53-03:00"
+timestamp: "2026-08-28T11:20:00-03:00"
 ---
 
 ## [run: 2026-08-28]
+
+### A consumer break shipped past the gate built to catch it
+
+- **What:** Closed `MV.ticket.carryover-grep` (4/4, `/sdlc-task`) — `mev carryover --grep <pattern>`
+  filters over slug + text before the lane counts. Then, on an operator request to rebuild `bastion`,
+  discovered `bastion` would not compile at all against mev `main`: `MV.16.G` had added a tenth
+  `exec_timeout: Duration` parameter to the public `evaluate_carryover_with_dedup` and bastion's call
+  site still passed nine. Fixed in `bastion:8d8ed4b` (forwards `mev::COMMAND_EXEC_TIMEOUT`; inert
+  there, since that site passes `allow_exec: false`). Also fixed `engine-rs:e8d35b6`, a stale
+  `Cargo.lock` missing `regex`. Both consumers now report `pass` for the first time. Filed four
+  tickets: three in mev (`locked-lockfile-check`, `consumer-gate-reports-coverage`,
+  `repo-filter-hides-cross-repo-entries`) and one in base-template
+  (`pr-stages-read-draft-and-checks-from-github`). README gained a `## Concurrent writers` section.
+- **Why:** `scripts/check_consumers.sh` — registered and gating since `MV.18.A`, and whose entire
+  purpose is catching exactly this — never caught it, because it never compiled bastion. It declined
+  twice for two different reasons (`skipped_dirty`, then `lockfile_stale`) and printed green both
+  times. The break was found by a human asking for a rebuild. Four separate defects this week share
+  that one shape: a check that could not run reports the same green as a check that passed, so the
+  tickets close the pattern rather than the instance.
+- **Refs:** `planning/handoff.md`; `orchestration-run/autonomous-foundation/notes.md`; commit
+  `b2d8ae57` (tickets).
+
 
 Resumed and closed `MV.ticket.write-verbs-ignore-the-quiesce-lease` via `/sdlc-flow` (tasks 1–5, PASS).
 Tasks 1–4 (lease.rs, the 11 write-verb call sites, the fixture suite, docs) carried over unchanged from
