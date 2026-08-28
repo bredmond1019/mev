@@ -101,6 +101,12 @@ argument shape differs.
 command only prints its plan unless you pass `--write`; "Always writes" means there is no
 dry-run mode at all.
 
+The eleven commands that write `state.json` or its derived files — `emit-state`,
+`state-history --restore`, `set-block-status`, `defer-epic`, `resume-epic`, `complete-epic`,
+`sync-epics`, `close-operator-gate`, `normalize-op-slugs`, `approve`, `reject` — additionally
+accept `--agent <name>` and `--lock-dir <PATH>`, and will refuse to write while another agent
+holds a *quiesce lease*. See [Concurrent writers](#concurrent-writers) below.
+
 | Command | What it does | Write? |
 |---|---|---|
 | [`validate`](#validate---blog---lint-path) | Lints a plain Markdown/MDX content tree (frontmatter, JSON structs, dead links, code fences). | Read-only |
@@ -200,6 +206,30 @@ mev carryover ~/Dev/your-corpus --dispose --dry-run   # preview exactly what --d
 `--dispose` and `--backfill` are the only writing modes in this command family; every other flag
 (including `--audit`, `--trajectory`, `--would-block`) is read-only.
 
+## Concurrent writers
+
+If several agents or people drive `mev` against one corpus, two independent mechanisms keep their
+writes apart. Both apply only to a run that actually writes — a dry-run checks neither.
+
+- **The advisory lock** (`<corpus root>/.mev-emit.lock`) stops two writes landing at the same
+  instant. A second writer fails with `E_EMIT_LOCK_HELD`; retrying shortly is the right response.
+- **Quiesce leases** let one agent declare a quiet window that others must respect — which the lock
+  cannot express, since it is only held for the duration of a single write. `mev` reads
+  `<lock_dir>/leases/*.json` and refuses with `E_QUIESCE_LEASE_HELD`, writing nothing, when a lease
+  there is `"kind": "exclusive"`, is not stale, and is held by an agent other than the caller. A
+  lease's `"scope"` decides its reach: `"fleet"` refuses writes in every repo, while `"repo"` (or an
+  absent `scope`) refuses only writes to the repo it names. Unlike the lock, this is **not** a retry
+  condition — wait for the lease to be released.
+
+`--lock-dir <PATH>` says where to look; otherwise `mev` uses the `FLEET_LOCK_DIR` environment
+variable, and failing that `<corpus root>/.fleet-locks`. If that directory does not exist or cannot
+be read, nothing is refused — leases are opt-in, and a corpus that has never created one is
+unaffected.
+
+`--agent <name>` identifies the caller so its *own* lease does not refuse it. Omitting it means the
+caller cannot be matched against any lease holder, so any live exclusive lease will refuse the
+write — including one the same caller wrote itself.
+
 ## `--json` output shape
 
 Every validating command's `--json` flag emits a `JsonReport` envelope:
@@ -271,6 +301,7 @@ Full module-by-module breakdown: [`docs/architecture.md`](docs/architecture.md).
 | Build fails looking for `okf-core` | The path dependency sibling isn't cloned. | Clone `https://github.com/bredmond1019/okf-core` next to this repo (`../okf-core` relative to `mev/`). |
 | `validate-brain --links --state` (or any two flags together) only checks one thing | The flags don't compose — see the dispatch order above. | Run one flag per invocation. |
 | `emit-state --write` reports `E_EMIT_LOCK_HELD` | Another live `mev` write process holds the advisory lock. | Wait for it to finish; a lock from a dead process is reclaimed automatically. |
+| A write command reports `E_QUIESCE_LEASE_HELD` | Another agent holds an exclusive quiesce lease over this write. Retrying will not help — see [Concurrent writers](#concurrent-writers). | Wait for the lease to be released, or pass `--agent <name>` if the lease is your own. |
 | A `--write` command refuses inside a git worktree | Writers resolve paths from `brain.toml`, not the current working directory, so writing from a linked worktree would target the wrong checkout. | Run from the main working tree. |
 | A generated file looks wrong after `emit-state --write` | The write is recorded, so it's recoverable. | `mev state-history <path>` to list revisions, `--restore SEQ` to roll back. |
 
