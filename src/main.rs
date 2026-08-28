@@ -2090,7 +2090,7 @@ fn print_carryover_audit(audit: &mev::CarryoverAudit) {
         audit.typed_predicate_count, audit.carryover_count
     );
     println!(
-        "clear rate (carryover[] only, reference[] excluded): {}/{} = {:.1}%",
+        "clear rate — deletions only (carryover[] only, reference[] excluded): {}/{} = {:.1}%",
         audit.cleared_total,
         audit.clearable_total,
         audit.clear_rate * 100.0
@@ -2099,6 +2099,59 @@ fn print_carryover_audit(audit: &mev::CarryoverAudit) {
         "last {} days — inflow: {}, outflow: {}",
         audit.window_days, audit.inflow, audit.outflow
     );
+
+    print_archive_outflow(&audit.archive_outflow);
+}
+
+/// Print the `OUTFLOW (archive)` section of `mev carryover --audit`'s human-readable
+/// report. Omitted entirely when there is nothing to say — including when every
+/// selected repo is simply missing its archive: an absent `carryover-archive.jsonl`
+/// yields zero rows, no diagnostic, and exit 0 (unlike a malformed archive line,
+/// which IS reported).
+fn print_archive_outflow(outflow: &mev::brain::carryover::ArchiveOutflow) {
+    if outflow.rows_total == 0 && outflow.archives_read == 0 {
+        return;
+    }
+
+    println!(
+        "\nOUTFLOW (archive, {} rows over {} archive(s)):",
+        outflow.rows_total, outflow.archives_read
+    );
+    println!("  reason          observed  reconstructed");
+    let mut total_observed = 0usize;
+    let mut total_reconstructed = 0usize;
+    for (reason, split) in &outflow.per_reason {
+        println!(
+            "  {:<14}  {:>8}  {:>13}",
+            reason, split.observed, split.reconstructed
+        );
+        total_observed += split.observed;
+        total_reconstructed += split.reconstructed;
+    }
+    println!(
+        "  {:<14}  {:>8}  {:>13}",
+        "TOTAL", total_observed, total_reconstructed
+    );
+
+    if !outflow.malformed_lines.is_empty() {
+        let shown: Vec<&str> = outflow
+            .malformed_lines
+            .iter()
+            .take(5)
+            .map(|s| s.as_str())
+            .collect();
+        println!(
+            "  skipped {} malformed archive line(s): {}",
+            outflow.malformed_lines.len(),
+            shown.join(", ")
+        );
+    }
+
+    if total_reconstructed > 0 {
+        println!(
+            "  reconstructed rows are git-reconstructed (MV.16.B) and may include relocations, not only disposals."
+        );
+    }
 }
 
 /// Human-readable, one-block-per-consumer summary for `mev check-consumers`'s default
