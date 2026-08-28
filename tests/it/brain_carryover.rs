@@ -331,13 +331,25 @@ fn total_equals_sum_of_lanes_and_entries() {
 /// evaluating anything) still trips this floor.
 const EVALUABLE_FLOOR: usize = 6;
 
-/// Ceiling on `cleared` in the live HQ corpus. `cleared` is the destructive
-/// verdict this whole block is engineered never to over-produce — an
-/// unexpected jump is exactly the failure mode a floor alone cannot catch.
-/// Measured 2026-08-09: 2 cleared (baseline was 3). Set generously above
-/// both readings to tolerate ordinary fleet churn while still catching a
-/// widening that starts mis-firing.
-const CLEARED_CEILING: usize = 15;
+// A `CLEARED_CEILING` const lived here and gated `cargo test`. It was REMOVED
+// 2026-08-28, not re-baselined.
+//
+// It asserted `report.cleared <= 15` over the LIVE fleet corpus, to catch a
+// widening that starts manufacturing false `cleared` verdicts. The intent was
+// right; the instrument was not. `cleared` over the live corpus is a function
+// of every repo's `carryover[]` predicates, so any lane in any repo can move it
+// without touching mev — and one did: this assertion passed at 717/717 and
+// failed on the next run with no mev source change in between, tripping at 16.
+// A gate that can go red without the code changing is worth as little as one
+// that goes green without running, and it blocks every close-out and push in
+// this repo while it drifts.
+//
+// The property it was guarding is now pinned where it belongs, on a fixture
+// corpus, by `widening_admits_entries_but_never_relanes_them` below. That test
+// states the invariant directly rather than inferring it from a count: widening
+// changes WHICH entries the filter admits, never WHICH LANE an entry lands in.
+// A widening that manufactured a false `cleared` would fail it deterministically,
+// on any machine, with no dependency on fleet state.
 
 #[test]
 fn live_corpus_evaluable_floor_and_cleared_ceiling() {
@@ -376,13 +388,6 @@ fn live_corpus_evaluable_floor_and_cleared_ceiling() {
         report.actionable,
         report.not_evaluable
     );
-    assert!(
-        report.cleared <= CLEARED_CEILING,
-        "live-corpus cleared count {} exceeds the ceiling of {CLEARED_CEILING} — a widening may \
-         be over-firing and manufacturing false `cleared` verdicts",
-        report.cleared
-    );
-
     // Live-data twin of the `carryover.rs:1098`-equivalent CLOSURE_VERBS
     // pinning test: if `core:ba-0-a-id-collision` is still present in the
     // corpus, it must never have landed in the cleared lane. BA.0.A IS
@@ -404,6 +409,172 @@ fn live_corpus_evaluable_floor_and_cleared_ceiling() {
 
     // Nothing in this task writes to any state.json — the sweep above is a
     // pure read, and no code path in this test opens any file for writing.
+}
+
+/// Write a widening fixture: `alpha` owns one entry whose predicate is
+/// satisfied (Cleared) and one whose predicate is not (Actionable); one entry
+/// is scoped `cross_repo: true` with an UNSATISFIED predicate, and one is
+/// `tier`-scoped, also unsatisfied.
+///
+/// The cross-repo entry is the load-bearing one: it is invisible to a bare
+/// `--repo alpha`, admitted by `--include-cross-repo`, and must arrive in
+/// `Actionable` when it does. A widening that manufactured a false `cleared`
+/// would land it in `Cleared` instead, which is exactly what the deleted
+/// live-corpus ceiling was trying to notice from a distance.
+fn write_widening_alpha_state(root: &Path) {
+    let state = serde_json::json!({
+        "repo": "alpha",
+        "kind": "project",
+        "updated": "2026-08-01",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "tracks": [
+            {
+                "title": "Phase 1",
+                "blocks": [
+                    { "id": "AL.1.A", "title": "Alpha block A", "status": "open" }
+                ]
+            }
+        ],
+        "carryover": [
+            {
+                "slug": "alpha-owned-cleared",
+                "scope": { "repo": "alpha" },
+                "kind": "deferred",
+                "text": "Alpha was waiting on beta's block A landing.",
+                "related": [ { "type": "block", "repo": "beta", "id": "BE.1.A" } ],
+                "clears_when": "BE.1.A lands",
+                "created": "2026-06-01"
+            },
+            {
+                "slug": "alpha-owned-actionable",
+                "scope": { "repo": "alpha" },
+                "kind": "deferred",
+                "text": "Alpha is waiting on beta's block B landing.",
+                "related": [ { "type": "block", "repo": "beta", "id": "BE.1.B" } ],
+                "clears_when": "BE.1.B lands",
+                "created": "2026-06-01"
+            },
+            {
+                "slug": "cross-repo-actionable",
+                "scope": { "cross_repo": true },
+                "kind": "deferred",
+                "text": "No single repo owns this; it waits on beta's open block B.",
+                "related": [ { "type": "block", "repo": "beta", "id": "BE.1.B" } ],
+                "clears_when": "BE.1.B lands",
+                "created": "2026-06-01"
+            },
+            {
+                "slug": "tier-scoped-actionable",
+                "scope": { "tier": "core" },
+                "kind": "deferred",
+                "text": "Tier-wide item, also waiting on beta's open block B.",
+                "related": [ { "type": "block", "repo": "beta", "id": "BE.1.B" } ],
+                "clears_when": "BE.1.B lands",
+                "created": "2026-06-01"
+            }
+        ]
+    });
+    write_json(root, "repos/alpha/planning/state.json", &state);
+}
+
+/// The invariant the deleted `CLEARED_CEILING` was reaching for, stated
+/// directly and deterministically: **`--include-cross-repo` changes which
+/// entries the filter admits; it never changes which lane an entry lands in.**
+///
+/// Deterministic where the ceiling was not — this fixture is built in a temp
+/// dir, so the verdict depends on nothing outside this test.
+#[test]
+fn widening_admits_entries_but_never_relanes_them() {
+    let root = temp_dir("carryover-widening");
+    write_brain_toml(&root);
+    write_widening_alpha_state(&root);
+    write_beta_state(&root);
+
+    let narrow = mev::carryover_sweep_with_grep_and_widening(
+        &root,
+        Some("alpha"),
+        false,
+        false,
+        mev::COMMAND_EXEC_TIMEOUT,
+        None,
+    )
+    .expect("narrow sweep");
+    let wide = mev::carryover_sweep_with_grep_and_widening(
+        &root,
+        Some("alpha"),
+        true,
+        false,
+        mev::COMMAND_EXEC_TIMEOUT,
+        None,
+    )
+    .expect("widened sweep");
+
+    // Narrow: alpha's two entries only. The cross-repo and tier entries match
+    // no `--repo` filter at all.
+    let mut narrow_slugs: Vec<&str> = narrow.entries.iter().map(|e| e.slug.as_str()).collect();
+    narrow_slugs.sort_unstable();
+    assert_eq!(
+        narrow_slugs,
+        vec!["alpha-owned-actionable", "alpha-owned-cleared"],
+        "a bare --repo must admit only that repo's own entries"
+    );
+
+    // Widened: alpha's two plus the cross-repo one. The TIER entry must stay
+    // out — widening reaches the unattributable, not everything.
+    let mut wide_slugs: Vec<&str> = wide.entries.iter().map(|e| e.slug.as_str()).collect();
+    wide_slugs.sort_unstable();
+    assert_eq!(
+        wide_slugs,
+        vec![
+            "alpha-owned-actionable",
+            "alpha-owned-cleared",
+            "cross-repo-actionable"
+        ],
+        "--include-cross-repo must admit cross_repo entries and still exclude tier-scoped ones"
+    );
+
+    // THE ANTI-OVER-FIRING ASSERTION. The admitted cross-repo entry's predicate
+    // is unsatisfied (beta's BE.1.B is open), so it must arrive Actionable. A
+    // widening that manufactured a false `cleared` puts it in Cleared here.
+    let admitted = wide
+        .entries
+        .iter()
+        .find(|e| e.slug == "cross-repo-actionable")
+        .expect("widening must admit the cross-repo entry");
+    assert_eq!(
+        admitted.lane,
+        CarryoverLane::Actionable,
+        "widening admitted this entry but must not have re-laned it — its block BE.1.B is still \
+         open, so Cleared here is a manufactured verdict: {:#?}",
+        admitted.refs
+    );
+
+    // Every entry present in BOTH sweeps must hold the same lane in both:
+    // admission is orthogonal to adjudication.
+    for n in &narrow.entries {
+        let w = wide
+            .entries
+            .iter()
+            .find(|e| e.slug == n.slug)
+            .expect("an entry admitted narrowly must still be admitted when widened");
+        assert_eq!(
+            n.lane, w.lane,
+            "entry {} changed lane when the filter widened — admission must never re-adjudicate",
+            n.slug
+        );
+    }
+
+    // And the count the deleted ceiling watched: widening added exactly one
+    // entry, and it added ZERO to `cleared`.
+    assert_eq!(
+        wide.total,
+        narrow.total + 1,
+        "widening admitted exactly one entry"
+    );
+    assert_eq!(
+        wide.cleared, narrow.cleared,
+        "widening must not increase the cleared count — that is the over-firing shape"
+    );
 }
 
 // ---------------------------------------------------------------------------

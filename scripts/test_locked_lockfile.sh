@@ -23,6 +23,14 @@
 #
 set -uo pipefail
 
+# Snapshot the working tree BEFORE doing anything, so the isolation guard at the
+# end can compare against it. An absolute "git status is empty" assertion would
+# be testing whether SOMEONE ELSE left the tree dirty, not whether this script
+# touched it -- it fails under any concurrent lane, any in-flight edit, and in a
+# worktree, none of which say anything about this script's isolation.
+REPO_ROOT_SNAPSHOT="$(cd "$(dirname "$0")/.." && pwd)"
+TREE_BEFORE="$(cd "$REPO_ROOT_SNAPSHOT" && git status --short -- . 2>/dev/null)"
+
 fail=0
 pass_count=0
 fail_count=0
@@ -98,11 +106,19 @@ check "SAME fixture, lock regenerated: cargo metadata --locked now exits 0" \
 
 # ---------------------------------------------------------------------------
 # Isolation guard: this script must never touch the real repo.
+#
+# Compares the tree against the snapshot taken at startup rather than asserting
+# it is absolutely clean. The question this guard exists to answer is "did THIS
+# SCRIPT change anything", and only a before/after diff answers it: an absolute
+# check conflates the script's own writes with every unrelated edit in the tree,
+# so it goes red for another lane's uncommitted work and green for a genuine
+# violation that happens to land in an already-dirty file. Observed failing that
+# way 2026-08-28, on an unrelated in-flight test edit.
 # ---------------------------------------------------------------------------
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SELF_BASENAME="$(basename "$0")"
-REPO_STATUS="$(cd "$REPO_ROOT" && git status --short -- . ":(exclude)scripts/$SELF_BASENAME")"
-check "this repo's own working tree is untouched (git status --short empty, excluding this script itself)" \
+TREE_AFTER="$(cd "$REPO_ROOT" && git status --short -- . 2>/dev/null)"
+REPO_STATUS="$( [ "$TREE_BEFORE" = "$TREE_AFTER" ] && echo "" || printf '%s' "$TREE_AFTER" )"
+check "this repo's own working tree is unchanged by this script (before/after git status identical)" \
     "$( [ -z "$REPO_STATUS" ] && echo 0 || echo 1 )"
 
 check "test_locked_lockfile.sh passes bash -n" \
