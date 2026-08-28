@@ -1873,7 +1873,7 @@ mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>
 | `--repo <SLUG>` | unset | Restrict the sweep to one repo's `carryover[]` entries **by ownership**, not by which file an entry happens to be stored in — see below. An unknown slug is a hard error naming the valid slugs |
 | `--json` | off | Emit the `CarryoverReport` (or, under `--audit`, the `CarryoverAudit`; or, under `--would-block`, the `WouldBlockReport`) as compact JSON instead of the human summary |
 | `--allow-exec` | off | Opt in to running `command_exits_zero` predicates. Without it, every such entry reports `not-evaluable` (reason `execution-not-allowed`) and **no command is ever run**. **`--dispose` does not imply this** — passing `--dispose` never turns on command execution, so a `command_exits_zero` entry that is `not-evaluable` for lack of `--allow-exec` is never disposal-eligible either |
-| `--audit` | off | Report a fleet-wide `carryover[]`/`reference[]` census instead of the per-entry sweep — total, per-container and per-kind/per-class counts, typed-predicate coverage, and inflow/outflow over `--window` days. Composed entirely from the same loaded corpus and `CarryoverReport` the ordinary sweep already produces — no second corpus walk. Shares the exact same `--repo` ownership rule as the ordinary sweep, so `mev carryover --audit --repo X` and `mev carryover --repo X` always agree on which entries are in scope |
+| `--audit` | off | Report a fleet-wide `carryover[]`/`reference[]` census instead of the per-entry sweep — total, per-container and per-kind/per-class counts, typed-predicate coverage, inflow/outflow over `--window` days, and a measured archive-outflow section (MV.16.E). The census figures are composed entirely from the same loaded corpus and `CarryoverReport` the ordinary sweep already produces — no second corpus *walk* — but `--audit` does perform one new read per selected repo, of that repo's `planning/carryover-archive.jsonl`, to produce the archive-outflow section; that read happens only under `--audit`. Shares the exact same `--repo` ownership rule as the ordinary sweep, so `mev carryover --audit --repo X` and `mev carryover --repo X` always agree on which entries are in scope |
 | `--window <DAYS>` | `30` | Window, in days, `--audit`'s inflow/outflow figures are measured over. Ignored without `--audit` |
 | `--dispose` | off | Move every CLEARED-lane entry out of its owning repo's `state.json` and into that repo's `planning/carryover-archive.jsonl`. The live write path this subcommand has — see below |
 | `--backfill` | off | One-time reconstruction of `carryover[]` entries removed from `state.json` **before** `--dispose` existed, recovered from git history and written to that repo's `planning/carryover-archive.jsonl` flagged `reconstructed: true`. Refuses a second run over a populated archive rather than merging. Cannot be combined with `--dispose` — see below |
@@ -2045,10 +2045,15 @@ behaviour, and none of them affects the exit code.
 
 `mev carryover --audit` (`MV.ticket.reference-container-validation` task 4) answers "what does
 the fleet's triage material actually look like", as opposed to the per-entry sweep above, which
-answers "what should a human act on right now". It is composed entirely from the same loaded
-corpus (`files`) and `CarryoverReport` the ordinary sweep already produced — no new filesystem
-read, no second discovery walk — and, like the plain sweep, it is **read-only**: the audit
-recommends; `--dispose` is the only invocation of this subcommand that writes anything.
+answers "what should a human act on right now". Its census figures (totals, per-kind, per-class,
+typed-predicate coverage, clear rate, inflow/outflow) are composed entirely from the same loaded
+corpus (`files`) and `CarryoverReport` the ordinary sweep already produced — no second corpus
+*walk*. `--audit` itself does perform one new filesystem read beyond that: for each selected
+repo it reads `planning/carryover-archive.jsonl` (MV.16.E) to produce the outflow-by-archive
+section below. That read happens only on the `--audit` path — the plain sweep, `--dispose`,
+`--backfill` and `--would-block` never touch the archive. Like the plain sweep, the whole command
+is still **read-only**: the audit recommends; `--dispose` is the only invocation of this
+subcommand that writes anything.
 
 | Figure | Meaning |
 |---|---|
@@ -2056,8 +2061,41 @@ recommends; `--dispose` is the only invocation of this subcommand that writes an
 | per-kind (`carryover[]`) | `carryover[]` entries grouped by `kind` — includes legacy `constraint`/`known_issue` wherever they still appear, since D72's narrowing didn't rewrite any data |
 | per-class (`reference[]`) | `reference[]` entries grouped by `class` (`trap`/`invariant`/`lesson`/`deliberate`, plus any not-yet-valid value present in the corpus) |
 | typed-predicate coverage | How many `carryover[]` entries carry a typed `clears_when` predicate (`block_closed`/`file_exists`/`file_contains`/`command_exits_zero`) rather than free prose or no predicate at all |
-| clear rate | `cleared_total / clearable_total` — **scoped to `carryover[]` only.** `reference[]` entries have no `clears_when` and are structurally never clearable, so they are excluded from the denominator by construction, not by a filter: a raw per-repo rate would punish reference-heavy repos for behaving correctly (measured on the live corpus: `bastiel` 11%, `okf-core` 0/14 — composition, not discipline) |
-| inflow / outflow | Entries whose `created` date falls within `--window` days of today (inflow), and `Cleared`-lane entries whose staleness anchor (`max(created, reviewed)`) falls within the window (outflow) — a proxy for "recently became safe to delete", since no container records an actual deletion timestamp |
+| clear rate — deletions only | `cleared_total / clearable_total` — **scoped to `carryover[]` only.** `reference[]` entries have no `clears_when` and are structurally never clearable, so they are excluded from the denominator by construction, not by a filter: a raw per-repo rate would punish reference-heavy repos for behaving correctly (measured on the live corpus: `bastiel` 11%, `okf-core` 0/14 — composition, not discipline). Labelled "deletions only" because it counts entries that are still `carryover[]` rows sitting in the CLEARED lane — it cannot see a disposal, which *removes* the entry — so the archive-outflow section below is the figure that actually measures disposition |
+| inflow / outflow (proxy) | Entries whose `created` date falls within `--window` days of today (inflow), and `Cleared`-lane entries whose staleness anchor (`max(created, reviewed)`) falls within the window (outflow) — a proxy for "recently became safe to delete", since no container records an actual deletion timestamp. Superseded as a disposition measure by the archive outflow below, which reads real disposal records instead of inferring from what is still present |
+
+**Outflow (archive) — measured dispositions, split observed / reconstructed (MV.16.E).** Beneath
+the inflow/outflow proxy line, `--audit` prints a second section built from
+`planning/carryover-archive.jsonl` — the append-only record `--dispose` and `--backfill` both
+write, one `CarryoverArchiveRow` (okf-core) per line, derived per repo with the same
+`archive_path_for` helper the rest of the archive tooling uses. Unlike the proxy line above, this
+section counts entries that actually left `carryover[]`, however they left — a disposal is
+visible here even though it has already vanished from the corpus the plain census reads.
+
+- **Per-`reason` counts**, keyed on `DisposalReason` (`cleared`/`superseded`/`promoted`/
+  `withdrawn`), each split into two columns:
+  - `observed` — rows a live `--dispose` run wrote (`reconstructed: false`, the default when the
+    key is absent).
+  - `reconstructed` — rows `--backfill`'s one-time git reconstruction wrote (`reconstructed:
+    true`).
+- **Why the split is never blended.** `--backfill`'s reconstructed rows carry weaker, inferred
+  evidence — at least one reconstructed removal in the live corpus is a relocation to another
+  repo, not a disposal at all — and a downstream published post quotes these figures. Blending the
+  two columns into one number would let inferred, sometimes-wrong data inflate a headline that
+  gets published and cannot be walked back.
+- **Missing or empty archive is the normal case, not an error.** `--backfill` and `--dispose` are
+  both applied per repo on demand, so a repo (or the whole fleet, until either has run once
+  against it) can legitimately have no `carryover-archive.jsonl` yet. `--audit` reports this with
+  one explanatory line and still exits `0` — it never treats an absent archive as a failure.
+- **A malformed archive line is named, not swallowed.** A line that fails to parse as
+  `CarryoverArchiveRow` is reported as `<path>:<1-based line number>` (up to 5 shown) and skipped;
+  the surrounding valid rows are still counted, and the run still exits `0`.
+- **Same `--repo` scoping as the rest of the audit.** `--audit --repo X` reads the archive only
+  for the repos its `carryover[]`/`reference[]` census already selected, so the two halves of the
+  report always agree on which repos are in scope.
+- The full `CarryoverArchiveRow` schema (the four extra fields an archive row carries beyond a
+  plain `Carryover`) is documented in [`docs/carryover-contract.md`](carryover-contract.md); this
+  section only covers how `--audit` reads and reports it.
 
 #### Exit codes
 
