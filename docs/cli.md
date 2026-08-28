@@ -1910,7 +1910,7 @@ mev --json doc opportunity ingest --input company-brief.json
 
 ---
 
-### `carryover [--repo <slug>] [--grep <pattern>] [--json] [--allow-exec] [--exec-timeout <secs>] [--audit] [--window <days>] [--dispose] [--backfill] [--dry-run] [--would-block] [--trajectory] [--weeks <days>] [path]`
+### `carryover [--repo <slug>] [--include-cross-repo] [--grep <pattern>] [--json] [--allow-exec] [--exec-timeout <secs>] [--audit] [--window <days>] [--dispose] [--backfill] [--dry-run] [--would-block] [--trajectory] [--weeks <days>] [path]`
 
 Fleet-wide sweep of every discovered `planning/state.json`'s `carryover[]` array. By default
 this is **read-only**: it evaluates each entry's `clears_when` predicate where it is
@@ -1934,13 +1934,14 @@ history-based write path instead — see [`--backfill` — one-time git reconstr
 removals](#--backfill--one-time-git-reconstruction-of-past-removals) below.
 
 ```bash
-mev carryover [--repo <SLUG>] [--grep <PATTERN>] [--json] [--allow-exec] [--exec-timeout <SECS>] [--audit] [--window <DAYS>] [--dispose] [--backfill] [--dry-run] [--would-block] [--trajectory] [--weeks <DAYS>] [path]
+mev carryover [--repo <SLUG>] [--include-cross-repo] [--grep <PATTERN>] [--json] [--allow-exec] [--exec-timeout <SECS>] [--audit] [--window <DAYS>] [--dispose] [--backfill] [--dry-run] [--would-block] [--trajectory] [--weeks <DAYS>] [path]
 ```
 
 | Argument / Flag | Default | Description |
 |---|---|---|
 | `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
 | `--repo <SLUG>` | unset | Restrict the sweep to one repo's `carryover[]` entries **by ownership**, not by which file an entry happens to be stored in — see below. An unknown slug is a hard error naming the valid slugs |
+| `--include-cross-repo` | off | Only meaningful together with `--repo`: widens that filter to also match entries scoped `cross_repo: true` (no single owning repo), in addition to the named repo's own entries. Entries owned by a *different* named repo stay excluded — this widens the filter to the unattributable, it does not disable it. Tier-scoped entries stay excluded either way (pinned decision; a separate `--include-tier` is out of scope). Passed without `--repo` this is a misuse: it reports the error and exits non-zero rather than being silently ignored, the same way `--weeks` without `--trajectory` is handled. Cannot be combined with `--audit`, `--trajectory`, `--dispose`, `--backfill`, or `--would-block` |
 | `--grep <PATTERN>` | unset | Restrict the sweep to entries whose `slug` or `text` matches this case-insensitive regex. Composes with `--repo` (both narrow; an entry must satisfy both) and with `--json`. Applied before the total/cleared/actionable/not-evaluable counts are computed, so the counts always describe the filtered set. Suppresses the three cross-repo dedup sections (clusters, suggested duplicates, single-repo `finding_id` warnings), since those are statements about the whole corpus. Only applies to the plain per-entry sweep — cannot be combined with `--audit`, `--trajectory`, `--dispose`, `--backfill`, or `--would-block`. An invalid regex exits non-zero naming the pattern and the regex error. A pattern matching nothing exits `0` and says so explicitly, distinguishing "swept, matched nothing" from "nothing to sweep" |
 | `--json` | off | Emit the `CarryoverReport` (or, under `--audit`, the `CarryoverAudit`; under `--would-block`, the `WouldBlockReport`; or, under `--trajectory`, the `TrajectoryReport`) as compact JSON instead of the human summary |
 | `--allow-exec` | off | Opt in to running `command_exits_zero` predicates. Without it, every such entry reports `not-evaluable` (reason `execution-not-allowed`) and **no command is ever run**. **`--dispose` does not imply this** — passing `--dispose` never turns on command execution, so a `command_exits_zero` entry that is `not-evaluable` for lack of `--allow-exec` is never disposal-eligible either |
@@ -1969,6 +1970,22 @@ Before this behaviour was fixed, `--repo` keyed on the file's repo instead, so a
 was invisible to the very repo that owned it and could only be found via the repo it happened to be
 filed under. `--audit --repo` applies the identical rule, so the two flags never disagree on which
 entries are in scope.
+
+**A bare `--repo <SLUG>` excludes `cross_repo`- and tier-scoped entries — deliberately, but not
+harmlessly.** A cross-repo item is no single repo's, so `--repo` correctly does not claim it. But
+that also means a repo-filtered view is never the whole picture: entries scoped `cross_repo: true`
+or to a `tier` match no `--repo` filter for any slug, and a filtered run says how many such entries
+it excluded. Pass **`--include-cross-repo`** alongside `--repo` to widen the view to also include
+the `cross_repo: true` entries (tier-scoped entries stay excluded regardless — that is a pinned
+decision, not an oversight). `--include-cross-repo` widens the filter to the unattributable; it
+never pulls in entries owned by a *different* named repo, and it requires `--repo` — passed alone
+it is a misuse, reported and non-zero, the same way `--weeks` requires `--trajectory`.
+
+**This interacts with `--grep`.** A `--repo`-filtered `--grep` that matches nothing means "no match
+in this repo's slice of the corpus" — it is not evidence that no such entry exists fleet-wide. An
+entry could be sitting right there, scoped `cross_repo: true`, invisible to the filter. Re-run with
+`--include-cross-repo`, or drop `--repo` entirely, before treating a `0 total` as a real negative
+(see HQ standing rule 11 on positive controls).
 
 **Without `--dispose`, `mev carryover` writes nothing.** The `cleared` lane is a recommendation
 — a human, or a `--dispose` run, acts on it; the plain sweep and `--audit` never delete or
