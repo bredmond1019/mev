@@ -13,6 +13,31 @@ timestamp: "2026-08-23T09:17:53-03:00"
 
 ## [run: 2026-08-28]
 
+Resumed and closed `MV.ticket.write-verbs-ignore-the-quiesce-lease` via `/sdlc-flow` (tasks 1–5, PASS).
+Tasks 1–4 (lease.rs, the 11 write-verb call sites, the fixture suite, docs) carried over unchanged from
+the prior bailed run. Task 5 (full-suite validation) re-ran clean this pass: `fmt`/`clippy -D warnings`/
+`cargo test`/`cargo build --release`/`cargo audit`/consumer-compile-gate all passed. The prior bail —
+`fleet_regression::fleet_readiness_is_unchanged_for_blocks_without_a_new_edge` failing on live external
+`agentic-portfolio/planning/state.json` drift — was triaged as pre-existing and out of scope (identically
+reproduced on base commit `main==f8c00f1` via a fresh `git worktree add`), so the run resumed clean
+rather than waiting on an external fix. Also independently confirmed the real `.fleet-locks` directory
+is never touched (byte-identical md5, before/after) when a write verb runs against a scratch corpus with
+an explicit `--lock-dir`. Task 5 made no source changes (validation-only). Flipped
+`MV.ticket.write-verbs-ignore-the-quiesce-lease` to `closed` in `planning/state.json` (validated, no
+net-new diagnostics) and ran `mev emit-state --write` to resync derived surfaces (0 errors, 42 warnings,
+all pre-existing `W_EMIT_NO_SENTINEL` noise). Next: pull the next item from the master-plan or HQ
+backlog.
+
+```
+318d7ec chore: wrap up MV.ticket.write-verbs-ignore-the-quiesce-lease
+88840b2 feat: implement MV.ticket.write-verbs-ignore-the-quiesce-lease-task4
+9fc71af feat: implement MV.ticket.write-verbs-ignore-the-quiesce-lease-task3
+f152677 feat: implement MV.ticket.write-verbs-ignore-the-quiesce-lease-task2
+a689345 feat: implement MV.ticket.write-verbs-ignore-the-quiesce-lease-task1
+```
+
+## [run: 2026-08-28 (prior)]
+
 Ran `MV.ticket.write-verbs-ignore-the-quiesce-lease` via `/sdlc-flow` (tasks 1–5; BAILED on task 5).
 Task 1 added `src/brain/lease.rs`, reading `<lock_dir>/leases/*.json` against `lease.schema.json` and
 answering exclusive/shared, fleet/repo-scope, self-exempt, staleness-aware Clear/Held verdicts
