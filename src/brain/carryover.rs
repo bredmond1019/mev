@@ -2800,28 +2800,45 @@ pub struct ArchiveOutflow {
     pub malformed_lines: Vec<String>,
 }
 
+/// Bookkeeping [`collect_archive_rows`] returns alongside the parsed rows: how many
+/// archives were actually read vs. missing, and which lines failed to parse. Shared by
+/// every caller of [`collect_archive_rows`] so `archives_read`/`archives_missing`/
+/// `malformed_lines` are computed exactly once, in exactly one place.
+#[derive(Debug, Clone, Default)]
+pub struct ArchiveReadStats {
+    /// Number of selected repos with a `carryover-archive.jsonl` found and read.
+    pub archives_read: usize,
+    /// Number of selected repos with no `carryover-archive.jsonl` on disk yet — the
+    /// normal case until `--backfill` or `--dispose` has run once.
+    pub archives_missing: usize,
+    /// `"<path>:<1-based-line-no>"` for every archive line that failed to parse as
+    /// an [`okf_core::CarryoverArchiveRow`]. Never fatal — a malformed line is
+    /// named and skipped, not dropped silently and not aborted on.
+    pub malformed_lines: Vec<String>,
+}
+
 /// Read every selected repo's `planning/carryover-archive.jsonl` (derived from its
-/// `planning/state.json` path via [`archive_path_for`]) and tally disposition counts.
+/// `planning/state.json` path via [`archive_path_for`]) and return the parsed rows plus
+/// read/skip bookkeeping.
 ///
 /// `repo_filter` mirrors [`audit_carryover`]'s own filter: a `Some` value restricts the
-/// read to files whose `StateSource::repo_slug` matches, so `--audit --repo X` never
-/// reports outflow for a repo whose inflow it excluded. A path already visited (a repo
-/// appearing more than once in `files`) is read only once.
+/// read to files whose `StateSource::repo_slug` matches, so a caller scoped by `--repo X`
+/// never reads a different repo's archive. A path already visited (a repo appearing more
+/// than once in `files`) is read only once.
 ///
-/// This is the ONE filesystem read this pass introduces, and it is intended to run only
-/// on the `--audit` path — see [`audit_carryover`], which is the sole caller.
-pub fn read_archive_outflow(
+/// This is the ONE archive reader in this module — [`read_archive_outflow`] (the
+/// `--audit` path) and [`build_trajectory`] (the `--trajectory` path, MV.16.F) both
+/// delegate to it rather than opening a second parser, so the two commands can never
+/// disagree about what rows exist, only about how they're summarized.
+pub fn collect_archive_rows(
     files: &[(
         crate::brain::state::StateSource,
         crate::brain::state::StateFile,
     )],
-    today: &str,
-    window_days: i64,
     repo_filter: Option<&str>,
-) -> ArchiveOutflow {
-    let today_date = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d").ok();
-
-    let mut outflow = ArchiveOutflow::default();
+) -> (Vec<okf_core::CarryoverArchiveRow>, ArchiveReadStats) {
+    let mut rows = Vec::new();
+    let mut stats = ArchiveReadStats::default();
     let mut visited: HashSet<PathBuf> = HashSet::new();
 
     for (src, _file) in files {
@@ -2837,56 +2854,260 @@ pub fn read_archive_outflow(
         }
 
         let Ok(content) = std::fs::read_to_string(&archive_path) else {
-            outflow.archives_missing += 1;
+            stats.archives_missing += 1;
             continue;
         };
-        outflow.archives_read += 1;
+        stats.archives_read += 1;
 
         for (idx, line) in content.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
-            let row: okf_core::CarryoverArchiveRow = match serde_json::from_str(line) {
-                Ok(row) => row,
+            match serde_json::from_str::<okf_core::CarryoverArchiveRow>(line) {
+                Ok(row) => rows.push(row),
                 Err(_) => {
-                    outflow
+                    stats
                         .malformed_lines
                         .push(format!("{}:{}", archive_path.display(), idx + 1));
-                    continue;
                 }
-            };
-
-            outflow.rows_total += 1;
-
-            if let (Some(today_d), Some(anchor)) = (
-                today_date,
-                crate::brain::state::parse_state_date(&row.disposed_at),
-            ) {
-                let age = (today_d - anchor).num_days();
-                if (0..=window_days).contains(&age) {
-                    outflow.rows_in_window += 1;
-                }
-            }
-
-            let reason_key = match row.reason {
-                okf_core::DisposalReason::Cleared => "cleared",
-                okf_core::DisposalReason::Superseded => "superseded",
-                okf_core::DisposalReason::Promoted => "promoted",
-                okf_core::DisposalReason::Withdrawn => "withdrawn",
-            };
-            let split = outflow
-                .per_reason
-                .entry(reason_key.to_string())
-                .or_default();
-            if row.reconstructed {
-                split.reconstructed += 1;
-            } else {
-                split.observed += 1;
             }
         }
     }
 
+    (rows, stats)
+}
+
+/// Read every selected repo's `planning/carryover-archive.jsonl` (via
+/// [`collect_archive_rows`]) and tally disposition counts.
+///
+/// `repo_filter` mirrors [`audit_carryover`]'s own filter: a `Some` value restricts the
+/// read to files whose `StateSource::repo_slug` matches, so `--audit --repo X` never
+/// reports outflow for a repo whose inflow it excluded.
+///
+/// This is the ONE filesystem read this pass introduces, and it is intended to run only
+/// on the `--audit` path — see [`audit_carryover`], which is the sole caller.
+pub fn read_archive_outflow(
+    files: &[(
+        crate::brain::state::StateSource,
+        crate::brain::state::StateFile,
+    )],
+    today: &str,
+    window_days: i64,
+    repo_filter: Option<&str>,
+) -> ArchiveOutflow {
+    let today_date = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d").ok();
+
+    let (rows, stats) = collect_archive_rows(files, repo_filter);
+    let mut outflow = ArchiveOutflow {
+        archives_read: stats.archives_read,
+        archives_missing: stats.archives_missing,
+        malformed_lines: stats.malformed_lines,
+        ..Default::default()
+    };
+
+    for row in &rows {
+        outflow.rows_total += 1;
+
+        if let (Some(today_d), Some(anchor)) = (
+            today_date,
+            crate::brain::state::parse_state_date(&row.disposed_at),
+        ) {
+            let age = (today_d - anchor).num_days();
+            if (0..=window_days).contains(&age) {
+                outflow.rows_in_window += 1;
+            }
+        }
+
+        let reason_key = match row.reason {
+            okf_core::DisposalReason::Cleared => "cleared",
+            okf_core::DisposalReason::Superseded => "superseded",
+            okf_core::DisposalReason::Promoted => "promoted",
+            okf_core::DisposalReason::Withdrawn => "withdrawn",
+        };
+        let split = outflow
+            .per_reason
+            .entry(reason_key.to_string())
+            .or_default();
+        if row.reconstructed {
+            split.reconstructed += 1;
+        } else {
+            split.observed += 1;
+        }
+    }
+
     outflow
+}
+
+/// One week's row in [`TrajectoryReport`]'s table — the ISO week of `disposed_at`
+/// (`YYYY-Www`, zero-padded), the observed/reconstructed split for that week, and the
+/// running cumulative total through the end of that week (inclusive of
+/// [`TrajectoryReport::before_window`] and every earlier emitted week).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct WeekRow {
+    /// ISO-8601 week label, e.g. `"2026-W35"`.
+    pub iso_week: String,
+    /// Rows disposed at live disposal time (`--dispose`) that fall in this week.
+    pub observed: usize,
+    /// Rows backfilled from git history (`--backfill`, MV.16.B) that fall in this week.
+    pub reconstructed: usize,
+    /// Running total: `before_window` + every earlier emitted week's `observed +
+    /// reconstructed` + this week's own `observed + reconstructed`.
+    pub cumulative: usize,
+}
+
+impl WeekRow {
+    /// `observed + reconstructed` for this week alone (not cumulative).
+    pub fn total(&self) -> usize {
+        self.observed + self.reconstructed
+    }
+}
+
+/// The weekly outflow trajectory over `planning/carryover-archive.jsonl` — `mev
+/// carryover --trajectory` (MV.16.F). Built by [`build_trajectory`] from the exact same
+/// rows [`read_archive_outflow`] reads (via [`collect_archive_rows`]), so its last row's
+/// `cumulative` (plus `undated`) equals [`ArchiveOutflow::rows_total`] for the same
+/// `repo_filter` whenever the requested window covers the whole archive — the coherence
+/// guarantee this command exists to keep true.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TrajectoryReport {
+    /// Exactly the requested number of week rows, most recent (the week containing
+    /// `today`) last. Includes weeks with zero disposals.
+    pub weeks: Vec<WeekRow>,
+    /// Archive rows whose `disposed_at` falls strictly before the first emitted week —
+    /// folded into the first row's `cumulative` but never shown as its own week.
+    pub before_window: usize,
+    /// Total archive rows read across every selected repo's archive (mirrors
+    /// [`ArchiveOutflow::rows_total`] for the same scope).
+    pub rows_total: usize,
+    /// Number of selected repos with a `carryover-archive.jsonl` found and read.
+    pub archives_read: usize,
+    /// Number of selected repos with no `carryover-archive.jsonl` on disk yet.
+    pub archives_missing: usize,
+    /// `"<path>:<1-based-line-no>"` for every archive line that failed to parse.
+    pub malformed_lines: Vec<String>,
+    /// Rows whose `disposed_at` does not parse — excluded from every week bucket and
+    /// from `before_window`, but still counted in `rows_total`. A row here cannot be
+    /// placed on the trajectory at all: silently bucketing an unparseable date would
+    /// put a lie in a published table, so it is named instead and left out.
+    pub undated: usize,
+}
+
+/// Build the weekly outflow trajectory over the same archive rows [`read_archive_outflow`]
+/// reads — via [`collect_archive_rows`], never a second parser and never git. Git history
+/// was MV.16.B's one-time reconstruction pass that populated the archive in the first
+/// place; a trajectory command that re-walked git would recreate the problem the archive
+/// exists to solve, and would disagree with `--audit` the moment a disposal happened
+/// outside the walked range.
+///
+/// Emits exactly `weeks` rows ending with the ISO week containing `today`, walking
+/// backwards 7 days at a time (7 days always advances exactly one ISO week, so no
+/// day-of-week alignment is needed). Weeks with zero disposals are included — a
+/// collapsed gap would misrepresent the trajectory. `today` is caller-supplied rather
+/// than read from the clock, so callers (and tests) can pin it.
+pub fn build_trajectory(
+    files: &[(
+        crate::brain::state::StateSource,
+        crate::brain::state::StateFile,
+    )],
+    today: &str,
+    weeks: usize,
+    repo_filter: Option<&str>,
+) -> TrajectoryReport {
+    use chrono::Datelike;
+
+    let (rows, stats) = collect_archive_rows(files, repo_filter);
+
+    let mut report = TrajectoryReport {
+        archives_read: stats.archives_read,
+        archives_missing: stats.archives_missing,
+        malformed_lines: stats.malformed_lines,
+        ..Default::default()
+    };
+
+    let Some(today_date) = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d").ok() else {
+        // No valid `today` to anchor the window on — every row is undated relative to
+        // the trajectory (still counted in `rows_total`), and no week rows are emitted.
+        report.rows_total = rows.len();
+        report.undated = rows.len();
+        return report;
+    };
+
+    // Anchor dates for each emitted week, oldest first, ending on `today_date`. Walking
+    // back 7 days at a time always lands one ISO week earlier.
+    let mut week_dates: Vec<chrono::NaiveDate> = Vec::with_capacity(weeks);
+    for i in (0..weeks).rev() {
+        let offset = chrono::Duration::days(7 * i as i64);
+        if let Some(d) = today_date.checked_sub_signed(offset) {
+            week_dates.push(d);
+        }
+    }
+
+    let iso_label = |d: chrono::NaiveDate| -> String {
+        let iw = d.iso_week();
+        format!("{}-W{:02}", iw.year(), iw.week())
+    };
+
+    let week_labels: Vec<String> = week_dates.iter().map(|d| iso_label(*d)).collect();
+    report.weeks = week_labels
+        .iter()
+        .map(|label| WeekRow {
+            iso_week: label.clone(),
+            ..Default::default()
+        })
+        .collect();
+
+    let first_label = week_labels.first().cloned();
+    let last_index = report.weeks.len().saturating_sub(1);
+
+    for row in &rows {
+        report.rows_total += 1;
+
+        let Some(anchor) = crate::brain::state::parse_state_date(&row.disposed_at) else {
+            report.undated += 1;
+            continue;
+        };
+
+        let label = iso_label(anchor);
+        let target_index = week_labels.iter().position(|l| *l == label);
+
+        match target_index {
+            Some(idx) => {
+                let wr = &mut report.weeks[idx];
+                if row.reconstructed {
+                    wr.reconstructed += 1;
+                } else {
+                    wr.observed += 1;
+                }
+            }
+            None if first_label.as_deref().is_some_and(|f| label.as_str() < f) => {
+                report.before_window += 1;
+            }
+            None if !report.weeks.is_empty() => {
+                // Later than the last emitted week (a future-dated row) — fold into the
+                // last week rather than dropping it, so `cumulative` on the last row
+                // always equals `rows_total - undated` regardless of clock skew.
+                let wr = &mut report.weeks[last_index];
+                if row.reconstructed {
+                    wr.reconstructed += 1;
+                } else {
+                    wr.observed += 1;
+                }
+            }
+            None => {
+                // No weeks requested (`weeks == 0`) — nothing to place it in but
+                // `before_window`, so it goes there rather than being silently lost.
+                report.before_window += 1;
+            }
+        }
+    }
+
+    let mut running = report.before_window;
+    for wr in &mut report.weeks {
+        running += wr.total();
+        wr.cumulative = running;
+    }
+
+    report
 }
 
 // --- Dedup: tokenization + similarity ---
@@ -8454,6 +8675,138 @@ mod tests {
         assert!(!row.reconstructed);
         assert_eq!(row.evidence.as_deref(), Some("block repo-a:MV.3.A closed"));
         assert!(row.amends.is_none());
+    }
+
+    // -- build_trajectory (MV.16.F, task 1) --------------------------------------
+
+    /// Write one archive line for `slug`, disposed on `disposed_at`, `reconstructed`
+    /// or not, to `archive_path` (appending — callers write several lines).
+    fn append_archive_row(archive_path: &Path, slug: &str, disposed_at: &str, reconstructed: bool) {
+        let entry = item(slug, "deferred", None, vec![], "2020-01-01", None, None);
+        let mut row = build_archive_row(&candidate(slug, "evidence", entry), disposed_at);
+        row.reconstructed = reconstructed;
+        let mut content = std::fs::read_to_string(archive_path).unwrap_or_default();
+        content.push_str(&serde_json::to_string(&row).unwrap());
+        content.push('\n');
+        std::fs::write(archive_path, content).unwrap();
+    }
+
+    #[test]
+    fn build_trajectory_buckets_rows_into_their_iso_week() {
+        let (_dir, source, archive_path) = scratch_repo(
+            "trajectory-bucketing",
+            &StateFile {
+                repo: "repo-a".into(),
+                ..Default::default()
+            },
+        );
+        // 2026-08-24 is a Monday in ISO week 2026-W35; 2026-08-17 is a Monday in
+        // 2026-W34.
+        append_archive_row(&archive_path, "a", "2026-08-24", false);
+        append_archive_row(&archive_path, "b", "2026-08-17", false);
+        let files = vec![(source, StateFile::default())];
+
+        let report = build_trajectory(&files, "2026-08-24", 4, None);
+
+        assert_eq!(report.weeks.len(), 4);
+        assert_eq!(report.weeks.last().unwrap().iso_week, "2026-W35");
+        assert_eq!(report.weeks.last().unwrap().observed, 1);
+        let w34 = report
+            .weeks
+            .iter()
+            .find(|w| w.iso_week == "2026-W34")
+            .unwrap();
+        assert_eq!(w34.observed, 1);
+    }
+
+    #[test]
+    fn build_trajectory_includes_zero_disposal_weeks_and_last_cumulative_matches_rows_total() {
+        let (_dir, source, archive_path) = scratch_repo(
+            "trajectory-zero-weeks",
+            &StateFile {
+                repo: "repo-a".into(),
+                ..Default::default()
+            },
+        );
+        append_archive_row(&archive_path, "only-one", "2026-08-24", false);
+        let files = vec![(source, StateFile::default())];
+
+        let report = build_trajectory(&files, "2026-08-24", 4, None);
+
+        assert_eq!(report.weeks.len(), 4);
+        // Three weeks with zero disposals must still be present, not omitted.
+        assert_eq!(report.weeks.iter().filter(|w| w.total() == 0).count(), 3);
+        assert_eq!(
+            report.weeks.last().unwrap().cumulative,
+            report.rows_total - report.undated
+        );
+    }
+
+    #[test]
+    fn build_trajectory_reconstructed_rows_land_in_their_own_column() {
+        let (_dir, source, archive_path) = scratch_repo(
+            "trajectory-reconstructed",
+            &StateFile {
+                repo: "repo-a".into(),
+                ..Default::default()
+            },
+        );
+        append_archive_row(&archive_path, "observed-row", "2026-08-24", false);
+        append_archive_row(&archive_path, "reconstructed-row", "2026-08-24", true);
+        let files = vec![(source, StateFile::default())];
+
+        let report = build_trajectory(&files, "2026-08-24", 1, None);
+
+        let week = &report.weeks[0];
+        assert_eq!(week.observed, 1);
+        assert_eq!(week.reconstructed, 1);
+        // Reconstructed rows must never be folded into the observed column.
+        assert_ne!(week.observed, week.total());
+    }
+
+    #[test]
+    fn build_trajectory_shares_the_same_rows_and_stats_read_archive_outflow_reads() {
+        let (_dir, source, archive_path) = scratch_repo(
+            "trajectory-coherence",
+            &StateFile {
+                repo: "repo-a".into(),
+                ..Default::default()
+            },
+        );
+        append_archive_row(&archive_path, "row-one", "2026-08-24", false);
+        append_archive_row(&archive_path, "row-two", "2026-08-17", false);
+        let files = vec![(source, StateFile::default())];
+
+        let trajectory = build_trajectory(&files, "2026-08-24", 8, None);
+        let outflow = read_archive_outflow(&files, "2026-08-24", 3650, None);
+
+        assert_eq!(trajectory.rows_total, outflow.rows_total);
+        assert_eq!(trajectory.archives_read, outflow.archives_read);
+        assert_eq!(
+            trajectory.weeks.last().unwrap().cumulative,
+            outflow.rows_total - trajectory.undated
+        );
+    }
+
+    #[test]
+    fn build_trajectory_undated_row_is_excluded_from_buckets_but_counted_in_rows_total() {
+        let (_dir, source, archive_path) = scratch_repo(
+            "trajectory-undated",
+            &StateFile {
+                repo: "repo-a".into(),
+                ..Default::default()
+            },
+        );
+        append_archive_row(&archive_path, "good-row", "2026-08-24", false);
+        append_archive_row(&archive_path, "bad-row", "not-a-date", false);
+        let files = vec![(source, StateFile::default())];
+
+        let report = build_trajectory(&files, "2026-08-24", 1, None);
+
+        assert_eq!(report.rows_total, 2);
+        assert_eq!(report.undated, 1);
+        assert_eq!(report.weeks[0].total(), 1);
+        assert_eq!(report.weeks.last().unwrap().cumulative, 1);
     }
 
     fn historical_removal(entry: Carryover, commit_subject: &str) -> HistoricalRemoval {
