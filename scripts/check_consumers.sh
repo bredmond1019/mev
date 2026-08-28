@@ -233,6 +233,9 @@ main() {
     local gate_failed=0
     local seen_slugs=()
     local obj slug outcome owner note errors_str reason
+    local verified_count=0
+    local total_count=0
+    local unverified_notes=()
 
     if [ -n "$objects" ]; then
         while IFS= read -r obj; do
@@ -240,6 +243,13 @@ main() {
             slug="$(json_field_slug "$obj")"
             outcome="$(json_field_outcome "$obj")"
             seen_slugs+=("$slug")
+
+            total_count=$((total_count + 1))
+            if [ "$outcome" = "pass" ]; then
+                verified_count=$((verified_count + 1))
+            else
+                unverified_notes+=("$slug: $outcome")
+            fi
 
             owner=""
             if lookup_waiver "$slug"; then
@@ -304,6 +314,20 @@ main() {
             echo "check_consumers: waiver names '$w', which the tool did not report — check the slug" >&2
         fi
     done
+
+    local coverage_line="check_consumers: verified $verified_count of $total_count consumers"
+    if [ "$verified_count" -lt "$total_count" ]; then
+        local joined="" n
+        for n in "${unverified_notes[@]+"${unverified_notes[@]}"}"; do
+            if [ -z "$joined" ]; then
+                joined="$n"
+            else
+                joined="$joined, $n"
+            fi
+        done
+        coverage_line="$coverage_line ($joined)"
+    fi
+    echo "$coverage_line"
 
     if [ "$gate_failed" -eq 1 ]; then
         exit 1
