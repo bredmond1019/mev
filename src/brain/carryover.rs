@@ -7247,6 +7247,149 @@ mod tests {
     }
 
     #[test]
+    fn c141_clears_when_network_predicates_can_never_clear_retro_fixture() {
+        // MV.16.G task 5 retro-fixture for finding C141, slug
+        // `clears-when-network-predicates-can-never-clear` (engine-rs). C141's
+        // real evidence is `git -C core/engine-rs push --dry-run origin main`
+        // exiting 0 in 19.5s against a 2s bound — a network call this suite
+        // must never make. This reproduces the SHAPE without the network: a
+        // command that reliably outruns the configured bound.
+        //
+        // Pre-fix baseline (what this exact shape produced before MV.16.G):
+        // `command_exit_zero_satisfied` returned a bare `bool`, so a timeout
+        // and a genuine non-zero exit both collapsed to `satisfied: false`
+        // and both landed in `report.actionable` with an identical
+        // `CarryoverRef::CommandExitsZero { satisfied: false, .. }` — exactly
+        // C141's complaint: a network-touching predicate that can never
+        // clear reads identically to a real, actionable failure.
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "c141-network-predicate-shape",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        command: "sleep 30".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let start = std::time::Instant::now();
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            std::env::temp_dir().as_path(),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            true,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            report.not_evaluable, 1,
+            "post-fix: a timed-out command must be NotEvaluable, never Actionable"
+        );
+        assert_eq!(report.actionable, 0);
+        assert!(report.entries[0].refs.is_empty());
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::CommandTimedOut),
+            "the timeout must carry a dedicated reason, distinct from a genuine non-zero exit"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "watchdog should kill the child at roughly COMMAND_EXEC_TIMEOUT, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn c180_command_exits_zero_predicates_are_unsound_across_a_live_fleet_retro_fixture() {
+        // MV.16.G task 5 retro-fixture for finding C180, slug
+        // `command-exits-zero-predicates-are-unsound-across-a-live-fleet`
+        // (okf-core). C180's real evidence is `--manifest-path core/bastion`,
+        // which compiles bastion, mev AND okf-core together — a multi-crate
+        // build this suite must never invoke. This reproduces the SHAPE
+        // without the build: a command whose non-zero exit is caused by
+        // something other than the entry's own subject (an "upstream"
+        // failure, standing in for an unrelated crate breaking the shared
+        // build).
+        //
+        // C180's own conclusion, restated here because it is the reason this
+        // fixture exists: a false (non-zero) result from a command that
+        // exercises more than the entry's subject is evidence that
+        // *something upstream* is red, and is never evidence about the entry
+        // it is attached to — so it must be reported as Actionable (a human
+        // has to look), never silently as Cleared, and its outcome must be
+        // distinguishable from a timeout so an operator does not mistake one
+        // failure mode for the other.
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "c180-upstream-failure-shape",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        // Stands in for "cargo build --manifest-path
+                        // core/bastion" failing because an unrelated sibling
+                        // crate (okf-core) is red, not because of this
+                        // entry's own subject.
+                        command: "sh -c 'exit 1'".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let start = std::time::Instant::now();
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            std::env::temp_dir().as_path(),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            true,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            report.actionable, 1,
+            "an upstream-caused non-zero exit is Actionable, a human must look"
+        );
+        assert_eq!(
+            report.cleared, 0,
+            "never Cleared on an unsound upstream signal"
+        );
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::CommandExitsZero {
+                command: "sh -c 'exit 1'".to_string(),
+                satisfied: false,
+            }],
+            "an upstream ExitNonZero still carries a ref, distinguishing it from a TimedOut/SpawnFailed which carries none"
+        );
+        assert_eq!(
+            report.entries[0].reason, None,
+            "an ExitNonZero is not forced into NotEvaluable the way TimedOut/SpawnFailed are"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "a genuine non-zero exit must resolve fast, unlike a bound-outrunning timeout: took {elapsed:?}"
+        );
+    }
+
+    #[test]
     fn mixed_typed_satisfied_and_prose_unsatisfied_entries_each_preserve_conjunctive_and() {
         // The schema allows exactly one `clears_when` per carryover entry, so
         // "mixed typed-and-prose reference sets" is exercised across a fleet
