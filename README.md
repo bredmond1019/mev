@@ -104,8 +104,8 @@ dry-run mode at all.
 The eleven commands that write `state.json` or its derived files — `emit-state`,
 `state-history --restore`, `set-block-status`, `defer-epic`, `resume-epic`, `complete-epic`,
 `sync-epics`, `close-operator-gate`, `normalize-op-slugs`, `approve`, `reject` — additionally
-accept `--agent <name>` and `--lock-dir <PATH>`, and will refuse to write while another agent
-holds a *quiesce lease*. See [Concurrent writers](#concurrent-writers) below.
+accept `--agent <name>` and `--lock-dir <PATH>`. They refuse to run while someone else has
+claimed a quiet window over the corpus. See [Concurrent writers](#concurrent-writers) below.
 
 | Command | What it does | Write? |
 |---|---|---|
@@ -208,27 +208,40 @@ mev carryover ~/Dev/your-corpus --dispose --dry-run   # preview exactly what --d
 
 ## Concurrent writers
 
-If several agents or people drive `mev` against one corpus, two independent mechanisms keep their
-writes apart. Both apply only to a run that actually writes — a dry-run checks neither.
+A writing command rewrites files across the whole corpus, so if two people or agents drive `mev`
+against one corpus at the same time, one can overwrite work the other is still checking. Two
+separate mechanisms prevent that, and they answer different questions. **Both are checked only on a
+run that actually writes** — a dry-run takes neither.
 
-- **The advisory lock** (`<corpus root>/.mev-emit.lock`) stops two writes landing at the same
-  instant. A second writer fails with `E_EMIT_LOCK_HELD`; retrying shortly is the right response.
-- **Quiesce leases** let one agent declare a quiet window that others must respect — which the lock
-  cannot express, since it is only held for the duration of a single write. `mev` reads
-  `<lock_dir>/leases/*.json` and refuses with `E_QUIESCE_LEASE_HELD`, writing nothing, when a lease
-  there is `"kind": "exclusive"`, is not stale, and is held by an agent other than the caller. A
-  lease's `"scope"` decides its reach: `"fleet"` refuses writes in every repo, while `"repo"` (or an
-  absent `scope`) refuses only writes to the repo it names. Unlike the lock, this is **not** a retry
-  condition — wait for the lease to be released.
+| Mechanism | Answers | If it stops you |
+|---|---|---|
+| **Advisory lock** — a file at `<corpus root>/.mev-emit.lock`, held only for the seconds one write takes | "Is someone writing *right now*?" | `E_EMIT_LOCK_HELD`. **Retry shortly.** A lock left behind by a dead process is reclaimed automatically. |
+| **Quiesce lease** — a small JSON file someone writes by hand to claim a quiet window, lasting as long as they need | "Has someone asked me *not* to write for a while?" | `E_QUIESCE_LEASE_HELD`, nothing written. **Do not retry** — wait for the lease to be released. |
 
-`--lock-dir <PATH>` says where to look; otherwise `mev` uses the `FLEET_LOCK_DIR` environment
-variable, and failing that `<corpus root>/.fleet-locks`. If that directory does not exist or cannot
-be read, nothing is refused — leases are opt-in, and a corpus that has never created one is
-unaffected.
+A **quiesce lease** is one file under `<lock_dir>/leases/`, in the shape of
+[`lease.schema.json`](.claude/workflows/lease.schema.json). `mev` refuses a write when it finds one
+that is all three of:
 
-`--agent <name>` identifies the caller so its *own* lease does not refuse it. Omitting it means the
-caller cannot be matched against any lease holder, so any live exclusive lease will refuse the
-write — including one the same caller wrote itself.
+- `"kind": "exclusive"` — a `"shared"` lease never refuses anything.
+- **Not stale** — its `heartbeat` (or its `acquired_at`, if it has no heartbeat) is under 3 hours
+  old. A lease nobody refreshes stops refusing writes on its own, so a forgotten one cannot wedge
+  the corpus.
+- **Held by someone else** — see `--agent` below.
+
+A lease's `"scope"` sets its reach: `"fleet"` refuses writes in every repo; `"repo"`, or no `scope`
+at all, refuses only writes to the one repo it names.
+
+### The two flags
+
+- **`--lock-dir <PATH>`** — where to look for leases. Otherwise `mev` uses the `FLEET_LOCK_DIR`
+  environment variable, then `<corpus root>/.fleet-locks`. **If that directory does not exist,
+  nothing is ever refused** — leases are opt-in, and a corpus that has never made one is unaffected.
+- **`--agent <name>`** — who is calling, so your *own* lease does not block you. Omit it and you
+  cannot be matched against any holder, so any live exclusive lease refuses the write — including
+  one you wrote yourself.
+
+Diagnostic codes and per-command detail:
+[`docs/cli.md`](docs/cli.md#quiesce-lease-on---write---agent---lock-dir).
 
 ## `--json` output shape
 
@@ -301,7 +314,7 @@ Full module-by-module breakdown: [`docs/architecture.md`](docs/architecture.md).
 | Build fails looking for `okf-core` | The path dependency sibling isn't cloned. | Clone `https://github.com/bredmond1019/okf-core` next to this repo (`../okf-core` relative to `mev/`). |
 | `validate-brain --links --state` (or any two flags together) only checks one thing | The flags don't compose — see the dispatch order above. | Run one flag per invocation. |
 | `emit-state --write` reports `E_EMIT_LOCK_HELD` | Another live `mev` write process holds the advisory lock. | Wait for it to finish; a lock from a dead process is reclaimed automatically. |
-| A write command reports `E_QUIESCE_LEASE_HELD` | Another agent holds an exclusive quiesce lease over this write. Retrying will not help — see [Concurrent writers](#concurrent-writers). | Wait for the lease to be released, or pass `--agent <name>` if the lease is your own. |
+| A write command reports `E_QUIESCE_LEASE_HELD` | Someone claimed a quiet window over the corpus — see [Concurrent writers](#concurrent-writers). Retrying will not help. | Wait for the lease to be released, or pass `--agent <name>` if the lease is your own. A lease older than 3 hours is ignored automatically. |
 | A `--write` command refuses inside a git worktree | Writers resolve paths from `brain.toml`, not the current working directory, so writing from a linked worktree would target the wrong checkout. | Run from the main working tree. |
 | A generated file looks wrong after `emit-state --write` | The write is recorded, so it's recoverable. | `mev state-history <path>` to list revisions, `--restore SEQ` to roll back. |
 
