@@ -2337,6 +2337,29 @@ fn print_carryover_trajectory(report: &mev::brain::carryover::TrajectoryReport) 
     }
 }
 
+/// The parenthetical that reports how many entries a `--repo` filter excluded, and what — if
+/// anything — the operator can do about it.
+///
+/// Split out because the advisory half is only true while `--include-cross-repo` is OFF. Emitted
+/// unconditionally (as it was when `MV.ticket.repo-filter-hides-cross-repo-entries` first shipped
+/// it), it tells an operator who has *already* passed the flag to pass the flag — about entries it
+/// cannot reach, since the remainder under `--include-cross-repo` is by construction the
+/// tier-scoped entries and that flag widens only to `cross_repo`. See
+/// `carryover_filter_owner`/`include_cross_repo` in `brain::carryover`: an entry is counted here
+/// only when it has no filter owner AND did not match, so turning the flag on removes exactly the
+/// `cross_repo`-scoped ones from the count and leaves the tier-scoped ones.
+fn excluded_clause(excluded: usize, include_cross_repo: bool) -> String {
+    if include_cross_repo {
+        format!(
+            "{excluded} tier-scoped entries excluded by this filter; --include-cross-repo does not widen to tier-scoped entries"
+        )
+    } else {
+        format!(
+            "{excluded} cross-repo/tier entries excluded by this filter; add --include-cross-repo to include the cross-repo-scoped ones"
+        )
+    }
+}
+
 /// Human-readable, lane-grouped summary for `mev carryover`'s default (non-`--json`) output.
 ///
 /// `repo_filter`, when set, makes both the summary line and (when the result
@@ -2373,11 +2396,12 @@ fn print_carryover_report(
     report: &mev::CarryoverReport,
     grep_pattern: Option<&str>,
     repo_filter: Option<&str>,
+    include_cross_repo: bool,
 ) {
     if let Some(filter) = repo_filter {
         println!(
-            "carryover sweep: filter --repo '{filter}' applied ({} cross-repo/tier entries excluded by this filter; add --include-cross-repo to include the cross-repo-scoped ones)",
-            report.repo_filter_excluded_cross_repo
+            "carryover sweep: filter --repo '{filter}' applied ({})",
+            excluded_clause(report.repo_filter_excluded_cross_repo, include_cross_repo)
         );
     }
     if let Some(pattern) = grep_pattern {
@@ -2392,8 +2416,8 @@ fn print_carryover_report(
     if grep_pattern.is_some() && report.total == 0 {
         if let Some(filter) = repo_filter {
             println!(
-                "carryover sweep: swept 1 repo ({filter}) and matched nothing for this pattern (not \"nothing to sweep\"); {} cross-repo/tier entries are excluded by --repo, add --include-cross-repo to sweep them too",
-                report.repo_filter_excluded_cross_repo
+                "carryover sweep: swept 1 repo ({filter}) and matched nothing for this pattern (not \"nothing to sweep\"); {}",
+                excluded_clause(report.repo_filter_excluded_cross_repo, include_cross_repo)
             );
         } else {
             println!(
@@ -4015,7 +4039,12 @@ fn main() -> ExitCode {
                                 }
                             }
                         } else {
-                            print_carryover_report(&report, grep.as_deref(), repo.as_deref());
+                            print_carryover_report(
+                                &report,
+                                grep.as_deref(),
+                                repo.as_deref(),
+                                include_cross_repo,
+                            );
                             ExitCode::SUCCESS
                         }
                     }
@@ -4209,5 +4238,50 @@ fn main() -> ExitCode {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod excluded_clause_tests {
+    use super::excluded_clause;
+
+    /// With the flag OFF, the advisory is correct: the excluded set contains `cross_repo`-scoped
+    /// entries, and `--include-cross-repo` is exactly what surfaces them.
+    #[test]
+    fn advises_the_flag_when_it_is_not_yet_set() {
+        let clause = excluded_clause(55, false);
+        assert!(clause.contains("55 cross-repo/tier entries excluded by this filter"));
+        assert!(clause.contains("add --include-cross-repo"));
+    }
+
+    /// With the flag ON the advice is unactionable and must not appear: the operator has already
+    /// passed it, and the remainder is tier-scoped, which the flag does not widen to. This is the
+    /// regression — the clause used to be emitted unconditionally.
+    #[test]
+    fn never_advises_a_flag_that_is_already_set() {
+        let clause = excluded_clause(2, true);
+        assert!(
+            !clause.contains("add --include-cross-repo"),
+            "must not tell an operator to pass a flag they have already passed: {clause}"
+        );
+    }
+
+    /// The remainder under the flag is tier-scoped, and the clause must say so rather than repeat
+    /// the mixed "cross-repo/tier" wording — naming the wrong scope is what made the count look
+    /// inconsistent with the unfiltered run.
+    #[test]
+    fn names_the_remainder_as_tier_scoped_under_the_flag() {
+        let clause = excluded_clause(2, true);
+        assert!(clause.contains("2 tier-scoped entries excluded by this filter"));
+        assert!(!clause.contains("cross-repo/tier"));
+        assert!(clause.contains("does not widen to tier-scoped entries"));
+    }
+
+    /// Zero is a real and common case (a repo whose filter excluded nothing); it must still render
+    /// a coherent sentence in both modes rather than being special-cased away.
+    #[test]
+    fn renders_zero_in_both_modes() {
+        assert!(excluded_clause(0, false).starts_with("0 cross-repo/tier entries"));
+        assert!(excluded_clause(0, true).starts_with("0 tier-scoped entries"));
     }
 }

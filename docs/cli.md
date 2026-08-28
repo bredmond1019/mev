@@ -1981,6 +1981,27 @@ decision, not an oversight). `--include-cross-repo` widens the filter to the una
 never pulls in entries owned by a *different* named repo, and it requires `--repo` — passed alone
 it is a misuse, reported and non-zero, the same way `--weeks` requires `--trajectory`.
 
+**The exclusion notice changes wording with the flag, because the remainder changes meaning.**
+Without `--include-cross-repo` the excluded set mixes `cross_repo`- and tier-scoped entries and the
+flag is the remedy, so the line names both and points at it:
+
+```
+filter --repo 'synapse' applied (55 cross-repo/tier entries excluded by this filter;
+  add --include-cross-repo to include the cross-repo-scoped ones)
+```
+
+With the flag on, every `cross_repo` entry has already been pulled in, so whatever is still excluded
+is tier-scoped by construction — and the flag does not widen to those. The line therefore names the
+remainder precisely and offers no remedy, rather than advising a flag that is already set:
+
+```
+filter --repo 'synapse' applied (2 tier-scoped entries excluded by this filter;
+  --include-cross-repo does not widen to tier-scoped entries)
+```
+
+The two counts are computed the same way and are not in conflict: 55 drops to 2 because the 53
+`cross_repo` entries moved from excluded to included.
+
 **This interacts with `--grep`.** A `--repo`-filtered `--grep` that matches nothing means "no match
 in this repo's slice of the corpus" — it is not evidence that no such entry exists fleet-wide. An
 entry could be sitting right there, scoped `cross_repo: true`, invisible to the filter. Re-run with
