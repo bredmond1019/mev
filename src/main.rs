@@ -2104,16 +2104,12 @@ fn print_carryover_audit(audit: &mev::CarryoverAudit) {
 }
 
 /// Print the `OUTFLOW (archive)` section of `mev carryover --audit`'s human-readable
-/// report. Omitted entirely when there is nothing to say (no rows and no archives
-/// read); collapses to a single explanatory line when every selected repo is simply
-/// missing its archive.
+/// report. Omitted entirely when there is nothing to say — including when every
+/// selected repo is simply missing its archive: an absent `carryover-archive.jsonl`
+/// yields zero rows, no diagnostic, and exit 0 (unlike a malformed archive line,
+/// which IS reported).
 fn print_archive_outflow(outflow: &mev::brain::carryover::ArchiveOutflow) {
     if outflow.rows_total == 0 && outflow.archives_read == 0 {
-        if outflow.archives_missing > 0 {
-            println!(
-                "\nOUTFLOW (archive): no carryover-archive.jsonl found for the selected repos — run `mev carryover --backfill` or dispose an entry to populate it."
-            );
-        }
         return;
     }
 

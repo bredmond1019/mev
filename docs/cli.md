@@ -2085,8 +2085,9 @@ visible here even though it has already vanished from the corpus the plain censu
   gets published and cannot be walked back.
 - **Missing or empty archive is the normal case, not an error.** `--backfill` and `--dispose` are
   both applied per repo on demand, so a repo (or the whole fleet, until either has run once
-  against it) can legitimately have no `carryover-archive.jsonl` yet. `--audit` reports this with
-  one explanatory line and still exits `0` — it never treats an absent archive as a failure.
+  against it) can legitimately have no `carryover-archive.jsonl` yet. `--audit` reports this
+  silently — zero rows, no diagnostic — and still exits `0`; it never treats an absent archive as
+  a failure.
 - **A malformed archive line is named, not swallowed.** A line that fails to parse as
   `CarryoverArchiveRow` is reported as `<path>:<1-based line number>` (up to 5 shown) and skipped;
   the surrounding valid rows are still counted, and the run still exits `0`.
