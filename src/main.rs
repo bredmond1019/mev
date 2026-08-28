@@ -2134,6 +2134,10 @@ fn print_carryover_report(report: &mev::CarryoverReport) {
                             "command-timed-out (rerun with a higher --exec-timeout, or the command genuinely never finishes)"
                         }
                         Some(mev::NotEvaluableReason::CommandSpawnFailed) => "command-spawn-failed",
+                        Some(mev::NotEvaluableReason::FileUnreadable) => "file-unreadable",
+                        Some(mev::NotEvaluableReason::PatternNotLiteral) => {
+                            "pattern-not-literal (authored as a regex; only literal substring matching is supported)"
+                        }
                         Some(mev::NotEvaluableReason::GateMentionNotCheckable) => {
                             "gate-mention-not-checkable (candidate for a typed command_exits_zero predicate)"
                         }

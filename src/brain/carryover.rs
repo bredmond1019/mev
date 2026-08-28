@@ -131,6 +131,21 @@ pub enum NotEvaluableReason {
     /// `PATH`), never evidence about the predicate's subject — never
     /// `Cleared`.
     CommandSpawnFailed,
+    /// A `FileContains` predicate's target could not be read to completion —
+    /// missing, resolved ambiguously under the two-root strategy, larger
+    /// than [`FILE_CONTAINS_MAX_BYTES`], or not valid UTF-8. Evidence about
+    /// the file, never evidence that the pattern is genuinely absent — only
+    /// a file that was read successfully is checkable, so this is never
+    /// `Cleared` or `Actionable` alongside a genuine negative.
+    FileUnreadable,
+    /// A `FileContains` predicate's `pattern` carries a shape (`.*`, `\d`, a
+    /// `[...]` class, alternation, anchors, …) that cannot plausibly be the
+    /// author's literal intent. The evaluator does literal substring
+    /// matching only (see the module header) and a regex-shaped pattern can
+    /// therefore never match — evaluating it literally would report a
+    /// permanent, indistinguishable false red instead of naming the actual
+    /// problem: the pattern was authored as a regex.
+    PatternNotLiteral,
     /// `clears_when` mentions a validator/gate/CI concept (see
     /// [`GATE_MENTION_WORDS`]) but no path or block reference could be
     /// extracted from it — e.g. *"the validator is green"* alone. Not
@@ -172,10 +187,15 @@ pub enum CarryoverRef {
     /// identical "unmet: key" line.
     UnresolvedBlock { key: String },
     /// A typed `file_contains` predicate. Satisfied when the path resolves
-    /// (same two-root strategy as [`Self::Path`]) and its contents contain
-    /// `pattern` as a literal substring. Every failure mode — missing file,
-    /// unreadable file, non-UTF8 contents, oversized file — is `satisfied:
-    /// false`, never a panic.
+    /// uniquely (same two-root strategy as [`Self::Path`]) and its contents
+    /// contain `pattern` as a literal substring; unsatisfied when the file
+    /// was read successfully and the pattern is genuinely absent. Produced
+    /// only for [`FileContainsOutcome::Found`]/[`FileContainsOutcome::NotFound`]
+    /// — a read failure (missing, ambiguous, oversized, unreadable, non-UTF8)
+    /// or a regex-shaped pattern produces NO ref at all and forces
+    /// `NotEvaluable` instead (see [`NotEvaluableReason::FileUnreadable`] /
+    /// [`NotEvaluableReason::PatternNotLiteral`]), so this variant is never a
+    /// stand-in for "could not tell".
     FileContains {
         path: String,
         pattern: String,
@@ -703,40 +723,107 @@ fn resolve_existing_path(
 /// this predicate is meant to check.
 const FILE_CONTAINS_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
-/// Whether a `file_contains` predicate is satisfied: the path resolves (same
+/// The observed outcome of evaluating a `file_contains` predicate. Kept
+/// distinct from a bare `bool` so a caller can tell "the file was read and
+/// the pattern is genuinely absent" (`NotFound`) apart from "we never got a
+/// real answer" (`Unreadable`/`PatternNotLiteral`) — collapsing every
+/// failure mode (missing, oversized, unreadable, non-UTF-8, resolves
+/// ambiguously) into one `false` is exactly the unsoundness `MV.16.G` exists
+/// to remove: an unknown outcome must never read as satisfied, and a broken
+/// predicate must never be indistinguishable from a real signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FileContainsOutcome {
+    /// The path resolved to a unique, readable, UTF-8 file within the size
+    /// bound, and `pattern` appears in it as a literal substring.
+    Found,
+    /// The path resolved to a unique, readable, UTF-8 file within the size
+    /// bound, and `pattern` does NOT appear in it — a genuine negative.
+    NotFound,
+    /// The path did not resolve to a unique file (missing, ambiguous under
+    /// the two-root strategy, oversized, unreadable, or not valid UTF-8).
+    /// Evidence about the file, not about the pattern — see
+    /// [`NotEvaluableReason::FileUnreadable`].
+    Unreadable,
+    /// `pattern` carries a shape (`.*`, `\d`, a `[...]` class, alternation,
+    /// anchors, …) that cannot plausibly be the author's literal intent —
+    /// the evaluator does literal substring matching only and never adds a
+    /// `regex` dependency (see the module header), so a regex-shaped
+    /// pattern can never match and would otherwise read as a permanent
+    /// false red. See [`NotEvaluableReason::PatternNotLiteral`].
+    PatternNotLiteral,
+}
+
+/// Detect a pattern shape that cannot plausibly be an author's literal
+/// intent — composite regex metacharacter sequences only, never a single
+/// bare metacharacter, so a legitimate literal like `docs/cli.md` or
+/// `exit $?` is never refused. Deliberately conservative: false negatives
+/// (a real regex slipping through as "literal") are cheaper here than false
+/// positives (a working literal predicate turned permanently
+/// not-evaluable) — the caller only ever falls back to literal substring
+/// matching, never to actual regex evaluation, so a slip-through just keeps
+/// today's (already sound) literal-match behavior.
+fn pattern_is_regex_shaped(pattern: &str) -> bool {
+    const COMPOSITE_MARKERS: &[&str] = &[".*", ".+", "\\d", "\\w", "\\s", "\\S", "\\D", "\\W"];
+    if COMPOSITE_MARKERS.iter().any(|m| pattern.contains(m)) {
+        return true;
+    }
+    // A bracket class: an unescaped `[` followed somewhere later by `]`.
+    if pattern.contains('[') && pattern.contains(']') {
+        return true;
+    }
+    // An alternation group: `(...|...)`.
+    if pattern.contains('(') && pattern.contains('|') && pattern.contains(')') {
+        return true;
+    }
+    // Anchors are only refused when they open/close the whole pattern —
+    // that is the shape that means "match the whole line/string", not a
+    // bare `$` or `^` embedded in prose (e.g. `exit $?`).
+    if pattern.starts_with('^') || pattern.ends_with('$') {
+        return true;
+    }
+    false
+}
+
+/// Evaluate a `file_contains` predicate: the path resolves uniquely (same
 /// two-root strategy as [`path_ref_satisfied`]), its size is within
-/// [`FILE_CONTAINS_MAX_BYTES`], its contents decode as UTF-8, and `pattern`
+/// [`FILE_CONTAINS_MAX_BYTES`], its contents decode as UTF-8, `pattern` is
+/// not regex-shaped (see [`pattern_is_regex_shaped`]), and `pattern`
 /// appears as a literal substring (never a regex — see the module header).
-/// Every failure mode — missing file, oversized file, unreadable file,
-/// non-UTF8 contents, IO error — returns `false`, never panics.
-fn file_contains_satisfied(
+/// Never panics — every failure mode is a [`FileContainsOutcome`] variant.
+fn file_contains_outcome(
     path: &str,
     pattern: &str,
     brain_root: &Path,
     repo_paths: &HashMap<String, PathBuf>,
     owning_repo: &str,
-) -> bool {
-    // `None` and `Ambiguous` both fold into `false` here — this bool-typed
-    // helper cannot express the distinction yet; `MV.16.G` task 3 replaces
-    // it with an outcome type that reports ambiguity (and unreadability)
-    // distinctly rather than as an indistinguishable negative.
+) -> FileContainsOutcome {
+    if pattern_is_regex_shaped(pattern) {
+        return FileContainsOutcome::PatternNotLiteral;
+    }
     let resolved = match resolve_existing_path(path, brain_root, repo_paths, owning_repo) {
         PathResolution::Unique(resolved) => resolved,
-        PathResolution::None | PathResolution::Ambiguous { .. } => return false,
+        PathResolution::None | PathResolution::Ambiguous { .. } => {
+            return FileContainsOutcome::Unreadable;
+        }
     };
     let Ok(metadata) = std::fs::metadata(&resolved) else {
-        return false;
+        return FileContainsOutcome::Unreadable;
     };
     if metadata.len() > FILE_CONTAINS_MAX_BYTES {
-        return false;
+        return FileContainsOutcome::Unreadable;
     }
     let Ok(bytes) = std::fs::read(&resolved) else {
-        return false;
+        return FileContainsOutcome::Unreadable;
     };
     let Ok(contents) = String::from_utf8(bytes) else {
-        return false;
+        return FileContainsOutcome::Unreadable;
     };
-    contents.contains(pattern)
+    if contents.contains(pattern) {
+        FileContainsOutcome::Found
+    } else {
+        FileContainsOutcome::NotFound
+    }
 }
 
 /// Wall-clock bound for a `command_exits_zero` child process. `timeout(1)`
@@ -1064,16 +1151,35 @@ pub fn evaluate_carryover_with_dedup(
                     pattern,
                     ..
                 })) => {
-                    // Same two-root resolution strategy as `FileExists`;
-                    // every failure mode (missing/oversized/unreadable/
-                    // non-UTF8) folds into `satisfied: false`.
-                    let satisfied =
-                        file_contains_satisfied(path, pattern, brain_root, repo_paths, own_repo);
-                    refs.push(CarryoverRef::FileContains {
-                        path: path.clone(),
-                        pattern: pattern.clone(),
-                        satisfied,
-                    });
+                    // Same two-root resolution strategy as `FileExists`.
+                    // `Found`/`NotFound` push a ref as today; `Unreadable`
+                    // and `PatternNotLiteral` push none and force
+                    // `NotEvaluable` — the same shape `FileExists`'s
+                    // `Ambiguous` arm already uses, so a read failure or a
+                    // regex-shaped pattern is never indistinguishable from
+                    // a genuine negative.
+                    match file_contains_outcome(path, pattern, brain_root, repo_paths, own_repo) {
+                        FileContainsOutcome::Found => {
+                            refs.push(CarryoverRef::FileContains {
+                                path: path.clone(),
+                                pattern: pattern.clone(),
+                                satisfied: true,
+                            });
+                        }
+                        FileContainsOutcome::NotFound => {
+                            refs.push(CarryoverRef::FileContains {
+                                path: path.clone(),
+                                pattern: pattern.clone(),
+                                satisfied: false,
+                            });
+                        }
+                        FileContainsOutcome::Unreadable => {
+                            forced_reason = Some(NotEvaluableReason::FileUnreadable);
+                        }
+                        FileContainsOutcome::PatternNotLiteral => {
+                            forced_reason = Some(NotEvaluableReason::PatternNotLiteral);
+                        }
+                    }
                 }
                 Some(ClearsWhen::Predicate(ClearsWhenPredicate::CommandExitsZero {
                     command,
@@ -2613,7 +2719,7 @@ pub fn slug_for_finding(finding: &crate::brain::graph_findings::GraphFinding) ->
 ///   predicate that is a genuine STAND-IN for "re-run the detector" — a
 ///   `file_exists`/`file_contains` check over the exact fact the detector
 ///   itself checked — spelled so `mev carryover`'s own evaluator
-///   (`path_ref_satisfied`/`file_contains_satisfied`) resolves it the same
+///   (`path_ref_satisfied`/`file_contains_outcome`) resolves it the same
 ///   way. `--write`'s idempotence (dedup on `finding_id`) still matters
 ///   independently: it is what keeps a repeated `--write` from duplicating
 ///   an entry, not what retires one — that is now the predicate's job.
@@ -6601,7 +6707,10 @@ mod tests {
     }
 
     #[test]
-    fn file_contains_predicate_absent_file_is_actionable_never_panics() {
+    fn file_contains_predicate_absent_file_is_not_evaluable_never_panics() {
+        // Was `Actionable` with `satisfied: false` before MV.16.G task 3 —
+        // updated because a missing file is unreadable, not a genuine
+        // negative (a false red, never a false clear).
         let files = vec![(
             src("mev"),
             state_file(
@@ -6630,19 +6739,17 @@ mod tests {
             false,
             COMMAND_EXEC_TIMEOUT,
         );
-        assert_eq!(report.actionable, 1);
+        assert_eq!(report.not_evaluable, 1);
+        assert!(report.entries[0].refs.is_empty());
         assert_eq!(
-            report.entries[0].refs,
-            vec![CarryoverRef::FileContains {
-                path: "definitely/does/not/exist.md".to_string(),
-                pattern: "anything".to_string(),
-                satisfied: false,
-            }]
+            report.entries[0].reason,
+            Some(NotEvaluableReason::FileUnreadable)
         );
     }
 
     #[test]
-    fn file_contains_predicate_oversized_file_is_actionable_never_panics() {
+    fn file_contains_predicate_oversized_file_is_not_evaluable_never_panics() {
+        // Was `Actionable` with `satisfied: false` before MV.16.G task 3.
         let dir = scratch_dir("oversized");
         // One byte past FILE_CONTAINS_MAX_BYTES — must be rejected, not read.
         let oversized = vec![b'x'; (FILE_CONTAINS_MAX_BYTES + 1) as usize];
@@ -6658,7 +6765,7 @@ mod tests {
                     "deferred",
                     ClearsWhenPredicate::FileContains {
                         path: "huge.md".to_string(),
-                        pattern: "x".to_string(),
+                        pattern: "z".to_string(),
                         note: None,
                     },
                 )],
@@ -6676,22 +6783,22 @@ mod tests {
             false,
             COMMAND_EXEC_TIMEOUT,
         );
-        assert_eq!(report.actionable, 1);
-        assert_eq!(
-            report.entries[0].refs,
-            vec![CarryoverRef::FileContains {
-                path: "huge.md".to_string(),
-                pattern: "x".to_string(),
-                satisfied: false,
-            }],
+        assert_eq!(report.not_evaluable, 1);
+        assert!(
+            report.entries[0].refs.is_empty(),
             "an oversized file must never be read into memory to satisfy the predicate"
+        );
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::FileUnreadable)
         );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn file_contains_predicate_non_utf8_file_is_actionable_never_panics() {
+    fn file_contains_predicate_non_utf8_file_is_not_evaluable_never_panics() {
+        // Was `Actionable` before MV.16.G task 3.
         let dir = scratch_dir("non-utf8");
         // 0xFF is never valid as a UTF-8 lead byte.
         std::fs::write(dir.join("binary.md"), [0xFFu8, 0xFE, 0x00, 0x01]).unwrap();
@@ -6724,8 +6831,109 @@ mod tests {
             false,
             COMMAND_EXEC_TIMEOUT,
         );
-        assert_eq!(report.actionable, 1);
         assert!(!matches!(report.entries[0].lane, CarryoverLane::Cleared));
+        assert_eq!(report.not_evaluable, 1);
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::FileUnreadable)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_contains_predicate_regex_shaped_pattern_is_not_evaluable() {
+        // Live corpus shape: `bastion:session-qa-chat-about-never-tapped-live`
+        // authors `"pattern": "ChatAbout .*live"`, which the literal-match
+        // evaluator can never satisfy — a permanent false red that must be
+        // named, not evaluated as a literal.
+        let dir = scratch_dir("regex-shaped");
+        std::fs::write(dir.join("target.md"), "ChatAbout something live").unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-contains-regex-shaped",
+                    "deferred",
+                    ClearsWhenPredicate::FileContains {
+                        path: "target.md".to_string(),
+                        pattern: "ChatAbout .*live".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        assert_eq!(report.not_evaluable, 1);
+        assert!(report.entries[0].refs.is_empty());
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::PatternNotLiteral)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_contains_predicate_literal_single_dot_still_matches() {
+        // A bare `.` is NOT enough to be treated as regex-shaped — refusing
+        // a legitimate literal like `docs/cli.md` would turn a working
+        // predicate into a permanent not-evaluable. Positive control for
+        // `file_contains_predicate_regex_shaped_pattern_is_not_evaluable`.
+        let dir = scratch_dir("literal-dot");
+        std::fs::write(dir.join("target.md"), "see docs/cli.md for details").unwrap();
+
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-file-contains-literal-dot",
+                    "deferred",
+                    ClearsWhenPredicate::FileContains {
+                        path: "target.md".to_string(),
+                        pattern: "docs/cli.md".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            &dir,
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        assert_eq!(report.cleared, 1);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::FileContains {
+                path: "target.md".to_string(),
+                pattern: "docs/cli.md".to_string(),
+                satisfied: true,
+            }]
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
