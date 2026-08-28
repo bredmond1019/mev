@@ -11,6 +11,39 @@ related: [status]
 timestamp: "2026-08-23T09:17:53-03:00"
 ---
 
+## [run: 2026-08-28]
+
+Ran `MV.ticket.write-verbs-ignore-the-quiesce-lease` via `/sdlc-flow` (tasks 1–5; BAILED on task 5).
+Task 1 added `src/brain/lease.rs`, reading `<lock_dir>/leases/*.json` against `lease.schema.json` and
+answering exclusive/shared, fleet/repo-scope, self-exempt, staleness-aware Clear/Held verdicts
+(3h TTL mirroring `check_lane_agents.py`'s `STALE_THRESHOLD_SECONDS`, documented distinctly from
+`availability.rs`'s unrelated pid-keyed TTL constants). Task 2 wired all 11 corpus-wide write verbs
+(`emit-state`, `state-history --restore`, `defer/resume/complete-epic`, `sync-epics`,
+`set-block-status`, `close-operator-gate`, `normalize-op-slugs`, `approve`, `reject`) through a single
+`refuse_if_quiesced()` helper called before each `lock::acquire_lock` site, so a sibling lane's
+exclusive lease now refuses the write with `E_QUIESCE_LEASE_HELD` before the `.mev-emit.lock` is ever
+touched; a mid-task live smoke test that accidentally bypassed a real exclusive lease on the actual HQ
+corpus was caught and reverted via targeted `git restore`, with all subsequent testing moved to an
+isolated `/tmp` fixture root. Task 3 added an 8-test CLI fixture suite
+(`tests/it/brain_quiesce_lease.rs`) proving all 11 verbs consult the lease uniformly. Task 4 documented
+the guard in `docs/cli.md` beside every `E_EMIT_LOCK_HELD` occurrence. Task 5 (full-suite validation)
+BAILED: `cargo test` failed on `fleet_regression::fleet_readiness_is_unchanged_for_blocks_without_a_new_edge`,
+which reads the live external `agentic-portfolio/planning/state.json` corpus (`focus.next` drift) and
+touches none of this ticket's files — independently reproduced identically on base commit `main==f8c00f1`
+via a fresh `git worktree add` and `cargo nextest run` in this triage turn, confirming the failure
+pre-exists the ticket. fmt/clippy/build/audit/consumer-scripts all passed clean. Ran
+`mev emit-state --write` in place after the status.md edit (0 errors, 29 warnings, all pre-existing
+`W_EMIT_NO_SENTINEL` noise). Next: re-plan or retry Task 5 once the upstream `agentic-portfolio`
+corpus drift (missing `BT.ticket.engine-docs-drift-tripwire` from derived `focus.next`) is resolved
+externally — this ticket's code is otherwise complete and ready to merge once that gate clears.
+
+```
+88840b2 feat: implement MV.ticket.write-verbs-ignore-the-quiesce-lease-task4
+9fc71af feat: implement MV.ticket.write-verbs-ignore-the-quiesce-lease-task3
+f152677 feat: implement MV.ticket.write-verbs-ignore-the-quiesce-lease-task2
+a689345 feat: implement MV.ticket.write-verbs-ignore-the-quiesce-lease-task1
+```
+
 ## [run: 2026-08-27]
 
 Closed `MV.16.G` end to end via `/sdlc-flow` (7 of 7 tasks, PASS). Fixed the typed `clears_when`
