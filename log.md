@@ -8,10 +8,33 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-28T11:20:00-03:00"
+timestamp: "2026-08-28T16:30:00-03:00"
 ---
 
 ## [run: 2026-08-28]
+
+### Closed the could-not-check-reads-as-green pattern, then found it three more times
+
+- **What:** Ran the three-ticket `gate-decline-visibility` chain to 3/3 via `/sdlc-task`.
+  `cargo metadata --locked` now gates this repo (`locked-lockfile` + a fixture proving it can fail);
+  `check_consumers.sh` prints `verified P of N consumers` with adjudication provably untouched (no
+  `gate_failed` line changed in the diff); `mev carryover` gained `--include-cross-repo` and filtered
+  sweeps now name the filter instead of claiming they swept the corpus. Then fixed four things the
+  chain surfaced: the exclusion notice advising a flag already set (`aa88164`); a stale **global**
+  command install — base-template and all 12 repo copies were correct, only `~/.claude/commands/` was
+  10-of-57 behind, and it is the copy that executes; `/close-out` Step 0.5 scoping a multi-block
+  in-place chain to its last block only (`base-template:b127ee7`); and two gates that read state they
+  do not own (`ad04819`) — a live-corpus `cleared <= 15` ceiling, replaced by the fixture test
+  `widening_admits_entries_but_never_relanes_them`, and an isolation guard asserting the working tree
+  was absolutely clean rather than unchanged by the script. Filed
+  `MV.ticket.sdlc-workflow-missing-value-diagnostic` for BT.2.A's request.
+- **Why:** One defect found four ways in two days — a check that declined to run reported the same
+  green as a check that passed, and a real consumer break reached `main` behind two green declines.
+  The three tickets closed the pattern; the four follow-ons are the same shape found in the tooling
+  that was supposed to catch it. The live-corpus ceiling is the sharpest instance: it passed 717/717
+  and failed on the next run at 16 with no mev source change in between, which makes it a gate that
+  can go red without the code changing — worth as little as one that goes green without running.
+- **Refs:** `planning/orchestration-run/gate-decline-visibility/{notes.md,review.md}`, D68, D64, D57
 
 ### A consumer break shipped past the gate built to catch it
 
