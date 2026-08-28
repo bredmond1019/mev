@@ -4822,6 +4822,40 @@ pub fn notify_subset(
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// `--grep` filter (MV.ticket.carryover-grep, task 1)
+// ---------------------------------------------------------------------------
+
+/// Filter already-swept entries down to the subset whose `slug` OR `text`
+/// matches `pattern`, case-insensitively.
+///
+/// Pure: no I/O, no globals, no `std::process`. The pattern is compiled
+/// exactly once here and reused across every entry (never recompiled per
+/// entry). Matching covers `slug` and `text` only — not `clears_when`,
+/// `refs`, or `finding_id` (see the ticket's `out_of_scope`); those are not
+/// what a human searches by, and widening the match surface makes a common
+/// word like `block` hit nearly everything.
+///
+/// A malformed `pattern` is returned as `Err` rather than silently
+/// downgraded to a substring match or to matching nothing — a silent
+/// zero-match result is indistinguishable from "no such entry", which is
+/// exactly the failure this ticket exists to remove. The caller (the CLI
+/// mode handler, task 2/3) is responsible for reporting the error and
+/// exiting non-zero; this function never swallows it.
+pub fn filter_carryover_entries_by_grep(
+    entries: &[CarryoverVerdict],
+    pattern: &str,
+) -> Result<Vec<CarryoverVerdict>, regex::Error> {
+    let re = regex::RegexBuilder::new(pattern)
+        .case_insensitive(true)
+        .build()?;
+    Ok(entries
+        .iter()
+        .filter(|entry| re.is_match(&entry.slug) || re.is_match(&entry.text))
+        .cloned()
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10864,6 +10898,92 @@ mod tests {
         // here; this pins that Hot specifically requires lane membership.
         let slugs: Vec<&str> = out.iter().map(|r| r.slug.as_str()).collect();
         assert_eq!(slugs, vec!["blocking"]);
+    }
+
+    // -- filter_carryover_entries_by_grep (MV.ticket.carryover-grep, task 1) -
+
+    fn grep_verdict(slug: &str, text: &str) -> CarryoverVerdict {
+        CarryoverVerdict {
+            repo: "mev".to_string(),
+            slug: slug.to_string(),
+            kind: "known_issue".to_string(),
+            text: text.to_string(),
+            clears_when: None,
+            created: "2026-01-01".to_string(),
+            age_days: Some(1),
+            stale: false,
+            lane: CarryoverLane::NotEvaluable,
+            refs: Vec::new(),
+            reason: None,
+            priority: None,
+            finding_id: None,
+            blocks: Vec::new(),
+            enforce: None,
+        }
+    }
+
+    #[test]
+    fn grep_filter_matches_on_slug() {
+        let entries = vec![
+            grep_verdict("synapse-rename-mechanical-flip-pending", "some text"),
+            grep_verdict("unrelated-slug", "other text"),
+        ];
+        let out = filter_carryover_entries_by_grep(&entries, "synapse-rename")
+            .expect("valid pattern must compile");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].slug, "synapse-rename-mechanical-flip-pending");
+    }
+
+    #[test]
+    fn grep_filter_matches_on_text() {
+        let entries = vec![
+            grep_verdict("alpha", "mentions the synapse rename in prose"),
+            grep_verdict("beta", "nothing relevant here"),
+        ];
+        let out = filter_carryover_entries_by_grep(&entries, "synapse rename")
+            .expect("valid pattern must compile");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].slug, "alpha");
+    }
+
+    #[test]
+    fn grep_filter_is_case_insensitive() {
+        let entries = vec![grep_verdict("Synapse-Rename", "MIXED Case Text")];
+        let out = filter_carryover_entries_by_grep(&entries, "synapse-rename")
+            .expect("valid pattern must compile");
+        assert_eq!(out.len(), 1);
+
+        let out = filter_carryover_entries_by_grep(&entries, "mixed case")
+            .expect("valid pattern must compile");
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn grep_filter_matches_several_entries() {
+        let entries = vec![
+            grep_verdict("build-fix-a", "flaky build on macOS"),
+            grep_verdict("build-fix-b", "flaky build on linux"),
+            grep_verdict("unrelated", "nothing to do with it"),
+        ];
+        let out = filter_carryover_entries_by_grep(&entries, "flaky build")
+            .expect("valid pattern must compile");
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn grep_filter_matching_nothing_returns_empty_not_error() {
+        let entries = vec![grep_verdict("alpha", "some text")];
+        let out = filter_carryover_entries_by_grep(&entries, "no-such-pattern-anywhere")
+            .expect("a pattern matching nothing is still a valid pattern");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn grep_filter_invalid_regex_returns_err() {
+        let entries = vec![grep_verdict("alpha", "some text")];
+        let err = filter_carryover_entries_by_grep(&entries, "(unclosed[")
+            .expect_err("malformed regex must error, never silently match nothing");
+        assert!(!err.to_string().is_empty());
     }
 
     // -- enumerate_historical_removals (`MV.16.B` task 1) -------------------
