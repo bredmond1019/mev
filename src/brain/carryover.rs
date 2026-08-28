@@ -1396,6 +1396,100 @@ pub fn evaluate_carryover_with_dedup(
     }
 }
 
+/// Same as [`evaluate_carryover`], with an optional `--grep <PATTERN>` filter
+/// applied to the swept entries before the report's lane counts are
+/// (re)computed (`MV.ticket.carryover-grep`, task 2).
+///
+/// `grep_pattern: None` is a pure pass-through to [`evaluate_carryover`] —
+/// identical report, dedup sections included. `grep_pattern: Some(pattern)`
+/// runs the full evaluation once (with dedup skipped — see below), then
+/// narrows `entries` to the subset [`filter_carryover_entries_by_grep`]
+/// selects, and recomputes `total`/`cleared`/`actionable`/`not_evaluable`
+/// from THAT filtered subset — never from the full corpus. This is what
+/// keeps the header counts and the printed/serialized rows from ever
+/// disagreeing: a filter applied after the original (unfiltered) counts were
+/// already computed would look correct in isolation while misreporting the
+/// fleet.
+///
+/// The three cross-repo dedup sections (`clusters`, `suggestions`,
+/// `single_repo_finding_ids`) are always empty when a filter is active —
+/// they are statements about the whole corpus (a `finding_id` used in only
+/// one repo, or a heuristic duplicate pair) and computing them over a
+/// filtered slice would assert something false about entries the filter
+/// excluded. Skipping the (O(n²)) dedup pass here is also why the
+/// unfiltered-report evaluation the filtered path is built on passes
+/// `include_dedup: false` — that work would only be thrown away.
+///
+/// Returns `Err` when `pattern` fails to compile as a regex. The error is
+/// never swallowed into an empty-report "no matches" result — that would be
+/// indistinguishable from a pattern that legitimately matched nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_carryover_with_grep(
+    files: &[(StateSource, StateFile)],
+    status_map: &HashMap<String, Option<String>>,
+    brain_root: &Path,
+    repo_paths: &HashMap<String, PathBuf>,
+    today: &str,
+    thresholds: &AttentionThresholds,
+    repo_filter: Option<&str>,
+    allow_exec: bool,
+    exec_timeout: std::time::Duration,
+    grep_pattern: Option<&str>,
+) -> Result<CarryoverReport, regex::Error> {
+    let Some(pattern) = grep_pattern else {
+        return Ok(evaluate_carryover(
+            files,
+            status_map,
+            brain_root,
+            repo_paths,
+            today,
+            thresholds,
+            repo_filter,
+            allow_exec,
+            exec_timeout,
+        ));
+    };
+
+    let unfiltered = evaluate_carryover_with_dedup(
+        files,
+        status_map,
+        brain_root,
+        repo_paths,
+        today,
+        thresholds,
+        repo_filter,
+        allow_exec,
+        false,
+        exec_timeout,
+    );
+
+    let entries = filter_carryover_entries_by_grep(&unfiltered.entries, pattern)?;
+    let cleared = entries
+        .iter()
+        .filter(|e| e.lane == CarryoverLane::Cleared)
+        .count();
+    let actionable = entries
+        .iter()
+        .filter(|e| e.lane == CarryoverLane::Actionable)
+        .count();
+    let not_evaluable = entries
+        .iter()
+        .filter(|e| e.lane == CarryoverLane::NotEvaluable)
+        .count();
+    let total = entries.len();
+
+    Ok(CarryoverReport {
+        total,
+        cleared,
+        actionable,
+        not_evaluable,
+        entries,
+        clusters: Vec::new(),
+        suggestions: Vec::new(),
+        single_repo_finding_ids: Vec::new(),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Dispose plan — `mev carryover --dispose` (`MV.ticket.carryover-dispose`
 // task 1)
@@ -6133,6 +6227,259 @@ mod tests {
                 .map(|e| e.slug.as_str())
                 .collect::<Vec<_>>()
         );
+    }
+
+    // -- evaluate_carryover_with_grep (MV.ticket.carryover-grep, task 2) ----
+
+    #[test]
+    fn grep_filter_counts_equal_filtered_entries_not_full_corpus() {
+        // Three entries, only one of which mentions "synapse" — a filter
+        // applied after the (unfiltered) counts were computed would still
+        // report total=3; this asserts the header always matches the body.
+        let mut synapse_entry = item(
+            "synapse-rename",
+            "env",
+            None,
+            vec![],
+            "2020-01-01",
+            None,
+            None,
+        );
+        synapse_entry.text = "the synapse rename is pending".to_string();
+        let mut other_a = item("other-a", "env", None, vec![], "2020-01-01", None, None);
+        other_a.text = "unrelated finding a".to_string();
+        let mut other_b = item("other-b", "env", None, vec![], "2020-01-01", None, None);
+        other_b.text = "unrelated finding b".to_string();
+
+        let files = vec![(
+            src("mev"),
+            state_file("mev", vec![], vec![synapse_entry, other_a, other_b]),
+        )];
+        let status = status_map(&files);
+
+        let full = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        assert_eq!(full.total, 3, "sanity: all three entries load unfiltered");
+
+        let filtered = evaluate_carryover_with_grep(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+            Some("synapse"),
+        )
+        .expect("valid pattern must compile");
+
+        assert_eq!(filtered.total, 1);
+        assert_eq!(filtered.entries.len(), 1);
+        assert_eq!(filtered.entries[0].slug, "synapse-rename");
+        // The header counts must equal the body: not-evaluable is the only
+        // populated lane here (no clears_when), so it alone should equal 1.
+        assert_eq!(
+            filtered.cleared + filtered.actionable + filtered.not_evaluable,
+            1
+        );
+        assert_eq!(
+            filtered.cleared + filtered.actionable + filtered.not_evaluable,
+            filtered.entries.len(),
+            "header counts must always sum to the number of printed rows"
+        );
+    }
+
+    #[test]
+    fn grep_filter_matching_nothing_reports_empty_report_not_error() {
+        let mut entry = item("alpha", "env", None, vec![], "2020-01-01", None, None);
+        entry.text = "some text".to_string();
+        let files = vec![(src("mev"), state_file("mev", vec![], vec![entry]))];
+        let status = status_map(&files);
+
+        let filtered = evaluate_carryover_with_grep(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+            Some("no-such-pattern-anywhere"),
+        )
+        .expect("a pattern matching nothing is still a valid pattern");
+
+        assert_eq!(filtered.total, 0);
+        assert!(filtered.entries.is_empty());
+        assert_eq!(filtered.cleared, 0);
+        assert_eq!(filtered.actionable, 0);
+        assert_eq!(filtered.not_evaluable, 0);
+    }
+
+    #[test]
+    fn grep_filter_report_level_invalid_regex_returns_err() {
+        let mut entry = item("alpha", "env", None, vec![], "2020-01-01", None, None);
+        entry.text = "some text".to_string();
+        let files = vec![(src("mev"), state_file("mev", vec![], vec![entry]))];
+        let status = status_map(&files);
+
+        let err = evaluate_carryover_with_grep(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+            Some("(unclosed["),
+        )
+        .expect_err("malformed regex must error, never silently match nothing");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn grep_filter_suppresses_dedup_sections_that_are_populated_without_it() {
+        // Reuses the exact fixture `evaluate_carryover_with_dedup_false_skips_clusters_and_suggestions`
+        // proves triggers a suggestion when the dedup pass runs unfiltered.
+        let files = vec![
+            (
+                src("mev"),
+                state_file(
+                    "mev",
+                    vec![],
+                    vec![item(
+                        "similar-entry-a",
+                        "env",
+                        None,
+                        vec![],
+                        "2020-01-01",
+                        None,
+                        None,
+                    )],
+                ),
+            ),
+            (
+                src("okf-core"),
+                state_file(
+                    "okf-core",
+                    vec![],
+                    vec![item(
+                        "similar-entry-b",
+                        "env",
+                        None,
+                        vec![],
+                        "2020-01-01",
+                        None,
+                        None,
+                    )],
+                ),
+            ),
+        ];
+        let status = status_map(&files);
+
+        // Unfiltered: dedup sections are populated (this is the positive
+        // control — proves the fixture actually triggers dedup at all).
+        let unfiltered = evaluate_carryover_with_grep(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+            None,
+        )
+        .expect("no pattern given, cannot fail");
+        assert!(
+            !unfiltered.suggestions.is_empty(),
+            "sanity check: unfiltered dedup pass must populate suggestions"
+        );
+
+        // Filtered down to just one of the two similar entries: dedup
+        // sections must be empty, not recomputed over the filtered slice.
+        let filtered = evaluate_carryover_with_grep(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+            Some("similar-entry-a"),
+        )
+        .expect("valid pattern must compile");
+        assert_eq!(filtered.total, 1);
+        assert!(filtered.clusters.is_empty());
+        assert!(filtered.suggestions.is_empty());
+        assert!(filtered.single_repo_finding_ids.is_empty());
+    }
+
+    #[test]
+    fn grep_filter_composes_with_repo_filter_requiring_both() {
+        let mut mev_entry = item("shared-slug", "env", None, vec![], "2020-01-01", None, None);
+        mev_entry.text = "mentions synapse rename".to_string();
+        let mut okf_entry = item("shared-slug", "env", None, vec![], "2020-01-01", None, None);
+        okf_entry.text = "mentions synapse rename".to_string();
+
+        let files = vec![
+            (src("mev"), state_file("mev", vec![], vec![mev_entry])),
+            (
+                src("okf-core"),
+                state_file("okf-core", vec![], vec![okf_entry]),
+            ),
+        ];
+        let status = status_map(&files);
+
+        // --grep alone matches both repos' entries.
+        let grep_only = evaluate_carryover_with_grep(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+            Some("synapse"),
+        )
+        .expect("valid pattern must compile");
+        assert_eq!(grep_only.total, 2);
+
+        // --grep AND --repo together: only the entry satisfying BOTH survives.
+        let both = evaluate_carryover_with_grep(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            Some("mev"),
+            false,
+            COMMAND_EXEC_TIMEOUT,
+            Some("synapse"),
+        )
+        .expect("valid pattern must compile");
+        assert_eq!(both.total, 1);
+        assert_eq!(both.entries[0].repo, "mev");
     }
 
     #[test]

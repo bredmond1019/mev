@@ -2508,8 +2508,37 @@ pub fn carryover_sweep(
     allow_exec: bool,
     exec_timeout: std::time::Duration,
 ) -> anyhow::Result<brain::carryover::CarryoverReport> {
-    let (_loaded, report) =
-        load_and_evaluate_carryover_corpus(root, repo_filter, allow_exec, exec_timeout)?;
+    carryover_sweep_with_grep(root, repo_filter, allow_exec, exec_timeout, None)
+}
+
+/// Same as [`carryover_sweep`], with an optional `--grep <PATTERN>` filter
+/// (`MV.ticket.carryover-grep`, task 2) applied to each swept entry's `slug`
+/// and `text` before the report's lane counts are computed — so `total` /
+/// `cleared` / `actionable` / `not_evaluable` always describe the same set
+/// as the printed/serialized rows, never the whole (unfiltered) corpus. The
+/// match is case-insensitive; see
+/// [`brain::carryover::filter_carryover_entries_by_grep`] for the exact
+/// semantics. When a filter is active, the three cross-repo dedup sections
+/// (`clusters`, `suggestions`, `single_repo_finding_ids`) are always empty —
+/// they are statements about the whole corpus and are meaningless over a
+/// subset.
+///
+/// Returns `Err` when `grep_pattern` is `Some` and fails to compile as a
+/// regex — never falls back to a substring match or to matching nothing.
+pub fn carryover_sweep_with_grep(
+    root: &std::path::Path,
+    repo_filter: Option<&str>,
+    allow_exec: bool,
+    exec_timeout: std::time::Duration,
+    grep_pattern: Option<&str>,
+) -> anyhow::Result<brain::carryover::CarryoverReport> {
+    let (_loaded, report) = load_and_evaluate_carryover_corpus(
+        root,
+        repo_filter,
+        allow_exec,
+        exec_timeout,
+        grep_pattern,
+    )?;
     Ok(report)
 }
 
@@ -2524,6 +2553,7 @@ fn load_and_evaluate_carryover_corpus(
     repo_filter: Option<&str>,
     allow_exec: bool,
     exec_timeout: std::time::Duration,
+    grep_pattern: Option<&str>,
 ) -> anyhow::Result<(
     Vec<(brain::state::StateSource, brain::state::StateFile)>,
     brain::carryover::CarryoverReport,
@@ -2588,7 +2618,7 @@ fn load_and_evaluate_carryover_corpus(
         .date_naive()
         .format("%Y-%m-%d")
         .to_string();
-    let report = evaluate_carryover(
+    let report = brain::carryover::evaluate_carryover_with_grep(
         &loaded,
         &status_map,
         root,
@@ -2598,7 +2628,14 @@ fn load_and_evaluate_carryover_corpus(
         repo_filter,
         allow_exec,
         exec_timeout,
-    );
+        grep_pattern,
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "invalid --grep pattern '{}': {e}",
+            grep_pattern.unwrap_or("")
+        )
+    })?;
     Ok((loaded, report))
 }
 
@@ -2621,7 +2658,7 @@ pub fn carryover_audit(
     brain::carryover::CarryoverAudit,
 )> {
     let (loaded, report) =
-        load_and_evaluate_carryover_corpus(root, repo_filter, allow_exec, exec_timeout)?;
+        load_and_evaluate_carryover_corpus(root, repo_filter, allow_exec, exec_timeout, None)?;
     let today = chrono::Local::now()
         .date_naive()
         .format("%Y-%m-%d")

@@ -1031,6 +1031,15 @@ enum Command {
         /// Restrict the sweep to one repo's carryover[] entries.
         #[arg(long)]
         repo: Option<String>,
+        /// Restrict the sweep to entries whose `slug` or `text` matches this
+        /// pattern (case-insensitive regex). Composes with `--repo`: an
+        /// entry must satisfy both. The reported total/cleared/actionable/
+        /// not-evaluable counts describe the filtered set, and the
+        /// cross-repo dedup sections (clusters, suggested duplicates,
+        /// single-repo finding_id warnings) are suppressed while this is
+        /// active, since they describe the whole corpus.
+        #[arg(long)]
+        grep: Option<String>,
         /// Emit the CarryoverReport as compact JSON instead of a human summary.
         #[arg(long)]
         json: bool,
@@ -2307,11 +2316,21 @@ fn print_carryover_trajectory(report: &mev::brain::carryover::TrajectoryReport) 
 }
 
 /// Human-readable, lane-grouped summary for `mev carryover`'s default (non-`--json`) output.
-fn print_carryover_report(report: &mev::CarryoverReport) {
+fn print_carryover_report(report: &mev::CarryoverReport, grep_pattern: Option<&str>) {
+    if let Some(pattern) = grep_pattern {
+        println!(
+            "carryover sweep: filter --grep '{pattern}' applied (case-insensitive, slug+text)"
+        );
+    }
     println!(
         "carryover sweep: {} total — {} cleared, {} actionable, {} not-evaluable",
         report.total, report.cleared, report.actionable, report.not_evaluable
     );
+    if grep_pattern.is_some() && report.total == 0 {
+        println!(
+            "carryover sweep: swept the corpus and matched nothing for this pattern (not \"nothing to sweep\")"
+        );
+    }
 
     for lane in [
         mev::CarryoverLane::Cleared,
@@ -3794,6 +3813,7 @@ fn main() -> ExitCode {
         Command::Carryover {
             path,
             repo,
+            grep,
             json,
             allow_exec,
             exec_timeout,
@@ -3834,6 +3854,12 @@ fn main() -> ExitCode {
             if trajectory && (audit || dispose || backfill || would_block) {
                 eprintln!(
                     "error: --trajectory cannot be combined with --audit, --dispose, --backfill, or --would-block; pass it alone (optionally with --repo/--weeks/--json)"
+                );
+                return ExitCode::FAILURE;
+            }
+            if grep.is_some() && (audit || trajectory || dispose || backfill || would_block) {
+                eprintln!(
+                    "error: --grep only applies to the plain per-entry sweep; it cannot be combined with --audit, --trajectory, --dispose, --backfill, or --would-block"
                 );
                 return ExitCode::FAILURE;
             }
@@ -3885,7 +3911,13 @@ fn main() -> ExitCode {
                     }
                 }
             } else {
-                match mev::carryover_sweep(&root, repo.as_deref(), allow_exec, exec_timeout) {
+                match mev::carryover_sweep_with_grep(
+                    &root,
+                    repo.as_deref(),
+                    allow_exec,
+                    exec_timeout,
+                    grep.as_deref(),
+                ) {
                     Ok(report) => {
                         if json || cli.json {
                             match serde_json::to_string(&report) {
@@ -3899,7 +3931,7 @@ fn main() -> ExitCode {
                                 }
                             }
                         } else {
-                            print_carryover_report(&report);
+                            print_carryover_report(&report, grep.as_deref());
                             ExitCode::SUCCESS
                         }
                     }
