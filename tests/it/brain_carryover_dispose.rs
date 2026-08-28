@@ -222,6 +222,7 @@ fn load_and_evaluate_for_dispose(
         &config.attention,
         None,
         allow_exec,
+        mev::COMMAND_EXEC_TIMEOUT,
     );
 
     (loaded, load_errors, report)

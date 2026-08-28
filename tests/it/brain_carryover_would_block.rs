@@ -295,6 +295,7 @@ fn run_would_block_pipeline(
         &config.attention,
         repo_filter,
         false,
+        mev::COMMAND_EXEC_TIMEOUT,
     );
 
     let (lane_index, lane_diags): (LaneResidencyIndex, _) = build_lane_residency_index(root);

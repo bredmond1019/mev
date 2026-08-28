@@ -166,6 +166,7 @@ fn entries_for(
         &config.attention,
         None,
         false,
+        mev::COMMAND_EXEC_TIMEOUT,
     );
     report.entries
 }

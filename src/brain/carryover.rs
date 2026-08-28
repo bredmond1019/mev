@@ -108,6 +108,22 @@ pub enum NotEvaluableReason {
     /// `Cleared` regardless of what the command would have exited — an
     /// unrun command is unknown, and unknown must never read as cleared.
     ExecutionNotAllowed,
+    /// A `CommandExitsZero` predicate's child process was still running when
+    /// the configured bound elapsed and was killed by the in-process
+    /// watchdog. Distinct from a genuine non-zero exit: a timeout tells us
+    /// nothing about what the command would have exited, so it is unknown,
+    /// not failed, and unknown must never read as `Cleared` — the same
+    /// safe-direction rule as [`Self::ExecutionNotAllowed`]. See C141
+    /// (`clears-when-network-predicates-can-never-clear`): a network-touching
+    /// command can outrun any reasonable in-process bound, and folding that
+    /// into a plain `false` reported it as a permanent, indistinguishable
+    /// false red.
+    CommandTimedOut,
+    /// A `CommandExitsZero` predicate's child process could not be spawned at
+    /// all. Evidence about the environment the sweep ran in (e.g. `sh` not on
+    /// `PATH`), never evidence about the predicate's subject — never
+    /// `Cleared`.
+    CommandSpawnFailed,
     /// `clears_when` mentions a validator/gate/CI concept (see
     /// [`GATE_MENTION_WORDS`]) but no path or block reference could be
     /// extracted from it — e.g. *"the validator is green"* alone. Not
@@ -662,18 +678,47 @@ fn file_contains_satisfied(
 /// does not exist on this macOS shell, so the bound is enforced in-process
 /// by polling `try_wait` and killing the child on expiry — never by
 /// shelling out to `timeout`.
-const COMMAND_EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+pub const COMMAND_EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Poll interval for the in-process watchdog.
 const COMMAND_EXEC_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Whether a `command_exits_zero` predicate is satisfied: spawns `sh -c
-/// <command>` in `cwd`, and returns `true` only on a clean exit status of 0
-/// observed within [`COMMAND_EXEC_TIMEOUT`]. Spawn failure, non-zero exit,
-/// signal death, and timeout (the child is killed and reaped) all return
-/// `false` — never `true`, and never a panic that aborts the sweep. Only
-/// called when the caller has already confirmed `allow_exec` is set.
-fn command_exit_zero_satisfied(command: &str, cwd: &Path) -> bool {
+/// The observed outcome of running a `command_exits_zero` predicate's child
+/// process. Kept distinct from a bare `bool` so a caller can tell "the
+/// command ran and told us something" (`ExitZero`/`ExitNonZero`) apart from
+/// "we never got a real answer" (`SpawnFailed`/`TimedOut`) — collapsing the
+/// four into one `false` is exactly the unsoundness `MV.16.G` exists to
+/// remove: an unknown outcome must never read as satisfied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommandOutcome {
+    /// The child exited with status 0 within the bound.
+    ExitZero,
+    /// The child exited with a non-zero status (or was killed by a signal)
+    /// within the bound — a genuine, observed failure.
+    ExitNonZero,
+    /// The child could not be spawned at all (e.g. `sh` not on `PATH`). Not
+    /// evidence about the predicate's subject — evidence about the
+    /// environment the sweep ran in.
+    SpawnFailed,
+    /// The child was still running when the configured bound elapsed and was
+    /// killed and reaped by the in-process watchdog. Unknown, not failed —
+    /// see [`NotEvaluableReason::CommandTimedOut`].
+    TimedOut,
+}
+
+/// Run a `command_exits_zero` predicate's command: spawns `sh -c <command>`
+/// in `cwd` and observes its outcome within `timeout`, via an in-process
+/// watchdog (`timeout(1)` does not exist on this macOS shell, so the bound
+/// is enforced by polling `try_wait` and killing the child on expiry — never
+/// by shelling out to `timeout`). Never panics — every failure mode is a
+/// [`CommandOutcome`] variant, never an abort of the sweep. Only called when
+/// the caller has already confirmed `allow_exec` is set.
+fn command_exit_zero_outcome(
+    command: &str,
+    cwd: &Path,
+    timeout: std::time::Duration,
+) -> CommandOutcome {
     use std::process::Stdio;
 
     let mut child = match std::process::Command::new("sh")
@@ -686,22 +731,28 @@ fn command_exit_zero_satisfied(command: &str, cwd: &Path) -> bool {
         .spawn()
     {
         Ok(child) => child,
-        Err(_) => return false,
+        Err(_) => return CommandOutcome::SpawnFailed,
     };
 
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(status)) => {
+                return if status.success() {
+                    CommandOutcome::ExitZero
+                } else {
+                    CommandOutcome::ExitNonZero
+                };
+            }
             Ok(None) => {
-                if start.elapsed() >= COMMAND_EXEC_TIMEOUT {
+                if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return false;
+                    return CommandOutcome::TimedOut;
                 }
                 std::thread::sleep(COMMAND_EXEC_POLL_INTERVAL);
             }
-            Err(_) => return false,
+            Err(_) => return CommandOutcome::SpawnFailed,
         }
     }
 }
@@ -730,7 +781,10 @@ fn lane_rank(lane: CarryoverLane) -> u8 {
 /// `StateSource::repo_slug`). `allow_exec` is the opt-in gate for the
 /// `CommandExitsZero` typed predicate — see that arm's doc comment for the
 /// safe-direction reasoning; it has no effect on any other predicate or on
-/// prose extraction.
+/// prose extraction. `exec_timeout` is the wall-clock bound the in-process
+/// watchdog enforces on a `CommandExitsZero` child process when `allow_exec`
+/// is set — pass [`COMMAND_EXEC_TIMEOUT`] for the default 2s bound; it has no
+/// effect when `allow_exec` is `false`.
 ///
 /// **References are combined conjunctively (AND), even when the source prose
 /// reads as a disjunction ("or").** This is a deliberate safe-direction bias:
@@ -749,6 +803,7 @@ pub fn evaluate_carryover(
     thresholds: &AttentionThresholds,
     repo_filter: Option<&str>,
     allow_exec: bool,
+    exec_timeout: std::time::Duration,
 ) -> CarryoverReport {
     evaluate_carryover_with_dedup(
         files,
@@ -760,6 +815,7 @@ pub fn evaluate_carryover(
         repo_filter,
         allow_exec,
         true,
+        exec_timeout,
     )
 }
 
@@ -812,6 +868,7 @@ pub fn evaluate_carryover_with_dedup(
     repo_filter: Option<&str>,
     allow_exec: bool,
     include_dedup: bool,
+    exec_timeout: std::time::Duration,
 ) -> CarryoverReport {
     let known_keys: HashSet<String> = status_map.keys().cloned().collect();
     let today_date = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d").ok();
@@ -950,11 +1007,30 @@ pub fn evaluate_carryover_with_dedup(
                             // never a no-op.
                             brain_root,
                         );
-                        let satisfied = command_exit_zero_satisfied(command, cwd);
-                        refs.push(CarryoverRef::CommandExitsZero {
-                            command: command.clone(),
-                            satisfied,
-                        });
+                        match command_exit_zero_outcome(command, cwd, exec_timeout) {
+                            CommandOutcome::ExitZero => {
+                                refs.push(CarryoverRef::CommandExitsZero {
+                                    command: command.clone(),
+                                    satisfied: true,
+                                });
+                            }
+                            CommandOutcome::ExitNonZero => {
+                                refs.push(CarryoverRef::CommandExitsZero {
+                                    command: command.clone(),
+                                    satisfied: false,
+                                });
+                            }
+                            // Unknown outcomes: no ref, so the entry lands in
+                            // `NotEvaluable` rather than `Actionable` next to
+                            // a genuinely-failing command — the same shape
+                            // `ExecutionNotAllowed` already uses below.
+                            CommandOutcome::TimedOut => {
+                                forced_reason = Some(NotEvaluableReason::CommandTimedOut);
+                            }
+                            CommandOutcome::SpawnFailed => {
+                                forced_reason = Some(NotEvaluableReason::CommandSpawnFailed);
+                            }
+                        }
                     } else {
                         // Opt-in is off: this predicate is NOT evaluated at
                         // all — no ref is produced, and the entry is
@@ -4957,6 +5033,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.total, 1);
         assert_eq!(report.cleared, 1);
@@ -4997,6 +5074,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.total, 1);
         assert_eq!(report.actionable, 1);
@@ -5039,6 +5117,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.not_evaluable, 1);
         let entry = &report.entries[0];
@@ -5087,6 +5166,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.not_evaluable, 1);
         let entry = &report.entries[0];
@@ -5135,6 +5215,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 0, "a related[] edge must never clear");
         assert_eq!(report.not_evaluable, 1);
@@ -5195,6 +5276,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(
             report.cleared, 0,
@@ -5246,6 +5328,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 1);
         assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
@@ -5279,6 +5362,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.not_evaluable, 1);
         assert_eq!(
@@ -5320,6 +5404,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.actionable, 1, "one path missing -> actionable");
         let entry = &report.entries[0];
@@ -5374,6 +5459,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         let by_slug = |slug: &str| report.entries.iter().find(|e| e.slug == slug).unwrap();
         assert!(
@@ -5433,6 +5519,7 @@ mod tests {
             &thresholds(),
             Some("mev"),
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.total, 1);
         assert_eq!(report.entries[0].repo, "mev");
@@ -5534,6 +5621,7 @@ mod tests {
             &thresholds(),
             Some("base-template"),
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         let slugs: Vec<&str> = report.entries.iter().map(|e| e.slug.as_str()).collect();
         assert!(
@@ -5560,6 +5648,7 @@ mod tests {
             &thresholds(),
             Some("base-template"),
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         let slugs: Vec<&str> = report.entries.iter().map(|e| e.slug.as_str()).collect();
         assert!(slugs.contains(&"four-repos-still-narrow-clippy"));
@@ -5581,6 +5670,7 @@ mod tests {
             &thresholds(),
             Some("brain"),
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         let slugs: Vec<&str> = report.entries.iter().map(|e| e.slug.as_str()).collect();
         assert!(
@@ -5607,6 +5697,7 @@ mod tests {
                 &thresholds(),
                 Some(filter),
                 false,
+                COMMAND_EXEC_TIMEOUT,
             );
             let slugs: Vec<&str> = report.entries.iter().map(|e| e.slug.as_str()).collect();
             assert!(
@@ -5636,6 +5727,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.total, 6);
         let slugs: std::collections::HashSet<&str> =
@@ -5674,6 +5766,7 @@ mod tests {
                 &thresholds(),
                 filter,
                 false,
+                COMMAND_EXEC_TIMEOUT,
             );
             let audit = audit_carryover(&files, &report, "2026-08-03", 90, filter);
             assert_eq!(
@@ -5734,6 +5827,7 @@ mod tests {
             None,
             false,
             true,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert!(
             !with_dedup.suggestions.is_empty(),
@@ -5751,6 +5845,7 @@ mod tests {
             None,
             false,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert!(
             without_dedup.clusters.is_empty(),
@@ -5825,6 +5920,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         let report2 = evaluate_carryover(
             &files,
@@ -5835,6 +5931,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         let lanes1: Vec<CarryoverLane> = report1.entries.iter().map(|e| e.lane).collect();
         let lanes2: Vec<CarryoverLane> = report2.entries.iter().map(|e| e.lane).collect();
@@ -5888,6 +5985,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 1);
         assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
@@ -5928,6 +6026,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.actionable, 1);
         assert_eq!(report.entries[0].lane, CarryoverLane::Actionable);
@@ -5970,6 +6069,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 0);
         assert_eq!(report.actionable, 1);
@@ -6018,6 +6118,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 1);
         assert_eq!(
@@ -6069,6 +6170,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 1);
 
@@ -6102,6 +6204,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.actionable, 1);
         assert_eq!(
@@ -6155,6 +6258,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 1);
         assert_eq!(
@@ -6200,6 +6304,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.actionable, 1);
         assert_eq!(
@@ -6242,6 +6347,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.actionable, 1);
         assert_eq!(
@@ -6287,6 +6393,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.actionable, 1);
         assert_eq!(
@@ -6334,6 +6441,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.actionable, 1);
         assert!(!matches!(report.entries[0].lane, CarryoverLane::Cleared));
@@ -6368,6 +6476,7 @@ mod tests {
             &thresholds(),
             None,
             true, // allow_exec
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 1);
         assert_eq!(
@@ -6406,6 +6515,7 @@ mod tests {
             &thresholds(),
             None,
             true,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.actionable, 1);
         assert_eq!(
@@ -6444,6 +6554,7 @@ mod tests {
             &thresholds(),
             None,
             true,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.actionable, 1);
         assert!(!matches!(report.entries[0].lane, CarryoverLane::Cleared));
@@ -6451,9 +6562,15 @@ mod tests {
 
     #[test]
     fn command_exits_zero_with_opt_in_and_slow_command_times_out_and_is_actionable() {
-        // Exceeds COMMAND_EXEC_TIMEOUT; the in-process watchdog must kill it
-        // and report not-satisfied within roughly the bound rather than
-        // hanging the sweep. `timeout(1)` is never invoked to enforce this.
+        // MV.16.G: exceeds COMMAND_EXEC_TIMEOUT; the in-process watchdog must
+        // kill it within roughly the bound rather than hanging the sweep.
+        // `timeout(1)` is never invoked to enforce this. UPDATED by MV.16.G:
+        // a timeout is now UNKNOWN, not a genuine failure — before this
+        // block it collapsed into the same `Actionable`/`satisfied: false`
+        // shape as a real non-zero exit (asserted below as the pre-fix
+        // baseline), which is indistinguishable from C141's exact failure
+        // mode. It now lands in `NotEvaluable` with a dedicated reason and
+        // produces no ref at all.
         let files = vec![(
             src("mev"),
             state_file(
@@ -6481,16 +6598,24 @@ mod tests {
             &thresholds(),
             None,
             true,
+            COMMAND_EXEC_TIMEOUT,
         );
         let elapsed = start.elapsed();
 
-        assert_eq!(report.actionable, 1);
+        // Pre-fix baseline (what this test asserted before MV.16.G): `report.actionable == 1`
+        // with `refs == [CarryoverRef::CommandExitsZero { satisfied: false, .. }]` — a timeout
+        // was indistinguishable from a genuine non-zero exit.
         assert_eq!(
-            report.entries[0].refs,
-            vec![CarryoverRef::CommandExitsZero {
-                command: "sleep 30".to_string(),
-                satisfied: false,
-            }]
+            report.not_evaluable, 1,
+            "a timed-out command must be NotEvaluable, not Actionable"
+        );
+        assert!(
+            report.entries[0].refs.is_empty(),
+            "a timeout produces no ref"
+        );
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::CommandTimedOut)
         );
         assert!(
             elapsed < std::time::Duration::from_secs(10),
@@ -6528,6 +6653,7 @@ mod tests {
             &thresholds(),
             None,
             false, // allow_exec off
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 0);
         assert_eq!(report.not_evaluable, 1);
@@ -6536,6 +6662,54 @@ mod tests {
         assert_eq!(
             report.entries[0].reason,
             Some(NotEvaluableReason::ExecutionNotAllowed)
+        );
+    }
+
+    #[test]
+    fn command_exits_zero_predicate_raised_exec_timeout_lets_a_slow_command_reach_exit_zero() {
+        // Proves `exec_timeout` is the bound the watchdog actually enforces,
+        // not a value threaded through and ignored: a command that sleeps
+        // past the module's own 2s default (`COMMAND_EXEC_TIMEOUT`) but
+        // inside a raised bound must complete and be observed as a clean
+        // exit, not killed.
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![],
+                vec![predicate_item(
+                    "typed-command-raised-bound",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        command: "sleep 3 && true".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            std::env::temp_dir().as_path(),
+            &HashMap::new(),
+            "2026-08-09",
+            &thresholds(),
+            None,
+            true,
+            std::time::Duration::from_secs(10),
+        );
+        assert_eq!(
+            report.cleared, 1,
+            "a raised --exec-timeout must let a >2s command finish and clear"
+        );
+        assert_eq!(report.entries[0].reason, None);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::CommandExitsZero {
+                command: "sleep 3 && true".to_string(),
+                satisfied: true,
+            }]
         );
     }
 
@@ -6582,6 +6756,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         let by_slug = |slug: &str| {
             report
@@ -6637,6 +6812,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
         assert_eq!(report.entries[0].reason, Some(NotEvaluableReason::Prose));
@@ -6684,6 +6860,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.entries[0].lane, CarryoverLane::Actionable);
         assert_eq!(
@@ -6733,6 +6910,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
 
@@ -6770,6 +6948,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
         assert_eq!(report.entries[0].reason, Some(NotEvaluableReason::Prose));
@@ -6807,6 +6986,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
         assert!(report.entries[0].refs.is_empty());
@@ -6848,6 +7028,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
     }
@@ -6884,6 +7065,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_ne!(report.entries[0].lane, CarryoverLane::Cleared);
     }
@@ -8471,6 +8653,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 1);
         assert_eq!(report.actionable, 1);
@@ -8522,6 +8705,7 @@ mod tests {
             &thresholds(),
             None,
             false,
+            COMMAND_EXEC_TIMEOUT,
         );
 
         let load_errors = vec![(
@@ -8579,6 +8763,7 @@ mod tests {
             &thresholds(),
             None,
             false, // allow_exec: false, as --dispose alone must leave it
+            COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.cleared, 0);
         assert_eq!(
