@@ -817,6 +817,18 @@ enum Command {
         /// Ignored without `--audit`.
         #[arg(long, default_value_t = 30)]
         window: i64,
+        /// Print the weekly `carryover-archive.jsonl` outflow trajectory
+        /// (`MV.16.F`) instead of the per-entry sweep or `--audit`'s census:
+        /// one row per ISO week, most recent last, bucketing the same archive
+        /// rows `--audit` reads (never git — see
+        /// [`mev::brain::carryover::build_trajectory`]). Mutually exclusive
+        /// with `--audit`, `--dispose`, `--backfill`, and `--would-block`.
+        #[arg(long)]
+        trajectory: bool,
+        /// Number of week rows `--trajectory` emits, ending with the week
+        /// containing today. Ignored without `--trajectory`.
+        #[arg(long, default_value_t = 8)]
+        weeks: usize,
         /// Move every CLEARED-lane `carryover[]` entry into its owning repo's
         /// `planning/carryover-archive.jsonl` and remove it from `state.json`
         /// (`MV.ticket.carryover-dispose`). A disposal is a MOVE, never a
@@ -1889,6 +1901,128 @@ fn run_carryover_would_block(
     }
 
     ExitCode::SUCCESS
+}
+
+/// Drive `mev carryover --trajectory` (`MV.16.F`): reuse the SAME corpus load
+/// `--would-block`/`--dispose` use
+/// ([`load_and_evaluate_carryover_corpus_for_dispose`]) so `--repo` scoping
+/// is identical by construction, then build the weekly outflow trajectory
+/// over the same archive rows `--audit` reads
+/// ([`mev::brain::carryover::build_trajectory`], which delegates to
+/// [`mev::brain::carryover::collect_archive_rows`] — never a second archive
+/// parser and never git).
+///
+/// Human-table rendering and `--json` structure/formatting parity with
+/// `--audit` land in `MV.16.F` task 3 ([`print_carryover_trajectory`]); this
+/// driver already exposes both output modes end-to-end. Always exits 0 on
+/// success — `--trajectory` is a reporting command and never fails on its
+/// own findings, only on a corpus load error (mirroring every other
+/// `carryover` mode).
+fn run_carryover_trajectory(
+    root: &std::path::Path,
+    repo_filter: Option<&str>,
+    allow_exec: bool,
+    weeks: usize,
+    as_json: bool,
+) -> ExitCode {
+    let (loaded, load_errors, _report) =
+        match load_and_evaluate_carryover_corpus_for_dispose(root, repo_filter, allow_exec) {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!("error: {err:#}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+    for (repo_slug, msg) in &load_errors {
+        eprintln!("warning: {repo_slug}: failed to load state: {msg}");
+    }
+
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let trajectory_report =
+        mev::brain::carryover::build_trajectory(&loaded, &today, weeks, repo_filter);
+
+    if as_json {
+        match serde_json::to_string(&trajectory_report) {
+            Ok(s) => println!("{s}"),
+            Err(err) => {
+                eprintln!("error serializing --trajectory report: {err:#}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        print_carryover_trajectory(&trajectory_report);
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Human-readable table for `mev carryover --trajectory`'s default (non-`--json`)
+/// output, modelled on [`print_carryover_audit`]/[`print_archive_outflow`] for
+/// formatting parity and message reuse.
+///
+/// When `archives_read == 0` there is nothing to tabulate (mirrors
+/// [`print_archive_outflow`]'s "omitted entirely" no-archive case) — this prints
+/// only the summary line, which already reports `0 archive row(s) over 0
+/// archive(s)`, and returns without a table, an `earlier (before window)` line,
+/// or any of the undated/malformed/reconstructed caveats.
+fn print_carryover_trajectory(report: &mev::brain::carryover::TrajectoryReport) {
+    println!(
+        "carryover trajectory: {} archive row(s) over {} archive(s)",
+        report.rows_total, report.archives_read
+    );
+
+    if report.archives_read == 0 {
+        return;
+    }
+
+    if report.before_window > 0 {
+        println!("earlier (before window): {}", report.before_window);
+    }
+
+    println!();
+    println!("  week       observed  reconstructed   total  cumulative");
+    for week in &report.weeks {
+        println!(
+            "  {:<9}  {:>8}  {:>13}  {:>5}  {:>10}",
+            week.iso_week,
+            week.observed,
+            week.reconstructed,
+            week.total(),
+            week.cumulative
+        );
+    }
+
+    if report.undated > 0 {
+        println!(
+            "  {} row(s) with an unparseable disposed_at are excluded from the weekly buckets but counted in the total.",
+            report.undated
+        );
+    }
+
+    if !report.malformed_lines.is_empty() {
+        let shown: Vec<&str> = report
+            .malformed_lines
+            .iter()
+            .take(5)
+            .map(|s| s.as_str())
+            .collect();
+        println!(
+            "  skipped {} malformed archive line(s): {}",
+            report.malformed_lines.len(),
+            shown.join(", ")
+        );
+    }
+
+    let total_reconstructed: usize = report.weeks.iter().map(|w| w.reconstructed).sum();
+    if total_reconstructed > 0 {
+        println!(
+            "  reconstructed rows are git-reconstructed (MV.16.B) and may include relocations, not only disposals."
+        );
+    }
 }
 
 /// Human-readable, lane-grouped summary for `mev carryover`'s default (non-`--json`) output.
@@ -3227,6 +3361,8 @@ fn main() -> ExitCode {
             allow_exec,
             audit,
             window,
+            trajectory,
+            weeks,
             dispose,
             dry_run,
             would_block,
@@ -3257,7 +3393,21 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::FAILURE;
             }
-            if would_block {
+            if trajectory && (audit || dispose || backfill || would_block) {
+                eprintln!(
+                    "error: --trajectory cannot be combined with --audit, --dispose, --backfill, or --would-block; pass it alone (optionally with --repo/--weeks/--json)"
+                );
+                return ExitCode::FAILURE;
+            }
+            if trajectory {
+                run_carryover_trajectory(
+                    &root,
+                    repo.as_deref(),
+                    allow_exec,
+                    weeks,
+                    json || cli.json,
+                )
+            } else if would_block {
                 run_carryover_would_block(&root, repo.as_deref(), allow_exec, json || cli.json)
             } else if backfill {
                 run_carryover_backfill(&root, repo.as_deref(), dry_run)

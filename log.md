@@ -11,6 +11,38 @@ related: [status]
 timestamp: "2026-08-23T09:17:53-03:00"
 ---
 
+## [run: 2026-08-27]
+
+Closed `MV.16.F` end to end via `/sdlc-flow` (6 of 6 tasks, PASS). `mev carryover --trajectory
+[--weeks N]` (default 8) buckets `planning/carryover-archive.jsonl` rows by the ISO week of their
+`disposed_at` and prints a weekly outflow table, deliberately reusing MV.16.E's archive reader
+rather than opening a second one that could disagree with `--audit` — task 1 extracted
+`collect_archive_rows` as the single shared parser so `read_archive_outflow` and the new
+`build_trajectory`/`TrajectoryReport`/`WeekRow` both consume it. Task 2 wired `--trajectory`/
+`--weeks` onto `mev carryover`, mutually exclusive with `--audit`/`--dispose`/`--backfill`/
+`--would-block`. Task 3 completed the human table (five columns: week/observed/reconstructed/
+total/cumulative), the `earlier (before window)` line, and undated/malformed/reconstructed
+caveats matching `--audit`'s wording, plus `--json` serializing `TrajectoryReport` directly. Task 4
+added 8 fixture tests in `tests/it/brain_carryover_trajectory.rs` — bucketing, zero-disposal weeks,
+observed/reconstructed split, before-window, the audit-coherence gate (cumulative total equals
+`--audit`'s `archive_outflow.rows_total`) before/after a new disposal, undated rows, `--repo`
+scoping, and the four misuse combinations. Task 5 documented `--trajectory`/`--weeks` in
+`docs/cli.md`. Task 6 (validation) confirmed fmt, clippy `-D warnings`, `cargo nextest run --lib
+--bins` (1176 pass), full `cargo test` (695 pass), and a live-corpus
+`cargo run -- carryover --trajectory --weeks 4` smoke run exits 0 printing the expected no-archive
+line, since no repo has yet run `MV.16.B`'s one-time backfill. Review verdict PASS, first attempt,
+no fixes needed. Next: `MV.16.G` (predicate soundness — fix the evaluator, do not extend coverage)
+or the next master-plan/HQ backlog item.
+
+```
+b14d4e8 feat: implement MV.16.F-task5
+1f274ee feat: implement MV.16.F-task4
+6832bcb feat: implement MV.16.F-task3
+448a2f1 feat: implement MV.16.F-task2
+d9ae001 feat: implement MV.16.F-task1
+672a5c9 MV.16.E: 6 task(s), review PASS (#47)
+```
+
 ## [run: 2026-08-28]
 
 Closed `MV.16.E` end to end via `/sdlc-flow` (6 of 6 tasks, PASS). `mev carryover --audit` now reads
