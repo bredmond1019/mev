@@ -134,6 +134,15 @@ printf '%s' '[{"slug":"engine-rs","outcome":{"outcome":"lockfile_stale"}}]' \
 printf '%s' '[{"slug":"mev","outcome":{"outcome":"not_evaluable","reason":"unrecognized failure (exit 1)"}}]' \
     > "$FIX/not_evaluable_alone.json"
 
+printf '%s' '[{"slug":"bastion","outcome":{"outcome":"pass"}},{"slug":"engine-rs","outcome":{"outcome":"skipped_dirty"}}]' \
+    > "$FIX/mixed_pass_skipped.json"
+
+printf '%s' '[{"slug":"bastion","outcome":{"outcome":"skipped_dirty"}},{"slug":"engine-rs","outcome":{"outcome":"lockfile_stale"}}]' \
+    > "$FIX/two_declining_different.json"
+
+printf '%s' '[{"slug":"bastion","outcome":{"outcome":"pass"}},{"slug":"mev","outcome":{"outcome":"not_evaluable","reason":"unrecognized failure (exit 1)"}}]' \
+    > "$FIX/pass_and_not_evaluable.json"
+
 # ---------------------------------------------------------------------------
 # Fixture helpers
 # ---------------------------------------------------------------------------
@@ -275,6 +284,62 @@ set_waiver_file $'# header comment\n\nbastion | OP.fix-bastion | bastion known b
 run_gate "$FIX/one_broken.json"
 check "comments and blank lines ignored; the real waiver row still applies -> exit 0" \
     "$( [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'waived by OP.fix-bastion' && echo 0 || echo 1 )"
+
+# ---------------------------------------------------------------------------
+# Coverage-line cases (MV.ticket.consumer-gate-reports-coverage task 1):
+# `check_consumers: verified <P> of <N> consumers` must print on every
+# path, with <P> counting ONLY `pass` outcomes and <N> counting every
+# reported consumer; when P < N the unverified consumers are named with
+# their own outcome. These cases pin BOTH the coverage text AND the exit
+# code, so task 2 cannot change adjudication while satisfying them.
+# check_consumers.sh is untouched as of this task, so all five below are
+# expected to FAIL until task 2 lands — that failure is the evidence the
+# gate can go red.
+# ---------------------------------------------------------------------------
+
+# (a) two consumers both pass -> 2 of 2, no unverified names, exit 0.
+reset_fixtures
+run_gate "$FIX/all_pass.json"
+check "coverage: two pass -> exit 0" \
+    "$( [ "$RC" -eq 0 ] && echo 0 || echo 1 )"
+check "coverage: two pass -> 'verified 2 of 2 consumers'" \
+    "$(printf '%s' "$OUT" | grep -qF 'check_consumers: verified 2 of 2 consumers' && echo 0 || echo 1)"
+
+# (b) one pass + one skipped_dirty -> 1 of 2, names the decliner, exit 0.
+reset_fixtures
+run_gate "$FIX/mixed_pass_skipped.json"
+check "coverage: pass + skipped_dirty -> exit 0" \
+    "$( [ "$RC" -eq 0 ] && echo 0 || echo 1 )"
+check "coverage: pass + skipped_dirty -> 'verified 1 of 2 consumers (engine-rs: skipped_dirty)'" \
+    "$(printf '%s' "$OUT" | grep -qF 'check_consumers: verified 1 of 2 consumers (engine-rs: skipped_dirty)' && echo 0 || echo 1)"
+
+# (c) two consumers decline with DIFFERENT outcomes -> 0 of 2, names both
+# with their own distinct outcome, exit 0.
+reset_fixtures
+run_gate "$FIX/two_declining_different.json"
+check "coverage: skipped_dirty + lockfile_stale -> exit 0" \
+    "$( [ "$RC" -eq 0 ] && echo 0 || echo 1 )"
+check "coverage: skipped_dirty + lockfile_stale -> 'verified 0 of 2 consumers (bastion: skipped_dirty, engine-rs: lockfile_stale)'" \
+    "$(printf '%s' "$OUT" | grep -qF 'check_consumers: verified 0 of 2 consumers (bastion: skipped_dirty, engine-rs: lockfile_stale)' && echo 0 || echo 1)"
+
+# (d) one pass + one not_evaluable -> not_evaluable counts as unverified,
+# NOT verified: 1 of 2, names it, exit 0.
+reset_fixtures
+run_gate "$FIX/pass_and_not_evaluable.json"
+check "coverage: pass + not_evaluable -> exit 0" \
+    "$( [ "$RC" -eq 0 ] && echo 0 || echo 1 )"
+check "coverage: pass + not_evaluable -> 'verified 1 of 2 consumers (mev: not_evaluable)'" \
+    "$(printf '%s' "$OUT" | grep -qF 'check_consumers: verified 1 of 2 consumers (mev: not_evaluable)' && echo 0 || echo 1)"
+
+# (e) one broken (unwaived) -> gate still exits 1 (adjudication
+# unchanged), and the coverage line still prints, naming the broken
+# consumer as unverified.
+reset_fixtures
+run_gate "$FIX/one_broken.json"
+check "coverage: one broken -> exit code STAYS non-zero" \
+    "$( [ "$RC" -ne 0 ] && echo 0 || echo 1 )"
+check "coverage: one broken -> 'verified 1 of 2 consumers (bastion: broken)'" \
+    "$(printf '%s' "$OUT" | grep -qF 'check_consumers: verified 1 of 2 consumers (bastion: broken)' && echo 0 || echo 1)"
 
 # ---------------------------------------------------------------------------
 # Syntax sanity, in-suite (also asserted externally by task validation).
