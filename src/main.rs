@@ -1961,22 +1961,66 @@ fn run_carryover_trajectory(
 }
 
 /// Human-readable table for `mev carryover --trajectory`'s default (non-`--json`)
-/// output. Minimal placeholder for `MV.16.F` task 2 — the full column layout,
-/// the `earlier (before window)` line, and the undated/malformed/reconstructed
-/// caveats (mirroring [`print_carryover_audit`]) land in task 3.
+/// output, modelled on [`print_carryover_audit`]/[`print_archive_outflow`] for
+/// formatting parity and message reuse.
+///
+/// When `archives_read == 0` there is nothing to tabulate (mirrors
+/// [`print_archive_outflow`]'s "omitted entirely" no-archive case) — this prints
+/// only the summary line, which already reports `0 archive row(s) over 0
+/// archive(s)`, and returns without a table, an `earlier (before window)` line,
+/// or any of the undated/malformed/reconstructed caveats.
 fn print_carryover_trajectory(report: &mev::brain::carryover::TrajectoryReport) {
     println!(
         "carryover trajectory: {} archive row(s) over {} archive(s)",
         report.rows_total, report.archives_read
     );
+
+    if report.archives_read == 0 {
+        return;
+    }
+
+    if report.before_window > 0 {
+        println!("earlier (before window): {}", report.before_window);
+    }
+
+    println!();
+    println!("  week       observed  reconstructed   total  cumulative");
     for week in &report.weeks {
         println!(
-            "  {}  observed={} reconstructed={} total={} cumulative={}",
+            "  {:<9}  {:>8}  {:>13}  {:>5}  {:>10}",
             week.iso_week,
             week.observed,
             week.reconstructed,
             week.total(),
             week.cumulative
+        );
+    }
+
+    if report.undated > 0 {
+        println!(
+            "  {} row(s) with an unparseable disposed_at are excluded from the weekly buckets but counted in the total.",
+            report.undated
+        );
+    }
+
+    if !report.malformed_lines.is_empty() {
+        let shown: Vec<&str> = report
+            .malformed_lines
+            .iter()
+            .take(5)
+            .map(|s| s.as_str())
+            .collect();
+        println!(
+            "  skipped {} malformed archive line(s): {}",
+            report.malformed_lines.len(),
+            shown.join(", ")
+        );
+    }
+
+    let total_reconstructed: usize = report.weeks.iter().map(|w| w.reconstructed).sum();
+    if total_reconstructed > 0 {
+        println!(
+            "  reconstructed rows are git-reconstructed (MV.16.B) and may include relocations, not only disposals."
         );
     }
 }
