@@ -2344,6 +2344,31 @@ fn print_carryover_trajectory(report: &mev::brain::carryover::TrajectoryReport) 
 /// many cross-repo/tier entries it excluded — the unqualified "swept the
 /// corpus" sentence is a false claim of corpus-wide coverage once `--repo`
 /// has narrowed the sweep (`MV.ticket.repo-filter-hides-cross-repo-entries`).
+///
+/// Task 3 live-corpus re-run (D64, declared un-gateable — this repo's checks
+/// cannot see the live fleet corpus or an installed binary), 2026-08-28, after
+/// `cargo install --path .` against this ticket's task-2 commit (installed,
+/// not source, behaviour was checked):
+///
+/// - `mev carryover --grep synapse` (unfiltered control): 6 total, includes
+///   `synapse:synapse-rename-mechanical-flip-pending` (scope `cross_repo: true`).
+/// - `mev carryover --repo synapse --grep synapse`: 4 total, does NOT include
+///   `synapse-rename-mechanical-flip-pending` — the filter is not widened by
+///   default. The summary line names the active `--repo synapse` filter and
+///   reports "2 cross-repo/tier entries excluded by this filter" instead of
+///   the old unqualified "swept the corpus" sentence.
+/// - `mev carryover --repo synapse --grep synapse --include-cross-repo`: 6
+///   total (not the 5 the ticket's task spec measured on 2026-08-23 — the
+///   live corpus grew a second cross-repo-scoped entry matching "synapse",
+///   `data-contract-ownership-contradicts-d78`, in the interim), and DOES
+///   include `synapse-rename-mechanical-flip-pending`. Both non-`--repo`-named
+///   entries (`data-contract-ownership-contradicts-d78` and
+///   `synapse-rename-mechanical-flip-pending`) are scoped `cross_repo: true`,
+///   confirmed directly against `core/_planning/synapse/state.json`; no entry
+///   scoped to a different named repo leaked in. The count drifted from the
+///   spec's stale snapshot, but the behavioural claims this task exists to
+///   pin — excluded by default, included by `--include-cross-repo`, never
+///   widened to another named repo — all hold.
 fn print_carryover_report(
     report: &mev::CarryoverReport,
     grep_pattern: Option<&str>,
