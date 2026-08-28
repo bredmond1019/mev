@@ -511,6 +511,50 @@ pub fn check_carryover_staleness(
     diags
 }
 
+/// Case-insensitive substring words that mark an entry's prose as scoping the
+/// finding to another machine — sub-class B of
+/// [`check_carryover_already_satisfied`]. Deliberately plain substring
+/// matching (no regex crate; this module is hand-scanned by convention).
+const OTHER_MACHINE_WORDS: &[&str] = &[
+    "mini",
+    "mac mini",
+    "on that machine",
+    "remote",
+    "another machine",
+];
+
+/// Sub-class A — an unanchored `file_contains` pattern that may be matching
+/// prose elsewhere in the same file rather than the specific field it names.
+/// "Anchored" here means the pattern carries a leading newline (the
+/// convention this corpus uses to pin a YAML frontmatter field) — a bare
+/// substring with no such anchor is the exact shape that cleared
+/// `postgres-14-17-cleanup-pending` on 2026-08-19 by matching the runbook's
+/// own prose instead of the frontmatter it was meant to observe.
+fn is_unanchored_file_contains(predicate: &ClearsWhenPredicate) -> bool {
+    matches!(
+        predicate,
+        ClearsWhenPredicate::FileContains { pattern, .. } if !pattern.starts_with('\n')
+    )
+}
+
+/// Sub-class B — a satisfied path predicate (`file_exists`/`file_contains`)
+/// on an entry whose own prose (`text`) scopes the finding to a different
+/// machine than the one currently evaluating it. This is exactly the shape
+/// that cleared `client-wild-trail-photo-missing-on-mini` on 2026-08-19: a
+/// repo-relative path resolved on the dev checkout while the finding was
+/// about the Mac Mini.
+fn is_path_predicate_scoped_elsewhere(predicate: &ClearsWhenPredicate, text: &str) -> bool {
+    let is_path_predicate = matches!(
+        predicate,
+        ClearsWhenPredicate::FileExists { .. } | ClearsWhenPredicate::FileContains { .. }
+    );
+    if !is_path_predicate {
+        return false;
+    }
+    let text_lower = text.to_lowercase();
+    OTHER_MACHINE_WORDS.iter().any(|w| text_lower.contains(w))
+}
+
 /// Human-facing summary of why an already-satisfied verdict's refs matched, for
 /// [`check_carryover_already_satisfied`]. Every ref in a `Cleared` verdict is, by
 /// construction, satisfied — this renders what each one observed, not whether it
@@ -583,6 +627,26 @@ pub fn check_carryover_already_satisfied(
             .unwrap_or_default();
         let why = describe_matched_refs(&verdict.refs);
 
+        let mut sub_class = String::new();
+        if let Some(ClearsWhen::Predicate(p)) = &item.clears_when {
+            if is_unanchored_file_contains(p) {
+                sub_class.push_str(
+                    " SUB-CLASS A (unanchored file_contains): this pattern has no leading \
+                     newline / line anchor, so it may be matching prose elsewhere in the same \
+                     file rather than the specific field it was meant to observe — anchor it \
+                     (a leading '\\n' pins a YAML frontmatter field).",
+                );
+            }
+            if is_path_predicate_scoped_elsewhere(p, &verdict.text) {
+                sub_class.push_str(
+                    " SUB-CLASS B (path resolves locally, finding is remote): the entry's text \
+                     scopes this finding to another machine, but the path predicate resolved on \
+                     THIS checkout — re-predicate on something the running host can actually \
+                     observe.",
+                );
+            }
+        }
+
         diags.push(Diagnostic::warning(
             path,
             "W_STATE_CARRYOVER_ALREADY_SATISFIED",
@@ -591,7 +655,7 @@ pub fn check_carryover_already_satisfied(
                  is still present and un-disposed — matched: {why}. This is NOT the sweep's \
                  healthy CLEARED lane: an entry that is live and already satisfied is either (a) \
                  already resolved, so it should not have been filed, or (b) predicated on the \
-                 wrong observable. Re-predicate it — do not delete it.",
+                 wrong observable. Re-predicate it — do not delete it.{sub_class}",
                 item.slug
             ),
         ));
