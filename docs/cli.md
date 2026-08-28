@@ -1849,7 +1849,7 @@ mev --json doc opportunity ingest --input company-brief.json
 
 ---
 
-### `carryover [--repo <slug>] [--json] [--allow-exec] [--audit] [--window <days>] [--dispose] [--backfill] [--dry-run] [--would-block] [path]`
+### `carryover [--repo <slug>] [--json] [--allow-exec] [--audit] [--window <days>] [--dispose] [--backfill] [--dry-run] [--would-block] [--trajectory] [--weeks <days>] [path]`
 
 Fleet-wide sweep of every discovered `planning/state.json`'s `carryover[]` array. By default
 this is **read-only**: it evaluates each entry's `clears_when` predicate where it is
@@ -1857,21 +1857,23 @@ machine-checkable and sorts the fleet into three lanes. `--audit` switches to a 
 triage containers instead (see [`--audit` — the `carryover[]`/`reference[]`
 census](#--audit--the-carryover-reference-census) below). `--would-block` switches to a
 read-only report over `carryover[].blocks[]` edges instead (see [`--would-block` — the honest
-blast radius](#--would-block--the-honest-blast-radius) below). `--dispose` switches to the live
+blast radius](#--would-block--the-honest-blast-radius) below). `--trajectory` switches to a
+read-only weekly outflow table over the archive instead (see [`--trajectory` — the weekly
+outflow table](#--trajectory--the-weekly-outflow-table) below). `--dispose` switches to the live
 write path this subcommand has — see [`--dispose` — archiving CLEARED
 entries](#--dispose--archiving-cleared-entries) below. `--backfill` switches to a one-time,
 history-based write path instead — see [`--backfill` — one-time git reconstruction of past
 removals](#--backfill--one-time-git-reconstruction-of-past-removals) below.
 
 ```bash
-mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>] [--dispose] [--backfill] [--dry-run] [--would-block] [path]
+mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>] [--dispose] [--backfill] [--dry-run] [--would-block] [--trajectory] [--weeks <DAYS>] [path]
 ```
 
 | Argument / Flag | Default | Description |
 |---|---|---|
 | `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
 | `--repo <SLUG>` | unset | Restrict the sweep to one repo's `carryover[]` entries **by ownership**, not by which file an entry happens to be stored in — see below. An unknown slug is a hard error naming the valid slugs |
-| `--json` | off | Emit the `CarryoverReport` (or, under `--audit`, the `CarryoverAudit`; or, under `--would-block`, the `WouldBlockReport`) as compact JSON instead of the human summary |
+| `--json` | off | Emit the `CarryoverReport` (or, under `--audit`, the `CarryoverAudit`; under `--would-block`, the `WouldBlockReport`; or, under `--trajectory`, the `TrajectoryReport`) as compact JSON instead of the human summary |
 | `--allow-exec` | off | Opt in to running `command_exits_zero` predicates. Without it, every such entry reports `not-evaluable` (reason `execution-not-allowed`) and **no command is ever run**. **`--dispose` does not imply this** — passing `--dispose` never turns on command execution, so a `command_exits_zero` entry that is `not-evaluable` for lack of `--allow-exec` is never disposal-eligible either |
 | `--audit` | off | Report a fleet-wide `carryover[]`/`reference[]` census instead of the per-entry sweep — total, per-container and per-kind/per-class counts, typed-predicate coverage, inflow/outflow over `--window` days, and a measured archive-outflow section (MV.16.E). The census figures are composed entirely from the same loaded corpus and `CarryoverReport` the ordinary sweep already produces — no second corpus *walk* — but `--audit` does perform one new read per selected repo, of that repo's `planning/carryover-archive.jsonl`, to produce the archive-outflow section; that read happens only under `--audit`. Shares the exact same `--repo` ownership rule as the ordinary sweep, so `mev carryover --audit --repo X` and `mev carryover --repo X` always agree on which entries are in scope |
 | `--window <DAYS>` | `30` | Window, in days, `--audit`'s inflow/outflow figures are measured over. Ignored without `--audit` |
@@ -1879,6 +1881,8 @@ mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--audit] [--window <DAYS>
 | `--backfill` | off | One-time reconstruction of `carryover[]` entries removed from `state.json` **before** `--dispose` existed, recovered from git history and written to that repo's `planning/carryover-archive.jsonl` flagged `reconstructed: true`. Refuses a second run over a populated archive rather than merging. Cannot be combined with `--dispose` — see below |
 | `--dry-run` | off | Only meaningful together with `--dispose` or `--backfill`: compute and print the identical plan without writing anything. Passed without either, `mev carryover` reports the misuse and exits non-zero rather than silently ignoring it |
 | `--would-block` | off | Report every `carryover[].blocks[]` edge's honest blast radius — owner, edge type, resolved target, the target's live authored status, lane residency, and a verdict — with enforcement off. Read-only, always exits `0`, and cannot be combined with `--dispose`/`--dry-run`/`--audit`. See below |
+| `--trajectory` | off | Report the weekly `carryover-archive.jsonl` outflow trajectory instead of the per-entry sweep — one row per ISO week, most recent last, with the observed/reconstructed split and a running cumulative total that must agree with `--audit`'s archive row total. Reads the same archive `--audit` reads and never touches git. Read-only, always exits `0`, and cannot be combined with `--audit`/`--dispose`/`--backfill`/`--would-block`. See below |
+| `--weeks <N>` | `8` | Number of week rows `--trajectory` emits, ending with the ISO week containing today. Ignored without `--trajectory` |
 
 Resolves `brain.toml` by walking up from `path`, discovers and loads every repo's
 `planning/state.json` (individual load failures are skipped, not fatal), and evaluates every
@@ -2143,7 +2147,61 @@ mev carryover --would-block
 
 # Same, as JSON, restricted to one repo
 mev carryover --would-block --json --repo mev
+
+# Weekly outflow trajectory, default 8 weeks
+mev carryover --trajectory
+
+# Last 4 weeks only, as JSON
+mev carryover --trajectory --weeks 4 --json
+
+# Restricted to one repo, matching that repo's --audit scope
+mev carryover --trajectory --repo mev
 ```
+
+#### `--trajectory` — the weekly outflow table
+
+`mev carryover --trajectory` (`MV.16.F`) answers "what does the fleet's carryover outflow look
+like over time", decomposed by week, as opposed to `--audit`'s single archive-outflow total. It
+reads `planning/carryover-archive.jsonl` through the exact same reader `--audit` uses — MV.16.E's
+`read_archive_outflow` machinery, refactored to share a `collect_archive_rows` helper with the new
+`build_trajectory` — so there is one archive reader in this codebase, not two. **It never reads
+git.** Git was MV.16.B's one-time reconstruction pass that populated the archive in the first
+place; a second git reader here would re-derive the same numbers a different way and could drift
+from `--audit` the moment a disposal happened outside whatever range it walked.
+
+- **Bucketing.** Rows are bucketed by the ISO week (`YYYY-Www`) of their `disposed_at` date.
+  `--trajectory` emits exactly `--weeks` rows, most recent last, ending with the week containing
+  today — **including weeks with zero disposals**. A week that silently drops off the table because
+  nothing happened in it would misrepresent the trajectory as sparser than it is.
+- **Columns.** Each row carries `observed`, `reconstructed`, the row `total` (their sum), and a
+  running `cumulative` total. Reconstructed rows (`--backfill`'s git-derived rows, flagged
+  `reconstructed: true`) are always shown in their own column, never merged into `observed` — the
+  same one-way-publication reason `--audit`'s archive-outflow section keeps the two split (weaker,
+  inferred evidence should never inflate a number that gets published).
+- **`earlier (before window)`.** Archive rows dated before the first emitted week are not dropped;
+  they are counted in an explicit `earlier (before window): N` line printed above the table and
+  folded into the first row's `cumulative`, so a narrow `--weeks` window can never silently disagree
+  with the fleet-wide total.
+- **`undated` rows.** A row whose `disposed_at` fails to parse is excluded from every week bucket
+  (it cannot be assigned an ISO week) but still counts toward `rows_total` — printed as a dedicated
+  line when `undated > 0`, since silently bucketing an unparseable date would put a wrong number in
+  a published table.
+- **The coherence guarantee.** For a window that covers the whole archive, the last row's
+  `cumulative` equals `--audit`'s `archive_outflow.rows_total` for the same `--repo` scope — this is
+  the block's headline criterion, and `tests/it/brain_carryover_trajectory.rs` asserts it directly,
+  including that both numbers move together when one more row is disposed into the fixture.
+- **Mutual exclusions.** `--trajectory` cannot be combined with `--audit`, `--dispose`,
+  `--backfill`, or `--would-block` — each combination is reported as a misuse naming both flags and
+  exits non-zero, mirroring the existing `--would-block` misuse check. `--weeks` is ignored when
+  passed without `--trajectory`, the same way `--window` is ignored without `--audit`.
+- **`--repo` scoping.** `--trajectory --repo X` reads the archive for exactly the repos
+  `--audit --repo X` reads, and no others, so the two commands' totals are always comparable.
+- **Missing or empty archive.** Same as `--audit`: no `carryover-archive.jsonl` yet is the normal
+  case, not an error. `--trajectory` prints the single no-archive summary line (`0 archive row(s)
+  over 0 archive(s)`) and nothing else, and exits `0`.
+- **`--json`** serializes the `TrajectoryReport` struct directly — the same figures the human table
+  shows, so the published build-log post (`business:BZ.6.C`) can generate from data instead of
+  scraping the table.
 
 #### `--dispose` — archiving CLEARED entries
 
