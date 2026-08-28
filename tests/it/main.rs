@@ -43,6 +43,7 @@ mod brain_last_touched;
 mod brain_links;
 mod brain_manifest;
 mod brain_okf;
+mod brain_quiesce_lease;
 mod brain_state;
 mod brain_structure;
 mod brain_sync;
