@@ -28,6 +28,7 @@ mod brain_carryover_backfill;
 mod brain_carryover_dedup;
 mod brain_carryover_dispose;
 mod brain_carryover_enforcement;
+mod brain_carryover_grep_cli;
 mod brain_carryover_ranking;
 mod brain_carryover_trajectory;
 mod brain_carryover_would_block;

@@ -988,6 +988,14 @@ enum Command {
     /// Fleet-wide, read-only sweep of every discovered `planning/state.json`'s
     /// `carryover[]` array (`MV.ticket.carryover-sweep-command`).
     ///
+    /// `--repo <SLUG>` restricts the sweep to one repo's entries; `--grep <PATTERN>`
+    /// restricts it to entries whose `slug` or `text` matches a case-insensitive
+    /// regex. The two compose (an entry must satisfy both), and both narrow the
+    /// set BEFORE the total/cleared/actionable/not-evaluable counts are computed,
+    /// so the header always describes exactly the rows printed under it. While
+    /// `--grep` is active the three cross-repo dedup sections below are
+    /// suppressed, since they describe the whole corpus, not a filtered slice.
+    ///
     /// Resolves `brain.toml`, discovers and loads every repo's `planning/state.json`, and
     /// evaluates each `carryover[]` entry's `clears_when` predicate where it is
     /// machine-checkable, sorting the fleet into three lanes:
@@ -1021,7 +1029,8 @@ enum Command {
     ///
     /// Exit codes:
     ///   0 — sweep completed, regardless of how many entries land in any lane
-    ///   1 — brain.toml not found/unreadable, an unknown --repo slug, or a serialization
+    ///   1 — brain.toml not found/unreadable, an unknown --repo slug, an invalid --grep
+    ///       regex (message names both the pattern and the regex error), or a serialization
     ///       error under --json
     Carryover {
         /// Path to search from when locating brain.toml (walks up to find it).

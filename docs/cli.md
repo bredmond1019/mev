@@ -1910,11 +1910,18 @@ mev --json doc opportunity ingest --input company-brief.json
 
 ---
 
-### `carryover [--repo <slug>] [--json] [--allow-exec] [--exec-timeout <secs>] [--audit] [--window <days>] [--dispose] [--backfill] [--dry-run] [--would-block] [--trajectory] [--weeks <days>] [path]`
+### `carryover [--repo <slug>] [--grep <pattern>] [--json] [--allow-exec] [--exec-timeout <secs>] [--audit] [--window <days>] [--dispose] [--backfill] [--dry-run] [--would-block] [--trajectory] [--weeks <days>] [path]`
 
 Fleet-wide sweep of every discovered `planning/state.json`'s `carryover[]` array. By default
 this is **read-only**: it evaluates each entry's `clears_when` predicate where it is
-machine-checkable and sorts the fleet into three lanes. `--audit` switches to a census over both
+machine-checkable and sorts the fleet into three lanes. `--grep <PATTERN>` narrows the swept
+entries to those whose `slug` or `text` matches a case-insensitive regex, so retrieving one
+known entry no longer means dumping the whole fleet and grepping the output; it composes with
+`--repo` (an entry must satisfy both), applies before the total/cleared/actionable/not-evaluable
+counts are computed (so the header always agrees with the rows printed under it), and suppresses
+the three cross-repo dedup sections below, since those describe the whole corpus rather than a
+filtered slice. An invalid regex is a hard error naming the pattern and the regex parse error.
+`--audit` switches to a census over both
 triage containers instead (see [`--audit` — the `carryover[]`/`reference[]`
 census](#--audit--the-carryover-reference-census) below). `--would-block` switches to a
 read-only report over `carryover[].blocks[]` edges instead (see [`--would-block` — the honest
@@ -1927,13 +1934,14 @@ history-based write path instead — see [`--backfill` — one-time git reconstr
 removals](#--backfill--one-time-git-reconstruction-of-past-removals) below.
 
 ```bash
-mev carryover [--repo <SLUG>] [--json] [--allow-exec] [--exec-timeout <SECS>] [--audit] [--window <DAYS>] [--dispose] [--backfill] [--dry-run] [--would-block] [--trajectory] [--weeks <DAYS>] [path]
+mev carryover [--repo <SLUG>] [--grep <PATTERN>] [--json] [--allow-exec] [--exec-timeout <SECS>] [--audit] [--window <DAYS>] [--dispose] [--backfill] [--dry-run] [--would-block] [--trajectory] [--weeks <DAYS>] [path]
 ```
 
 | Argument / Flag | Default | Description |
 |---|---|---|
 | `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
 | `--repo <SLUG>` | unset | Restrict the sweep to one repo's `carryover[]` entries **by ownership**, not by which file an entry happens to be stored in — see below. An unknown slug is a hard error naming the valid slugs |
+| `--grep <PATTERN>` | unset | Restrict the sweep to entries whose `slug` or `text` matches this case-insensitive regex. Composes with `--repo` (both narrow; an entry must satisfy both) and with `--json`. Applied before the total/cleared/actionable/not-evaluable counts are computed, so the counts always describe the filtered set. Suppresses the three cross-repo dedup sections (clusters, suggested duplicates, single-repo `finding_id` warnings), since those are statements about the whole corpus. Only applies to the plain per-entry sweep — cannot be combined with `--audit`, `--trajectory`, `--dispose`, `--backfill`, or `--would-block`. An invalid regex exits non-zero naming the pattern and the regex error. A pattern matching nothing exits `0` and says so explicitly, distinguishing "swept, matched nothing" from "nothing to sweep" |
 | `--json` | off | Emit the `CarryoverReport` (or, under `--audit`, the `CarryoverAudit`; under `--would-block`, the `WouldBlockReport`; or, under `--trajectory`, the `TrajectoryReport`) as compact JSON instead of the human summary |
 | `--allow-exec` | off | Opt in to running `command_exits_zero` predicates. Without it, every such entry reports `not-evaluable` (reason `execution-not-allowed`) and **no command is ever run**. **`--dispose` does not imply this** — passing `--dispose` never turns on command execution, so a `command_exits_zero` entry that is `not-evaluable` for lack of `--allow-exec` is never disposal-eligible either |
 | `--exec-timeout <SECS>` | `2` | Wall-clock bound the in-process watchdog enforces on a `command_exits_zero` predicate's child process before killing it. This is a **mev-side** bound — a flag on this command, not a field on the predicate itself; a per-predicate timeout would be an okf-core `ClearsWhenPredicate` schema change and is explicitly out of scope for `MV.16.G`. Ignored without `--allow-exec`. Raising it lets a slower command (e.g. one that touches the network) finish instead of reporting `command-timed-out`; it does not change whether execution is opt-in |
@@ -2198,7 +2206,7 @@ visible here even though it has already vanished from the corpus the plain censu
 | Code | Meaning |
 |---|---|
 | `0` | Sweep (or, under `--audit`, the census) completed successfully, regardless of how many entries land in any lane |
-| `1` | `brain.toml` not found/unreadable, an unknown `--repo` slug, or a serialization error under `--json` |
+| `1` | `brain.toml` not found/unreadable, an unknown `--repo` slug, an invalid `--grep` regex (names the pattern and the regex error), or a serialization error under `--json` |
 
 **Examples:**
 
@@ -2211,6 +2219,12 @@ mev carryover --json
 
 # Restrict to one repo
 mev carryover --repo mev
+
+# Find one known entry by slug or text, without dumping the fleet
+mev carryover --grep synapse-rename
+
+# --grep composes with --repo and --json
+mev carryover --repo orchestrator --grep 'synapse-rename' --json
 
 # From an explicit brain root
 mev carryover ~/Dev/agentic-portfolio
