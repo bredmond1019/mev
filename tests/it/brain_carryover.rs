@@ -18,6 +18,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use mev::brain::carryover::{CarryoverLane, CarryoverRef, NotEvaluableReason};
 
@@ -653,6 +654,247 @@ fn audit_respects_repo_filter() {
         "beta carries no carryover[] entries"
     );
     assert_eq!(audit.reference_count, 1, "beta carries 1 reference[] entry");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// `--repo` hides cross-repo entries — `MV.ticket.repo-filter-hides-cross-repo-entries`,
+// Task 1.
+//
+// CLI-level (not library-level): the widening this ticket adds lives behind a not-yet-
+// existent `--include-cross-repo` flag, so these cases drive the built binary directly
+// (the same pattern `tests/it/brain_carryover_grep_cli.rs` uses) rather than calling
+// `mev::carryover_sweep`, whose signature does not change in this task. That keeps this
+// file's pre-existing library-level tests compiling untouched while these cases still go
+// red at runtime against today's binary.
+//
+// The fixture carries all four scope shapes at once per the task spec: `repo: "alpha"`,
+// `repo: "beta"`, `cross_repo: true`, and a tier-scoped entry. A fixture with only alpha
+// and cross-repo would pass for a wrong implementation that widens to everything — the
+// beta entry is what catches that, and the tier entry is what pins task 2's decision.
+//
+// Pinned decision for the tier-scoped entry (to be implemented in task 2):
+// `--include-cross-repo` widens ONLY to `cross_repo: true` entries, never to `tier`-scoped
+// ones — the ticket's `out_of_scope` explicitly defers a separate `--include-tier` flag,
+// so a tier entry must stay excluded even with `--include-cross-repo` passed.
+// ---------------------------------------------------------------------------
+
+fn run_mev(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_mev"))
+        .args(args)
+        .output()
+        .expect("run mev")
+}
+
+/// Write a fixture carrying all four scope shapes in one repo's `carryover[]`:
+/// `repo: "alpha"`, `repo: "beta"`, `cross_repo: true`, and `tier: "primary"`.
+/// `brain.toml` registers both `alpha` and `beta` so `--repo` accepts either slug.
+fn write_four_scope_shapes_fixture(root: &Path) {
+    write_brain_toml(root);
+
+    let state = serde_json::json!({
+        "repo": "alpha",
+        "kind": "project",
+        "updated": "2026-08-01",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "tracks": [],
+        "carryover": [
+            {
+                "slug": "scope-repo-alpha-entry",
+                "scope": { "repo": "alpha" },
+                "kind": "deferred",
+                "text": "Owned by alpha alone.",
+                "clears_when": "a human reviews this manually and signs off",
+                "created": "2026-06-01"
+            },
+            {
+                "slug": "scope-repo-beta-entry",
+                "scope": { "repo": "beta" },
+                "kind": "deferred",
+                "text": "Owned by beta alone, filed in alpha's file via a scope override.",
+                "clears_when": "a human reviews this manually and signs off",
+                "created": "2026-06-01"
+            },
+            {
+                "slug": "scope-cross-repo-entry",
+                "scope": { "cross_repo": true },
+                "kind": "deferred",
+                "text": "No single owning repo — cross-repo.",
+                "clears_when": "a human reviews this manually and signs off",
+                "created": "2026-06-01"
+            },
+            {
+                "slug": "scope-tier-entry",
+                "scope": { "tier": "primary" },
+                "kind": "deferred",
+                "text": "Scoped to a whole tier, not one repo.",
+                "clears_when": "a human reviews this manually and signs off",
+                "created": "2026-06-01"
+            }
+        ]
+    });
+    write_json(root, "repos/alpha/planning/state.json", &state);
+    write_json(
+        root,
+        "repos/beta/planning/state.json",
+        &serde_json::json!({
+            "repo": "beta",
+            "kind": "project",
+            "updated": "2026-08-01",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "tracks": [],
+            "carryover": []
+        }),
+    );
+}
+
+/// `--repo alpha` (today's existing flag, no widening) returns only the entry scoped
+/// `repo: "alpha"` — none of beta's, cross-repo's, or the tier entry's.
+#[test]
+fn repo_filter_alone_returns_only_the_named_repos_entry() {
+    let dir = temp_dir("scope-repo-only");
+    write_four_scope_shapes_fixture(&dir);
+
+    let out = run_mev(&[
+        "carryover",
+        "--repo",
+        "alpha",
+        "--json",
+        dir.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout should be a single JSON report");
+    let slugs: Vec<&str> = report["entries"]
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .map(|e| e["slug"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(
+        slugs,
+        vec!["scope-repo-alpha-entry"],
+        "expected only the alpha-scoped entry with --repo alpha, got {slugs:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// `--repo alpha --include-cross-repo` must return the alpha entry AND the cross-repo
+/// entry, must still exclude beta's entry, and must still exclude the tier entry (pinned
+/// decision above). NOT YET IMPLEMENTED: `--include-cross-repo` does not exist as a flag
+/// until task 2, so this currently fails to parse (non-zero exit) rather than asserting a
+/// wrong entry set — that is expected and acceptable for this task.
+#[test]
+fn include_cross_repo_widens_to_cross_repo_entries_but_not_beta_or_tier() {
+    let dir = temp_dir("scope-widen");
+    write_four_scope_shapes_fixture(&dir);
+
+    let out = run_mev(&[
+        "carryover",
+        "--repo",
+        "alpha",
+        "--include-cross-repo",
+        "--json",
+        dir.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "expected --repo alpha --include-cross-repo to exit 0 once task 2 lands, got {:?}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout should be a single JSON report");
+    let mut slugs: Vec<&str> = report["entries"]
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .map(|e| e["slug"].as_str().unwrap())
+        .collect();
+    slugs.sort_unstable();
+
+    assert_eq!(
+        slugs,
+        vec!["scope-cross-repo-entry", "scope-repo-alpha-entry"],
+        "expected alpha + cross-repo entries only (beta and the tier entry excluded), got {slugs:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// `--include-cross-repo` without `--repo` is a misuse — reported and non-zero exit,
+/// never silently ignored, matching how `--weeks` without `--trajectory` already behaves.
+/// NOT YET IMPLEMENTED: today this fails to parse as an unrecognized flag, which already
+/// exits non-zero — the flag's existence and its dedicated misuse message land in task 2.
+#[test]
+fn include_cross_repo_without_repo_is_a_reported_misuse() {
+    let dir = temp_dir("scope-misuse");
+    write_four_scope_shapes_fixture(&dir);
+
+    let out = run_mev(&["carryover", "--include-cross-repo", dir.to_str().unwrap()]);
+    assert!(
+        !out.status.success(),
+        "--include-cross-repo without --repo must exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--include-cross-repo") && stderr.contains("--repo"),
+        "expected the misuse message to name both --include-cross-repo and --repo, got:\n{stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// THE CASE THAT GOES RED TODAY: a `--repo`-filtered run with zero matches (forced via
+/// `--grep` against a pattern nothing matches) must NOT emit the unqualified
+/// `swept the corpus and matched nothing for this pattern` sentence — that sentence is a
+/// false claim of corpus-wide coverage once `--repo` narrowed the sweep. It must instead
+/// name the active repo filter. This assertion is written to fail against the current
+/// binary, where the unqualified sentence IS emitted regardless of `--repo` — that failure
+/// is the D68 evidence this task records.
+#[test]
+fn repo_filtered_empty_result_does_not_claim_the_whole_corpus_was_swept() {
+    let dir = temp_dir("scope-reporting");
+    write_four_scope_shapes_fixture(&dir);
+
+    let out = run_mev(&[
+        "carryover",
+        "--repo",
+        "alpha",
+        "--grep",
+        "no-such-pattern-anywhere",
+        dir.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "a pattern matching nothing must still exit 0, got {:?}",
+        out.status.code()
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        !stdout.contains("swept the corpus and matched nothing for this pattern"),
+        "a --repo-filtered empty result must not claim the whole corpus was swept, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("alpha"),
+        "expected the filtered empty-result line to name the active --repo filter (alpha), got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("--include-cross-repo"),
+        "expected the filtered empty-result line to name --include-cross-repo as the way to \
+         widen the view, got:\n{stdout}"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
