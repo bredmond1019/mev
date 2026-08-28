@@ -241,6 +241,68 @@ identical code path with both writes suppressed. Full flag reference and example
 
 ---
 
+## 6b. `W_STATE_CARRYOVER_ALREADY_SATISFIED` — the already-satisfied gate
+
+This is a **validation diagnostic**, not part of the ranking wire shape above — it does not change
+`rank_carryover`'s exported surface and does not bump this document's contract version. It is
+documented here because it is this repo's other carryover-facing check and this is the repo's
+existing carryover doc.
+
+**The rule.** HQ's `CLAUDE.md` carryover-routing section already states it in prose: *"Never author
+a typed `clears_when` that is already satisfied — it retires the entry on its first `mev carryover`
+sweep while the finding is still live, which is worse than no predicate."* Before this gate, nothing
+enforced it. Measured on the brain 2026-08-19: of 5 `CLEARED` entries, 3 were false, and 2 of the 3
+were already satisfied the moment they were authored.
+
+**What it checks.** `validate_brain_state` (the `state` pass) evaluates every file's
+`carryover[].clears_when` once, up front, into a `CarryoverReport` — with `allow_exec: false`, so a
+`command_exits_zero` predicate is **never executed** by the validator. It never fires for
+`command_exits_zero` entries; they land `NotEvaluable` under exec-disabled evaluation, which is the
+correct and deliberately safe outcome, not a gap to "fix" by turning exec on in a validator that runs
+in CI and the nightly routine. `check_carryover_already_satisfied`
+(`src/brain/state.rs`) then walks every `carryover[]` entry whose verdict in that report landed in
+`CarryoverLane::Cleared` — i.e. the predicate is satisfied *right now*, while the entry is still
+present and un-disposed — and emits one `W_STATE_CARRYOVER_ALREADY_SATISFIED` warning per such
+entry, naming the entry's `slug`, the rendered predicate, and why it matched (from the verdict's own
+matched refs, never re-derived).
+
+**This is distinct from the sweep's healthy `CLEARED` lane.** `mev carryover`'s plain sweep reports
+`Cleared` as a normal, actionable-for-disposal outcome. This gate speaks only about an entry that is
+*still live* and *already* satisfied — by construction that combination means either (a) the entry
+was already resolved when it was filed and should never have been added, or (b) it is predicated on
+the wrong observable. Both are author errors, and the diagnostic's own message says so — it is worded
+distinctly from a `Cleared` sweep result so the two are never confused in output.
+
+**Severity is Warning, and stays Warning.** `Report::is_failure` counts only `Error`, so
+`validate-brain --state` still exits 0 in this diagnostic's presence. Promoting it to error is
+explicitly out of scope until the fleet's predicate-less entries have been triaged — this is a
+detection mechanism first, not yet an enforcement gate.
+
+**Two sub-classes, one code.** Both were measured on the brain on 2026-08-19 and need different
+fixes, so the gate names each as a refinement of the same `W_STATE_CARRYOVER_ALREADY_SATISFIED`
+message rather than as separate codes — a grep for the code still finds every instance:
+
+- **Sub-class A — unanchored `file_contains` matching prose.** Fires when the satisfied predicate is
+  `file_contains` and its `pattern` has no leading newline (this corpus's convention for anchoring a
+  pattern to a specific YAML frontmatter field). Ground truth: `postgres-14-17-cleanup-pending` was
+  cleared on 2026-08-19 by the bare substring `status: archived`, which also occurs in the runbook's
+  own Phase 7 prose describing the flip, while the frontmatter still read `status: draft`. **Fix:**
+  anchor the pattern with a leading `\n`.
+- **Sub-class B — a path predicate scoped to another machine.** Fires when the satisfied predicate is
+  `file_exists` or `file_contains` and the entry's own `text` mentions another machine (matched
+  case-insensitively against `mini`, `mac mini`, `on that machine`, `remote`, `another machine`).
+  Ground truth: `client-wild-trail-photo-missing-on-mini` (a tier-scoped entry, `{repo: null, tier:
+  "client"}`) was reported `CLEARED` on 2026-08-19 because a repo-relative path resolved on the dev
+  checkout while the finding was actually about the Mac Mini, which was still broken. **Fix:**
+  re-predicate on something the running host can actually observe — or, as this entry now does,
+  fall back to free prose so it lands not-evaluable instead of falsely clearing.
+
+**The remedy is always re-predicate, never delete.** Deleting the entry throws away the finding it
+was filed to track; naming the predicate imprecisely is the author error the gate exists to catch,
+not a reason to remove the record of the finding itself.
+
+---
+
 ## 7. Consumer re-pin instructions
 
 Following the [D20](../../../docs/decisions/D20-shared-data-contract.md) pattern (see
