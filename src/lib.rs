@@ -421,10 +421,10 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     use brain::distill::check_distill_staleness;
     use brain::state::{
         StateLoadError, build_state_graph, check_backlog_integrity, check_backlog_staleness,
-        check_carryover_staleness, check_epics, check_field_policy, check_focus_drift,
-        check_op_slug_stutter, check_operator_staleness, check_rollup, check_schema,
-        check_state_graph, check_status_consistency, detect_cycles, discover_state_files,
-        load_state,
+        check_carryover_already_satisfied, check_carryover_staleness, check_epics,
+        check_field_policy, check_focus_drift, check_op_slug_stutter, check_operator_staleness,
+        check_rollup, check_schema, check_state_graph, check_status_consistency, detect_cycles,
+        discover_state_files, load_state,
     };
     use std::collections::HashMap;
 
@@ -552,7 +552,7 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     // source prose reads as "or" — a deliberate bias against false `Cleared` verdicts (see
     // that function's doc comment). Any diagnostic built on `lane == CarryoverLane::Cleared`
     // therefore inherits that same safe-direction bias.
-    let _carryover_report = brain::carryover::evaluate_carryover(
+    let carryover_report = brain::carryover::evaluate_carryover(
         &loaded,
         &status_map,
         root,
@@ -569,6 +569,11 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
             file,
             today,
             &config.attention,
+        ));
+        report.diagnostics.extend(check_carryover_already_satisfied(
+            src,
+            file,
+            &carryover_report,
         ));
         report
             .diagnostics
