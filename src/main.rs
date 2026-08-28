@@ -1716,7 +1716,7 @@ fn run_carryover_dispose(
         }
     };
 
-    let plan = compute_disposal_plan(&report, &loaded, &load_errors);
+    let plan = compute_disposal_plan(&report, &loaded, &load_errors, exec_timeout);
 
     let preamble = render_dispose_preamble(&plan);
     if !preamble.is_empty() {

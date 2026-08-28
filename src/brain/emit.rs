@@ -1798,11 +1798,7 @@ pub(crate) fn collect_attention_rows(
             slug: item.slug.clone(),
             kind: carryover_kind_str(&item.kind).into_owned(),
             text: item.text.clone(),
-            clears_when: item
-                .clears_when
-                .as_ref()
-                .and_then(clears_when_display)
-                .map(String::from),
+            clears_when: item.clears_when.as_ref().and_then(clears_when_display),
             created: item.created.clone(),
             age_days,
             stale,
@@ -1830,7 +1826,7 @@ pub(crate) fn collect_attention_rows(
             let clears_when = source
                 .and_then(|item| item.clears_when.as_ref())
                 .and_then(clears_when_display)
-                .map(|c| attention_snippet(c, 60));
+                .map(|c| attention_snippet(&c, 60));
             AttentionRow {
                 repo: r.repo.clone(),
                 age: r.age_days,

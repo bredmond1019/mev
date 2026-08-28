@@ -422,13 +422,45 @@ pub fn clears_when_prose(cw: &ClearsWhen) -> Option<&str> {
 
 /// Human-facing display string for a `clears_when`, for the report/summary
 /// sites (`CarryoverVerdict.clears_when`, the staleness-warning and
-/// Attention-section formatters). Currently identical to
-/// [`clears_when_prose`] — `Predicate` entries have no display string yet —
-/// kept as a separate name so those call sites read as "what do I show a
-/// human" rather than "what do I evaluate", and so a future predicate
-/// summary (`MV.ticket.clears-when-evaluation`) has one place to land.
-pub fn clears_when_display(cw: &ClearsWhen) -> Option<&str> {
-    clears_when_prose(cw)
+/// Attention-section formatters).
+///
+/// Unlike [`clears_when_prose`] — which stays `None` for every
+/// `ClearsWhen::Predicate` because the EVALUATION sites depend on that
+/// `None` — this renders a compact, unambiguous string for every typed
+/// predicate variant too, so an operator hand-verifying a `--dispose`
+/// candidate can see what the entry claims to be waiting on straight from
+/// the report. Returns an owned `String` (rather than `&str`, like
+/// [`clears_when_prose`]) because the predicate branch has nothing to borrow
+/// from — it is always freshly formatted.
+pub fn clears_when_display(cw: &ClearsWhen) -> Option<String> {
+    match cw {
+        ClearsWhen::Prose(s) => Some(s.clone()),
+        ClearsWhen::Predicate(p) => Some(predicate_display(p)),
+    }
+}
+
+/// Render one typed [`ClearsWhenPredicate`] compactly and unambiguously for
+/// [`clears_when_display`]. The predicate's `note`, when present, is
+/// appended so an author's gloss is never silently dropped from the report.
+fn predicate_display(p: &ClearsWhenPredicate) -> String {
+    let (body, note) = match p {
+        ClearsWhenPredicate::BlockClosed { repo, id, note } => {
+            (format!("block_closed {repo}:{id}"), note)
+        }
+        ClearsWhenPredicate::FileExists { path, note } => (format!("file_exists {path}"), note),
+        ClearsWhenPredicate::FileContains {
+            path,
+            pattern,
+            note,
+        } => (format!("file_contains {path} ~ \"{pattern}\""), note),
+        ClearsWhenPredicate::CommandExitsZero { command, note } => {
+            (format!("command_exits_zero \"{command}\""), note)
+        }
+    };
+    match note {
+        Some(n) => format!("{body} — {n}"),
+        None => body,
+    }
 }
 
 /// Verbs that turn a block ID mentioned in `clears_when` into a *closure*
@@ -1291,11 +1323,7 @@ pub fn evaluate_carryover_with_dedup(
                 slug: item.slug.clone(),
                 kind: carryover_kind_str(&item.kind).into_owned(),
                 text: item.text.clone(),
-                clears_when: item
-                    .clears_when
-                    .as_ref()
-                    .and_then(clears_when_display)
-                    .map(String::from),
+                clears_when: item.clears_when.as_ref().and_then(clears_when_display),
                 created: item.created.clone(),
                 age_days,
                 stale,
@@ -1436,7 +1464,9 @@ pub struct DisposalPlan {
 ///    practice: every verdict in `report.entries` was produced from exactly
 ///    one entry in `files` by [`evaluate_carryover_with_dedup`]) rather than
 ///    panicking or fabricating a record.
-/// 3. Renders the evidence string via [`describe_clearing_evidence`].
+/// 3. Renders the evidence string via [`describe_clearing_evidence`],
+///    passing `exec_timeout` through so a `command_exits_zero` disposal
+///    records the bound that was actually in force for this sweep.
 ///
 /// **Guard (4) — `--dispose` never implies `--allow-exec` — needs no special
 /// case here.** `evaluate_carryover_with_dedup` already refuses to mark a
@@ -1452,6 +1482,7 @@ pub fn compute_disposal_plan(
     report: &CarryoverReport,
     files: &[(StateSource, StateFile)],
     load_errors: &[(String, String)],
+    exec_timeout: std::time::Duration,
 ) -> DisposalPlan {
     let mut candidates = Vec::new();
 
@@ -1472,7 +1503,7 @@ pub fn compute_disposal_plan(
             repo: verdict.repo.clone(),
             slug: verdict.slug.clone(),
             entry: entry.clone(),
-            evidence: describe_clearing_evidence(verdict),
+            evidence: describe_clearing_evidence(verdict, exec_timeout),
         });
     }
 
@@ -1500,7 +1531,17 @@ pub fn compute_disposal_plan(
 /// `evaluate_carryover_with_dedup`'s lane assignment: the `Cleared`/
 /// `Actionable` split is only reached when `!refs.is_empty()`) — so this
 /// never returns an empty string for a genuine disposal candidate.
-pub fn describe_clearing_evidence(verdict: &CarryoverVerdict) -> String {
+///
+/// `exec_timeout` is the wall-clock bound that was actually in force for
+/// this sweep (see [`COMMAND_EXEC_TIMEOUT`] for the default). A
+/// `CommandExitsZero` clause records it, so an archived disposal names the
+/// watchdog that applied rather than the unfalsifiable `command X exited 0`
+/// this used to emit — without it, nothing on disk after the fact says a
+/// bound was even in force.
+pub fn describe_clearing_evidence(
+    verdict: &CarryoverVerdict,
+    exec_timeout: std::time::Duration,
+) -> String {
     verdict
         .refs
         .iter()
@@ -1513,7 +1554,10 @@ pub fn describe_clearing_evidence(verdict: &CarryoverVerdict) -> String {
                 format!("{path} contains \"{pattern}\"")
             }
             CarryoverRef::CommandExitsZero { command, .. } => {
-                format!("command `{command}` exited 0")
+                format!(
+                    "command `{command}` exited 0 (bound {}s)",
+                    exec_timeout.as_secs()
+                )
             }
         })
         .collect::<Vec<String>>()
@@ -9147,7 +9191,7 @@ mod tests {
         assert_eq!(report.cleared, 1);
         assert_eq!(report.actionable, 1);
 
-        let plan = compute_disposal_plan(&report, &files, &[]);
+        let plan = compute_disposal_plan(&report, &files, &[], COMMAND_EXEC_TIMEOUT);
         assert_eq!(plan.candidates.len(), 1);
         assert!(plan.skipped.is_empty());
 
@@ -9201,7 +9245,7 @@ mod tests {
             "repo-broken".to_string(),
             "invalid type: string, expected a boolean at line 4 column 12".to_string(),
         )];
-        let plan = compute_disposal_plan(&report, &files, &load_errors);
+        let plan = compute_disposal_plan(&report, &files, &load_errors, COMMAND_EXEC_TIMEOUT);
 
         assert_eq!(plan.candidates.len(), 1);
         assert_eq!(plan.skipped.len(), 1);
@@ -9260,7 +9304,7 @@ mod tests {
             Some(NotEvaluableReason::ExecutionNotAllowed)
         );
 
-        let plan = compute_disposal_plan(&report, &files, &[]);
+        let plan = compute_disposal_plan(&report, &files, &[], COMMAND_EXEC_TIMEOUT);
         assert!(plan.candidates.is_empty());
     }
 
@@ -9293,9 +9337,130 @@ mod tests {
             enforce: None,
         };
         assert_eq!(
-            describe_clearing_evidence(&verdict),
+            describe_clearing_evidence(&verdict, COMMAND_EXEC_TIMEOUT),
             "block repo-a:MV.1.A closed; path docs/x.md exists"
         );
+    }
+
+    #[test]
+    fn describe_clearing_evidence_records_the_exec_timeout_in_force() {
+        let verdict = CarryoverVerdict {
+            repo: "repo-a".to_string(),
+            slug: "cmd-cleared".to_string(),
+            kind: "deferred".to_string(),
+            text: "text".to_string(),
+            clears_when: Some("true exits 0".to_string()),
+            created: "2020-01-01".to_string(),
+            age_days: None,
+            stale: false,
+            lane: CarryoverLane::Cleared,
+            refs: vec![CarryoverRef::CommandExitsZero {
+                command: "true".to_string(),
+                satisfied: true,
+            }],
+            reason: None,
+            priority: None,
+            finding_id: None,
+            blocks: vec![],
+            enforce: None,
+        };
+        assert_eq!(
+            describe_clearing_evidence(&verdict, std::time::Duration::from_secs(5)),
+            "command `true` exited 0 (bound 5s)"
+        );
+    }
+
+    // -- clears_when_display (task 4) --------------------------------------------
+
+    #[test]
+    fn clears_when_display_prose_is_byte_identical_to_pre_task4_behaviour() {
+        // Regression floor: `clears_when_display` for `Prose` must render
+        // exactly the string it always has, unchanged by this task's
+        // `Predicate` widening.
+        let cw = ClearsWhen::Prose("MV.3.A lands and docs/x.md exists".to_string());
+        assert_eq!(
+            clears_when_display(&cw).as_deref(),
+            Some("MV.3.A lands and docs/x.md exists")
+        );
+    }
+
+    #[test]
+    fn clears_when_display_renders_block_closed_predicate() {
+        let cw = ClearsWhen::Predicate(ClearsWhenPredicate::BlockClosed {
+            repo: "mev".to_string(),
+            id: "MV.16.G".to_string(),
+            note: None,
+        });
+        assert_eq!(
+            clears_when_display(&cw).as_deref(),
+            Some("block_closed mev:MV.16.G")
+        );
+    }
+
+    #[test]
+    fn clears_when_display_renders_file_exists_predicate() {
+        let cw = ClearsWhen::Predicate(ClearsWhenPredicate::FileExists {
+            path: "docs/x.md".to_string(),
+            note: None,
+        });
+        assert_eq!(
+            clears_when_display(&cw).as_deref(),
+            Some("file_exists docs/x.md")
+        );
+    }
+
+    #[test]
+    fn clears_when_display_renders_file_contains_predicate() {
+        let cw = ClearsWhen::Predicate(ClearsWhenPredicate::FileContains {
+            path: "docs/x.md".to_string(),
+            pattern: "done".to_string(),
+            note: None,
+        });
+        assert_eq!(
+            clears_when_display(&cw).as_deref(),
+            Some("file_contains docs/x.md ~ \"done\"")
+        );
+    }
+
+    #[test]
+    fn clears_when_display_renders_command_exits_zero_predicate_with_note() {
+        let cw = ClearsWhen::Predicate(ClearsWhenPredicate::CommandExitsZero {
+            command: "true".to_string(),
+            note: Some("sanity check".to_string()),
+        });
+        assert_eq!(
+            clears_when_display(&cw).as_deref(),
+            Some("command_exits_zero \"true\" — sanity check")
+        );
+    }
+
+    #[test]
+    fn clears_when_display_is_none_only_when_clears_when_itself_is_none() {
+        // Every typed predicate variant now produces Some(..) — the None-
+        // for-Predicate behaviour stays on `clears_when_prose` only.
+        for cw in [
+            ClearsWhen::Predicate(ClearsWhenPredicate::BlockClosed {
+                repo: "mev".to_string(),
+                id: "MV.1.A".to_string(),
+                note: None,
+            }),
+            ClearsWhen::Predicate(ClearsWhenPredicate::FileExists {
+                path: "x".to_string(),
+                note: None,
+            }),
+            ClearsWhen::Predicate(ClearsWhenPredicate::FileContains {
+                path: "x".to_string(),
+                pattern: "y".to_string(),
+                note: None,
+            }),
+            ClearsWhen::Predicate(ClearsWhenPredicate::CommandExitsZero {
+                command: "true".to_string(),
+                note: None,
+            }),
+        ] {
+            assert!(clears_when_display(&cw).is_some());
+            assert!(clears_when_prose(&cw).is_none());
+        }
     }
 
     // -- dispose write path (task 2) --------------------------------------------
