@@ -98,6 +98,7 @@ mod tests {
     /// Build a test config with brain (root), core (tier), and mev (core/mev) units.
     fn three_unit_config() -> BrainConfig {
         BrainConfig {
+            permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
             carryover: Default::default(),

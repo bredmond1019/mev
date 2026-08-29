@@ -832,6 +832,7 @@ mod tests {
     fn brain_only_config() -> crate::brain::config::BrainConfig {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
+            permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
             carryover: Default::default(),
@@ -1045,6 +1046,7 @@ mod tests {
     fn brain_and_subrepo_config() -> crate::brain::config::BrainConfig {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
+            permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
             carryover: Default::default(),

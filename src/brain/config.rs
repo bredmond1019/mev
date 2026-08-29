@@ -313,6 +313,47 @@ impl Default for CarryoverConfig {
     }
 }
 
+/// `[permission_profiles]` section — the graded-action permission levels an
+/// orchestration chain runs under (landed by `HQ.5.B`).
+///
+/// Backlog: `Add permission_profiles field to mev's BrainConfig` (flagged by
+/// engine-rs-91 during `EN.12.C` — engine-rs parses this table itself against a
+/// checked-in fixture as a short-term workaround, so two independent parsers of
+/// one permissions table can drift). This is the durable fix: an additive,
+/// `#[serde(default)]` field so a `brain.toml` lacking the table still parses
+/// (older fixtures, and any brain root that predates `HQ.5.B`).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct PermissionProfilesConfig {
+    /// Actions forbidden at every level regardless of profile (HQ D71).
+    #[serde(default)]
+    pub never_allowed: Vec<String>,
+    /// The profile id in force when no chain-level override is given.
+    #[serde(default)]
+    pub default: Option<String>,
+    /// `[permission_profiles.levels.<id>]` entries, keyed by level id.
+    #[serde(default)]
+    pub levels: std::collections::BTreeMap<String, PermissionProfileLevel>,
+}
+
+/// One `[permission_profiles.levels.<id>]` entry.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PermissionProfileLevel {
+    /// Stable identifier stamped verbatim into every run record.
+    pub id: String,
+    /// Human-readable description of what this level is for.
+    #[serde(default)]
+    pub meaning: String,
+    /// Whether this level permits installing on the Mac Mini.
+    #[serde(default)]
+    pub mini_install: bool,
+    /// Whether this level permits pushing to `main`.
+    #[serde(default)]
+    pub main_push: bool,
+    /// Whether this level permits writing to a repo other than the chain's own.
+    #[serde(default)]
+    pub cross_repo_write: bool,
+}
+
 /// One `[[repos]]` entry in `brain.toml`.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct RepoEntry {
@@ -371,6 +412,11 @@ pub struct BrainConfig {
     /// `carryover[].blocks[]` edges (default: off).
     #[serde(default)]
     pub carryover: CarryoverConfig,
+    /// `[permission_profiles]` section — graded-action permission levels
+    /// (`HQ.5.B`). Additive: absent in older/fixture `brain.toml`s, in which
+    /// case every field defaults empty/off.
+    #[serde(default)]
+    pub permission_profiles: PermissionProfilesConfig,
     /// `[[repos]]` entries.
     #[serde(default)]
     pub repos: Vec<RepoEntry>,
@@ -962,6 +1008,7 @@ enforce_blocks = true
     /// self-entries (`core`, `business`), and one leaf repo under each tier.
     fn scoped_fixture_config() -> BrainConfig {
         BrainConfig {
+            permission_profiles: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             attention: AttentionThresholds::default(),
@@ -1107,5 +1154,153 @@ enforce_blocks = true
         assert_eq!(deps.absolute_targets(&root).len(), 4);
         assert!(deps.allows(&root, &root.join("core/planning/status.md")));
         assert!(!deps.allows(&root, &root.join("business/planning/status.md")));
+    }
+
+    // -----------------------------------------------------------------
+    // permission_profiles — backlog: "Add permission_profiles field to
+    // mev's BrainConfig" (HQ.5.B, SQ-37)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn permission_profiles_absent_yields_all_defaults() {
+        // The checked-in fixture brain.toml has no [permission_profiles]
+        // table -> must parse, not error, with everything empty/off.
+        let cfg = load_brain_config(&fixture_path()).expect("should parse fixture");
+        assert!(cfg.permission_profiles.never_allowed.is_empty());
+        assert_eq!(cfg.permission_profiles.default, None);
+        assert!(cfg.permission_profiles.levels.is_empty());
+    }
+
+    #[test]
+    fn permission_profiles_table_parses_never_allowed_and_default() {
+        let toml = r#"
+[permission_profiles]
+never_allowed = ["clear_operator_gate"]
+default = "standard"
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(
+            cfg.permission_profiles.never_allowed,
+            vec!["clear_operator_gate".to_string()]
+        );
+        assert_eq!(
+            cfg.permission_profiles.default,
+            Some("standard".to_string())
+        );
+    }
+
+    #[test]
+    fn permission_profiles_levels_parse_by_id() {
+        let toml = r#"
+[permission_profiles]
+never_allowed = ["clear_operator_gate"]
+default = "standard"
+
+[permission_profiles.levels.locked]
+id = "locked"
+meaning = "no side effect outside the working tree"
+mini_install = false
+main_push = false
+cross_repo_write = false
+
+[permission_profiles.levels.standard]
+id = "standard"
+meaning = "lands changes and pushes to main"
+mini_install = false
+main_push = true
+cross_repo_write = true
+
+[permission_profiles.levels.unrestricted]
+id = "unrestricted"
+meaning = "permits every graded action"
+mini_install = true
+main_push = true
+cross_repo_write = true
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.permission_profiles.levels.len(), 3);
+
+        let locked = &cfg.permission_profiles.levels["locked"];
+        assert_eq!(locked.id, "locked");
+        assert!(!locked.mini_install && !locked.main_push && !locked.cross_repo_write);
+
+        let standard = &cfg.permission_profiles.levels["standard"];
+        assert_eq!(standard.id, "standard");
+        assert!(!standard.mini_install && standard.main_push && standard.cross_repo_write);
+
+        let unrestricted = &cfg.permission_profiles.levels["unrestricted"];
+        assert_eq!(unrestricted.id, "unrestricted");
+        assert!(
+            unrestricted.mini_install && unrestricted.main_push && unrestricted.cross_repo_write
+        );
+    }
+
+    /// Conformance: pins mev's parse against the REAL fleet `brain.toml`, not a
+    /// checked-in fixture — the backlog ticket's explicit ask ("a conformance test
+    /// pinning mev's parse against the real brain.toml table") since a fixture
+    /// alone cannot catch the two independent parsers (mev's and engine-rs's own
+    /// short-term struct) drifting apart. Skips gracefully off the sibling HQ
+    /// checkout (fresh clone / hosted CI, per the fleet-push-discipline "public
+    /// checkout can't see the vault" class) rather than failing.
+    #[test]
+    fn live_corpus_permission_profiles_table_parses_and_matches_the_documented_shape() {
+        let live_root = std::path::Path::new("../..");
+        let live_brain_toml = live_root.join("brain.toml");
+        if !live_brain_toml.exists() {
+            eprintln!(
+                "skipping live_corpus_permission_profiles_table_parses_and_matches_the_documented_shape: \
+                 {} has no brain.toml (fresh clone or CI runner without the sibling HQ checkout)",
+                live_root.display()
+            );
+            return;
+        }
+
+        let cfg = match load_brain_config(&live_brain_toml) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "skipping live_corpus_permission_profiles_table_parses_and_matches_the_documented_shape: \
+                     live brain.toml errored: {e}"
+                );
+                return;
+            }
+        };
+
+        assert!(
+            !cfg.permission_profiles.never_allowed.is_empty(),
+            "live brain.toml's [permission_profiles] declares never_allowed (HQ D71); an empty \
+             list here means the table failed to parse silently rather than erroring"
+        );
+        assert!(
+            cfg.permission_profiles
+                .never_allowed
+                .iter()
+                .any(|a| a == "clear_operator_gate"),
+            "never_allowed must include clear_operator_gate per D71; got {:?}",
+            cfg.permission_profiles.never_allowed
+        );
+        assert!(
+            cfg.permission_profiles.default.is_some(),
+            "live brain.toml declares a default profile"
+        );
+        assert!(
+            !cfg.permission_profiles.levels.is_empty(),
+            "live brain.toml declares at least one [permission_profiles.levels.*] entry"
+        );
+        for (key, level) in &cfg.permission_profiles.levels {
+            assert_eq!(
+                &level.id, key,
+                "level map key must match its own id field verbatim"
+            );
+        }
+        // The declared default must never be the most permissive level in force
+        // (mirrors brain.toml's own comment on this key) — a live-corpus guard,
+        // not a mev-enforced rule.
+        if let Some(default) = &cfg.permission_profiles.default {
+            assert_ne!(
+                default, "unrestricted",
+                "default profile must not be the most permissive level"
+            );
+        }
     }
 }

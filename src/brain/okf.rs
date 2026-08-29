@@ -347,6 +347,7 @@ mod tests {
             })
             .collect();
         BrainConfig {
+            permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
             carryover: Default::default(),

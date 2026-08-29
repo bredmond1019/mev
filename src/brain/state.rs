@@ -4103,6 +4103,7 @@ mod tests {
     fn make_config_with_alpha(alpha_repo_path: &str) -> BrainConfig {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
+            permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
             carryover: Default::default(),
@@ -4189,6 +4190,7 @@ mod tests {
 
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
+            permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
             carryover: Default::default(),
@@ -4271,6 +4273,7 @@ mod tests {
         .unwrap();
 
         let config = BrainConfig {
+            permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
             carryover: Default::default(),
@@ -4315,6 +4318,7 @@ mod tests {
         // Add a second repo entry that has no state.json on disk
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
+            permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
             carryover: Default::default(),
@@ -4430,6 +4434,7 @@ mod tests {
         // `discover_dedupes_repo_entry_that_shadows_a_tier_rollup`.
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
+            permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
             carryover: Default::default(),
@@ -8269,6 +8274,7 @@ mod tests {
     fn make_mixed_tier_config() -> BrainConfig {
         use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
+            permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
             carryover: Default::default(),
@@ -8359,6 +8365,7 @@ mod tests {
         // self-entry (`slug == repo_path == "business"`). It must still scope to
         // its own tier (not `All`, which would spuriously target it as HQ).
         let config = BrainConfig {
+            permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
             carryover: Default::default(),
@@ -8853,6 +8860,7 @@ mod tests {
         // A config where "alpha" is (accidentally) listed twice — the second
         // listing must not produce a duplicate (repo, id) block in focus.now.
         let config = BrainConfig {
+            permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
             carryover: Default::default(),
@@ -9036,6 +9044,7 @@ mod tests {
         // dropped entirely because the union loop required `kind == "project"`).
         use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
+            permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
             carryover: Default::default(),
@@ -10268,6 +10277,7 @@ mod check_epics_tests {
             prefix: None,
         };
         BrainConfig {
+            permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
             carryover: Default::default(),

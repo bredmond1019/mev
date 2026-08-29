@@ -46,6 +46,7 @@ fn temp_dir(suffix: &str) -> std::path::PathBuf {
 /// This is the canonical fixture config for all tests in this module.
 fn three_unit_config() -> BrainConfig {
     BrainConfig {
+        permission_profiles: Default::default(),
         attention: Default::default(),
         history: Default::default(),
         carryover: Default::default(),

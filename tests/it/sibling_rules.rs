@@ -116,6 +116,7 @@ fn empty_self_pair(dir: &Path, repo: &str) -> (StateSource, StateFile) {
 /// resolve identically for both `derive_rollup` and `derive_brain_focus`.
 fn mixed_kind_config() -> BrainConfig {
     BrainConfig {
+        permission_profiles: Default::default(),
         attention: Default::default(),
         history: Default::default(),
         carryover: Default::default(),
