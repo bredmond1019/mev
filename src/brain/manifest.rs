@@ -184,6 +184,8 @@ mod tests {
                 keywords: vec!["foo".to_string(), "bar".to_string()],
                 related: vec![],
                 synced_from: None,
+                created: None,
+                updated: None,
             }),
         }
     }
