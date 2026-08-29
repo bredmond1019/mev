@@ -13,6 +13,34 @@ timestamp: "2026-08-29T18:00:00-03:00"
 
 ## [run: 2026-08-29]
 
+### `mev blocks` verb bailed on tasks 1-4 skipping AC 11-16
+
+- **What:** Ran `MV.ticket.query-verb-leverage-chain-and-filters` via `/sdlc-flow` across tasks
+  1-6. Tasks 1-2 built `src/brain/query.rs` (`BlockQuery`, `BlockCone`, `QueryReport`,
+  `block_cone`/`same_repo_chain`/`select`, reusing `availability::transitive_closure`). Task 3
+  wired the `mev blocks` CLI verb with `--repo`/`--roadmap`/`--startable`/`--blocked`/
+  `--max-priority`/`--leverage`/`--chain`/`--limit`/`--json`. Task 4 verified the two live
+  consumers compile against the working tree. Task 5 documented the verb in `docs/cli/lanes.md`
+  and `docs/cli.md`. Task 6 ran the full validation suite (fmt, clippy, nextest 1232, `cargo test`
+  722, `check_consumers.sh`) — all green.
+- **Why it bailed:** Review verdict FAIL. Tasks 1-4 never touched `frontier.rs` or implemented
+  readiness reporting — AC 11-16 (`GateRank` `exit`/`start` fields + `--json` emission + the
+  mirror-compatibility fixture; three-state readiness reporting + `--runnable`/`--not-runnable`
+  filters + the unresolvable-slug degrade) are entirely unmet, confirmed by `rg` returning zero
+  hits for `runnable`/`readiness` and no `exit`/`start` fields on `GateRank`. Task 5's own decision
+  log admits the gap directly. This is a missing-scope/re-plan issue, not a fixable defect — six
+  of sixteen acceptance criteria were simply never attempted.
+- **Next:** Re-plan the remaining scope (frontier `GateRank` fields + readiness reporting) as its
+  own follow-up ticket/task range rather than re-running this spec as-is.
+
+```
+7928edd docs(sync): pull base-template — document OkfFrontmatter created/updated fields
+33117d8 feat: implement MV.ticket.query-verb-leverage-chain-and-filters-task5
+73f0056 feat: implement MV.ticket.query-verb-leverage-chain-and-filters-task3
+d7416e7 feat: implement MV.ticket.query-verb-leverage-chain-and-filters-task2
+de2fb49 feat: implement MV.ticket.query-verb-leverage-chain-and-filters-task1
+```
+
 ### Measured the mev gap with a prototype instead of guessing it
 
 - **What:** Split `docs/cli.md` (3219 lines) into a catalogue plus five domain pages under
