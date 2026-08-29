@@ -508,46 +508,12 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     // 7c. Block-record checks (MV.ticket.block-record-validation) — discover
     //     planning/blocks/*.json per repo and run the W_BLOCK_* checks against
     //     each record. A repo with no planning/blocks/ directory is silent
-    //     ([`brain::block::discover_block_records`] returns an empty `Vec`, not
-    //     an error) — this stays true for every repo in the fleet today.
-    //     `known_ids_by_repo` is derived here (not passed in from elsewhere) so
-    //     the "record has no matching block in state.json" check compares
-    //     against exactly the ids the already-loaded state graph declares for
-    //     that record's own repo, per [`brain::block::check_block_record`]'s
-    //     contract. Every diagnostic these checks return is warning severity
-    //     ([`brain::block::check_block_record`]'s own guarantee), so this pass
-    //     can never change `report.is_failure()` on its own.
-    {
-        use brain::block::{check_block_record, discover_block_records};
-        use std::collections::HashSet;
-
-        let mut known_ids_by_repo: HashMap<String, HashSet<String>> = HashMap::new();
-        for (src, file) in &loaded {
-            let ids = known_ids_by_repo.entry(src.repo_slug.clone()).or_default();
-            for track in &file.tracks {
-                for block in &track.blocks {
-                    ids.insert(block.id.clone());
-                }
-            }
-        }
-
-        for repo in &config.repos {
-            let block_repo_root = if repo.repo_path == "." || repo.repo_path.is_empty() {
-                root.to_path_buf()
-            } else {
-                root.join(&repo.repo_path)
-            };
-            let known_ids = known_ids_by_repo
-                .get(&repo.slug)
-                .cloned()
-                .unwrap_or_default();
-            for record_file in discover_block_records(&block_repo_root) {
-                report
-                    .diagnostics
-                    .extend(check_block_record(&record_file, &known_ids));
-            }
-        }
-    }
+    //     (see [`brain::state::check_block_records`]'s doc). Every diagnostic
+    //     this returns is warning severity, so it can never change
+    //     `report.is_failure()` on its own.
+    report
+        .diagnostics
+        .extend(brain::state::check_block_records(root, &config, &loaded));
 
     // 8. Rollup-drift checks (brain files only).
     // Build a slug → StateFile map of all loaded children (project kind).

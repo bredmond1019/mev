@@ -2086,6 +2086,64 @@ pub fn block_status_map(files: &[(StateSource, StateFile)]) -> HashMap<String, O
     status_map
 }
 
+// ---------------------------------------------------------------------------
+// Block-record checks (MV.ticket.block-record-validation, Task 3)
+// ---------------------------------------------------------------------------
+
+/// Discover and check every `planning/blocks/*.json` record across every repo
+/// registered in `config`, using `loaded` (already-discovered/loaded
+/// `state.json` files) to build the "known block ids" set each record's
+/// `W_BLOCK_UNKNOWN_ID` check compares against.
+///
+/// Wired into `validate_brain_state`'s `--state` pass. A repo with no
+/// `planning/blocks/` directory contributes nothing — per
+/// [`crate::brain::block::discover_block_records`]'s own contract, this is
+/// silence, never an error, so this function can never affect the run's exit
+/// code on its own (every diagnostic [`crate::brain::block::check_block_record`]
+/// returns is warning severity).
+///
+/// `root` is the corpus root (as passed to `validate_brain_state`); each
+/// repo's own root is derived from `config`'s `[[repos]] repo_path` the same
+/// way [`discover_state_files`] resolves leaf repo paths.
+pub fn check_block_records(
+    root: &Path,
+    config: &BrainConfig,
+    loaded: &[(StateSource, StateFile)],
+) -> Vec<Diagnostic> {
+    use crate::brain::block::{check_block_record, discover_block_records};
+    use std::collections::HashSet;
+
+    let mut diags = Vec::new();
+
+    // Known block ids per repo slug, from the already-loaded state graph.
+    let mut known_ids_by_repo: HashMap<String, HashSet<String>> = HashMap::new();
+    for (src, file) in loaded {
+        let ids = known_ids_by_repo.entry(src.repo_slug.clone()).or_default();
+        for track in &file.tracks {
+            for block in &track.blocks {
+                ids.insert(block.id.clone());
+            }
+        }
+    }
+
+    for repo in &config.repos {
+        let repo_root = if repo.repo_path == "." || repo.repo_path.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(&repo.repo_path)
+        };
+        let known_ids = known_ids_by_repo
+            .get(&repo.slug)
+            .cloned()
+            .unwrap_or_default();
+        for record_file in discover_block_records(&repo_root) {
+            diags.extend(check_block_record(&record_file, &known_ids));
+        }
+    }
+
+    diags
+}
+
 /// Check that no `closed` block depends on a non-`closed` block.
 ///
 /// A block that declares `status: "closed"` with a `{type:"block"}` entry in its
