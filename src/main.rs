@@ -1346,13 +1346,21 @@ enum Command {
     /// `--leverage` and `--chain` together is a usage error — pick one derivation
     /// per invocation.
     ///
-    /// Without `--json`: one line per selected block, plus (with `--leverage` or
+    /// Each selected block also reports readiness alongside startability, since
+    /// `startable` (dependency-clear) and `runnable` (has a record AND a
+    /// tasks.json) are different questions — `--runnable`/`--not-runnable` filter
+    /// on the latter, mutually exclusive with each other.
+    ///
+    /// Without `--json`: one line per selected block (annotated with its
+    /// startable/record/tasks/runnable state), plus (with `--leverage` or
     /// `--chain`) the derivation's result on the following indented line. With
     /// `--json`: this verb's own `QueryReport` shape.
     ///
     /// Exit codes:
     ///   0 — query computed and printed
-    ///   1 — brain.toml not found/unreadable, or `--leverage` combined with `--chain`
+    ///   1 — brain.toml not found/unreadable, `--leverage` combined with `--chain`,
+    ///       `--startable` combined with `--blocked`, or `--runnable` combined with
+    ///       `--not-runnable`
     Blocks {
         /// Path to search from when locating brain.toml (walks up to find it).
         /// Defaults to the current directory.
@@ -1376,6 +1384,15 @@ enum Command {
         /// block with no resolvable priority never matches.
         #[arg(long, value_name = "N")]
         max_priority: Option<u8>,
+        /// Narrow to blocks with BOTH a block record and a tasks.json on disk — the
+        /// blocks an SDLC engine can actually start on, not merely dependency-clear.
+        /// An unresolvable repo slug reports not-runnable rather than erroring.
+        #[arg(long)]
+        runnable: bool,
+        /// Narrow to blocks missing a record or a tasks.json. Mutually exclusive with
+        /// --runnable.
+        #[arg(long)]
+        not_runnable: bool,
         /// Report each selected startable block's transitive downstream cone
         /// (live/parked), ordered by live cone size descending. Mutually exclusive
         /// with --chain.
@@ -3866,6 +3883,8 @@ fn main() -> ExitCode {
             startable,
             blocked,
             max_priority,
+            runnable,
+            not_runnable,
             leverage,
             chain,
             limit,
@@ -3877,6 +3896,10 @@ fn main() -> ExitCode {
             }
             if leverage && chain {
                 eprintln!("error: --leverage and --chain are mutually exclusive");
+                return ExitCode::FAILURE;
+            }
+            if runnable && not_runnable {
+                eprintln!("error: --runnable and --not-runnable are mutually exclusive");
                 return ExitCode::FAILURE;
             }
 
@@ -3905,14 +3928,29 @@ fn main() -> ExitCode {
                 },
                 max_priority,
             };
+            let want_runnable = if runnable {
+                Some(true)
+            } else if not_runnable {
+                Some(false)
+            } else {
+                None
+            };
 
-            match mev::blocks_brain(&root, &query, leverage, chain) {
+            match mev::blocks_brain(&root, &query, leverage, chain, want_runnable) {
                 Ok(mut report) => {
                     if leverage {
                         report.blocks.sort_by(|a, b| {
-                            let la = report.cones.get(a).map(|c| c.live_count()).unwrap_or(0);
-                            let lb = report.cones.get(b).map(|c| c.live_count()).unwrap_or(0);
-                            lb.cmp(&la).then_with(|| a.cmp(b))
+                            let la = report
+                                .cones
+                                .get(&a.key)
+                                .map(|c| c.live_count())
+                                .unwrap_or(0);
+                            let lb = report
+                                .cones
+                                .get(&b.key)
+                                .map(|c| c.live_count())
+                                .unwrap_or(0);
+                            lb.cmp(&la).then_with(|| a.key.cmp(&b.key))
                         });
                     }
                     if let Some(limit) = limit {
@@ -3931,16 +3969,19 @@ fn main() -> ExitCode {
                             }
                         }
                     } else {
-                        for key in &report.blocks {
-                            println!("{key}");
-                            if let Some(cone) = report.cones.get(key) {
+                        for row in &report.blocks {
+                            println!(
+                                "{} (startable={} record={} tasks={} runnable={})",
+                                row.key, row.startable, row.record, row.tasks, row.runnable
+                            );
+                            if let Some(cone) = report.cones.get(&row.key) {
                                 println!(
                                     "  leverage: {} live, {} parked",
                                     cone.live_count(),
                                     cone.parked.len()
                                 );
                             }
-                            if let Some(run) = report.chains.get(key) {
+                            if let Some(run) = report.chains.get(&row.key) {
                                 println!("  chain: {}", run.join(" -> "));
                             }
                         }

@@ -1841,7 +1841,8 @@ mod tests {
             r#"[{"type":"operator","slug":"s","exit":"e","start":"c"}]"#,
         )];
 
-        let segments = segment_lane_file_segments(&lane_file, &loaded, &[lane_file.clone()]);
+        let segments =
+            segment_lane_file_segments(&lane_file, &loaded, std::slice::from_ref(&lane_file));
 
         assert_eq!(segments.len(), 2, "expected 2 segments, got {segments:?}");
 

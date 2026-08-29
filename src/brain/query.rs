@@ -11,6 +11,7 @@
 //! (widened to `pub(crate)`) to seed the transitive downstream closure.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::Path;
 
 /// One block as seen by this module's queries — a minimal, self-contained view.
 /// Callers (the `mev blocks` verb, task 3) build these from the real corpus;
@@ -83,12 +84,65 @@ impl BlockCone {
     }
 }
 
+/// Whether a block's spec files exist on disk — a property of the filesystem,
+/// distinct from [`BlockInfo::startable`] (a property of the dependency
+/// graph). Three states are distinguishable, never collapsed into one flag:
+/// both present, record only, or neither — the difference between one
+/// `/generate-tasks` and a whole `/ticket`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Readiness {
+    /// `planning/blocks/<id>.json` exists under the owning repo's root.
+    pub record: bool,
+    /// `planning/<id>/tasks.json` exists under the owning repo's root.
+    pub tasks: bool,
+}
+
+impl Readiness {
+    /// `true` only when both the block record and its `tasks.json` exist.
+    pub fn runnable(&self) -> bool {
+        self.record && self.tasks
+    }
+}
+
+/// Compute [`Readiness`] for block `id` under `repo_root` — the resolved
+/// filesystem root of the block's OWNING repo (from `brain.toml`'s
+/// `[[repos]]`, resolved by the caller). `repo_root: None` — an unresolvable
+/// repo slug — degrades to [`Readiness::default`] (neither file present, so
+/// [`Readiness::runnable`] is `false`) rather than erroring: an unknown repo
+/// is a reporting gap, not a crash.
+pub fn readiness_for(repo_root: Option<&Path>, id: &str) -> Readiness {
+    let Some(root) = repo_root else {
+        return Readiness::default();
+    };
+    let record = root
+        .join("planning")
+        .join("blocks")
+        .join(format!("{id}.json"))
+        .is_file();
+    let tasks = root.join("planning").join(id).join("tasks.json").is_file();
+    Readiness { record, tasks }
+}
+
+/// One selected block's full report row: its identity, its graph-derived
+/// [`BlockInfo::startable`], and its disk-derived [`Readiness`] — kept as
+/// separate keys (never folded into one flag) so `--json` lets a consumer
+/// distinguish "blocked" from "no spec yet".
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BlockRow {
+    /// Canonical `"repo:id"` key.
+    pub key: String,
+    pub startable: bool,
+    pub record: bool,
+    pub tasks: bool,
+    pub runnable: bool,
+}
+
 /// `mev blocks`' own JSON/text report shape. Populated by the verb (task 3);
 /// declared now so the module's public surface is stable across tasks.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct QueryReport {
-    /// Keys of the blocks matching the query, in the verb's chosen order.
-    pub blocks: Vec<String>,
+    /// One row per block matching the query, in the verb's chosen order.
+    pub blocks: Vec<BlockRow>,
     /// `--leverage`: per selected block, its cone.
     pub cones: HashMap<String, BlockCone>,
     /// `--chain`: per startable head, the longest same-repo run from it.
@@ -279,7 +333,7 @@ mod tests {
         b
     }
 
-    fn as_map<'a>(blocks: &'a [BlockInfo]) -> HashMap<&'a str, &'a BlockInfo> {
+    fn as_map(blocks: &[BlockInfo]) -> HashMap<&str, &BlockInfo> {
         blocks.iter().map(|b| (b.key.as_str(), b)).collect()
     }
 
@@ -636,5 +690,54 @@ mod tests {
         let result = select(&blocks, &query);
         let keys: BTreeSet<&str> = result.iter().map(|b| b.key.as_str()).collect();
         assert_eq!(keys, BTreeSet::from(["mev:A"]));
+    }
+
+    // -----------------------------------------------------------------
+    // readiness_for — MV.ticket.query-verb-leverage-chain-and-filters AC 14-16
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn readiness_both_present_is_runnable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("planning/blocks")).unwrap();
+        std::fs::write(dir.path().join("planning/blocks/A.1.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.path().join("planning/A.1")).unwrap();
+        std::fs::write(dir.path().join("planning/A.1/tasks.json"), "[]").unwrap();
+
+        let r = readiness_for(Some(dir.path()), "A.1");
+        assert!(r.record);
+        assert!(r.tasks);
+        assert!(r.runnable());
+    }
+
+    #[test]
+    fn readiness_record_only_is_not_runnable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("planning/blocks")).unwrap();
+        std::fs::write(dir.path().join("planning/blocks/A.1.json"), "{}").unwrap();
+
+        let r = readiness_for(Some(dir.path()), "A.1");
+        assert!(r.record);
+        assert!(!r.tasks);
+        assert!(!r.runnable());
+    }
+
+    #[test]
+    fn readiness_neither_present_is_not_runnable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("planning")).unwrap();
+
+        let r = readiness_for(Some(dir.path()), "A.1");
+        assert!(!r.record);
+        assert!(!r.tasks);
+        assert!(!r.runnable());
+    }
+
+    #[test]
+    fn readiness_unresolvable_repo_degrades_to_not_runnable_rather_than_erroring() {
+        let r = readiness_for(None, "A.1");
+        assert!(!r.record);
+        assert!(!r.tasks);
+        assert!(!r.runnable());
     }
 }

@@ -123,7 +123,7 @@ fn repo_filter_narrows_the_result_set_on_its_own() {
     let root = dir.path();
     write_corpus(root);
 
-    let unfiltered = mev::blocks_brain(root, &mev::BlockQuery::default(), false, false)
+    let unfiltered = mev::blocks_brain(root, &mev::BlockQuery::default(), false, false, None)
         .expect("driver runs over a well-formed corpus");
     assert_eq!(
         unfiltered.blocks.len(),
@@ -136,7 +136,7 @@ fn repo_filter_narrows_the_result_set_on_its_own() {
         repo: Some("alpha".to_string()),
         ..Default::default()
     };
-    let filtered = mev::blocks_brain(root, &query, false, false)
+    let filtered = mev::blocks_brain(root, &query, false, false, None)
         .expect("driver runs over a well-formed corpus");
 
     assert!(
@@ -148,7 +148,7 @@ fn repo_filter_narrows_the_result_set_on_its_own() {
         filtered.blocks
     );
     assert_eq!(filtered.blocks.len(), 3, "all three alpha blocks, no more");
-    assert!(filtered.blocks.iter().all(|k| k.starts_with("alpha:")));
+    assert!(filtered.blocks.iter().all(|r| r.key.starts_with("alpha:")));
 }
 
 #[test]
@@ -164,11 +164,15 @@ fn repo_startable_and_max_priority_compose() {
         max_priority: Some(1),
         ..Default::default()
     };
-    let result = mev::blocks_brain(root, &query, false, false)
+    let result = mev::blocks_brain(root, &query, false, false, None)
         .expect("driver runs over a well-formed corpus");
 
     assert_eq!(
-        result.blocks,
+        result
+            .blocks
+            .iter()
+            .map(|r| r.key.clone())
+            .collect::<Vec<_>>(),
         vec!["alpha:AL.1.A".to_string()],
         "repo-agnostic filters (startable AND max_priority) must both hold at once; \
          got {:?}",
@@ -183,7 +187,7 @@ fn repo_startable_and_max_priority_compose() {
         max_priority: Some(1),
         ..Default::default()
     };
-    let result = mev::blocks_brain(root, &query, false, false)
+    let result = mev::blocks_brain(root, &query, false, false, None)
         .expect("driver runs over a well-formed corpus");
     assert!(
         result.blocks.is_empty(),
@@ -204,10 +208,17 @@ fn leverage_reports_the_live_cone_for_the_startable_alpha_head() {
         startable: Some(true),
         ..Default::default()
     };
-    let result = mev::blocks_brain(root, &query, true, false)
+    let result = mev::blocks_brain(root, &query, true, false, None)
         .expect("driver runs over a well-formed corpus");
 
-    assert_eq!(result.blocks, vec!["alpha:AL.1.A".to_string()]);
+    assert_eq!(
+        result
+            .blocks
+            .iter()
+            .map(|r| r.key.clone())
+            .collect::<Vec<_>>(),
+        vec!["alpha:AL.1.A".to_string()]
+    );
     let cone = result
         .cones
         .get("alpha:AL.1.A")
@@ -231,7 +242,7 @@ fn chain_reports_the_same_repo_run_from_the_startable_alpha_head() {
         startable: Some(true),
         ..Default::default()
     };
-    let result = mev::blocks_brain(root, &query, false, true)
+    let result = mev::blocks_brain(root, &query, false, true, None)
         .expect("driver runs over a well-formed corpus");
 
     let chain = result
@@ -249,4 +260,94 @@ fn chain_reports_the_same_repo_run_from_the_startable_alpha_head() {
          got {chain:?}"
     );
     assert!(result.cones.is_empty(), "cones not requested");
+}
+
+// -----------------------------------------------------------------------
+// Readiness — AC 14-16 (`MV.ticket.query-verb-leverage-chain-and-filters`)
+// -----------------------------------------------------------------------
+
+/// AL.1.A gets both a block record and a tasks.json (runnable); AL.1.B gets a
+/// record only; AL.1.C gets neither. All three are startable=false except A,
+/// but readiness is independent of startable and must be reported per block.
+fn write_readiness_fixture(root: &Path) {
+    write_json(
+        root,
+        "repos/alpha/planning/blocks/AL.1.A.json",
+        &serde_json::json!({"id": "AL.1.A"}),
+    );
+    write_json(
+        root,
+        "repos/alpha/planning/AL.1.A/tasks.json",
+        &serde_json::json!([]),
+    );
+    write_json(
+        root,
+        "repos/alpha/planning/blocks/AL.1.B.json",
+        &serde_json::json!({"id": "AL.1.B"}),
+    );
+}
+
+#[test]
+fn readiness_distinguishes_both_present_record_only_and_neither() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_corpus(root);
+    write_readiness_fixture(root);
+
+    let result = mev::blocks_brain(root, &mev::BlockQuery::default(), false, false, None)
+        .expect("driver runs over a well-formed corpus");
+
+    let by_key: std::collections::HashMap<_, _> =
+        result.blocks.iter().map(|r| (r.key.as_str(), r)).collect();
+
+    let a = by_key["alpha:AL.1.A"];
+    assert!(a.record && a.tasks && a.runnable, "A has both; got {a:?}");
+
+    let b = by_key["alpha:AL.1.B"];
+    assert!(
+        b.record && !b.tasks && !b.runnable,
+        "B has a record only; got {b:?}"
+    );
+
+    let c = by_key["alpha:AL.1.C"];
+    assert!(
+        !c.record && !c.tasks && !c.runnable,
+        "C has neither; got {c:?}"
+    );
+}
+
+#[test]
+fn runnable_filter_narrows_to_blocks_with_both_record_and_tasks() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_corpus(root);
+    write_readiness_fixture(root);
+
+    let runnable_only =
+        mev::blocks_brain(root, &mev::BlockQuery::default(), false, false, Some(true))
+            .expect("driver runs over a well-formed corpus");
+    assert_eq!(
+        runnable_only
+            .blocks
+            .iter()
+            .map(|r| r.key.clone())
+            .collect::<Vec<_>>(),
+        vec!["alpha:AL.1.A".to_string()],
+        "only A has both a record and a tasks.json; got {:?}",
+        runnable_only.blocks
+    );
+
+    let not_runnable =
+        mev::blocks_brain(root, &mev::BlockQuery::default(), false, false, Some(false))
+            .expect("driver runs over a well-formed corpus");
+    assert!(
+        not_runnable.blocks.iter().all(|r| r.key != "alpha:AL.1.A"),
+        "--not-runnable must exclude the one block with both files; got {:?}",
+        not_runnable.blocks
+    );
+    assert_eq!(
+        not_runnable.blocks.len() + runnable_only.blocks.len(),
+        4,
+        "runnable and not-runnable partitions must cover every block exactly once"
+    );
 }

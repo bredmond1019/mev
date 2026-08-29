@@ -2500,15 +2500,28 @@ pub fn lanes_brain(
 ///
 /// `want_cones`/`want_chains` gate the two O(n) transitive walks so a plain `mev blocks`
 /// (no `--leverage`/`--chain`) does no extra work beyond the filter.
+///
+/// `runnable` (`Some(true)`/`Some(false)`/`None`) filters on
+/// [`brain::query::Readiness::runnable`] after it is computed for every selected
+/// block — readiness is a disk property (does `planning/blocks/<id>.json` /
+/// `planning/<id>/tasks.json` exist under the block's OWNING repo, resolved via
+/// `brain.toml`'s `[[repos]]`), so it cannot live inside the pure
+/// [`brain::query::select`] filter the way `repo`/`startable`/`max_priority` do. An
+/// unresolvable repo slug degrades to not-runnable (`Readiness::default()`) rather
+/// than erroring — see [`brain::query::readiness_for`].
 pub fn blocks_brain(
     root: &std::path::Path,
     query: &brain::query::BlockQuery,
     want_cones: bool,
     want_chains: bool,
+    runnable: Option<bool>,
 ) -> anyhow::Result<brain::query::QueryReport> {
     use brain::config::find_brain_config;
     use brain::lane_segments::{derive_lane_positions, discover_lane_files};
-    use brain::query::{BlockInfo, DepEdge, QueryReport, block_cone, same_repo_chain, select};
+    use brain::query::{
+        BlockInfo, BlockRow, DepEdge, QueryReport, block_cone, readiness_for, same_repo_chain,
+        select,
+    };
     use brain::state::{
         BlockDep, BlockedBy, StateEdgeKind, TrackBlock, build_state_graph, discover_state_files,
         load_state,
@@ -2600,10 +2613,38 @@ pub fn blocks_brain(
 
     let block_map: HashMap<&str, &BlockInfo> = blocks.iter().map(|b| (b.key.as_str(), b)).collect();
 
+    // repo slug -> resolved filesystem root, for readiness_for's disk checks.
+    let mut repo_paths: HashMap<String, PathBuf> = HashMap::new();
+    for repo in &config.repos {
+        let repo_root = if repo.repo_path == "." || repo.repo_path.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(&repo.repo_path)
+        };
+        repo_paths.insert(repo.slug.clone(), repo_root);
+    }
+
     let selected = select(&blocks, query);
 
+    let rows: Vec<BlockRow> = selected
+        .iter()
+        .map(|b| {
+            let id = b.key.split_once(':').map(|(_, id)| id).unwrap_or(&b.key);
+            let repo_root = repo_paths.get(&b.repo).map(|p| p.as_path());
+            let readiness = readiness_for(repo_root, id);
+            BlockRow {
+                key: b.key.clone(),
+                startable: b.startable,
+                record: readiness.record,
+                tasks: readiness.tasks,
+                runnable: readiness.runnable(),
+            }
+        })
+        .filter(|row| runnable.is_none_or(|want| row.runnable == want))
+        .collect();
+
     let mut report = QueryReport {
-        blocks: selected.iter().map(|b| b.key.clone()).collect(),
+        blocks: rows,
         cones: HashMap::new(),
         chains: HashMap::new(),
     };

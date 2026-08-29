@@ -2226,7 +2226,7 @@ fn set_block_status_scoped_write_touches_only_the_scoped_repo() {
         );
     }
     let gamma_state: serde_json::Value = serde_json::from_str(
-        &std::str::from_utf8(&after["repos/gamma/planning/state.json"]).unwrap(),
+        std::str::from_utf8(&after["repos/gamma/planning/state.json"]).unwrap(),
     )
     .unwrap();
     let closed_status = gamma_state["tracks"][0]["blocks"][0]["status"]

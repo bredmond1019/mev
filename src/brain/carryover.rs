@@ -10707,8 +10707,9 @@ mod tests {
             "acme:ACME.9.Z",
             "lane names an unregistered block",
         );
-        let result = write_graph_findings_for_repo(&source, &file, &[f.clone()], "2026-08-23")
-            .expect("write must succeed");
+        let result =
+            write_graph_findings_for_repo(&source, &file, std::slice::from_ref(&f), "2026-08-23")
+                .expect("write must succeed");
         assert!(result.written);
         assert_eq!(result.appended, vec![f.finding_id.clone()]);
 
@@ -11231,8 +11232,10 @@ mod tests {
         // A present `[attention]` table that only overrides an unrelated
         // staleness field (never a policy key) must still yield the
         // documented default rule.
-        let mut t = AttentionThresholds::default();
-        t.deferred_days = 2;
+        let t = AttentionThresholds {
+            deferred_days: 2,
+            ..Default::default()
+        };
         let entries = vec![
             ranking(TriageLane::Blocking, Some(3), "blocking-p3"),
             ranking(TriageLane::Hot, Some(0), "hot-p0"),
