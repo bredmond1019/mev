@@ -206,6 +206,25 @@ Errors drive exit 1. Warnings are reported but do not fail the run.
 
 ---
 
+### `created` / `updated` — Optional, not validated
+
+Authorship dates: when the document was first written, and when it was last meaningfully revised.
+Modelled by `okf_core::OkfFrontmatter` (added 2026-08-29, okf-core block
+`OK.ticket.add-created-updated-frontmatter`) so they survive a parse/serialize round-trip instead of
+being dropped — but **`mev` applies no rule to either**: no required check, no format check, no
+freshness check. A wrong date, a stale `updated`, or a `created` later than `updated` all pass.
+
+| | |
+|---|---|
+| Required | no |
+| Type | `string` (convention: `YYYY-MM-DD`; no format is enforced) |
+| Violation | none — absent from the diagnostic summary above by design |
+
+Not to be confused with two fields `mev` *does* act on: `timestamp` (the Log/ProjectStatus
+freshness stamp) and `synced_from` (below, which drives `E_SYNC_DRIFT` under `--sync`).
+
+---
+
 ### `synced_from` — Tolerated (not OKF-validated)
 
 The `synced_from` field is a cross-repo sync watermark written by the auto-sync pipeline into brain cache docs (`docs/projects/<project>.md`). It records the `timestamp` value from the sub-repo's `planning/status.md` at the time the cache was last synced.
