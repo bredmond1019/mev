@@ -58,7 +58,7 @@ mev emit-state --write
   derivation internally. A stale installed binary rewrites surfaces in an old format. Install
   first; commit immediately after.
 
-## The 26 commands
+## The 27 commands
 
 Derived from the CLI dispatch in [`src/main.rs`](../src/main.rs), not from these docs — if a
 command exists and is missing here, this table is wrong.
@@ -109,6 +109,7 @@ command exists and is missing here, this table is wrong.
 |---|---|---|
 | `frontier` | Print every block that is startable right now | [lanes](cli/lanes.md) |
 | `lanes` | Lane-segment availability plus unblock leverage | [lanes](cli/lanes.md) |
+| `blocks` | Filtered block queries, the transitive leverage cone, the same-repo chain | [lanes](cli/lanes.md) |
 | `emit-block-graph` | Emit the block-dependency graph as JSON | [lanes](cli/lanes.md) |
 | `emit-graph` | Emit the `scope:doc_id` knowledge graph as JSON | [lanes](cli/lanes.md) |
 | `generate-graph` | Render that graph as a browsable HTML page | [lanes](cli/lanes.md) |
@@ -122,7 +123,7 @@ command exists and is missing here, this table is wrong.
 | [state](cli/state.md) | `emit-state` · `state-history` · `set-block-status` · `manifest` |
 | [epics](cli/epics.md) | the four `*-epic` verbs · `close-operator-gate` · `approve`/`reject` · `normalize-op-slugs` |
 | [carryover](cli/carryover.md) | `carryover` · `graph-findings` · `attention-queue` |
-| [lanes](cli/lanes.md) | `frontier` · `lanes` · `emit-block-graph` · `emit-graph` · `generate-graph` · `check-consumers` · `doc` |
+| [lanes](cli/lanes.md) | `frontier` · `lanes` · `blocks` · `emit-block-graph` · `emit-graph` · `generate-graph` · `check-consumers` · `doc` |
 
 
 ## Synopsis

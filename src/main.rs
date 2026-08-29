@@ -1320,6 +1320,95 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Filtered block queries, the transitive leverage cone, and the same-repo chain —
+    /// `MV.ticket.query-verb-leverage-chain-and-filters`.
+    ///
+    /// Answers the ad-hoc questions an operator actually asks: what is open in this
+    /// repo, in this roadmap, startable, above this priority — plus the two
+    /// derivations no other verb computes: the *transitive* downstream cone of a
+    /// block (what closing it frees, live vs. parked) and the longest run of blocks
+    /// reachable without leaving one repo.
+    ///
+    /// **`--repo` filters on its own.** Unlike `emit-block-graph`, where a bare
+    /// `--repo` without `--scope repo` is silently ignored and the whole corpus comes
+    /// back looking like a filtered result, `--repo` here always narrows the result
+    /// set. There is no `--scope` flag to forget.
+    ///
+    /// Roadmap membership (`--roadmap`) is resolved via `brain::lane_segments` and
+    /// defaults to each block's `origin_roadmap` (D57), falling back to the roadmap
+    /// it is scheduled under when no origin is declared.
+    ///
+    /// `--leverage` computes, for every selected startable block, its transitive
+    /// downstream cone (live members only rank it; parked members are reported but
+    /// never counted) and sorts the result by live cone size, descending. `--chain`
+    /// computes, for every selected startable block, the longest same-repo run
+    /// reachable from it. Both may be combined with the filters above; combining
+    /// `--leverage` and `--chain` together is a usage error — pick one derivation
+    /// per invocation.
+    ///
+    /// Each selected block also reports readiness alongside startability, since
+    /// `startable` (dependency-clear) and `runnable` (has a record AND a
+    /// tasks.json) are different questions — `--runnable`/`--not-runnable` filter
+    /// on the latter, mutually exclusive with each other.
+    ///
+    /// Without `--json`: one line per selected block (annotated with its
+    /// startable/record/tasks/runnable state), plus (with `--leverage` or
+    /// `--chain`) the derivation's result on the following indented line. With
+    /// `--json`: this verb's own `QueryReport` shape.
+    ///
+    /// Exit codes:
+    ///   0 — query computed and printed
+    ///   1 — brain.toml not found/unreadable, `--leverage` combined with `--chain`,
+    ///       `--startable` combined with `--blocked`, or `--runnable` combined with
+    ///       `--not-runnable`
+    Blocks {
+        /// Path to search from when locating brain.toml (walks up to find it).
+        /// Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Narrow to one repo slug. Filters on its own — see the command's doc.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Narrow to one roadmap slug (origin_roadmap by default; falls back to the
+        /// scheduled roadmap — see the command's doc).
+        #[arg(long)]
+        roadmap: Option<String>,
+        /// Narrow to blocks that are currently startable (no unmet block/gate deps).
+        #[arg(long)]
+        startable: bool,
+        /// Narrow to blocks that are currently blocked (the inverse of --startable).
+        /// A usage error to combine with --startable.
+        #[arg(long)]
+        blocked: bool,
+        /// Narrow to blocks whose effective priority is <= this value (inclusive). A
+        /// block with no resolvable priority never matches.
+        #[arg(long, value_name = "N")]
+        max_priority: Option<u8>,
+        /// Narrow to blocks with BOTH a block record and a tasks.json on disk — the
+        /// blocks an SDLC engine can actually start on, not merely dependency-clear.
+        /// An unresolvable repo slug reports not-runnable rather than erroring.
+        #[arg(long)]
+        runnable: bool,
+        /// Narrow to blocks missing a record or a tasks.json. Mutually exclusive with
+        /// --runnable.
+        #[arg(long)]
+        not_runnable: bool,
+        /// Report each selected startable block's transitive downstream cone
+        /// (live/parked), ordered by live cone size descending. Mutually exclusive
+        /// with --chain.
+        #[arg(long)]
+        leverage: bool,
+        /// Report each selected startable block's longest same-repo run. Mutually
+        /// exclusive with --leverage.
+        #[arg(long)]
+        chain: bool,
+        /// Cap the number of blocks printed/serialized.
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+        /// Emit this verb's own JSON report shape instead of one text line per block.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3777,6 +3866,124 @@ fn main() -> ExitCode {
                         let text = mev::brain::availability::render_availability_text(&artifact);
                         if !text.is_empty() {
                             println!("{text}");
+                        }
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::Blocks {
+            path,
+            repo,
+            roadmap,
+            startable,
+            blocked,
+            max_priority,
+            runnable,
+            not_runnable,
+            leverage,
+            chain,
+            limit,
+            json,
+        } => {
+            if startable && blocked {
+                eprintln!("error: --startable and --blocked are mutually exclusive");
+                return ExitCode::FAILURE;
+            }
+            if leverage && chain {
+                eprintln!("error: --leverage and --chain are mutually exclusive");
+                return ExitCode::FAILURE;
+            }
+            if runnable && not_runnable {
+                eprintln!("error: --runnable and --not-runnable are mutually exclusive");
+                return ExitCode::FAILURE;
+            }
+
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            // `--blocked` is the inverse of `--startable`, not a status filter:
+            // "blocked" is a derived lane (never an authored TrackBlock.status —
+            // see CLAUDE.md / E_STATE_AUTHORED_BLOCKED), so filtering on the
+            // literal string would silently match nothing.
+            let query = mev::BlockQuery {
+                repo,
+                roadmap,
+                status: None,
+                startable: if startable {
+                    Some(true)
+                } else if blocked {
+                    Some(false)
+                } else {
+                    None
+                },
+                max_priority,
+            };
+            let want_runnable = if runnable {
+                Some(true)
+            } else if not_runnable {
+                Some(false)
+            } else {
+                None
+            };
+
+            match mev::blocks_brain(&root, &query, leverage, chain, want_runnable) {
+                Ok(mut report) => {
+                    if leverage {
+                        report.blocks.sort_by(|a, b| {
+                            let la = report
+                                .cones
+                                .get(&a.key)
+                                .map(|c| c.live_count())
+                                .unwrap_or(0);
+                            let lb = report
+                                .cones
+                                .get(&b.key)
+                                .map(|c| c.live_count())
+                                .unwrap_or(0);
+                            lb.cmp(&la).then_with(|| a.key.cmp(&b.key))
+                        });
+                    }
+                    if let Some(limit) = limit {
+                        report.blocks.truncate(limit);
+                    }
+
+                    if json {
+                        match serde_json::to_string_pretty(&report) {
+                            Ok(s) => {
+                                println!("{s}");
+                                ExitCode::SUCCESS
+                            }
+                            Err(err) => {
+                                eprintln!("error serializing block query: {err:#}");
+                                ExitCode::FAILURE
+                            }
+                        }
+                    } else {
+                        for row in &report.blocks {
+                            println!(
+                                "{} (startable={} record={} tasks={} runnable={})",
+                                row.key, row.startable, row.record, row.tasks, row.runnable
+                            );
+                            if let Some(cone) = report.cones.get(&row.key) {
+                                println!(
+                                    "  leverage: {} live, {} parked",
+                                    cone.live_count(),
+                                    cone.parked.len()
+                                );
+                            }
+                            if let Some(run) = report.chains.get(&row.key) {
+                                println!("  chain: {}", run.join(" -> "));
+                            }
                         }
                         ExitCode::SUCCESS
                     }

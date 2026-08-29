@@ -32,6 +32,7 @@ pub mod manifest;
 pub mod master_plan;
 pub mod okf;
 pub mod operator;
+pub mod query;
 pub mod scope;
 pub mod state;
 pub mod structure;

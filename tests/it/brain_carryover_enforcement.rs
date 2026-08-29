@@ -126,6 +126,7 @@ fn carryover_entry(
 
 /// Loads a temp-dir corpus into the `(sources, files, status_map)` shape every helper
 /// below needs, plus the `config` (for `evaluate_carryover`'s `thresholds` argument).
+#[allow(clippy::type_complexity)]
 fn load_corpus(
     root: &Path,
 ) -> (
@@ -171,9 +172,9 @@ fn entries_for(
     report.entries
 }
 
-fn focus_for<'a>(
+fn focus_for(
     repo_slug: &str,
-    loaded: &'a [(StateSource, StateFile)],
+    loaded: &[(StateSource, StateFile)],
     gating: Option<&BTreeMap<String, RepoGatingReport>>,
 ) -> DerivedFocus {
     let (src, file) = loaded
@@ -507,8 +508,8 @@ fn opt_out_closed_wontfix_deferred_in_progress_never_gate() {
     assert!(focus_alpha.now.contains(&"AL.4.A".to_string()));
     assert!(!focus_alpha.blocked.iter().any(|(id, _)| id == "AL.3.A"));
     assert!(!focus_alpha.blocked.iter().any(|(id, _)| id == "AL.4.A"));
-    assert!(focus_alpha.carryover_gates.get("AL.3.A").is_none());
-    assert!(focus_alpha.carryover_gates.get("AL.4.A").is_none());
+    assert!(!focus_alpha.carryover_gates.contains_key("AL.3.A"));
+    assert!(!focus_alpha.carryover_gates.contains_key("AL.4.A"));
 
     // closed / wontfix targets contribute no gate (they were never candidates at all).
     let focus_other = focus_for("other", &loaded, Some(&gating));
@@ -620,7 +621,7 @@ fn gating_set_agrees_edge_for_edge_with_would_block_report() {
 
     // Every applied gate must correspond to some Blocking row.
     let mut applied_gates = 0usize;
-    for (_, per_repo) in &gating {
+    for per_repo in gating.values() {
         for (target_key, gate) in &per_repo.gates {
             applied_gates += 1;
             let matched = report.rows.iter().any(|row| {

@@ -88,6 +88,15 @@ pub struct GateRank {
     /// Every block this gate blocks, rendered `"repo:id"`, in the order
     /// first encountered.
     pub gates: Vec<String>,
+    /// The exit artifact from the originating `depends_on` edge — `Some` for
+    /// an `operator` gate (required on [`OperatorDep`]), always `None` for
+    /// an `approval` gate ([`ApprovalDep`] carries no `exit`/`start`).
+    /// Additive (`MV.ticket.query-verb-leverage-chain-and-filters`); absent
+    /// rather than empty-string when the edge does not define it.
+    pub exit: Option<String>,
+    /// The paste-ready start command from the originating `depends_on`
+    /// edge — see [`GateRank::exit`].
+    pub start: Option<String>,
 }
 
 /// Derive [`GateRank`]s for every operator/approval gate named in `files`'
@@ -108,7 +117,11 @@ pub fn gate_ranks(
 ) -> Vec<GateRank> {
     // (kind, slug) -> index into `groups`, preserving first-seen order.
     let mut order: Vec<(&'static str, String)> = Vec::new();
-    let mut groups: HashMap<(&'static str, String), (u8, Vec<String>)> = HashMap::new();
+    #[allow(clippy::type_complexity)]
+    let mut groups: HashMap<
+        (&'static str, String),
+        (u8, Vec<String>, Option<String>, Option<String>),
+    > = HashMap::new();
 
     for (src, file) in files {
         for track in &file.tracks {
@@ -117,18 +130,34 @@ pub fn gate_ranks(
                 let block_rank =
                     effective_priority_for(&src.repo_slug, &block.id, block.priority, effective);
                 for dep in &block.depends_on {
-                    let key = match dep {
-                        BlockedBy::Operator(OperatorDep { slug, .. }) => ("operator", slug.clone()),
-                        BlockedBy::Approval(ApprovalDep { slug, .. }) => ("approval", slug.clone()),
+                    let (key, exit, start) = match dep {
+                        BlockedBy::Operator(OperatorDep {
+                            slug, exit, start, ..
+                        }) => (
+                            ("operator", slug.clone()),
+                            Some(exit.clone()),
+                            Some(start.clone()),
+                        ),
+                        BlockedBy::Approval(ApprovalDep { slug, .. }) => {
+                            (("approval", slug.clone()), None, None)
+                        }
                         BlockedBy::Block(_) | BlockedBy::External(_) => continue,
                     };
                     if !groups.contains_key(&key) {
                         order.push(key.clone());
                     }
-                    let entry = groups.entry(key).or_insert_with(|| (u8::MAX, Vec::new()));
+                    let entry = groups
+                        .entry(key)
+                        .or_insert_with(|| (u8::MAX, Vec::new(), None, None));
                     entry.0 = entry.0.min(block_rank);
                     if !entry.1.contains(&block_key) {
                         entry.1.push(block_key.clone());
+                    }
+                    if entry.2.is_none() {
+                        entry.2 = exit;
+                    }
+                    if entry.3.is_none() {
+                        entry.3 = start;
                     }
                 }
             }
@@ -138,14 +167,17 @@ pub fn gate_ranks(
     let mut ranks: Vec<GateRank> = order
         .into_iter()
         .map(|(kind, slug)| {
-            let (rank, gates) = groups
-                .remove(&(kind, slug.clone()))
-                .unwrap_or((u8::MAX, Vec::new()));
+            let (rank, gates, exit, start) =
+                groups
+                    .remove(&(kind, slug.clone()))
+                    .unwrap_or((u8::MAX, Vec::new(), None, None));
             GateRank {
                 kind,
                 slug,
                 rank,
                 gates,
+                exit,
+                start,
             }
         })
         .collect();
@@ -1100,6 +1132,8 @@ mod tests {
                 slug: "review-plan".to_string(),
                 rank: 1,
                 gates: vec!["mev:MV.13.A".to_string()],
+                exit: Some("planning/decision.md".to_string()),
+                start: Some("/begin-session review-plan".to_string()),
             }],
         };
 
@@ -1112,6 +1146,90 @@ mod tests {
         assert_eq!(value["gate_ranks"][0]["slug"], "review-plan");
         assert_eq!(value["gate_ranks"][0]["rank"], 1);
         assert_eq!(value["gate_ranks"][0]["gates"][0], "mev:MV.13.A");
+        assert_eq!(value["gate_ranks"][0]["exit"], "planning/decision.md");
+        assert_eq!(
+            value["gate_ranks"][0]["start"],
+            "/begin-session review-plan"
+        );
+    }
+
+    #[test]
+    fn gate_rank_carries_exit_and_start_from_operator_edge() {
+        let files = vec![state_file(
+            "repo",
+            vec![track_block_with_priority(
+                "A.1",
+                Some(1),
+                vec![operator_dep("review-plan")],
+            )],
+        )];
+        let ranks = gate_ranks(&files, &HashMap::new());
+        assert_eq!(ranks.len(), 1);
+        assert_eq!(ranks[0].exit, Some("planning/decision.md".to_string()));
+        assert_eq!(
+            ranks[0].start,
+            Some("/begin-session review-plan".to_string())
+        );
+        // Addition must not perturb ordering fields anything already depends on.
+        assert_eq!(ranks[0].rank, 1);
+        assert_eq!(ranks[0].gates, vec!["repo:A.1".to_string()]);
+    }
+
+    #[test]
+    fn gate_rank_for_approval_edge_has_no_exit_or_start() {
+        let dep = BlockedBy::Approval(ApprovalDep {
+            slug: "ship-it".to_string(),
+            what: "Ship the release".to_string(),
+            digest: "abc123".to_string(),
+        });
+        let files = vec![state_file(
+            "repo",
+            vec![track_block_with_priority("A.1", Some(1), vec![dep])],
+        )];
+        let ranks = gate_ranks(&files, &HashMap::new());
+        assert_eq!(ranks.len(), 1);
+        assert_eq!(ranks[0].kind, "approval");
+        assert_eq!(ranks[0].exit, None);
+        assert_eq!(ranks[0].start, None);
+    }
+
+    /// `MV.ticket.query-verb-leverage-chain-and-filters` AC 13 — the one piece of
+    /// evidence `scripts/check_consumers.sh` cannot supply: it compiles
+    /// engine-rs's test targets, which proves nothing about a *runtime*
+    /// deserialization failure. This reproduces engine-rs's mirror at
+    /// `engine-core/src/workflows/orchestration/gates.rs:195` exactly — a
+    /// struct declaring only the four original fields, no
+    /// `deny_unknown_fields` — and asserts a `GateRank` carrying the new
+    /// fields still deserializes into it, with the unknown keys ignored.
+    #[test]
+    fn gate_rank_with_new_fields_deserializes_into_engine_rs_mirror_shape() {
+        #[derive(serde::Deserialize)]
+        struct MirrorGateRank {
+            #[allow(dead_code)]
+            kind: String,
+            #[allow(dead_code)]
+            slug: String,
+            #[allow(dead_code)]
+            rank: u8,
+            #[allow(dead_code)]
+            gates: Vec<String>,
+        }
+
+        let rank = GateRank {
+            kind: "operator",
+            slug: "review-plan".to_string(),
+            rank: 1,
+            gates: vec!["mev:MV.13.A".to_string()],
+            exit: Some("planning/decision.md".to_string()),
+            start: Some("/begin-session review-plan".to_string()),
+        };
+        let json = serde_json::to_string(&rank).unwrap();
+        let mirrored: Result<MirrorGateRank, _> = serde_json::from_str(&json);
+        assert!(
+            mirrored.is_ok(),
+            "engine-rs's mirror must keep parsing a GateRank carrying exit/start: {:?}",
+            mirrored.err()
+        );
     }
 
     #[test]

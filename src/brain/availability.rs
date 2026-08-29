@@ -845,7 +845,7 @@ fn dependents_index(graph: &StateGraph) -> HashMap<&str, HashSet<&str>> {
 /// result) — a BFS/DFS over [`dependents_index`]'s adjacency, not a single hop,
 /// so a three-deep dependency chain across three lanes reaches all three, not
 /// just the first.
-fn transitive_closure(
+pub(crate) fn transitive_closure(
     seed: &HashSet<String>,
     dependents_of: &HashMap<&str, HashSet<&str>>,
 ) -> HashSet<String> {

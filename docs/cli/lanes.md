@@ -28,6 +28,7 @@ start right now across the whole corpus.
 |---|---|
 | [`frontier`](#frontier---json-path) | What is startable right now, corpus-wide? |
 | [`lanes`](#lanes---json-path) | Which lane segments are available, and what would unblock the most? |
+| [`blocks`](#blocks-flags-path) | What's open in this repo/roadmap, what's startable, what does closing this one block free, how deep can I go without leaving this repo? |
 | [`emit-block-graph`](#emit-block-graph-flags-path) | The block-dependency graph, as JSON |
 | [`emit-graph`](#emit-graph---pretty-path) | The `scope:doc_id` knowledge graph, as JSON |
 | [`generate-graph`](#generate-graph---out-path) | The same graph as a browsable HTML page |
@@ -45,6 +46,9 @@ mev frontier
 
 # Which lane segments are live, and what unblocks the most?
 mev lanes
+
+# What's open in mev, ranked by what closing it would free?
+mev blocks --repo mev --startable --leverage
 
 # Did my change break a repo that depends on mev?
 scripts/check_consumers.sh
@@ -134,7 +138,9 @@ One line per frontier entry:
       "kind": "operator",
       "slug": "operator-fleet-concurrency-live-smoke-test",
       "rank": 1,
-      "gates": ["base-template:BT.ticket.heavy-command-signals-rust-build"]
+      "gates": ["base-template:BT.ticket.heavy-command-signals-rust-build"],
+      "exit": "planning/decision.md",
+      "start": "/begin-session operator-fleet-concurrency-live-smoke-test"
     }
   ]
 }
@@ -146,6 +152,16 @@ tell how stale the frontier is relative to the corpus it read. `gate_ranks` deri
 rank for operator/approval gates, which are targetless (they gate a block but have no
 dependents of their own) and so never receive an `effective_priority` directly: each
 gate's rank is the minimum effective priority across every block it gates.
+
+`exit`/`start` (`MV.ticket.query-verb-leverage-chain-and-filters`) are populated from the
+originating `depends_on` edge: `exit` is the artifact whose existence ends the session, `start` is
+the paste-ready command that begins it. Both are `Some` for an `operator` gate (required on that
+edge's `OperatorDep`) and always `None` for an `approval` gate (`ApprovalDep` carries no
+`exit`/`start`) — absent rather than an empty string when the edge does not define them. Additive
+only: `rank` and `gates` are unchanged by their presence, and engine-rs's read-only mirror of this
+shape (`engine-core/src/workflows/orchestration/gates.rs`) keeps parsing `lane-frontier.json`
+without them since it derives plain `Deserialize` with no `deny_unknown_fields` — mirroring the new
+fields into that struct is engine-rs's own call, not required by this change.
 
 #### Exit codes
 
@@ -269,6 +285,168 @@ mev lanes --json ~/Dev/agentic-portfolio
 
 # Just the startable segments with nonzero leverage
 mev lanes --json | jq '.segments[] | select(.availability == "startable" and .leverage.lanes_freed > 0)'
+```
+
+---
+
+### `blocks [flags] [path]`
+
+Filtered block queries, the transitive leverage cone, and the same-repo chain —
+`MV.ticket.query-verb-leverage-chain-and-filters`. Answers the ad-hoc questions an operator
+actually asks (what is open in this repo, in this roadmap, startable, above this priority) plus
+two derivations no other verb computes: the **transitive** downstream cone of a block (what
+closing it frees, live vs. parked) and the longest run of blocks reachable **without leaving one
+repo**. Read-only; writes nothing.
+
+```bash
+mev blocks [--repo <SLUG>] [--roadmap <SLUG>] [--startable] [--blocked]
+           [--max-priority <N>] [--runnable] [--not-runnable]
+           [--leverage] [--chain] [--limit <N>] [--json] [path]
+```
+
+| Argument / Flag | Default | Description |
+|---|---|---|
+| `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
+| `--repo <SLUG>` | unset | Narrow to one repo slug. **Filters on its own** — see the callout below |
+| `--roadmap <SLUG>` | unset | Narrow to one roadmap slug — see the attribution rules below |
+| `--startable` | off | Narrow to blocks that are currently startable (no unmet block/gate deps). Mutually exclusive with `--blocked` |
+| `--blocked` | off | Narrow to blocks that are currently blocked — the inverse of `--startable`, not a status filter (`"blocked"` is a derived lane, never an authored status). Mutually exclusive with `--startable` |
+| `--max-priority <N>` | unset | Narrow to blocks whose effective priority is `<= N` (inclusive). A block with no resolvable priority never matches |
+| `--runnable` | off | Narrow to blocks with BOTH a block record (`planning/blocks/<id>.json`) AND a `tasks.json` on disk — see "Readiness vs. startable" below. Mutually exclusive with `--not-runnable` |
+| `--not-runnable` | off | Narrow to blocks missing a record or a `tasks.json`. Mutually exclusive with `--runnable` |
+| `--leverage` | off | Report each selected startable block's transitive downstream cone (live/parked), sorted by live cone size descending. Mutually exclusive with `--chain` |
+| `--chain` | off | Report each selected startable block's longest same-repo run. Mutually exclusive with `--leverage` |
+| `--limit <N>` | unset | Cap the number of blocks printed/serialized, applied after any `--leverage` sort |
+| `--json` | off | Emit this verb's own `QueryReport` shape instead of one text line per block |
+
+#### Readiness vs. startable
+
+`startable` (dependency-clear — no unmet block/gate deps) and `runnable` (has both a block record
+AND a `tasks.json` on disk) are different questions, and this verb never conflates them. A block
+can be startable with no spec at all — `/sdlc-task`/`/sdlc-flow` bail immediately on those with
+`No tasks.json (D16)`, one extra `/generate-tasks` step worth seeing before queueing, not after.
+Three states are distinguishable per block, never collapsed into one flag: both files present
+(`runnable`), a record with no `tasks.json`, or neither. `record`/`tasks` resolve against the
+block's OWNING repo (via `brain.toml`'s `[[repos]]`); a block whose repo slug does not resolve
+there reports not-runnable rather than erroring.
+
+#### `--repo` filters on its own
+
+**Unlike `emit-block-graph`**, where a bare `--repo` without `--scope repo` is silently ignored
+and the whole corpus comes back looking like a filtered result (see
+[`emit-block-graph`](#emit-block-graph-flags-path) above), `--repo` on `blocks` always narrows the
+result set — there is no `--scope` flag to forget. If you are used to `emit-block-graph`'s habit
+of needing a second flag, that habit does not apply here: `mev blocks --repo mev` alone returns
+only `mev`'s blocks.
+
+#### Roadmap attribution
+
+`--roadmap` is resolved via `brain::lane_segments`, which carries D57's roadmap-membership rules,
+and matches on exactly one of two attributions per block:
+
+1. **`origin_roadmap`** — the roadmap that created the block. This is the default: when a block
+   has an `origin_roadmap`, `--roadmap` matches against it.
+2. **The scheduled roadmap** — the roadmap a block is currently scheduled under. Used only as a
+   fallback, for blocks with no declared `origin_roadmap`.
+
+A `--roadmap` filter never falls back to "match everything" when the membership index has no
+entry for a slug — an unrecognized or empty roadmap matches nothing, not the whole corpus (the
+same "silence must mean zero, not 'couldn't check'" discipline as `lanes`' `degraded` flag).
+
+#### The leverage cone: live vs. parked
+
+`--leverage` walks the **transitive** downstream closure of each selected startable block —
+everything that (directly or indirectly) depends on it, however many hops away — and splits the
+result into `live` and `parked` members. Parked statuses (`deferred`, `wontfix`, `closed`) are
+reported but **never counted**: the ordering ranks by live cone size only.
+
+This distinction is load-bearing, not cosmetic. A cone of 11 blocks that is entirely parked frees
+nothing pickup-able right now — ranking it above a smaller, all-live cone would send an operator
+at exactly the wrong block. (Measured against the live corpus 2026-08-29: `dependent_count` on
+`emit-block-graph` counts direct dependents only and cannot answer this at all — a block with a
+`dependent_count` of 2 had a real transitive cone of 11 blocks across three repos.)
+
+`--chain` computes a different derivation: the longest run of blocks reachable from a startable
+head **without ever crossing a repo boundary** — a same-repo dependent extends the chain, a
+cross-repo dependent does not, and a parked block never extends it either. Both the cone walk and
+the chain walk terminate on a dependency cycle rather than hanging.
+
+`--leverage` and `--chain` are mutually exclusive — pick one derivation per invocation.
+
+#### Text output shape
+
+One line per selected block — annotated with its startable/record/tasks/runnable state — plus
+(with `--leverage` or `--chain`) the derivation's result on the following indented line:
+
+```
+mev:MV.ticket.some-block (startable=true record=true tasks=true runnable=true)
+  leverage: 3 live, 8 parked
+```
+
+or, with `--chain`:
+
+```
+mev:MV.ticket.some-block (startable=true record=true tasks=true runnable=true)
+  chain: mev:MV.ticket.some-block -> mev:MV.ticket.next -> mev:MV.ticket.next-next
+```
+
+#### `--json` output shape
+
+This verb's own report type — `QueryReport` — not `BlockGraphNode`/`BlockGraphExport`; neither of
+those shared types gained a field for this verb. Each row carries `startable`, `record`, `tasks`
+and `runnable` as separate keys rather than one conflated flag:
+
+```json
+{
+  "blocks": [
+    {
+      "key": "mev:MV.ticket.some-block",
+      "startable": true,
+      "record": true,
+      "tasks": true,
+      "runnable": true
+    }
+  ],
+  "cones": {
+    "mev:MV.ticket.some-block": {
+      "live": ["mev:MV.ticket.downstream-a", "mev:MV.ticket.downstream-b"],
+      "parked": ["mev:MV.ticket.parked-c"]
+    }
+  },
+  "chains": {}
+}
+```
+
+`cones` is populated only under `--leverage`; `chains` only under `--chain`. Both are empty
+objects when their flag is not given.
+
+#### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Query computed and printed |
+| `1` | `brain.toml` not found/unreadable, `--startable` combined with `--blocked`, `--runnable` combined with `--not-runnable`, or `--leverage` combined with `--chain` |
+
+**Examples:**
+
+```bash
+# What's open in mev?
+mev blocks --repo mev
+
+# What's startable in mev, ranked by what closing each one frees?
+mev blocks --repo mev --startable --leverage
+
+# How deep can I go in mev without switching repos?
+mev blocks --repo mev --startable --chain
+
+# Everything startable at priority 0 or 1, corpus-wide
+mev blocks --startable --max-priority 1 --json
+
+# Startable in mev, AND actually queueable right now (has a tasks.json)
+mev blocks --repo mev --startable --runnable
+
+# Startable but missing a spec — the "one /generate-tasks away" list
+mev blocks --repo mev --startable --not-runnable
 ```
 
 ---
