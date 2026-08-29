@@ -8,8 +8,25 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-28T16:30:00-03:00"
+timestamp: "2026-08-29T18:00:00-03:00"
 ---
+
+## [run: 2026-08-29]
+
+### Measured the mev gap with a prototype instead of guessing it
+
+- **What:** Split `docs/cli.md` (3219 lines) into a catalogue plus five domain pages under
+  `docs/cli/`, with a Quickstart on every doc and 7 public-404 links fixed. Replaced two gates
+  that read state they do not own — a live-corpus `cleared <= 15` ceiling and a tree-wide
+  isolation guard — with fixtures. Then, in HQ, built and rewired a Python prototype
+  (`planning/open-work/scripts/ow.py`) to consume `mev` for everything `mev` already computes,
+  and authored `MV.ticket.query-verb-leverage-chain-and-filters` from what was left over.
+- **Why:** The ticket's scope is measured, not designed. Rewiring the prototype onto mev found
+  two silent wrong answers — a locally derived gate key (`hq:` vs mev's `brain:`) that hid two P0
+  blocks, and a state-file glob that missed 4 of 24 files — which is the argument for porting:
+  anything re-derived outside mev drifts. What the prototype still computes locally (transitive
+  cone, same-repo chain, composable filter, a gate's exit/start) is exactly the ticket.
+- **Refs:** `planning/blocks/MV.ticket.query-verb-leverage-chain-and-filters.json`, D64, D68
 
 ## [run: 2026-08-28]
 
