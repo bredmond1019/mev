@@ -333,6 +333,7 @@ When `--state` is passed, `mev` runs the full OKF schema pass first, then append
 | `E_STATE_PRIORITY_RANGE` | Error | A `priority` value is not in 0..=3 |
 | `E_STATE_DUE_FORMAT` | Error | A `due` value is not a valid YYYY-MM-DD date |
 | `E_STATE_SDLC_WORKFLOW_ENUM` | Error | An `sdlc_workflow` value is not in `{none, patch, task, run, flow}` |
+| `W_STATE_SDLC_WORKFLOW_MISSING` | Warning | A block has no `sdlc_workflow` field at all — deliberately a warning, not an error, so it reports without blocking a push or a gate: 307 of 1031 blocks tripped it fleet-wide when it was introduced, and erroring would have red-gated the whole fleet at once. Paired asymmetrically with `E_STATE_SDLC_WORKFLOW_ENUM` above: a *wrong* value is an error, an *absent* one is a warning. Fix: add `sdlc_workflow` to the block record, set to one of `{none, patch, task, run, flow}` |
 | `E_STATE_MODEL_ENUM` | Error | A `model` value is not in `{sonnet, gemini-pro, gemini-flash, either}` |
 | `E_STATE_DATE_FORMAT` | Error | A carryover/backlog `created` / `reviewed` / `snoozed_until` value is not a valid `YYYY-MM-DD` (or RFC3339) date |
 | `W_STATE_FOCUS_DRIFT` | Warning | Stored `focus` disagrees with the derivation from `tracks[]`; exit code is unchanged |

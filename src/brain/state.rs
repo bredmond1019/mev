@@ -33,6 +33,8 @@
 //! - `E_STATE_PRIORITY_RANGE` — a `priority` value is not in 0..=3.
 //! - `E_STATE_DUE_FORMAT` — a `due` value is not a valid YYYY-MM-DD date.
 //! - `E_STATE_SDLC_WORKFLOW_ENUM` — an `sdlc_workflow` value ∉ {none,patch,task,run,flow}.
+//! - `W_STATE_SDLC_WORKFLOW_MISSING` — a block has no `sdlc_workflow` at all (warning
+//!   only — 307 of 1031 fleet blocks lack the field today, so this never blocks a push).
 //! - `E_STATE_MODEL_ENUM` — a `model` value ∉ {sonnet,gemini-pro,gemini-flash,either}.
 //! - `E_STATE_DATE_FORMAT` — a carryover/backlog `created`/`reviewed`/`snoozed_until` value
 //!   is not a valid `YYYY-MM-DD` (or RFC3339) date.
@@ -1448,6 +1450,15 @@ pub fn check_field_policy(src: &StateSource, file: &StateFile) -> Vec<Diagnostic
                         ));
                     }
                 }
+            } else {
+                diags.push(Diagnostic::warning(
+                    path,
+                    "W_STATE_SDLC_WORKFLOW_MISSING",
+                    format!(
+                        "block '{}' has no sdlc_workflow; should be one of {{none, patch, task, run, flow}}",
+                        block.id
+                    ),
+                ));
             }
 
             if let Some(ref model) = block.model {
@@ -10017,7 +10028,11 @@ mod check_field_policy_tests {
     fn run_field_policy(block: okf_core::TrackBlock) -> Vec<Diagnostic> {
         let mut file: StateFile =
             serde_json::from_str(tests::leaf_json("test_repo").as_str()).unwrap();
-        file.tracks[0].blocks[0] = block;
+        // Isolate to just the block under test — the fixture's other block (MV.3.K)
+        // carries no `sdlc_workflow` and would otherwise trip the new
+        // W_STATE_SDLC_WORKFLOW_MISSING warning added alongside these tests, polluting
+        // every assertion in this module that expects zero diagnostics.
+        file.tracks[0].blocks = vec![block];
         let src = StateSource {
             repo_slug: "test_repo".to_string(),
             abs_path: PathBuf::from("test.json"),
@@ -10037,7 +10052,11 @@ mod check_field_policy_tests {
             origin: None,
             priority: None,
             due: None,
-            sdlc_workflow: None,
+            // A valid value, not None: W_STATE_SDLC_WORKFLOW_MISSING now fires on an
+            // absent sdlc_workflow, and this fixture backs tests for OTHER fields
+            // (priority/due/model) that must stay clean of it. test_sdlc_workflow
+            // exercises the None case explicitly and separately.
+            sdlc_workflow: Some("none".to_string()),
             model: None,
             note: None,
             description: None,
@@ -10086,9 +10105,15 @@ mod check_field_policy_tests {
             assert!(run_field_policy(b.clone()).is_empty());
         }
         b.sdlc_workflow = Some("pipeline".to_string());
-        let diags = run_field_policy(b);
+        let diags = run_field_policy(b.clone());
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].locator, "E_STATE_SDLC_WORKFLOW_ENUM");
+
+        b.sdlc_workflow = None;
+        let diags = run_field_policy(b);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].locator, "W_STATE_SDLC_WORKFLOW_MISSING");
+        assert_eq!(diags[0].severity, crate::Severity::Warning);
     }
 
     #[test]
@@ -10108,6 +10133,10 @@ mod check_field_policy_tests {
         let mut file: StateFile =
             serde_json::from_str(tests::leaf_json("test_repo").as_str()).unwrap();
         file.carryover = vec![item];
+        // Same isolation as run_field_policy: drop the fixture's un-related track
+        // blocks so they don't trip W_STATE_SDLC_WORKFLOW_MISSING and pollute
+        // carryover-only assertions.
+        file.tracks[0].blocks.clear();
         let src = StateSource {
             repo_slug: "test_repo".to_string(),
             abs_path: PathBuf::from("test.json"),
