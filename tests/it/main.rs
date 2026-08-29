@@ -19,6 +19,7 @@
 
 mod approve_reject;
 mod attention_queue;
+mod blocks_driver;
 mod blog_validate;
 mod brain_block_graph;
 mod brain_carryover;

@@ -49,6 +49,9 @@ pub use brain::links::{
 };
 pub use brain::manifest::{Manifest, ManifestEntry, build_manifest};
 pub use brain::okf::{OkfFrontmatter, validate_md_file};
+pub use brain::query::{
+    BlockCone, BlockInfo, BlockQuery, DepEdge, QueryReport, block_cone, same_repo_chain, select,
+};
 pub use brain::visualize::generate_graph_visual;
 pub use consumers::{ConsumerOutcome, ConsumerResult, classify as classify_consumer_outcome};
 pub use doc::{
@@ -2467,6 +2470,164 @@ pub fn lanes_brain(
         degraded,
         segments,
     })
+}
+
+/// Read-only corpus-wide block query — the `mev blocks` entry point
+/// (`MV.ticket.query-verb-leverage-chain-and-filters`, Task 3).
+///
+/// Modelled on [`frontier_brain`]/[`lanes_brain`]: resolves `brain.toml`, discovers and
+/// loads every `planning/state.json`, builds the untruncated in-process [`StateGraph`],
+/// then adapts it into this module's own [`brain::query::BlockInfo`]/
+/// [`brain::query::DepEdge`] shapes so [`brain::query::select`],
+/// [`brain::query::block_cone`], and [`brain::query::same_repo_chain`] can run over the
+/// live corpus.
+///
+/// Roadmap attribution follows both D57 rules: [`brain::lane_segments::derive_lane_positions`]
+/// yields each block's authored `origin_roadmap` (where a lane declares one) and its
+/// scheduled roadmap (the directory the lane record lives under); a block's
+/// [`brain::query::BlockInfo::roadmap`] is `origin_roadmap` when present, falling back to
+/// the scheduled roadmap otherwise — "default to `origin_roadmap`" per the block record.
+///
+/// A block's dependency edges are `StateEdgeKind::BlockedBy` only — the same edge kind
+/// [`brain::availability::lane_leverage`]'s `dependents_index` uses, so the cone/chain
+/// walks here agree with the existing lane-leverage closure rather than introducing a
+/// second, differently-scoped notion of "blocking".
+///
+/// `startable` mirrors [`brain::frontier::compute_frontier`]'s per-entry rule (unmet
+/// `Block` deps + any `Operator`/`Approval`/`External` dep clears it) but computed for
+/// **every** block, not just lane segment heads — `mev blocks` must answer "is this
+/// block startable" for blocks that never surface as a frontier head.
+///
+/// `want_cones`/`want_chains` gate the two O(n) transitive walks so a plain `mev blocks`
+/// (no `--leverage`/`--chain`) does no extra work beyond the filter.
+pub fn blocks_brain(
+    root: &std::path::Path,
+    query: &brain::query::BlockQuery,
+    want_cones: bool,
+    want_chains: bool,
+) -> anyhow::Result<brain::query::QueryReport> {
+    use brain::config::find_brain_config;
+    use brain::lane_segments::{derive_lane_positions, discover_lane_files};
+    use brain::query::{BlockInfo, DepEdge, QueryReport, block_cone, same_repo_chain, select};
+    use brain::state::{
+        BlockDep, BlockedBy, StateEdgeKind, TrackBlock, build_state_graph, discover_state_files,
+        load_state,
+    };
+    use std::collections::HashMap;
+
+    let config = find_brain_config(root)
+        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
+
+    let (sources, _discovery_diags) = discover_state_files(root, &config);
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    for src in &sources {
+        if let Ok(file) = load_state(&src.abs_path) {
+            loaded.push((src.clone(), file));
+        }
+    }
+
+    let graph = build_state_graph(&loaded);
+
+    // D57 roadmap attribution: origin_roadmap by default, falling back to the
+    // scheduled roadmap (the lane record's own directory) when a lane declares none.
+    let (lane_files, _discover_diags) = discover_lane_files(root);
+    let (lane_positions, _derive_diags) = derive_lane_positions(&lane_files, &loaded);
+    let mut roadmap_of: HashMap<String, String> = HashMap::new();
+    for p in &lane_positions {
+        let key = format!("{}:{}", p.repo, p.id);
+        let roadmap = p
+            .origin_roadmap
+            .clone()
+            .unwrap_or_else(|| p.roadmap.clone());
+        roadmap_of.entry(key).or_insert(roadmap);
+    }
+
+    let global_status = brain::emit::global_status_map(&loaded);
+    let mut track_index: HashMap<String, &TrackBlock> = HashMap::new();
+    for (src, file) in &loaded {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                track_index.insert(format!("{}:{}", src.repo_slug, block.id), block);
+            }
+        }
+    }
+
+    let status_of = |key: &str| -> String {
+        global_status
+            .get(key)
+            .cloned()
+            .flatten()
+            .unwrap_or_else(|| "open".to_string())
+    };
+
+    let mut blocks: Vec<BlockInfo> = Vec::with_capacity(graph.nodes.len());
+    for node in &graph.nodes {
+        let status = status_of(&node.key);
+        let track_block = track_index.get(node.key.as_str());
+        let priority = track_block.and_then(|b| b.priority);
+        let startable = status != "closed"
+            && track_block.is_some_and(|b| {
+                b.depends_on.iter().all(|dep| match dep {
+                    BlockedBy::Block(BlockDep { repo, id, .. }) => {
+                        status_of(&format!("{repo}:{id}")) == "closed"
+                    }
+                    BlockedBy::Operator(_) | BlockedBy::Approval(_) | BlockedBy::External(_) => {
+                        false
+                    }
+                })
+            });
+
+        blocks.push(BlockInfo {
+            key: node.key.clone(),
+            repo: node.repo.clone(),
+            status,
+            roadmap: roadmap_of.get(&node.key).cloned(),
+            startable,
+            priority,
+        });
+    }
+
+    let edges: Vec<DepEdge<'_>> = graph
+        .edges
+        .iter()
+        .filter(|e| e.kind == StateEdgeKind::BlockedBy)
+        .map(|e| DepEdge {
+            from: e.from.as_str(),
+            to: e.to_ref.as_str(),
+            blocking: true,
+        })
+        .collect();
+
+    let block_map: HashMap<&str, &BlockInfo> = blocks.iter().map(|b| (b.key.as_str(), b)).collect();
+
+    let selected = select(&blocks, query);
+
+    let mut report = QueryReport {
+        blocks: selected.iter().map(|b| b.key.clone()).collect(),
+        cones: HashMap::new(),
+        chains: HashMap::new(),
+    };
+
+    if want_cones {
+        for b in &selected {
+            if b.startable {
+                report
+                    .cones
+                    .insert(b.key.clone(), block_cone(&b.key, &edges, &block_map));
+            }
+        }
+    }
+    if want_chains {
+        for b in &selected {
+            if b.startable {
+                report
+                    .chains
+                    .insert(b.key.clone(), same_repo_chain(&b.key, &edges, &block_map));
+            }
+        }
+    }
+
+    Ok(report)
 }
 
 /// Generate an interactive HTML knowledge graph of the Brain corpus.
