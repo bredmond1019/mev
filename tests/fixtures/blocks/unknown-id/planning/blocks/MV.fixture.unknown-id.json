@@ -1,0 +1,18 @@
+{
+  "id": "MV.fixture.unknown-id",
+  "repo": "mev",
+  "kind": "ticket",
+  "title": "Unknown id fixture block",
+  "description": "Every field is well-formed; the test drives this fixture with a known-ids set that omits this record's id.",
+  "what": "Trigger W_BLOCK_UNKNOWN_ID only.",
+  "why": "A block record with no matching block in state.json must be caught.",
+  "sdlc_workflow": "task",
+  "model": "sonnet",
+  "files": { "new": [], "modified": [] },
+  "out_of_scope": ["Nothing else"],
+  "acceptance_criteria": ["Fires W_BLOCK_UNKNOWN_ID"],
+  "spec_dir": "planning/MV.fixture.unknown-id/",
+  "depends_on": [],
+  "created": "2026-08-16",
+  "updated": "2026-08-16"
+}

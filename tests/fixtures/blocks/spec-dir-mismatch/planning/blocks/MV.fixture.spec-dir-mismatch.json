@@ -1,0 +1,18 @@
+{
+  "id": "MV.fixture.spec-dir-mismatch",
+  "repo": "mev",
+  "kind": "ticket",
+  "title": "Spec dir mismatch fixture block",
+  "description": "Every field is well-formed except `spec_dir`, which does not equal planning/<id>/.",
+  "what": "Trigger W_BLOCK_SPEC_DIR_MISMATCH only.",
+  "why": "A spec_dir that drifts from planning/<id>/ must be caught.",
+  "sdlc_workflow": "task",
+  "model": "sonnet",
+  "files": { "new": [], "modified": [] },
+  "out_of_scope": ["Nothing else"],
+  "acceptance_criteria": ["Fires W_BLOCK_SPEC_DIR_MISMATCH"],
+  "spec_dir": "planning/some-other-dir/",
+  "depends_on": [],
+  "created": "2026-08-16",
+  "updated": "2026-08-16"
+}

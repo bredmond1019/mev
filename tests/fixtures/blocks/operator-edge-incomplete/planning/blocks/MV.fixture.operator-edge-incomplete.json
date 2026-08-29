@@ -1,0 +1,24 @@
+{
+  "id": "MV.fixture.operator-edge-incomplete",
+  "repo": "mev",
+  "kind": "ticket",
+  "title": "Operator edge incomplete fixture block",
+  "description": "Every field is well-formed except the sole depends_on entry, an operator edge missing `exit`.",
+  "what": "Trigger W_BLOCK_OPERATOR_EDGE_INCOMPLETE only.",
+  "why": "An operator edge with no exit or start leaves the block ungated on a human step nobody can find.",
+  "sdlc_workflow": "task",
+  "model": "sonnet",
+  "files": { "new": [], "modified": [] },
+  "out_of_scope": ["Nothing else"],
+  "acceptance_criteria": ["Fires W_BLOCK_OPERATOR_EDGE_INCOMPLETE"],
+  "spec_dir": "planning/MV.fixture.operator-edge-incomplete/",
+  "depends_on": [
+    {
+      "type": "operator",
+      "slug": "some-operator-session",
+      "start": "the operator opens the session"
+    }
+  ],
+  "created": "2026-08-16",
+  "updated": "2026-08-16"
+}
