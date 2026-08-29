@@ -8,10 +8,39 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-29T18:00:00-03:00"
+timestamp: "2026-08-29T22:15:00-03:00"
 ---
 
 ## [run: 2026-08-29]
+
+### `/close-out` — fixed a real concurrent-lane flake in `fleet_regression`, closed the loop
+
+- **What:** Ran `/close-out` over the whole session's diff range. It gated on
+  `fleet_readiness_is_unchanged_for_blocks_without_a_new_edge` failing — the same test that had
+  already failed three times this session, each time confirmed (via `git stash` and a direct
+  re-run against unmodified `main`) as caused by a concurrent `fleet-drift-detection` orchestration
+  editing `jynx`/`base-template`/`brain`'s `state.json` live, not by any diff in this session.
+  Rather than override the gate, fixed the test itself (`f1e2a8c`): two layered, independent
+  signals — a `fleet_concurrency_check.py status` lease check (fast, authoritative, but only
+  catches `/begin-orchestration`-driven writers) and a timed double-read 4s apart as the fallback
+  for unleased one-off writers (a mismatch set that changes between reads means the corpus is
+  observably moving; only a set stable across both reads AND no active lease fails). Verified the
+  lease check was independently necessary, not redundant: the timed check alone had already
+  false-passed as "stable" once during testing, because `jynx`'s lease-holding writer happened to
+  pause for over 4s between commits. Added six fixture tests (`eb1d4a3`) for the lease-check
+  helper's fail-open branches (script absent, non-zero exit, malformed JSON, empty arrays), none of
+  which the one real-fleet run exercised. Then closed the coverage gap `/close-out`'s own Step 3
+  flagged: `docs/brain-toml.md` had no `[permission_profiles]` section despite `BrainConfig`
+  parsing it since `afbd0f3` (`074003f`), plus a stale "it controls three things" claim (seven
+  sections exist) and a stale "all three top-level sections are optional" line.
+- **Why:** `/close-out`'s own rule is to stop and surface a gating failure, not patch around it —
+  and this failure was real (a genuine architectural gap in a fleet-wide regression gate: it had no
+  way to distinguish "someone else is editing the corpus right now" from "this build's derivation
+  logic regressed"), so it earned an actual fix rather than an override. Also filed a `drift`
+  carryover (`permission-profiles-brain-config-shipped-without-a-block-record`) for real,
+  already-shipped work that never got a `planning/blocks/*.json` record — HQ's own routing rule is
+  "if it is not in `state.json`, it does not exist."
+- **Refs:** `tests/it/fleet_regression.rs`, `docs/brain-toml.md`, `planning/orchestration-run/query-verb-followthrough/`
 
 ### `MV.ticket.block-record-validation` closed via `/sdlc-flow`
 
