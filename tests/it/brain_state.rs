@@ -2334,3 +2334,97 @@ fn set_block_status_unknown_scope_slug_is_rejected_with_valid_slugs() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// MV.ticket.block-record-validation, Task 3 — block records wired into the
+// `--state` pass: silent with no planning/blocks/, warning-only when a record
+// is incomplete.
+// ---------------------------------------------------------------------------
+
+/// Neither `write_clean_fixture` repo has a `planning/blocks/` directory —
+/// the common case across the fleet today. `validate_brain_state` must emit
+/// zero `W_BLOCK_*` diagnostics and zero errors for it.
+#[test]
+fn no_blocks_dir_produces_no_block_diagnostics() {
+    let dir = temp_dir("block-no-dir");
+    write_clean_fixture(&dir);
+
+    let report = mev::validate_brain_state(&dir).expect("validate_brain_state should not error");
+
+    let block_diags: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator.starts_with("W_BLOCK_"))
+        .collect();
+    assert!(
+        block_diags.is_empty(),
+        "a repo with no planning/blocks/ must be silent, got: {block_diags:#?}"
+    );
+    assert_eq!(report.error_count(), 0);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A block record under alpha's `planning/blocks/` that is missing `why` and
+/// whose `id` has no matching block in alpha's `state.json` must surface both
+/// `W_BLOCK_MISSING_WHY` and `W_BLOCK_UNKNOWN_ID` — and, being warning-only,
+/// must NOT change `validate_brain_state`'s error count (the exit code stays
+/// unaffected by `W_BLOCK_*` alone, per this ticket's acceptance criteria).
+#[test]
+fn incomplete_block_record_is_warning_only_and_unknown_id_is_flagged() {
+    let dir = temp_dir("block-incomplete");
+    write_clean_fixture(&dir);
+
+    // AL.9.NOPE has no matching block in alpha's tracks[] (only AL.1.A/AL.1.B
+    // exist there), and this record omits `why` entirely.
+    write_json(
+        &dir,
+        "repos/alpha/planning/blocks/AL.9.NOPE.json",
+        &serde_json::json!({
+            "id": "AL.9.NOPE",
+            "repo": "alpha",
+            "kind": "ticket",
+            "title": "An incomplete record",
+            "description": "Has a description but no why.",
+            "what": "Something.",
+            "sdlc_workflow": "task",
+            "model": "sonnet",
+            "out_of_scope": ["Nothing relevant"],
+            "acceptance_criteria": ["It works"],
+            "spec_dir": "planning/AL.9.NOPE/"
+        }),
+    );
+
+    let report = mev::validate_brain_state(&dir).expect("validate_brain_state should not error");
+
+    let codes: Vec<&str> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator.starts_with("W_BLOCK_"))
+        .map(|d| d.locator.as_str())
+        .collect();
+    assert!(
+        codes.contains(&"W_BLOCK_MISSING_WHY"),
+        "expected W_BLOCK_MISSING_WHY, got: {codes:?}"
+    );
+    assert!(
+        codes.contains(&"W_BLOCK_UNKNOWN_ID"),
+        "expected W_BLOCK_UNKNOWN_ID, got: {codes:?}"
+    );
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator.starts_with("W_BLOCK_"))
+            .all(|d| d.severity == mev::Severity::Warning),
+        "every W_BLOCK_* diagnostic must be warning severity"
+    );
+    assert_eq!(
+        report.error_count(),
+        0,
+        "W_BLOCK_* diagnostics alone must not change the error count / exit code"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

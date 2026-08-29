@@ -371,7 +371,38 @@ The state module discovers, loads, and validates all `planning/state.json` files
 
 #### Public library entry point
 
-`validate_brain_state(root: &Path) -> anyhow::Result<Report>` (in `src/lib.rs`) runs the full OKF schema pass followed by the multi-step state pipeline (discovery → load → schema → graph build + check → cycle detection → status consistency → backlog integrity → rollup → focus drift) and appends all state diagnostics to the same `Report`. Invoked by `mev validate-brain --state`.
+`validate_brain_state(root: &Path) -> anyhow::Result<Report>` (in `src/lib.rs`) runs the full OKF schema pass followed by the multi-step state pipeline (discovery → load → schema → graph build + check → cycle detection → status consistency → backlog integrity → rollup → focus drift → block-record checks) and appends all state diagnostics to the same `Report`. Invoked by `mev validate-brain --state`.
+
+### Block records (`src/brain/block.rs`) — `MV.ticket.block-record-validation`
+
+A block record is the authored definition of one unit of work at `planning/blocks/<BlockID>.json` (D65), shaped by base-template's `.claude/workflows/block.schema.json`. `src/brain/block.rs` parses these files and checks them for the same kind of drift `state.rs` already checks in `tracks[]` — a stale `spec_dir`, a filename that no longer matches the record's own `id`, an `id` the repo's `state.json` doesn't know about.
+
+`BlockRecord`'s `#[derive(Deserialize)]` has no `#[serde(deny_unknown_fields)]` and models `why`/`description`/`out_of_scope` as `Option` even though the schema marks them required — a record missing one of those fields still deserializes, so the checks below can report "missing" as a finding rather than the whole file failing to parse.
+
+| Function | Signature | Description |
+|---|---|---|
+| `discover_block_records` | `(repo_root: &Path) -> Vec<BlockRecordFile>` | Reads every `planning/blocks/*.json` file under one repo root, sorted by filename. Returns an empty `Vec` (not an error) when `planning/blocks/` is absent — silence is the common case across the fleet, most repos have no `blocks/` dir yet. Each file's parse result is `Result<BlockRecord, String>` per entry: one bad file never stops the rest from loading. |
+| `check_block_record` | `(file: &BlockRecordFile, known_block_ids: &HashSet<String>) -> Vec<Diagnostic>` | Runs the seven `W_BLOCK_*` checks (below) against one already-parsed record. A record whose parse failed produces zero diagnostics here — the parse failure is the caller's problem to surface, not this function's. Every diagnostic is [`Diagnostic::warning`] — there is no error path; promotion to error-severity is a deliberate later decision, gated on the corpus being clean first. |
+
+`known_block_ids` is supplied by the caller (`check_block_records`, below) rather than loaded internally, so `block.rs` stays independent of `state.rs`'s loading machinery and is unit-testable with a plain `HashSet`.
+
+#### Diagnostic codes
+
+All seven are warning severity; see `docs/cli/validate.md` for the full diagnostic-code reference table.
+
+| Locator | Condition |
+|---|---|
+| `W_BLOCK_MISSING_WHY` | `why` is absent or whitespace-only |
+| `W_BLOCK_MISSING_DESCRIPTION` | `description` is absent or whitespace-only |
+| `W_BLOCK_MISSING_OUT_OF_SCOPE` | `out_of_scope` is absent or an empty list |
+| `W_BLOCK_SPEC_DIR_MISMATCH` | `spec_dir` is not `planning/<id>/` |
+| `W_BLOCK_FILENAME_ID_MISMATCH` | the file's basename (minus `.json`) does not match the record's own `id` |
+| `W_BLOCK_UNKNOWN_ID` | `id` has no matching block in that repo's `planning/state.json` `tracks[]` |
+| `W_BLOCK_OPERATOR_EDGE_INCOMPLETE` | a `depends_on[]` entry with `type:"operator"` is missing `exit` or `start` |
+
+#### Wiring into `--state` (`src/brain/state.rs`)
+
+`check_block_records(root: &Path, config: &BrainConfig, loaded: &[(StateSource, StateFile)]) -> Vec<Diagnostic>` discovers and checks every `planning/blocks/*.json` record across every repo in `config.repos[]`. It builds the per-repo `known_block_ids` set from `loaded`'s already-parsed `tracks[].blocks[].id` values, then calls `discover_block_records` + `check_block_record` per repo. A repo with no `blocks/` dir contributes nothing, so this pass can never affect `validate_brain_state`'s exit code on its own — every code it can emit is warning severity. Called from `validate_brain_state` in `src/lib.rs`, after focus drift.
 
 ---
 

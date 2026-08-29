@@ -505,6 +505,16 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     //     whole corpus rather than per-file like check_field_policy.
     report.diagnostics.extend(check_epics(&config, &loaded));
 
+    // 7c. Block-record checks (MV.ticket.block-record-validation) — discover
+    //     planning/blocks/*.json per repo and run the W_BLOCK_* checks against
+    //     each record. A repo with no planning/blocks/ directory is silent
+    //     (see [`brain::state::check_block_records`]'s doc). Every diagnostic
+    //     this returns is warning severity, so it can never change
+    //     `report.is_failure()` on its own.
+    report
+        .diagnostics
+        .extend(brain::state::check_block_records(root, &config, &loaded));
+
     // 8. Rollup-drift checks (brain files only).
     // Build a slug → StateFile map of all loaded children (project kind).
     let children: HashMap<String, brain::state::StateFile> = loaded

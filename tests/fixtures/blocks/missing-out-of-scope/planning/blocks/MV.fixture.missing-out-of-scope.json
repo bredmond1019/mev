@@ -1,0 +1,17 @@
+{
+  "id": "MV.fixture.missing-out-of-scope",
+  "repo": "mev",
+  "kind": "ticket",
+  "title": "Missing out_of_scope fixture block",
+  "description": "Every field is populated except `out_of_scope`, which is absent entirely.",
+  "what": "Trigger W_BLOCK_MISSING_OUT_OF_SCOPE only.",
+  "why": "Absence of out_of_scope must be caught, same as an empty list.",
+  "sdlc_workflow": "task",
+  "model": "sonnet",
+  "files": { "new": [], "modified": [] },
+  "acceptance_criteria": ["Fires W_BLOCK_MISSING_OUT_OF_SCOPE"],
+  "spec_dir": "planning/MV.fixture.missing-out-of-scope/",
+  "depends_on": [],
+  "created": "2026-08-16",
+  "updated": "2026-08-16"
+}

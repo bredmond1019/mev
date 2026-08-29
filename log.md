@@ -13,7 +13,22 @@ timestamp: "2026-08-29T18:00:00-03:00"
 
 ## [run: 2026-08-29]
 
-### `mev blocks` verb bailed on tasks 1-4 skipping AC 11-16
+### `MV.ticket.block-record-validation` closed via `/sdlc-flow`
+
+Closed `MV.ticket.block-record-validation` via `/sdlc-flow` (6 of 6 tasks, PASS). Added `src/brain/block.rs` with `BlockRecord` serde types mirroring `block.schema.json` (why/description/out_of_scope modeled as `Option` so missing fields deserialize rather than error) and `discover_block_records()` to load `planning/blocks/*.json` per repo, silent when the directory is absent. `check_block_record()` implements seven warning-severity `W_BLOCK_*` diagnostics: missing why, missing description, missing out_of_scope, spec_dir mismatch, filename/id mismatch, unknown id (against a caller-supplied known-ids set), and an incomplete operator `depends_on` edge. Wired into `validate_brain_state` via a new `check_block_records()` in `src/brain/state.rs`, with known-ids built per-repo from the already-loaded state graph. A fixture-tree suite (`tests/fixtures/blocks/`, one full repo-root per case) exercises the real filesystem-walk path via `discover_block_records` + `check_block_record`, covering known-good, no-blocks-dir, and one triggering fixture per code. Installed-binary evidence in `tests/fixtures/blocks/INSTALLED_BINARY_EVIDENCE.md` confirms all 7 codes fire exactly once against a disposable `brain.toml` corpus, exit 0. Task 6 was validation-only — fmt, clippy `-D warnings`, and `cargo nextest run` (1991 tests) all passed with no code changes needed. `planning/state.json` block `MV.ticket.block-record-validation` flipped to `closed`, validated clean by `mev validate-brain --state`.
+
+```
+9451b52 docs: update docs for MV.ticket.block-record-validation
+fe2650b feat: implement MV.ticket.block-record-validation-task5
+aab2d60 feat: implement MV.ticket.block-record-validation-task4
+641ed50 refactor: move block-record wiring logic into src/brain/state.rs
+8fe5ee8 feat: implement MV.ticket.block-record-validation-task3
+8821f40 feat: implement MV.ticket.block-record-validation-task2
+521c09f feat: implement MV.ticket.block-record-validation-task1
+676f6f9 chore: init worktree MV.ticket.block-record-validation-flow
+```
+
+### `mev blocks` verb bailed on tasks 1-4 skipping AC 11-16, then fixed
 
 - **What:** Ran `MV.ticket.query-verb-leverage-chain-and-filters` via `/sdlc-flow` across tasks
   1-6. Tasks 1-2 built `src/brain/query.rs` (`BlockQuery`, `BlockCone`, `QueryReport`,
@@ -30,8 +45,18 @@ timestamp: "2026-08-29T18:00:00-03:00"
   hits for `runnable`/`readiness` and no `exit`/`start` fields on `GateRank`. Task 5's own decision
   log admits the gap directly. This is a missing-scope/re-plan issue, not a fixable defect — six
   of sixteen acceptance criteria were simply never attempted.
-- **Next:** Re-plan the remaining scope (frontier `GateRank` fields + readiness reporting) as its
-  own follow-up ticket/task range rather than re-running this spec as-is.
+- **Fix:** Implemented the missing six AC directly: `frontier::GateRank` gained `exit`/`start`
+  (populated from the originating operator/approval `depends_on` edge, `None` for approval gates
+  which carry neither), a mirror-compatibility fixture proving engine-rs's read-only `GateRank`
+  mirror keeps parsing `lane-frontier.json` unmodified, and `mev blocks` now reports readiness
+  (`brain::query::Readiness`/`BlockRow`: record/tasks/runnable, disk-derived) alongside
+  startability, with `--runnable`/`--not-runnable` filters and an unresolvable repo slug degrading
+  to not-runnable rather than erroring. Also fixed six pre-existing `cargo clippy -D warnings`
+  failures unrelated to this diff (confirmed via `git stash`) that were blocking the ticket's own
+  `validation_commands` regardless. CI on PR #51 stayed red — `okf-core` origin/main is 4 commits
+  behind local (missing the `created`/`updated` field commit this fix depends on) — operator
+  declined a push (fleet-wide pushes need explicit approval), so the branch was merged into local
+  `main` only, not pushed.
 
 ```
 7928edd docs(sync): pull base-template — document OkfFrontmatter created/updated fields

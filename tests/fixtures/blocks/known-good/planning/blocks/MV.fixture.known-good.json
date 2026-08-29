@@ -1,0 +1,18 @@
+{
+  "id": "MV.fixture.known-good",
+  "repo": "mev",
+  "kind": "ticket",
+  "title": "Known-good fixture block",
+  "description": "A fully populated block record used as the zero-diagnostics control.",
+  "what": "Nothing — this record exists only to prove a well-formed record stays silent.",
+  "why": "Every W_BLOCK_* check needs a fixture that must NOT fire so a check that always fires would be caught.",
+  "sdlc_workflow": "task",
+  "model": "sonnet",
+  "files": { "new": [], "modified": [] },
+  "out_of_scope": ["Nothing else"],
+  "acceptance_criteria": ["Stays silent"],
+  "spec_dir": "planning/MV.fixture.known-good/",
+  "depends_on": [],
+  "created": "2026-08-16",
+  "updated": "2026-08-16"
+}

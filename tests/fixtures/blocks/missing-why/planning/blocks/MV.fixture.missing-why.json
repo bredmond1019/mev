@@ -1,0 +1,17 @@
+{
+  "id": "MV.fixture.missing-why",
+  "repo": "mev",
+  "kind": "ticket",
+  "title": "Missing why fixture block",
+  "description": "Every field is populated except `why`, which is absent entirely.",
+  "what": "Trigger W_BLOCK_MISSING_WHY only.",
+  "sdlc_workflow": "task",
+  "model": "sonnet",
+  "files": { "new": [], "modified": [] },
+  "out_of_scope": ["Nothing else"],
+  "acceptance_criteria": ["Fires W_BLOCK_MISSING_WHY"],
+  "spec_dir": "planning/MV.fixture.missing-why/",
+  "depends_on": [],
+  "created": "2026-08-16",
+  "updated": "2026-08-16"
+}

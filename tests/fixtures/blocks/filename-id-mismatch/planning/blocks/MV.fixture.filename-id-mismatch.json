@@ -1,0 +1,18 @@
+{
+  "id": "MV.fixture.wrong-internal-id",
+  "repo": "mev",
+  "kind": "ticket",
+  "title": "Filename/id mismatch fixture block",
+  "description": "The record's own `id` does not match this file's stem (MV.fixture.filename-id-mismatch).",
+  "what": "Trigger W_BLOCK_FILENAME_ID_MISMATCH only.",
+  "why": "A filename that drifts from the record's own id must be caught.",
+  "sdlc_workflow": "task",
+  "model": "sonnet",
+  "files": { "new": [], "modified": [] },
+  "out_of_scope": ["Nothing else"],
+  "acceptance_criteria": ["Fires W_BLOCK_FILENAME_ID_MISMATCH"],
+  "spec_dir": "planning/MV.fixture.wrong-internal-id/",
+  "depends_on": [],
+  "created": "2026-08-16",
+  "updated": "2026-08-16"
+}

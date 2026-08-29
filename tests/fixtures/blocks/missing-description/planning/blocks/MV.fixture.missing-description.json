@@ -1,0 +1,18 @@
+{
+  "id": "MV.fixture.missing-description",
+  "repo": "mev",
+  "kind": "ticket",
+  "title": "Missing description fixture block",
+  "description": "",
+  "what": "Trigger W_BLOCK_MISSING_DESCRIPTION only — `description` is present but empty/whitespace.",
+  "why": "Empty string must count as missing, not just an absent key.",
+  "sdlc_workflow": "task",
+  "model": "sonnet",
+  "files": { "new": [], "modified": [] },
+  "out_of_scope": ["Nothing else"],
+  "acceptance_criteria": ["Fires W_BLOCK_MISSING_DESCRIPTION"],
+  "spec_dir": "planning/MV.fixture.missing-description/",
+  "depends_on": [],
+  "created": "2026-08-16",
+  "updated": "2026-08-16"
+}
