@@ -154,7 +154,7 @@ mev validate --blog                # validates a blog tree instead (frontmatter 
 ```
 
 Read-only. Exits 1 if any error-severity diagnostic is found. Full diagnostic table:
-[`docs/cli.md`](docs/cli.md#validate---blog---lint-path).
+[`docs/cli/validate.md`](docs/cli/validate.md#validate---blog---lint-path).
 
 ### `validate-brain [path] [--sync|--graph|--state|--links|--structure]`
 
@@ -241,7 +241,7 @@ at all, refuses only writes to the one repo it names.
   one you wrote yourself.
 
 Diagnostic codes and per-command detail:
-[`docs/cli.md`](docs/cli.md#quiesce-lease-on---write---agent---lock-dir).
+[`docs/cli/state.md`](docs/cli/state.md#quiesce-lease-on---write---agent---lock-dir).
 
 ## `--json` output shape
 
@@ -300,7 +300,7 @@ Full module-by-module breakdown: [`docs/architecture.md`](docs/architecture.md).
 
 | Doc | Contents |
 |---|---|
-| [`docs/cli.md`](docs/cli.md) | Full CLI reference: every subcommand, flag, diagnostic code, exit code, example |
+| [`docs/cli.md`](docs/cli.md) | CLI catalogue: all 26 commands, one line each, linking into the five detail pages under [`docs/cli/`](docs/cli/index.md) |
 | [`docs/architecture.md`](docs/architecture.md) | Module map, `ContentValidator` trait, core types |
 | [`docs/brain-toml.md`](docs/brain-toml.md) | `brain.toml` config schema |
 | [`docs/okf-schema.md`](docs/okf-schema.md) | OKF frontmatter fields, validation rules, diagnostic table |

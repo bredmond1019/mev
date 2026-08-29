@@ -12,6 +12,27 @@ related: [brain:carryover-improvements-plan, brain:state-json-schema, cli-refere
 
 # Carryover Triage Ranking Contract
 
+## What this page is for
+
+This is a **contract between repos**, not a guide. `mev` derives the carryover triage ranking;
+`bastion` renders it. This page pins the API and wire shape so the two cannot drift apart, and it
+is versioned for that reason.
+
+If you want to *use* the carryover commands rather than consume their output, you want
+[the carryover CLI page](cli/carryover.md) instead.
+
+## Quickstart
+
+Run these in a **terminal** to see the shape this contract describes:
+
+```bash
+mev carryover --json | head -40     # the wire shape bastion consumes
+mev carryover                       # the same data, human-readable
+```
+
+**Changing anything below is a breaking change.** Bump the contract version, note it in the
+changelog, and re-pin the consumer copy in `core/bastion/docs/`.
+
 **Contract Version: 1.0.0**
 
 This is the **single source of truth** for how a `planning/state.json` `carryover[]` array is
@@ -305,7 +326,7 @@ not a reason to remove the record of the finding itself.
 
 ## 7. Consumer re-pin instructions
 
-Following the [D20](../../../docs/decisions/D20-shared-data-contract.md) pattern (see
+Following the `docs/decisions/D20-shared-data-contract.md` pattern (see
 `core/orchestrator/docs/data-contract.md` / `core/bastion/docs/data-contract.md` for the model):
 
 1. A consumer (e.g. `bastion`) pins its own `docs/data-contract.md` (or a dedicated

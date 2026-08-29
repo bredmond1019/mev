@@ -12,6 +12,34 @@ related: [cli-reference, brain-toml-config, okf-schema]
 
 # mev Architecture
 
+How `mev` is put together, for someone about to change it. If you only want to *run* it, the
+[CLI reference](cli.md) is the page you want.
+
+## What this page is for
+
+`mev` is one Rust crate with a thin binary on top. Nearly everything lives in the library so the
+integration tests and the consumer repos (`bastion`, `engine-rs`) can call it directly. Read this
+before adding a subcommand, a diagnostic, or a new validator.
+
+## Quickstart
+
+Run these in a **terminal**, from `core/mev`:
+
+```bash
+cargo build --release                  # binary at target/release/mev
+cargo nextest run --lib --bins         # fast pass -- use this while iterating
+NEXTEST_POLICY_OVERRIDE=1 cargo test   # full suite; the authoritative gate
+cargo fmt --check && cargo clippy -- -D warnings
+scripts/check_consumers.sh             # did this break bastion or engine-rs?
+```
+
+**Use `cargo nextest`, not plain `cargo test`.** A `PreToolUse` hook denies the bare form -- 25
+integration binaries make it slow. The override prefix above is for the one task that owns
+full-suite validation.
+
+**Adding a subcommand?** The dispatch table in [`src/main.rs`](../src/main.rs) is the source of
+truth for what `mev` can do, and [`cli.md`](cli.md)'s catalogue is derived from it. Update both.
+
 ## Module map
 
 ```
@@ -285,7 +313,7 @@ The graph module builds and validates the serializable `scope:doc_id` knowledge 
 
 The state module discovers, loads, and validates all `planning/state.json` files across the registered repos, then builds and checks the cross-repo block-dependency graph. Block P2 extends the v1 model to the v2 schema: `depends_on[]` DAG edges on track blocks, cycle detection, derived-blocked enforcement, backlog-node integrity, and focus-drift warnings.
 
-**Epics** add a cross-repo *initiative* axis on top of that graph. `tracks[]` groups work within one repo and `tier` groups repos organizationally; neither expresses a program like "Bastion Web + UI" that spans several repos at once. A block carries `epics: ["<slug>", ...]` (multi-valued — a block can serve two initiatives), validated against an HQ-only `epics[]` registry by `check_epics`. Epic-to-epic *relationships* are never authored: `derive_epic_edges` computes them from the same `depends_on` edges that already drive blocked-ness, so the relationship map cannot drift from the work graph. The canonical schema lives in the brain's [`docs/state/state-schema.md`](../../../docs/state/state-schema.md).
+**Epics** add a cross-repo *initiative* axis on top of that graph. `tracks[]` groups work within one repo and `tier` groups repos organizationally; neither expresses a program like "Bastion Web + UI" that spans several repos at once. A block carries `epics: ["<slug>", ...]` (multi-valued — a block can serve two initiatives), validated against an HQ-only `epics[]` registry by `check_epics`. Epic-to-epic *relationships* are never authored: `derive_epic_edges` computes them from the same `depends_on` edges that already drive blocked-ness, so the relationship map cannot drift from the work graph. The canonical schema lives in the brain's `docs/state/state-schema.md`.
 
 > **BA.15.12/D15/D16 convergence:** the `state.json` serde schema, `load_state`, and the
 > `StateGraph`/`build_state_graph` model are re-exported from bastion's `okf-core` crate
@@ -557,7 +585,7 @@ The links module extracts and validates all local references (markdown links, `f
 
 The structure module enforces D17 / CLAUDE.md Standing Rule 7: every corpus file in a directory must appear in that directory's `index.md`, and every `index.md` row must point at a file that exists on disk. Both directions are per-directory, direct children only — subdirectories are covered by their own `index.md`, so this check does not recurse into them.
 
-Reuses `links::extract_links` for parsing `index.md` rows (index rows are ordinary markdown `[text](path)` links / `file://` URIs — no separate parser) and `crawl::Corpus` / `CorpusEntry` as the authoritative, already skip-pruned and ephemeral-filtered set of "files in scope".
+Reuses `links::extract_links` for parsing `index.md` rows (index rows are ordinary markdown `path` links / `file://` URIs — no separate parser) and `crawl::Corpus` / `CorpusEntry` as the authoritative, already skip-pruned and ephemeral-filtered set of "files in scope".
 
 #### Public functions
 
@@ -1013,7 +1041,7 @@ resolution step behind `plan_set_stage`: it walks upward from `root` via `find_b
 locate the brain root, reads `business/docs/pipeline.md` there, and parses its `## Stages` line
 with `parse_stages` (a faithful, comment-linked port of bastion's `parse_stages` in
 `core/bastion/src/serve/handlers/pipeline.rs`, per
-[D58](../../../docs/decisions/D58-pipeline-stage-vocabulary-home.md) — the vocabulary is a
+`docs/decisions/D58-pipeline-stage-vocabulary-home.md` — the vocabulary is a
 go-to-market decision authored in `pipeline.md`, not compiled into `mev`). `parse_stages` itself
 is pure (`&str -> Vec<String>`, no filesystem access) and unit-tested inline. Three distinct
 failure modes each produce a single file-level `EmitPlan` with no actions and one error

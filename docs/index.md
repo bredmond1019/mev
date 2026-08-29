@@ -1,7 +1,7 @@
 ---
 type: Index
 title: mev Docs
-description: Navigation index for all mev reference documentation
+description: Navigation index for mev's reference documentation, grouped by what you are trying to do.
 doc_id: docs-index
 layer: [meta]
 project: mev
@@ -12,13 +12,34 @@ related: [cli-reference, architecture, brain-toml-config, okf-schema, carryover-
 
 # mev — Documentation Index
 
+`mev` validates the Bastion Brain corpus and derives every generated surface from it.
+**New here? Start with the [CLI reference](cli.md)** — it catalogues all 26 commands and opens with
+a Quickstart.
+
+## I want to run something
+
 | Doc | What it covers |
 |---|---|
-| [CLI reference](cli.md) | Subcommands (including `state-history` list/restore, `attention-queue` operator payload delivery, `check-consumers` post-merge consumer compile gate, `frontier` corpus-wide startable-block frontier + gate_rank, `lanes` six-state segment availability + lane-level unblock leverage, `graph-findings` mechanically-detectable carryover findings), flags, defaults, exit codes, examples |
-| [Architecture](architecture.md) | Module map, `ContentValidator` trait, core types (`Diagnostic`, `Report`, `JsonReport`) |
-| [brain.toml config](brain-toml.md) | Full `brain.toml` schema — `[vocab]`, `[crawl]`, `[[repos]]`, `[history]`, `[attention]` (staleness thresholds + the notification policy `attention-queue --notify-only` reads), `[carryover]` (the `enforce_blocks` gate and its per-repo cap) |
-| [OKF schema](okf-schema.md) | OKF frontmatter fields, required vs optional, validation rules |
-| [Carryover triage ranking contract](carryover-contract.md) | Canonical, producer-owned contract for `rank_carryover` — the four-lane ranking API and wire shape bastion consumes |
-| [SDLC workflows](workflows/index.md) | Claude Code SDLC pipeline commands and workflow engines |
+| [CLI reference](cli.md) | All 26 commands, one line each, with links into detail |
+| [Validation](cli/validate.md) | Checking content, the corpus, one file, or cross-source drift |
+| [State and derivation](cli/state.md) | Regenerating derived surfaces; revision history |
+| [Epics and operator gates](cli/epics.md) | Moving initiatives; clearing gates that need a human |
+| [Carryover and attention](cli/carryover.md) | Sweeping open findings; what needs the operator |
+| [Graphs, lanes and artifacts](cli/lanes.md) | What is startable; graph exports; the consumer gate |
 
-For project strategy and current focus, see [`planning/`](../planning/index.md).
+## I want to configure something
+
+| Doc | What it covers |
+|---|---|
+| [brain.toml config](brain-toml.md) | Every config section and what it controls |
+| [OKF schema](okf-schema.md) | Frontmatter fields, required vs optional, validation rules |
+
+## I want to understand how it works
+
+| Doc | What it covers |
+|---|---|
+| [Architecture](architecture.md) | Module map, the `ContentValidator` trait, core types |
+| [Carryover contract](carryover-contract.md) | The ranking API and wire shape bastion consumes |
+| [SDLC workflows](workflows/index.md) | The Claude Code pipeline commands and engines |
+
+For project strategy and current focus, see the planning vault at `core/mev/planning/index.md`.

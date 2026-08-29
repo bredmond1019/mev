@@ -12,6 +12,37 @@ related: [brain-toml-config, cli-reference, architecture]
 
 # OKF Frontmatter Schema
 
+## What this page is for
+
+**OKF frontmatter** is the YAML block every markdown file in the Brain must open with. It is what
+makes the corpus searchable and gives the structural graph its edges. This page is the field-level
+reference: what each field means, what values are legal, and which diagnostic fires when it is
+wrong.
+
+Writing a new doc? The procedure — including the four YAML traps that fail every gate at once —
+is in the `write-okf-markdown` skill. This page is the schema behind it.
+
+## Quickstart
+
+Run these in a **terminal**:
+
+```bash
+# Does my file parse and resolve?
+bastion validate-brain --structure     # is it in the corpus, does frontmatter parse
+bastion validate-brain --graph         # do its `related:` edges resolve
+bastion validate-brain --links         # do its markdown links resolve
+```
+
+**One flag per run** — they do not compose. The minimum legal block is three fields:
+
+```yaml
+---
+type: Reference
+title: What this is
+description: One line a searcher would recognise.
+---
+```
+
 Every `.md` file in the Bastion Brain repo must open with a YAML frontmatter block validated by `mev validate-brain`. This document describes every field, its constraints, and the diagnostic each violation produces.
 
 The governing decision is **D27** (company-brain `docs/decisions/`).

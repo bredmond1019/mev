@@ -12,6 +12,27 @@ related: [cli-reference, okf-schema, architecture]
 
 # `brain.toml` Config Reference
 
+## What this page is for
+
+`brain.toml` is the one config file for the whole corpus. It says which repos exist, which words
+are legal in which frontmatter field, what to skip while crawling, and when a stale item should
+start nagging. If a validation result surprises you, the answer is usually here.
+
+## Quickstart
+
+Run these in a **terminal**:
+
+```bash
+# Which brain.toml is actually in force? The first one found walking up wins.
+ls brain.toml || (cd .. && ls brain.toml)
+
+# Change a threshold, then see what moved
+mev attention-queue
+```
+
+There is no `mev config` command — you edit the file by hand and re-run whichever command reads it.
+`validate-brain` resolves it by walking up from the target root.
+
 `brain.toml` is the corpus config file for the Bastion Brain repo. `mev validate-brain` resolves it by walking up from the target root — the first `brain.toml` found wins.
 
 It controls three things:
