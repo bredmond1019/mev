@@ -71,6 +71,10 @@ command exists and is missing here, this table is wrong.
 | `validate-brain` | Validate the whole Brain corpus for OKF compliance | [validate](cli/validate.md) |
 | `validate-state` | Validate a single `state.json` | [validate](cli/validate.md) |
 | `conformance` | Check facts kept in two places still agree | [validate](cli/validate.md) |
+
+`validate-state`'s diagnostic codes (including `W_STATE_SDLC_WORKFLOW_MISSING`, a warning for a
+block with no `sdlc_workflow` field — never blocking, paired asymmetrically with the error
+`E_STATE_SDLC_WORKFLOW_ENUM`) are catalogued on [validate](cli/validate.md), not here.
 | `check-consumers` | Compile every repo that path-depends on this working tree | [lanes](cli/lanes.md) |
 
 ### Derive and write state
