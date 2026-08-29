@@ -7,13 +7,10 @@
 //! [`crate::brain::block_graph::BlockGraphNode`] or `BlockGraphExport` (see the
 //! block record's `out_of_scope`).
 //!
-//! Task 1 (this file, as first landed): signatures + the full fixture suite, with
-//! every function body returning `Default::default()` so the suite compiles and
-//! fails on behaviour, not on a missing symbol (D68). Task 2 fills in the bodies,
-//! reusing `crate::brain::availability::transitive_closure` (widened to
-//! `pub(crate)`) to seed [`block_cone`].
+//! `block_cone` reuses `crate::brain::availability::transitive_closure`
+//! (widened to `pub(crate)`) to seed the transitive downstream closure.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// One block as seen by this module's queries — a minimal, self-contained view.
 /// Callers (the `mev blocks` verb, task 3) build these from the real corpus;
@@ -104,11 +101,40 @@ pub struct QueryReport {
 /// be `Some` on its own — a block with no resolvable priority never matches a
 /// `max_priority` filter, since there's nothing to compare.
 ///
-/// STUB (task 1): returns an empty result unconditionally. Implemented in
-/// task 2.
 pub fn select<'a>(blocks: &'a [BlockInfo], query: &BlockQuery) -> Vec<&'a BlockInfo> {
-    let _ = (blocks, query);
-    Vec::default()
+    blocks
+        .iter()
+        .filter(|b| {
+            if let Some(repo) = &query.repo
+                && &b.repo != repo
+            {
+                return false;
+            }
+            if let Some(roadmap) = &query.roadmap {
+                match &b.roadmap {
+                    Some(r) if r == roadmap => {}
+                    _ => return false,
+                }
+            }
+            if let Some(status) = &query.status
+                && !status.contains(&b.status)
+            {
+                return false;
+            }
+            if let Some(startable) = query.startable
+                && b.startable != startable
+            {
+                return false;
+            }
+            if let Some(max_priority) = query.max_priority {
+                match b.priority {
+                    Some(p) if p <= max_priority => {}
+                    _ => return false,
+                }
+            }
+            true
+        })
+        .collect()
 }
 
 /// The transitive downstream cone of `seed`: every block reachable by
@@ -117,17 +143,40 @@ pub fn select<'a>(blocks: &'a [BlockInfo], query: &BlockQuery) -> Vec<&'a BlockI
 /// [`BlockInfo::is_live`]. `seed` itself is never included. Terminates on a
 /// cycle (a block already visited is never re-queued).
 ///
-/// STUB (task 1): returns an empty [`BlockCone`] unconditionally. Task 2 seeds
-/// `crate::brain::availability::transitive_closure` (widened to `pub(crate)`)
-/// with `{seed}` over the blocking-only adjacency derived from `edges`, then
-/// splits the result by `blocks`' status.
+/// Seeds `crate::brain::availability::transitive_closure` with `{seed}` over
+/// the blocking-only `dependents_of` adjacency derived from `edges` (a
+/// `DepEdge { from, to, blocking: true }` means `from` depends on `to`, so
+/// `to`'s dependents include `from`), then splits the resulting closure into
+/// `live`/`parked` by [`BlockInfo::is_live`].
 pub fn block_cone(
     seed: &str,
     edges: &[DepEdge<'_>],
     blocks: &HashMap<&str, &BlockInfo>,
 ) -> BlockCone {
-    let _ = (seed, edges, blocks);
-    BlockCone::default()
+    let mut dependents_of: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for edge in edges {
+        if !edge.blocking {
+            continue;
+        }
+        dependents_of.entry(edge.to).or_default().insert(edge.from);
+    }
+
+    let seed_set: HashSet<String> = std::iter::once(seed.to_string()).collect();
+    let closure = crate::brain::availability::transitive_closure(&seed_set, &dependents_of);
+
+    let mut cone = BlockCone::default();
+    for key in closure {
+        if key == seed {
+            continue;
+        }
+        let is_live = blocks.get(key.as_str()).is_none_or(|b| b.is_live());
+        if is_live {
+            cone.live.insert(key);
+        } else {
+            cone.parked.insert(key);
+        }
+    }
+    cone
 }
 
 /// The longest run of blocks reachable from `head` by following blocking
@@ -136,15 +185,69 @@ pub fn block_cone(
 /// node so a cycle terminates. `head` is included as the first element when the
 /// chain has any length at all.
 ///
-/// STUB (task 1): returns an empty `Vec` unconditionally. Implemented in
-/// task 2.
 pub fn same_repo_chain(
     head: &str,
     edges: &[DepEdge<'_>],
     blocks: &HashMap<&str, &BlockInfo>,
 ) -> Vec<String> {
-    let _ = (head, edges, blocks);
-    Vec::default()
+    let Some(head_block) = blocks.get(head) else {
+        return Vec::new();
+    };
+    let head_repo = head_block.repo.clone();
+
+    let mut dependents_of: HashMap<&str, Vec<&str>> = HashMap::new();
+    for edge in edges {
+        if !edge.blocking {
+            continue;
+        }
+        dependents_of.entry(edge.to).or_default().push(edge.from);
+    }
+
+    let mut visited: HashSet<&str> = HashSet::new();
+    visited.insert(head);
+    longest_same_repo_run(head, &dependents_of, blocks, &head_repo, &visited)
+}
+
+/// DFS helper for [`same_repo_chain`]: the longest run starting at `node`,
+/// exploring every dependent branch and keeping the longest. `visited` guards
+/// against revisiting a node on the current path so a cycle terminates rather
+/// than looping.
+fn longest_same_repo_run<'a>(
+    node: &'a str,
+    dependents_of: &HashMap<&'a str, Vec<&'a str>>,
+    blocks: &HashMap<&str, &BlockInfo>,
+    head_repo: &str,
+    visited: &HashSet<&'a str>,
+) -> Vec<String> {
+    let mut best = vec![node.to_string()];
+    let Some(deps) = dependents_of.get(node) else {
+        return best;
+    };
+    for &dep in deps {
+        if visited.contains(dep) {
+            continue;
+        }
+        let Some(dep_block) = blocks.get(dep) else {
+            continue;
+        };
+        if dep_block.repo != head_repo || !dep_block.is_live() {
+            continue;
+        }
+        let mut visited_next = visited.clone();
+        visited_next.insert(dep);
+        let mut candidate = vec![node.to_string()];
+        candidate.extend(longest_same_repo_run(
+            dep,
+            dependents_of,
+            blocks,
+            head_repo,
+            &visited_next,
+        ));
+        if candidate.len() > best.len() {
+            best = candidate;
+        }
+    }
+    best
 }
 
 #[cfg(test)]
