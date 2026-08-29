@@ -35,10 +35,13 @@ There is no `mev config` command — you edit the file by hand and re-run whiche
 
 `brain.toml` is the corpus config file for the Bastion Brain repo. `mev validate-brain` resolves it by walking up from the target root — the first `brain.toml` found wins.
 
-It controls three things:
+The three sections every corpus needs:
 - **Controlled vocabularies** (`[vocab]`) — the closed sets for `layer` and `status` OKF fields
 - **Crawl skip list** (`[crawl]`) — directories pruned during the walk
 - **Project registry** (`[[repos]]`) — the valid `project` slug values + metadata for future sync
+
+Plus four optional sections covered further down: `[history]`, `[attention]`, `[carryover]`, and
+`[permission_profiles]`.
 
 ---
 
@@ -251,6 +254,65 @@ An absent `[carryover]` table is equivalent to the example above — enforcement
 
 ---
 
+## `[permission_profiles]`
+
+Graded-action permission levels for an orchestration chain run (`HQ.5.B`). mev's `BrainConfig`
+parses this table so nothing silently drops it, but **mev enforces none of it** — nothing in this
+repo reads or acts on `permission_profiles`; parsing it only keeps mev and any other consumer
+(engine-rs's `EN.12.C`, the enforcement half) agreeing on the same config shape instead of each
+maintaining a private struct that can drift from the others. See `docs/permission-profiles.md` in
+the brain repo for what the levels mean and how `main_push` is scoped (a LOCAL merge only —
+publishing to `origin` is never a profile-granted action, at any level).
+
+| Key | Type | Description |
+|---|---|---|
+| `never_allowed` | `string[]` | Actions forbidden at every level regardless of profile. Exactly one entry today (`clear_operator_gate`) — a second entry is a change to this list, not a per-level setting. |
+| `default` | string | The profile id in force when no chain-level override is given. Must never equal the most permissive level. |
+| `levels.<id>` | table | One entry per named level (`locked`, `standard`, `unrestricted` in the live corpus) — see below. |
+
+Each `[permission_profiles.levels.<id>]` entry:
+
+| Key | Type | Description |
+|---|---|---|
+| `id` | string | Stable identifier, stamped verbatim into every run record. |
+| `meaning` | string | Human-readable description of what this level is for. |
+| `mini_install` | bool | Whether this level permits installing on the Mac Mini. |
+| `main_push` | bool | Whether this level permits merging into LOCAL `main` — never a publish to `origin`. |
+| `cross_repo_write` | bool | Whether this level permits writing to a repo other than the chain's own. |
+
+```toml
+[permission_profiles]
+never_allowed = ["clear_operator_gate"]
+default       = "standard"
+
+[permission_profiles.levels.locked]
+id                = "locked"
+meaning           = "Exploratory/unattended runs; no side effect outside the working tree without an operator gate"
+mini_install      = false
+main_push         = false
+cross_repo_write  = false
+
+[permission_profiles.levels.standard]
+id                = "standard"
+meaning           = "Ordinary supervised chain work: lands changes and merges to local main, never installs on the Mini"
+mini_install      = false
+main_push         = true
+cross_repo_write  = true
+
+[permission_profiles.levels.unrestricted]
+id                = "unrestricted"
+meaning           = "Explicit, deliberately-invoked runs; permits every graded action, never the default"
+mini_install      = true
+main_push         = true
+cross_repo_write  = true
+```
+
+An absent `[permission_profiles]` table parses to every field empty/off (`never_allowed: []`,
+`default: None`, `levels: {}`) rather than erroring — every fixture `brain.toml` in this repo's own
+test suite predates this table and still parses cleanly.
+
+---
+
 ## Lookup order
 
 `find_brain_config(root)` walks up from `root`, checking for `brain.toml` at each level:
@@ -268,4 +330,11 @@ The first file found is parsed and returned. If no `brain.toml` is found before 
 
 ## Defaults when sections are absent
 
-All three top-level sections are optional. An empty `brain.toml` (or no file at all once found) is valid TOML but produces empty vocabularies, meaning every controlled-vocab field will fail OKF validation. This is intentional: a misconfigured or missing vocab is a configuration error surfaced as diagnostics rather than a silent pass.
+Every top-level section is optional at the parser level — `BrainConfig` derives `Default` and every
+field within it does too, so an empty `brain.toml` (or no file at all once found) parses cleanly.
+`[vocab]`, `[crawl]`, and `[[repos]]` absent means empty vocabularies, meaning every controlled-vocab
+field will fail OKF validation — intentional: a misconfigured or missing vocab is a configuration
+error surfaced as diagnostics rather than a silent pass. `[history]`, `[attention]`, `[carryover]`,
+and `[permission_profiles]` absent means each falls back to its documented defaults above (history
+on/keep 10, attention's fail-closed notify rule, carryover enforcement off, permission_profiles
+empty) rather than an error.
