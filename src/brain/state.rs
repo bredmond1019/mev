@@ -10109,7 +10109,6 @@ mod check_field_policy_tests {
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].locator, "E_STATE_SDLC_WORKFLOW_ENUM");
 
-        let mut b = b;
         b.sdlc_workflow = None;
         let diags = run_field_policy(b);
         assert_eq!(diags.len(), 1);
