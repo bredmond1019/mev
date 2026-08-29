@@ -9,6 +9,7 @@
 // via `crate::attention_queue` in `src/lib.rs`.
 pub(crate) mod attention_payload;
 pub mod availability;
+pub mod block;
 pub mod block_graph;
 pub mod blocks;
 pub mod carryover;
