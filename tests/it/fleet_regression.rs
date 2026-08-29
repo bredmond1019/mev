@@ -379,3 +379,80 @@ fn carries_new_edge_identifies_operator_and_approval_only() {
     assert!(carries_new_edge(&with_operator));
     assert!(carries_new_edge(&with_approval));
 }
+
+// -----------------------------------------------------------------------
+// any_active_fleet_lease — fail-open branches, none of which the one
+// happy-path run (against the real fleet, in the test above) exercises.
+// -----------------------------------------------------------------------
+
+#[cfg(unix)]
+fn fake_lease_root(dir: &std::path::Path, script_body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script_dir = dir.join("base-template").join("scripts");
+    std::fs::create_dir_all(&script_dir).unwrap();
+    let script = script_dir.join("fleet_concurrency_check.py");
+    std::fs::write(&script, script_body).unwrap();
+    let mut perms = std::fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script, perms).unwrap();
+    dir.to_path_buf()
+}
+
+#[test]
+fn any_active_fleet_lease_false_when_script_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    // No base-template/scripts/fleet_concurrency_check.py under this root at all.
+    assert!(!any_active_fleet_lease(dir.path()));
+}
+
+#[cfg(unix)]
+#[test]
+fn any_active_fleet_lease_false_on_non_zero_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = fake_lease_root(
+        dir.path(),
+        "#!/usr/bin/env python3\nimport sys\nsys.exit(1)\n",
+    );
+    assert!(!any_active_fleet_lease(&root));
+}
+
+#[cfg(unix)]
+#[test]
+fn any_active_fleet_lease_false_on_malformed_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = fake_lease_root(dir.path(), "#!/usr/bin/env python3\nprint('not json')\n");
+    assert!(!any_active_fleet_lease(&root));
+}
+
+#[cfg(unix)]
+#[test]
+fn any_active_fleet_lease_false_when_both_arrays_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = fake_lease_root(
+        dir.path(),
+        "#!/usr/bin/env python3\nprint('{\"active\": [], \"exclusive_leases\": []}')\n",
+    );
+    assert!(!any_active_fleet_lease(&root));
+}
+
+#[cfg(unix)]
+#[test]
+fn any_active_fleet_lease_true_when_active_is_non_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = fake_lease_root(
+        dir.path(),
+        "#!/usr/bin/env python3\nprint('{\"active\": [\"jynx (native-build)\"], \"exclusive_leases\": []}')\n",
+    );
+    assert!(any_active_fleet_lease(&root));
+}
+
+#[cfg(unix)]
+#[test]
+fn any_active_fleet_lease_true_when_exclusive_leases_is_non_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = fake_lease_root(
+        dir.path(),
+        "#!/usr/bin/env python3\nprint('{\"active\": [], \"exclusive_leases\": [\"jynx (exclusive)\"]}')\n",
+    );
+    assert!(any_active_fleet_lease(&root));
+}
