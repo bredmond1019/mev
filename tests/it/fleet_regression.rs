@@ -31,16 +31,60 @@
 //! `agentic-portfolio` HQ root that houses this repo). If it isn't found — e.g. `mev`
 //! checked out standalone, outside the fleet — the test prints why and returns rather
 //! than failing; the fleet-wide guarantee only means something inside the fleet.
+//!
+//! ## Concurrent-lane stability check
+//!
+//! The live corpus is not a fixture — other sessions (orchestrated *or* one-off,
+//! `/begin-orchestration`-leased or not) can author a block-status change in some
+//! OTHER repo's `state.json` without yet re-running `mev emit-state --write` there,
+//! which leaves that repo's own stored `focus.next`/`focus.blocked[]` cache
+//! transiently stale relative to its own freshly-authored `tracks[]` — the exact
+//! "stale sibling `focus.next`" pattern `derive-state-safely` documents as
+//! self-resolving. That is real staleness, correctly detected — but it is not a
+//! regression in THIS build's derivation code, which is the only thing this gate
+//! exists to catch. Measured 2026-08-29: this test failed three times in one session
+//! purely because a concurrent `/begin-orchestration` run (which DOES take a fleet
+//! lock lease) was actively closing blocks in `jynx`/`base-template` mid-run — but a
+//! lease-based skip would miss the equally-common case of a concurrent *one-off*
+//! `/sdlc-task`/`/sdlc-flow` run, which takes no lease at all.
+//!
+//! The fix layers two independent signals, neither of which depends on the other:
+//!
+//! 1. **Lease check first, when available.** `base-template/scripts/fleet_concurrency_check.py
+//!    status` is queried once. If it reports ANY active lease or lock, the corpus is
+//!    known — not merely suspected — to be under active edit by an orchestrated lane
+//!    right now, and the result is immediately inconclusive with no need to wait.
+//!    This is the fast, authoritative path, but it only covers lease-taking
+//!    (`/begin-orchestration`-driven) writers.
+//! 2. **Timed double-read as the fallback/backstop.** [`collect_mismatches`] is called
+//!    twice, a few seconds apart, regardless of what the lease check found — a
+//!    concurrent writer's commits are bursty (think, edit, write — not continuous), so
+//!    a short window can coincidentally land between two writes even while a lease is
+//!    held (measured 2026-08-29: a stable-across-4s read happened while `jynx` still
+//!    held an active lease). If the mismatch set differs between the two reads, the
+//!    corpus is observably in motion and the result is inconclusive. Only a mismatch
+//!    set that is **identical across both reads, with no lease active either**, is
+//!    treated as a real, stable disagreement worth failing on.
+//!
+//! Neither signal alone is sufficient: leases miss unleased one-off writers; a short
+//! timed window can miss a bursty leased writer. Together they cover both.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use mev::brain::config::{find_brain_root, load_brain_config};
+use mev::brain::config::{BrainConfig, find_brain_root, load_brain_config};
 use mev::brain::state::{
     ApprovalDep, Block, BlockDep, BlockedBy, ExternalDep, OperatorDep, StateFile, StateSource,
     build_state_graph, derive_brain_focus, derive_focus, discover_state_files, load_state,
     tier_scope_for,
 };
+
+/// How long to wait between the two stability-check reads. Long enough that a
+/// concurrent `emit-state --write` (which touches many files in one pass) is very
+/// unlikely to land entirely between the two reads and be missed; short enough that
+/// this test does not meaningfully slow the suite down.
+const STABILITY_CHECK_DELAY: Duration = Duration::from_secs(4);
 
 /// True if this `TrackBlock`'s own `depends_on` carries an `operator` or `approval`
 /// entry — the "new edge" the ticket adds meaning to.
@@ -69,24 +113,55 @@ fn ids(blocks: &[Block]) -> HashSet<String> {
     blocks.iter().map(|b| b.id.clone()).collect()
 }
 
-#[test]
-fn fleet_readiness_is_unchanged_for_blocks_without_a_new_edge() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let root = match find_brain_root(&manifest_dir) {
-        Ok(root) => root,
-        Err(e) => {
-            eprintln!(
-                "fleet_regression: skipping — no brain.toml found walking up from {}: {e}",
-                manifest_dir.display()
-            );
-            return;
-        }
+/// Query `base-template/scripts/fleet_concurrency_check.py status` for whether ANY
+/// repo currently holds an active lease or lock. `true` means the corpus is known to
+/// be under active edit by an orchestrated lane right now. Fails OPEN — `false` (i.e.
+/// "assume no lease") on anything that goes wrong (script absent, `python3` missing,
+/// malformed output, timeout) — a lookup failure here must never make the fleet
+/// regression check MORE likely to false-fail, only fall back to the timed check.
+fn any_active_fleet_lease(root: &Path) -> bool {
+    let script = root
+        .join("base-template")
+        .join("scripts")
+        .join("fleet_concurrency_check.py");
+    if !script.is_file() {
+        return false;
+    }
+
+    let output = std::process::Command::new("python3")
+        .arg(&script)
+        .arg("status")
+        .current_dir(root)
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+
+    let Ok(text) = String::from_utf8(output.stdout) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
     };
 
-    let config = load_brain_config(&root.join("brain.toml"))
-        .unwrap_or_else(|e| panic!("failed to load {}: {e}", root.join("brain.toml").display()));
+    let has_entries = |key: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| !a.is_empty())
+    };
+    has_entries("active") || has_entries("exclusive_leases")
+}
 
-    let (sources, _discovery_diags) = discover_state_files(&root, &config);
+/// One full load-derive-compare pass over the live fleet corpus at `root`. Returns
+/// `(total_blocks_checked, mismatches)` — same shape and same derivation logic the
+/// test used inline before the stability check was added; factored out purely so it
+/// can be called twice.
+fn collect_mismatches(root: &Path, config: &BrainConfig) -> (usize, Vec<String>) {
+    let (sources, _discovery_diags) = discover_state_files(root, config);
     assert!(
         sources.len() >= 5,
         "fleet_regression: only found {} state.json sources under {} — this looks like a \
@@ -122,8 +197,8 @@ fn fleet_readiness_is_unchanged_for_blocks_without_a_new_edge() {
         // Kind-aware expected derivation — mirrors `check_focus_drift`'s split so this
         // test can never disagree with the validator about which derivation applies.
         let (derived_next, derived_blocked, stored_next, stored_blocked) = if file.kind == "brain" {
-            let scope = tier_scope_for(file, &config);
-            let derived = derive_brain_focus(src, file, &scope, &config, &graph, &files);
+            let scope = tier_scope_for(file, config);
+            let derived = derive_brain_focus(src, file, &scope, config, &graph, &files);
             (
                 ids(&derived.next),
                 ids(&derived.blocked),
@@ -180,21 +255,88 @@ fn fleet_readiness_is_unchanged_for_blocks_without_a_new_edge() {
         }
     }
 
+    (total_blocks_checked, mismatches)
+}
+
+#[test]
+fn fleet_readiness_is_unchanged_for_blocks_without_a_new_edge() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = match find_brain_root(&manifest_dir) {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!(
+                "fleet_regression: skipping — no brain.toml found walking up from {}: {e}",
+                manifest_dir.display()
+            );
+            return;
+        }
+    };
+
+    let config = load_brain_config(&root.join("brain.toml"))
+        .unwrap_or_else(|e| panic!("failed to load {}: {e}", root.join("brain.toml").display()));
+
+    let (total_blocks_checked_1, mismatches_1) = collect_mismatches(&root, &config);
     assert!(
-        total_blocks_checked > 0,
-        "fleet_regression: compared zero blocks across {} loaded files — the fleet fixture \
-         path resolved but nothing was actually derived; this would make the gate vacuously \
-         pass, which is worse than not having it",
-        files.len()
+        total_blocks_checked_1 > 0,
+        "fleet_regression: compared zero blocks on the first read — the fleet fixture path \
+         resolved but nothing was actually derived; this would make the gate vacuously pass, \
+         which is worse than not having it"
     );
 
+    let mismatch_set_1: HashSet<&str> = mismatches_1.iter().map(String::as_str).collect();
+    if mismatch_set_1.is_empty() {
+        return; // clean on the first read — no need to spend the stability-check delay
+    }
+
+    if any_active_fleet_lease(&root) {
+        eprintln!(
+            "fleet_regression: inconclusive — {} mismatch(es) found, but an orchestrated lane \
+             currently holds an active fleet lease/lock, so the corpus is known to be under \
+             active edit right now. Skipping rather than failing; no need to wait out the \
+             timed stability check when we already have direct evidence.\nmismatch(es):\n{}",
+            mismatches_1.len(),
+            mismatches_1.join("\n"),
+        );
+        return;
+    }
+
+    std::thread::sleep(STABILITY_CHECK_DELAY);
+
+    let (total_blocks_checked_2, mismatches_2) = collect_mismatches(&root, &config);
     assert!(
-        mismatches.is_empty(),
+        total_blocks_checked_2 > 0,
+        "fleet_regression: compared zero blocks on the second read, after comparing {} on the \
+         first — the corpus disappeared mid-test rather than merely changing",
+        total_blocks_checked_1
+    );
+
+    let mismatch_set_2: HashSet<&str> = mismatches_2.iter().map(String::as_str).collect();
+    if mismatch_set_1 != mismatch_set_2 {
+        eprintln!(
+            "fleet_regression: inconclusive — the mismatch set changed between two reads {:?} \
+             apart, which means the live corpus is being actively edited by something else \
+             right now (an orchestrated lane, a one-off /sdlc-task run, or a manual write) \
+             rather than exhibiting a stable regression in this build's own derivation code. \
+             Skipping rather than failing.\nfirst read ({} mismatch(es)):\n{}\nsecond read ({} \
+             mismatch(es)):\n{}",
+            STABILITY_CHECK_DELAY,
+            mismatches_1.len(),
+            mismatches_1.join("\n"),
+            mismatches_2.len(),
+            mismatches_2.join("\n"),
+        );
+        return;
+    }
+
+    // Identical mismatch set across two reads several seconds apart: not explained by
+    // something else editing the files in between. Treat as a real, stable regression.
+    panic!(
         "fleet regression: readiness/focus.next/focus.blocked[] changed for {} block(s) that \
-         carry no operator/approval edge — a change here can silently un-block or re-block work \
-         fleet-wide:\n{}",
-        mismatches.len(),
-        mismatches.join("\n")
+         carry no operator/approval edge, STABLE across two reads {:?} apart — a change here \
+         can silently un-block or re-block work fleet-wide:\n{}",
+        mismatches_2.len(),
+        STABILITY_CHECK_DELAY,
+        mismatches_2.join("\n")
     );
 }
 
