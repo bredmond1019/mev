@@ -28,6 +28,7 @@ start right now across the whole corpus.
 |---|---|
 | [`frontier`](#frontier---json-path) | What is startable right now, corpus-wide? |
 | [`lanes`](#lanes---json-path) | Which lane segments are available, and what would unblock the most? |
+| [`blocks`](#blocks-flags-path) | What's open in this repo/roadmap, what's startable, what does closing this one block free, how deep can I go without leaving this repo? |
 | [`emit-block-graph`](#emit-block-graph-flags-path) | The block-dependency graph, as JSON |
 | [`emit-graph`](#emit-graph---pretty-path) | The `scope:doc_id` knowledge graph, as JSON |
 | [`generate-graph`](#generate-graph---out-path) | The same graph as a browsable HTML page |
@@ -45,6 +46,9 @@ mev frontier
 
 # Which lane segments are live, and what unblocks the most?
 mev lanes
+
+# What's open in mev, ranked by what closing it would free?
+mev blocks --repo mev --startable --leverage
 
 # Did my change break a repo that depends on mev?
 scripts/check_consumers.sh
@@ -269,6 +273,139 @@ mev lanes --json ~/Dev/agentic-portfolio
 
 # Just the startable segments with nonzero leverage
 mev lanes --json | jq '.segments[] | select(.availability == "startable" and .leverage.lanes_freed > 0)'
+```
+
+---
+
+### `blocks [flags] [path]`
+
+Filtered block queries, the transitive leverage cone, and the same-repo chain —
+`MV.ticket.query-verb-leverage-chain-and-filters`. Answers the ad-hoc questions an operator
+actually asks (what is open in this repo, in this roadmap, startable, above this priority) plus
+two derivations no other verb computes: the **transitive** downstream cone of a block (what
+closing it frees, live vs. parked) and the longest run of blocks reachable **without leaving one
+repo**. Read-only; writes nothing.
+
+```bash
+mev blocks [--repo <SLUG>] [--roadmap <SLUG>] [--startable] [--blocked]
+           [--max-priority <N>] [--leverage] [--chain] [--limit <N>] [--json] [path]
+```
+
+| Argument / Flag | Default | Description |
+|---|---|---|
+| `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it) |
+| `--repo <SLUG>` | unset | Narrow to one repo slug. **Filters on its own** — see the callout below |
+| `--roadmap <SLUG>` | unset | Narrow to one roadmap slug — see the attribution rules below |
+| `--startable` | off | Narrow to blocks that are currently startable (no unmet block/gate deps). Mutually exclusive with `--blocked` |
+| `--blocked` | off | Narrow to blocks that are currently blocked — the inverse of `--startable`, not a status filter (`"blocked"` is a derived lane, never an authored status). Mutually exclusive with `--startable` |
+| `--max-priority <N>` | unset | Narrow to blocks whose effective priority is `<= N` (inclusive). A block with no resolvable priority never matches |
+| `--leverage` | off | Report each selected startable block's transitive downstream cone (live/parked), sorted by live cone size descending. Mutually exclusive with `--chain` |
+| `--chain` | off | Report each selected startable block's longest same-repo run. Mutually exclusive with `--leverage` |
+| `--limit <N>` | unset | Cap the number of blocks printed/serialized, applied after any `--leverage` sort |
+| `--json` | off | Emit this verb's own `QueryReport` shape instead of one text line per block |
+
+#### `--repo` filters on its own
+
+**Unlike `emit-block-graph`**, where a bare `--repo` without `--scope repo` is silently ignored
+and the whole corpus comes back looking like a filtered result (see
+[`emit-block-graph`](#emit-block-graph-flags-path) above), `--repo` on `blocks` always narrows the
+result set — there is no `--scope` flag to forget. If you are used to `emit-block-graph`'s habit
+of needing a second flag, that habit does not apply here: `mev blocks --repo mev` alone returns
+only `mev`'s blocks.
+
+#### Roadmap attribution
+
+`--roadmap` is resolved via `brain::lane_segments`, which carries D57's roadmap-membership rules,
+and matches on exactly one of two attributions per block:
+
+1. **`origin_roadmap`** — the roadmap that created the block. This is the default: when a block
+   has an `origin_roadmap`, `--roadmap` matches against it.
+2. **The scheduled roadmap** — the roadmap a block is currently scheduled under. Used only as a
+   fallback, for blocks with no declared `origin_roadmap`.
+
+A `--roadmap` filter never falls back to "match everything" when the membership index has no
+entry for a slug — an unrecognized or empty roadmap matches nothing, not the whole corpus (the
+same "silence must mean zero, not 'couldn't check'" discipline as `lanes`' `degraded` flag).
+
+#### The leverage cone: live vs. parked
+
+`--leverage` walks the **transitive** downstream closure of each selected startable block —
+everything that (directly or indirectly) depends on it, however many hops away — and splits the
+result into `live` and `parked` members. Parked statuses (`deferred`, `wontfix`, `closed`) are
+reported but **never counted**: the ordering ranks by live cone size only.
+
+This distinction is load-bearing, not cosmetic. A cone of 11 blocks that is entirely parked frees
+nothing pickup-able right now — ranking it above a smaller, all-live cone would send an operator
+at exactly the wrong block. (Measured against the live corpus 2026-08-29: `dependent_count` on
+`emit-block-graph` counts direct dependents only and cannot answer this at all — a block with a
+`dependent_count` of 2 had a real transitive cone of 11 blocks across three repos.)
+
+`--chain` computes a different derivation: the longest run of blocks reachable from a startable
+head **without ever crossing a repo boundary** — a same-repo dependent extends the chain, a
+cross-repo dependent does not, and a parked block never extends it either. Both the cone walk and
+the chain walk terminate on a dependency cycle rather than hanging.
+
+`--leverage` and `--chain` are mutually exclusive — pick one derivation per invocation.
+
+#### Text output shape
+
+One line per selected block, plus (with `--leverage` or `--chain`) the derivation's result on the
+following indented line:
+
+```
+mev:MV.ticket.some-block
+  leverage: 3 live, 8 parked
+```
+
+or, with `--chain`:
+
+```
+mev:MV.ticket.some-block
+  chain: mev:MV.ticket.some-block -> mev:MV.ticket.next -> mev:MV.ticket.next-next
+```
+
+#### `--json` output shape
+
+This verb's own report type — `QueryReport` — not `BlockGraphNode`/`BlockGraphExport`; neither of
+those shared types gained a field for this verb:
+
+```json
+{
+  "blocks": ["mev:MV.ticket.some-block"],
+  "cones": {
+    "mev:MV.ticket.some-block": {
+      "live": ["mev:MV.ticket.downstream-a", "mev:MV.ticket.downstream-b"],
+      "parked": ["mev:MV.ticket.parked-c"]
+    }
+  },
+  "chains": {}
+}
+```
+
+`cones` is populated only under `--leverage`; `chains` only under `--chain`. Both are empty
+objects when their flag is not given.
+
+#### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Query computed and printed |
+| `1` | `brain.toml` not found/unreadable, `--startable` combined with `--blocked`, or `--leverage` combined with `--chain` |
+
+**Examples:**
+
+```bash
+# What's open in mev?
+mev blocks --repo mev
+
+# What's startable in mev, ranked by what closing each one frees?
+mev blocks --repo mev --startable --leverage
+
+# How deep can I go in mev without switching repos?
+mev blocks --repo mev --startable --chain
+
+# Everything startable at priority 0 or 1, corpus-wide
+mev blocks --startable --max-priority 1 --json
 ```
 
 ---
