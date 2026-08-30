@@ -8,10 +8,25 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-29T22:15:00-03:00"
+timestamp: "2026-08-29T23:00:00-03:00"
 ---
 
 ## [run: 2026-08-29]
+
+### `MV.ticket.sdlc-workflow-missing-value-diagnostic` task 4 closed; both binaries rebuilt on PATH
+
+- **What:** Ran `/sdlc-task MV.ticket.sdlc-workflow-missing-value-diagnostic 4` in place on `main`
+  (tasks 1-3 already merged). All four validation commands passed, but the engine's bookkeep step
+  left the block `open` in `state.json` — closed by hand (`11835397a`). This is the second
+  confirmed instance this session of the already-filed `sdlc-task-bookkeep-omits-the-block-from-state`
+  defect; recorded in `planning/orchestration-run/query-verb-followthrough/notes.md`. Then rebuilt
+  and reinstalled both `mev` and `bastion` on `PATH` (`cargo install --path .` in each) so the
+  session's own work is what actually runs going forward.
+- **Why:** The block was genuinely done — full validation green — and per HQ's own routing rule
+  ("if it is not in `state.json`, it does not exist") a passed-but-unclosed block is a real gap, not
+  a cosmetic one. Rebuilding on `PATH` matters because the install, not the merge, is this machine's
+  delivery boundary — a stale binary silently reverts generated boards to an older format.
+- **Refs:** `planning/orchestration-run/query-verb-followthrough/`
 
 ### `/close-out` — fixed a real concurrent-lane flake in `fleet_regression`, closed the loop
 
