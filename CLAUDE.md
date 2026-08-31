@@ -90,9 +90,19 @@ scripts/check_consumers.sh
 # fixture suite for the consumer compile gate itself — cargo/git shimmed, no real build
 scripts/test_check_consumers.sh
 
+# same question as a verb, per-consumer, with four typed outcomes (only `broken` fails)
+cargo run -- check-consumers [--consumer bastion]
+
 # run    — validate the learn-ai content tree (defaults to ../learn-ai/content/learn)
 cargo run -- validate ../learn-ai/content/learn
 ```
+
+**Two skills carry the traps in mev's own query surface.** Before changing a public signature here,
+load **`check-blast-radius`** — `check-consumers`' four outcomes and which of them actually fail a
+run, plus why `bastion code --workspace mev` cannot see a caller in another repo. Before answering
+"what should I work on next" with `frontier`/`lanes`/`blocks`, load **`pick-the-next-block`** — the
+three verbs report three different meanings of "ready", and `mev blocks --repo` filters on its own
+while `emit-block-graph --repo` silently does not.
 
 > **Always prefer `cargo nextest run --lib --bins` over plain `cargo test` in this repo.** This is
 > wired as the `fastCommand` on the `test` check in `planning/harness.json`, which the SDLC
