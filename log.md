@@ -8,8 +8,32 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-08-29T23:00:00-03:00"
+timestamp: "2026-09-01T00:30:00-03:00"
 ---
+
+## [run: 2026-09-01]
+
+### `planning/context.md` audit + the "25 integration-test binaries" claim corrected fleet-locally
+
+- **What:** Audited `planning/context.md` against the repo's real state and repaired it in place:
+  the Document Set table gained 8 files that exist and were missing (`knowledge.md`, `memory.md`,
+  `handoff.md`, `state.json`, `blocks/`, `harness.examples.md`, `archive/`, and the whole repo-root
+  `docs/` tree); the Project Sequence went from a generic Phase 0/1/2/3+ scaffold to the 12 real
+  phase names in `master-plan.md`; Governing Principles went from 3 rules + 2 unfilled placeholders
+  to all 7 of CLAUDE.md's standing rules condensed one line each, with CLAUDE.md named canonical;
+  the 4 empty Fast Facts placeholders were filled with evergreen values and a line added routing
+  current phase/block counts to `status.md`. Separately corrected the stale
+  **"25 integration-test binaries"** claim in three live places — CLAUDE.md standing rule 6, the
+  Build/test/run block, and the `PreToolUse` hook's own denial message in `.claude/settings.json`.
+  Also authored ticket `MV.ticket.stale-doc-attention-lane` (block record + 6-task spec, wave 300).
+- **Why:** `context.md` was largely an unfilled scaffold that described mev as learn-ai/MDX-only,
+  four months and eleven phases out of date. The 25-binaries figure was never mev's: `cargo metadata`
+  reports exactly one integration target (`tests/it`, 65 modules, 743 tests, alongside 1268 unit
+  tests), and mev's own ~57 test binaries were consolidated into it by `373e306` on 2026-08-27. The
+  number is engine-core's, from `docs/decisions/D57-rust-sdlc-iteration-speed.md:32`, and was copied
+  across when the rule was written. The nextest preference is still right — the reason was wrong.
+- **Refs:** `planning/blocks/MV.ticket.stale-doc-attention-lane.json`,
+  `planning/MV.ticket.stale-doc-attention-lane/tasks.json`, HQ `docs/decisions/D83-okf-created-updated-frontmatter.md`
 
 ## [run: 2026-08-29]
 

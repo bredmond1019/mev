@@ -51,10 +51,18 @@ stays `null` — a normal, expected state, never a defect to chase.
    identities/URLs; flag any other handle or profile link as unverified before publishing it.
 6. **Use `cargo nextest run`, never plain `cargo test`, for any test run you invoke yourself
    during a task** (scoped: `cargo nextest run <module::path>`; full fast pass: `cargo nextest run
-   --lib`). 25 integration-test binaries make plain `cargo test` slow. The one exception is the
-   task explicitly designated to own full-suite validation for a spec — that task runs the real
-   `cargo test` / `cargo build --release` gates, per `planning/harness.json`'s `command` (not
-   `fastCommand`). See "Build / test / run" below for the full rationale.
+   --lib --bins`). The suite is ~2000 tests — 1268 unit tests under `src/` plus 743 integration
+   tests in **one** binary, `tests/it` (65 modules, auto-discovered from `tests/it/main.rs`).
+   Scoping is the win: `--lib --bins` skips linking and running the `it` binary entirely, and
+   nextest's process-per-test model gives isolation and per-test timing that `cargo test`'s
+   in-process threading does not. A `PreToolUse` hook in `.claude/settings.json` denies bare
+   `cargo test`; the sanctioned escape hatch is prefixing `NEXTEST_POLICY_OVERRIDE=1`. The one
+   exception is the task explicitly designated to own full-suite validation for a spec — that task
+   runs the real `cargo test` / `cargo build --release` gates, per `planning/harness.json`'s
+   `command` (not `fastCommand`). See "Build / test / run" below for the full rationale.
+   *(This rule said "25 integration-test binaries" until 2026-09-01. That number was engine-rs's,
+   and mev's own ~57 test binaries were consolidated into the single `it` binary by `373e306` on
+   2026-08-27. The conclusion never changed; only the reason was wrong.)*
 7. **Never `git push` this repo directly from inside it.** This repo sits in the fleet's Cargo
    path-dependency graph (`mev` -> `okf-core`; and `bastion`/`engine-rs` -> `mev`), and every
    Rust repo's CI clones its sibling path-deps at their unpinned default branch — pushing out of
@@ -80,12 +88,14 @@ rustup show
 # build  — release binary at target/release/mev
 cargo build --release
 
-# test   — fast, use this over plain `cargo test` (25 integration test binaries make full
-# `cargo test` slow — nextest runs each as a parallel process instead of serially)
+# test   — fast, use this over plain `cargo test`. Skips the tests/it integration binary
+# (743 tests in 65 modules) entirely and runs each test as its own process.
 cargo nextest run --lib --bins
 
-# full test — unit + integration (tests/); AUTHORITATIVE for the review verdict
-cargo test
+# full test — unit + integration (tests/it); AUTHORITATIVE for the review verdict.
+# A PreToolUse hook denies bare `cargo test`; prefix NEXTEST_POLICY_OVERRIDE=1 only in
+# the task that owns full-suite validation for a spec.
+NEXTEST_POLICY_OVERRIDE=1 cargo test
 
 # lint/format gates (must pass before review)
 cargo fmt --check
