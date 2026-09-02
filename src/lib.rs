@@ -425,10 +425,10 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     use brain::state::{
         StateLoadError, build_state_graph, check_backlog_integrity, check_backlog_staleness,
         check_carryover_already_satisfied, check_carryover_broken_predicate,
-        check_carryover_staleness, check_epics, check_field_policy, check_focus_drift,
-        check_op_slug_stutter, check_operator_staleness, check_rollup, check_schema,
-        check_state_graph, check_status_consistency, detect_cycles, discover_state_files,
-        load_state,
+        check_carryover_staleness, check_epics, check_field_policy, check_finding_id_orphan,
+        check_focus_drift, check_op_slug_stutter, check_operator_staleness, check_rollup,
+        check_schema, check_state_graph, check_status_consistency, detect_cycles,
+        discover_state_files, load_state,
     };
     use std::collections::HashMap;
 
@@ -594,6 +594,9 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
             file,
             &carryover_report,
         ));
+        report
+            .diagnostics
+            .extend(check_finding_id_orphan(src, file, &carryover_report));
         report
             .diagnostics
             .extend(check_backlog_staleness(src, file, today, &config.attention));

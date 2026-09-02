@@ -772,6 +772,176 @@ pub fn check_carryover_broken_predicate(
     diags
 }
 
+/// A `finding_id` shaped like a `mev graph-findings` machine-emitted digest —
+/// 64 lowercase hex characters. Every one of these is legitimately
+/// single-repo (`MV.16.D`'s measured split: 24 of 49 live clusters are this
+/// shape) and must never be considered for the near-neighbour typo check
+/// below — comparing hex digests against each other or against hand-authored
+/// prose ids answers no useful question and would only add noise.
+fn is_machine_emitted_finding_id(id: &str) -> bool {
+    id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Edit distance below which two DISTINCT `finding_id`s are considered a
+/// "near miss" — the shape a mistyped join key leaves behind: two ids that
+/// were probably meant to be one.
+///
+/// Measured 2026-09-02 over the 25 hand-authored (non-hex-digest) ids live in
+/// the corpus at that time (`mev carryover --json` .clusters[].finding_id,
+/// hex-shaped ids excluded): the CLOSEST any two distinct ids came to each
+/// other was edit distance 14, between `ptbr-parity-2026-08` and
+/// `voice-fingerprint-2026-08` (which share the `-2026-08` date suffix but
+/// name unrelated findings). Every other pair measured strictly farther.
+/// Per `MV.16.D` task 2 ("do not invent a number; choose the largest
+/// threshold that yields zero warnings on today's corpus"), 13 is that
+/// largest threshold — one below the closest real pair, so it stays
+/// zero-result against everything measured while remaining as sensitive as
+/// the live corpus allows. This is pinned by
+/// `finding_id_near_miss_threshold_yields_zero_on_closest_known_pair` below;
+/// if a future corpus addition drifts two DIFFERENT findings inside this
+/// distance, that test (or the live `--state` run) goes noisy and the
+/// threshold needs re-deriving, not silently trusting.
+const FINDING_ID_NEAR_MISS_THRESHOLD: usize = 13;
+
+/// Levenshtein (single-character insert/delete/substitute) edit distance
+/// between two strings, computed over Unicode scalar values. `finding_id`s
+/// are kebab-case ASCII in practice, so scalar-value comparison is exact for
+/// the corpus this runs over; there is no dependency on an external crate for
+/// what is a handful of short strings compared a handful of times per run.
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (la, lb) = (a.len(), b.len());
+
+    let mut prev: Vec<usize> = (0..=lb).collect();
+    let mut curr: Vec<usize> = vec![0; lb + 1];
+
+    for i in 1..=la {
+        curr[0] = i;
+        for j in 1..=lb {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[lb]
+}
+
+/// Every pair of DISTINCT hand-authored `finding_id`s in the corpus whose
+/// edit distance is at or under [`FINDING_ID_NEAR_MISS_THRESHOLD`]. Hash-shaped
+/// (machine-emitted) ids are excluded before any distance is computed — see
+/// [`is_machine_emitted_finding_id`]. Order within each returned pair is the
+/// corpus's own (already-sorted, `BTreeMap`-backed) `clusters` order, so
+/// output is deterministic across runs.
+fn finding_id_near_miss_pairs(
+    clusters: &[crate::brain::carryover::FindingCluster],
+) -> Vec<(String, String)> {
+    let hand_authored: Vec<&str> = clusters
+        .iter()
+        .map(|c| c.finding_id.as_str())
+        .filter(|id| !is_machine_emitted_finding_id(id))
+        .collect();
+
+    let mut pairs = Vec::new();
+    for i in 0..hand_authored.len() {
+        for j in (i + 1)..hand_authored.len() {
+            let (a, b) = (hand_authored[i], hand_authored[j]);
+            if levenshtein_distance(a, b) <= FINDING_ID_NEAR_MISS_THRESHOLD {
+                pairs.push((a.to_string(), b.to_string()));
+            }
+        }
+    }
+    pairs
+}
+
+/// `W_STATE_FINDING_ID_ORPHAN` (`MV.16.D`) — warn when a hand-authored
+/// `carryover[].finding_id` sits within [`FINDING_ID_NEAR_MISS_THRESHOLD`] edit
+/// distance of a DIFFERENT `finding_id` used elsewhere in the corpus.
+///
+/// This is deliberately NOT "the id appears in only one repo" — measured
+/// 2026-09-02, that describes 49 of 49 live clusters and is the ordinary,
+/// correct case (a finding_id exists precisely so ONE finding can be
+/// cross-referenced; most findings are still filed in exactly one repo).
+/// Two exclusions are structural, not special-cased:
+///   1. A hash-shaped (machine-emitted) id is never compared — see
+///      [`is_machine_emitted_finding_id`].
+///   2. A genuine cross-repo cluster (the SAME id string used from several
+///      repos) can never trigger this, because the near-miss pass only ever
+///      compares two DISTINCT id strings against each other — an id is never
+///      compared against itself.
+///
+/// What remains — two DIFFERENT hand-authored ids close enough in edit
+/// distance to plausibly be one mistyped as two — is the actual signal.
+///
+/// WARNING severity only: `--state` gates the push, and this check running
+/// over pre-existing ids must never red-gate a lane that never touched
+/// `carryover[]` (out of scope per the block record; promotion to error is a
+/// separate, later decision after the fleet is clean).
+pub fn check_finding_id_orphan(
+    src: &StateSource,
+    file: &StateFile,
+    report: &crate::brain::carryover::CarryoverReport,
+) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let path = &src.abs_path;
+
+    let near_miss = finding_id_near_miss_pairs(&report.clusters);
+    if near_miss.is_empty() {
+        return diags;
+    }
+
+    for item in &file.carryover {
+        let Some(finding_id) = item.finding_id.as_ref() else {
+            continue;
+        };
+        if finding_id.is_empty() || is_machine_emitted_finding_id(finding_id) {
+            continue;
+        }
+
+        for (a, b) in &near_miss {
+            let other_id = if finding_id == a {
+                b
+            } else if finding_id == b {
+                a
+            } else {
+                continue;
+            };
+
+            let other_desc = report
+                .clusters
+                .iter()
+                .find(|c| &c.finding_id == other_id)
+                .map(|c| {
+                    c.members
+                        .iter()
+                        .map(|m| format!("{}/{}", m.repo, m.slug))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let distance = levenshtein_distance(finding_id, other_id);
+
+            diags.push(Diagnostic::warning(
+                path,
+                "W_STATE_FINDING_ID_ORPHAN",
+                format!(
+                    "carryover '{}' finding_id '{finding_id}' is within edit distance \
+                     {distance} (threshold {FINDING_ID_NEAR_MISS_THRESHOLD}) of a DIFFERENT \
+                     finding_id '{other_id}' used by {other_desc} elsewhere in the corpus. This \
+                     is the shape a mistyped join key leaves behind — two ids that were probably \
+                     meant to be one, silently failing to group as a single cross-referenced \
+                     finding. Verify whether these name the same finding and, if so, unify them \
+                     onto one finding_id; if they are genuinely unrelated, this is a false \
+                     positive and can be left as-is.",
+                    item.slug
+                ),
+            ));
+        }
+    }
+
+    diags
+}
+
 /// Staleness warnings for the HQ `backlog[]` — one `W_STATE_BACKLOG_STALE` per
 /// `idea`/`ready` node older than the backlog threshold that is not snoozed.
 /// Nodes with no parseable `created` cannot age (never stale until dated).
