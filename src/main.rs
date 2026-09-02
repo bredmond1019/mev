@@ -1200,6 +1200,9 @@ enum Command {
     ///                               forbidden-pattern / covering-test compliance
     ///   contract-freshness       — canonical contract doc version vs each consumer's
     ///                               pinned copy, across repos
+    ///   surface-leak             — public repos' tracked files vs unpublishable relative
+    ///                               links and private infra literals (dotted-quad IPs,
+    ///                               *.ts.net hostnames)
     ///
     /// Each check reports one of three statuses: pass (both sides match), drift (the
     /// sides diverge — see the findings for the concrete set difference), or

@@ -18,6 +18,7 @@ pub mod contracts;
 mod epics_index;
 mod project_cache;
 mod sibling;
+pub mod surface;
 pub mod toolchain;
 
 use serde::Serialize;
@@ -147,6 +148,12 @@ pub fn all_checks() -> Vec<ConformanceCheck> {
             name: "contract-freshness",
             description: "canonical contract doc version vs each consumer's pinned copy, across repos",
             run: contracts::run,
+            reads_live_checkout: false,
+        },
+        ConformanceCheck {
+            name: "surface-leak",
+            description: "public repos' tracked files vs unpublishable relative links and private infra literals",
+            run: surface::run,
             reads_live_checkout: false,
         },
     ]
