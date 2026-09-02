@@ -40,6 +40,7 @@ fn verdict(
         finding_id: None,
         blocks,
         enforce: None,
+        needs: None,
     }
 }
 
