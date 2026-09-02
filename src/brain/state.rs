@@ -10158,6 +10158,325 @@ fn carryover_finding_id_absent_emits_no_diagnostic_never_checked_against_registr
     );
 }
 
+// ---- W_STATE_FINDING_ID_ORPHAN (`MV.16.D` task 3). Fixtures reproduce the four
+// real shapes measured on the corpus: a hand-authored near-miss pair (the actual
+// typo signal), a machine-emitted hex pair (must never warn even though its edit
+// distance is tiny), a hand-authored single-repo id with no near neighbour (the
+// ordinary, correct case), and a SYNTHETIC genuine cross-repo cluster (the corpus
+// itself has zero of these as of 2026-09-02, per the block record's amendment, so
+// this fixture cannot be sourced from live data). No fixture below pastes a live
+// `finding_id` verbatim. ----
+
+/// Same fixture shape as `tests::make_source` — duplicated here because this
+/// section's tests live outside `mod tests` (matching this file's existing
+/// convention for the carryover test section) and so cannot reach that
+/// module's private helpers.
+#[cfg(test)]
+fn finding_id_orphan_make_source(path: &std::path::Path, kind: &'static str) -> StateSource {
+    StateSource {
+        repo_slug: "test".to_string(),
+        abs_path: path.to_path_buf(),
+        expected_kind: kind,
+    }
+}
+
+/// Same fixture shape as `tests::parse_file` — see
+/// [`finding_id_orphan_make_source`]'s doc note on why this is duplicated
+/// rather than shared.
+#[cfg(test)]
+fn finding_id_orphan_parse_file(json: &str) -> StateFile {
+    serde_json::from_str(json).expect("fixture must parse")
+}
+
+/// Build a multi-file `CarryoverReport` the way `validate_brain_state` does,
+/// spanning however many `(src, file)` pairs are given — the corpus-wide view
+/// `check_finding_id_orphan` needs (contrast `evaluate_one`, which is
+/// single-file and cannot represent a cross-repo cluster).
+#[cfg(test)]
+fn evaluate_many(
+    files: &[(StateSource, StateFile)],
+    brain_root: &std::path::Path,
+) -> crate::brain::carryover::CarryoverReport {
+    let status_map: HashMap<String, Option<String>> = HashMap::new();
+    let repo_paths: HashMap<String, std::path::PathBuf> = files
+        .iter()
+        .map(|(src, _)| (src.repo_slug.clone(), brain_root.to_path_buf()))
+        .collect();
+    let cfg = crate::brain::config::AttentionThresholds::default();
+    crate::brain::carryover::evaluate_carryover(
+        files,
+        &status_map,
+        brain_root,
+        &repo_paths,
+        "2026-08-19",
+        &cfg,
+        None,
+        false,
+        crate::brain::carryover::COMMAND_EXEC_TIMEOUT,
+    )
+}
+
+/// POSITIVE (shown-failing gate): two hand-authored `finding_id`s one edit apart
+/// (`widget-timeout-fixture-aaa` / `...-aab`) must fire `W_STATE_FINDING_ID_ORPHAN`
+/// for BOTH entries, each naming both ids and both entries. Observed red before
+/// task 2's emission existed: with `check_finding_id_orphan` absent/never called
+/// this assertion has no diagnostic to find and `d.len() == 2` fails outright —
+/// this is that same assertion, now green with the emission wired in task 2.
+#[test]
+fn finding_id_orphan_fires_for_a_synthetic_one_character_near_miss_pair() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state.json");
+    let src = finding_id_orphan_make_source(&path, "project");
+
+    let file = finding_id_orphan_parse_file(
+        r#"{"repo":"mev","kind":"project","updated":"2026-08-19",
+            "carryover":[
+              {"slug":"near-miss-a","scope":{"repo":"mev"},"kind":"deferred",
+               "text":"x","created":"2026-08-19","finding_id":"widget-timeout-fixture-aaa"},
+              {"slug":"near-miss-b","scope":{"repo":"mev"},"kind":"deferred",
+               "text":"y","created":"2026-08-19","finding_id":"widget-timeout-fixture-aab"}
+            ]}"#,
+    );
+
+    let report = evaluate_many(&[(src.clone(), file.clone())], dir.path());
+    let d = check_finding_id_orphan(&src, &file, &report);
+    assert_eq!(
+        d.len(),
+        2,
+        "each of the two near-miss entries should fire its own diagnostic: {d:?}"
+    );
+    for diag in &d {
+        assert_eq!(diag.locator, "W_STATE_FINDING_ID_ORPHAN");
+        assert_eq!(diag.severity, crate::Severity::Warning);
+    }
+    let joined: String = d
+        .iter()
+        .map(|x| x.message.clone())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(
+        joined.contains("widget-timeout-fixture-aaa"),
+        "message set should name the first id: {joined}"
+    );
+    assert!(
+        joined.contains("widget-timeout-fixture-aab"),
+        "message set should name the second id: {joined}"
+    );
+    assert!(
+        joined.contains("near-miss-a") && joined.contains("near-miss-b"),
+        "message set should name both entries: {joined}"
+    );
+}
+
+/// EXCLUSION 1: two 64-char-hex, machine-emitted-shaped `finding_id`s one edit
+/// apart must NOT warn, even though their raw edit distance (1) is far under the
+/// threshold — because hash-shaped ids are filtered out of the near-miss pass
+/// entirely before any distance is computed (`is_machine_emitted_finding_id`).
+/// Shaped after a real `mev graph-findings` digest's shape (`73281c8fd426a223...`)
+/// without pasting any live id verbatim.
+#[test]
+fn finding_id_orphan_silent_for_two_hex_machine_emitted_ids_even_one_edit_apart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state.json");
+    let src = finding_id_orphan_make_source(&path, "project");
+
+    let hex_a = "73281c8fd426a223".repeat(4); // 64 lowercase hex chars
+    let mut hex_b = hex_a.clone();
+    hex_b.replace_range(63..64, "f"); // one character different
+
+    let file = finding_id_orphan_parse_file(&format!(
+        r#"{{"repo":"mev","kind":"project","updated":"2026-08-19",
+            "carryover":[
+              {{"slug":"hex-a","scope":{{"repo":"mev"}},"kind":"drift",
+               "text":"x","created":"2026-08-19","finding_id":"{hex_a}"}},
+              {{"slug":"hex-b","scope":{{"repo":"mev"}},"kind":"drift",
+               "text":"y","created":"2026-08-19","finding_id":"{hex_b}"}}
+            ]}}"#,
+    ));
+
+    let report = evaluate_many(&[(src.clone(), file.clone())], dir.path());
+    let d = check_finding_id_orphan(&src, &file, &report);
+    assert!(
+        d.is_empty(),
+        "two hex-shaped machine-emitted ids must never warn, regardless of edit distance: {d:?}"
+    );
+}
+
+/// EXCLUSION 2: a hand-authored single-repo `finding_id` with no near neighbour
+/// is the ordinary, correct case (the block record measured this as 25 of 49 live
+/// clusters) and must stay silent. Shaped after a real live entry
+/// (`nextest-scope-overgeneralized`) with a `-fixture` suffix so no live id is
+/// pasted verbatim.
+#[test]
+fn finding_id_orphan_silent_for_a_hand_authored_single_repo_id_with_no_near_neighbour() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state.json");
+    let src = finding_id_orphan_make_source(&path, "project");
+
+    let file = finding_id_orphan_parse_file(
+        r#"{"repo":"mev","kind":"project","updated":"2026-08-19",
+            "carryover":[
+              {"slug":"solo-finding","scope":{"repo":"mev"},"kind":"defect",
+               "text":"x","created":"2026-08-19",
+               "finding_id":"nextest-scope-overgeneralized-fixture"}
+            ]}"#,
+    );
+
+    let report = evaluate_many(&[(src.clone(), file.clone())], dir.path());
+    let d = check_finding_id_orphan(&src, &file, &report);
+    assert!(
+        d.is_empty(),
+        "a solitary hand-authored finding_id with no near neighbour must not warn: {d:?}"
+    );
+}
+
+/// EXCLUSION 3: a genuine cross-repo cluster — the SAME `finding_id` string used
+/// from two different repos — must never warn. THIS FIXTURE IS SYNTHETIC: the
+/// live corpus has zero cross-repo clusters as of 2026-09-02 (the block record's
+/// amendment), so there is no live example to shape this after. The near-miss
+/// pass only ever compares two DISTINCT id strings, and this cluster's two
+/// entries share one identical string, so it can never appear as either side of
+/// a pair.
+#[test]
+fn finding_id_orphan_silent_for_a_synthetic_genuine_cross_repo_cluster() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path_a = dir.path().join("repo-a-state.json");
+    let path_b = dir.path().join("repo-b-state.json");
+    let src_a = StateSource {
+        repo_slug: "repo-a".to_string(),
+        abs_path: path_a,
+        expected_kind: "project",
+    };
+    let src_b = StateSource {
+        repo_slug: "repo-b".to_string(),
+        abs_path: path_b,
+        expected_kind: "project",
+    };
+
+    let file_a = finding_id_orphan_parse_file(
+        r#"{"repo":"repo-a","kind":"project","updated":"2026-08-19",
+            "carryover":[
+              {"slug":"cross-repo-a","scope":{"repo":"repo-a"},"kind":"drift",
+               "text":"x","created":"2026-08-19","finding_id":"cross-repo-fixture-shared"}
+            ]}"#,
+    );
+    let file_b = finding_id_orphan_parse_file(
+        r#"{"repo":"repo-b","kind":"project","updated":"2026-08-19",
+            "carryover":[
+              {"slug":"cross-repo-b","scope":{"repo":"repo-b"},"kind":"drift",
+               "text":"y","created":"2026-08-19","finding_id":"cross-repo-fixture-shared"}
+            ]}"#,
+    );
+
+    let report = evaluate_many(
+        &[
+            (src_a.clone(), file_a.clone()),
+            (src_b.clone(), file_b.clone()),
+        ],
+        dir.path(),
+    );
+
+    // Sanity: this really is a genuine cross-repo cluster, not an accident of
+    // the fixture — proves the exclusion is doing real work, not vacuously
+    // passing because no cluster formed at all.
+    let cluster = report
+        .clusters
+        .iter()
+        .find(|c| c.finding_id == "cross-repo-fixture-shared")
+        .expect("the shared finding_id should form exactly one cluster");
+    assert!(
+        !cluster.single_repo,
+        "fixture must actually span two repos to test the cross-repo exclusion: {cluster:?}"
+    );
+
+    let d_a = check_finding_id_orphan(&src_a, &file_a, &report);
+    let d_b = check_finding_id_orphan(&src_b, &file_b, &report);
+    assert!(
+        d_a.is_empty() && d_b.is_empty(),
+        "a genuine cross-repo cluster must never warn: a={d_a:?} b={d_b:?}"
+    );
+}
+
+/// CORPUS-WIDE CONTROL — the one that matters most. Runs `check_finding_id_orphan`
+/// over every real `planning/state.json` in the fleet (the same corpus
+/// `validate_brain_state` sees) and asserts the warning count is far below 49 —
+/// 49 being what the naive "single-repo" rule would emit, per the block record's
+/// 2026-09-02 measurement. Portable: if no `brain.toml` is found walking up from
+/// this crate (e.g. `mev` checked out standalone, outside the fleet), the test
+/// prints why and returns rather than failing — the corpus-wide guarantee only
+/// means something inside the fleet, matching `fleet_regression.rs`'s convention.
+#[test]
+fn finding_id_orphan_corpus_wide_control_is_far_below_forty_nine() {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = match crate::brain::config::find_brain_root(&manifest_dir) {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!(
+                "finding_id_orphan_corpus_wide_control: skipping — no brain.toml found \
+                 walking up from {}: {e}",
+                manifest_dir.display()
+            );
+            return;
+        }
+    };
+
+    let report = match crate::validate_brain_state(&root) {
+        Ok(report) => report,
+        Err(e) => panic!("validate_brain_state failed over the live corpus: {e}"),
+    };
+
+    let warnings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.locator == "W_STATE_FINDING_ID_ORPHAN")
+        .collect();
+
+    eprintln!(
+        "finding_id_orphan_corpus_wide_control: {} W_STATE_FINDING_ID_ORPHAN warning(s) over \
+         the live corpus (naive single-repo rule would emit 49): {warnings:?}",
+        warnings.len()
+    );
+
+    assert!(
+        warnings.len() < 10,
+        "expected substantially fewer than 49 warnings over the live corpus (naive rule's \
+         count), got {} — the near-miss threshold or exclusions may have regressed: {warnings:?}",
+        warnings.len()
+    );
+
+    // `--state` must still exit 0 with the warning present — Warning severity
+    // never counts toward `is_failure`.
+    assert!(
+        !report.is_failure(),
+        "the live corpus must still pass --state with W_STATE_FINDING_ID_ORPHAN present"
+    );
+}
+
+/// Pins [`FINDING_ID_NEAR_MISS_THRESHOLD`] against the closest known real pair
+/// measured 2026-09-02 (`ptbr-parity-2026-08` / `voice-fingerprint-2026-08`, edit
+/// distance 14) — the threshold (13) must stay strictly below that distance, so
+/// the check yields zero warnings on today's corpus while remaining as sensitive
+/// as the live corpus allows. If this test goes red, either the threshold moved
+/// without a corresponding corpus re-measurement, or the corpus grew a pair
+/// closer than 14 apart and the threshold needs re-deriving (never silently
+/// trusting).
+#[test]
+fn finding_id_near_miss_threshold_yields_zero_on_closest_known_pair() {
+    assert_eq!(
+        FINDING_ID_NEAR_MISS_THRESHOLD, 13,
+        "threshold changed without re-deriving against the live corpus"
+    );
+    let distance = levenshtein_distance("ptbr-parity-2026-08", "voice-fingerprint-2026-08");
+    assert_eq!(
+        distance, 14,
+        "closest known real pair's measured distance changed — re-derive the threshold"
+    );
+    assert!(
+        FINDING_ID_NEAR_MISS_THRESHOLD < distance,
+        "threshold must stay strictly below the closest known real pair's distance"
+    );
+}
+
 #[test]
 fn carryover_clears_when_block_closed_well_formed_emits_no_diagnostic() {
     let json = r#"{
