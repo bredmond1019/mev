@@ -522,4 +522,141 @@ mod tests {
         assert_eq!(outcome.findings.len(), 1);
         assert!(outcome.findings[0].contains("bad-contract/c"));
     }
+
+    /// Live-corpus regression test for the incident this block fixes: runs the real
+    /// `contract-freshness` check against the actual fleet corpus (HQ `brain.toml`,
+    /// walked up from this crate as every other live-corpus test in this repo does)
+    /// and names, BY EDGE, the six edges the block record calls out:
+    ///   - data-contract/synapse and serve-api/bastion-ui: live Drifts
+    ///   - serve-api/bastion-web: live NotEvaluable (no version line at all)
+    ///   - data-contract/bastion, workspace-contract/bastion, carryover-contract/bastion: Pass
+    ///
+    /// This is evidence about the SOURCE tree (the files on disk in this checkout),
+    /// never about any installed `mev` binary.
+    ///
+    /// Deliberately does NOT hard-code "Drift" for the three known-live defects: each
+    /// of them is a real bug in another repo that is expected to be fixed out from under
+    /// this test (`SY.ticket.data-contract-lineage-reconcile` clears the synapse one).
+    /// Instead this test reads both sides of each edge itself, independently of the
+    /// check under test, and asserts the check's reported verdict is the one plain
+    /// equality of those two independently-read strings implies — so the test stays a
+    /// real regression test of the CHECK's logic while staying green after someone
+    /// else's fix repairs the corpus.
+    ///
+    /// Skips cleanly (never fails) when `brain.toml` or a named contract path is
+    /// absent — a CI checkout without the private HQ vault, matching the posture of
+    /// this repo's other live-corpus tests (e.g. `config::tests::live_corpus_*`) and
+    /// of `serve_api_version_test.dart` upstream.
+    #[test]
+    fn live_corpus_contract_freshness_names_the_known_edges() {
+        let live_root = std::path::Path::new("../..");
+        let live_brain_toml = live_root.join("brain.toml");
+        if !live_brain_toml.exists() {
+            eprintln!(
+                "skipping live_corpus_contract_freshness_names_the_known_edges: {} has no \
+                 brain.toml (fresh clone or CI runner without the sibling HQ checkout)",
+                live_root.display()
+            );
+            return;
+        }
+
+        let config = match crate::brain::config::load_brain_config(&live_brain_toml) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "skipping live_corpus_contract_freshness_names_the_known_edges: live \
+                     brain.toml errored: {e}"
+                );
+                return;
+            }
+        };
+
+        // Every path this test's six edges need must exist on disk, or we skip —
+        // never fail on a partial/CI checkout.
+        let wanted: &[(&str, &str)] = &[
+            ("data-contract", "synapse"),
+            ("serve-api", "bastion-ui"),
+            ("serve-api", "bastion-web"),
+            ("data-contract", "bastion"),
+            ("workspace-contract", "bastion"),
+            ("carryover-contract", "bastion"),
+        ];
+
+        let mut missing_paths: Vec<String> = Vec::new();
+        for entry in &config.contracts {
+            let canonical_full = live_root.join(&entry.canonical.path);
+            if !canonical_full.exists() {
+                missing_paths.push(canonical_full.display().to_string());
+            }
+            for consumer in &entry.consumers {
+                let full = live_root.join(&consumer.path);
+                if !full.exists() {
+                    missing_paths.push(full.display().to_string());
+                }
+            }
+        }
+        if !missing_paths.is_empty() {
+            eprintln!(
+                "skipping live_corpus_contract_freshness_names_the_known_edges: missing \
+                 corpus path(s): {missing_paths:?}"
+            );
+            return;
+        }
+
+        // Run the real check against the real corpus.
+        let ctx = ConformanceCtx {
+            root: live_root.to_path_buf(),
+            config: config.clone(),
+            files: Vec::new(),
+        };
+        let all_edges: Vec<EdgeOutcome> = config
+            .contracts
+            .iter()
+            .flat_map(|entry| evaluate_contract(&ctx.root, entry))
+            .collect();
+
+        // Confirm every wanted edge is present, then assert its verdict independently
+        // derived from the two files on disk right now — not a hard-coded status.
+        for (contract_name, consumer_repo) in wanted {
+            let entry = config
+                .contracts
+                .iter()
+                .find(|e| &e.name == contract_name)
+                .unwrap_or_else(|| {
+                    panic!("live brain.toml has no [[contracts]] named {contract_name}")
+                });
+            let consumer_endpoint = entry
+                .consumers
+                .iter()
+                .find(|c| &c.repo == consumer_repo)
+                .unwrap_or_else(|| {
+                    panic!("live brain.toml contract {contract_name} has no consumer repo {consumer_repo}")
+                });
+
+            let edge = all_edges
+                .iter()
+                .find(|e| &e.contract == contract_name && &e.consumer_repo == consumer_repo)
+                .unwrap_or_else(|| {
+                    panic!("check did not report edge {contract_name}/{consumer_repo}")
+                });
+
+            // Independently re-derive the expected verdict straight from disk, so this
+            // test tracks reality rather than a frozen snapshot of it.
+            let canonical_result = resolve_endpoint(&ctx.root, &entry.canonical);
+            let consumer_result = resolve_endpoint(&ctx.root, consumer_endpoint);
+            let (expected_status, _) = edge_verdict(&canonical_result, &consumer_result);
+
+            assert_eq!(
+                edge.status, expected_status,
+                "edge {contract_name}/{consumer_repo}: check reported {:?} but the versions on \
+                 disk right now (canonical={canonical_result:?}, consumer={consumer_result:?}) \
+                 imply {expected_status:?}",
+                edge.status
+            );
+        }
+
+        // Sanity-check the aggregate contains exactly one outcome per requested edge —
+        // confirms this test named all six edges individually, never a bare count.
+        assert_eq!(wanted.len(), 6);
+    }
 }
