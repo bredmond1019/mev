@@ -135,12 +135,10 @@ fn live_head(source_dir: &str) -> Option<String> {
 /// Other binaries in the fleet, beyond `mev` itself, that also run `--write` paths
 /// against this corpus and must therefore be covered by `toolchain-freshness`.
 ///
-/// `bastion` is, today, the only OTHER binary that runs `emit-state --write`
-/// (`scripts/emit_state_write.sh` shells out to `bastion emit-state --write`), and
-/// `brain.toml` carries no writer-registry field yet — this hardcoded list is the
-/// authored substitute. Widening it to a config-driven registry is future work if a
-/// third writer appears; it is not this ticket's job.
-pub const CROSS_BINARY_WRITERS: &[&str] = &["bastion"];
+/// The registry lives in `brain.toml`'s `[[conformance_writers]]` table (see
+/// [`crate::brain::config::ConformanceWriter`]) — adding a writer is a config edit,
+/// not a mev recompile.
+use crate::brain::config::ConformanceWriter;
 
 /// One registered writer's toolchain-freshness verdict, named, so a multi-writer report
 /// can show a reader exactly which binary drifted or was not evaluable — never a bare
@@ -236,18 +234,27 @@ fn writer_outcome(name: &str, stamped_sha: &str, dirty: &str, source_dir: &str) 
     }
 }
 
-/// Query and evaluate one cross-binary writer named in [`CROSS_BINARY_WRITERS`]. A
-/// spawn failure, non-zero exit, or unparseable/wrong-shaped stdout all produce
-/// `NotEvaluable` named for `name` — never `Pass` and never silently skipped.
-fn cross_binary_outcome(name: &str) -> WriterOutcome {
+/// Query and evaluate one cross-binary writer named in the `[[conformance_writers]]`
+/// registry. A spawn failure, non-zero exit, or unparseable/wrong-shaped stdout all
+/// produce `NotEvaluable` named for `writer.name` — never `Pass` and never silently
+/// skipped. When `repo_path` is set, it is appended to the `NotEvaluable` reason so a
+/// reader can find the source repo of a writer that could not be queried.
+fn cross_binary_outcome(writer: &ConformanceWriter) -> WriterOutcome {
+    let name = writer.name.as_str();
     match query_writer_stamp(name) {
         Ok((git_sha, dirty, source_dir)) => writer_outcome(name, &git_sha, &dirty, &source_dir),
-        Err(reason) => WriterOutcome {
-            name: name.to_string(),
-            status: CheckStatus::NotEvaluable,
-            findings: Vec::new(),
-            reason: Some(format!("{name}: {reason}")),
-        },
+        Err(reason) => {
+            let reason = match &writer.repo_path {
+                Some(repo_path) => format!("{name}: {reason} (repo_path: {repo_path})"),
+                None => format!("{name}: {reason}"),
+            };
+            WriterOutcome {
+                name: name.to_string(),
+                status: CheckStatus::NotEvaluable,
+                findings: Vec::new(),
+                reason: Some(reason),
+            }
+        }
     }
 }
 
@@ -263,19 +270,18 @@ fn worst_status(a: CheckStatus, b: CheckStatus) -> CheckStatus {
     }
 }
 
-/// Compute the per-writer outcomes (`self` + every [`CROSS_BINARY_WRITERS`] entry)
-/// alongside the worst-wins overall status, without needing a [`ConformanceCtx`] —
-/// [`run`] ignores its `ctx` entirely, so this is the seam callers outside the
-/// `mev conformance` registry (e.g. `emit_state`'s `--write` path) use directly.
-pub fn writer_outcomes() -> (CheckStatus, Vec<WriterOutcome>) {
+/// Compute the per-writer outcomes (`self` + every entry in `writers`) alongside the
+/// worst-wins overall status. An empty registry degrades to mev-only: exactly one
+/// outcome, named `self`, never a panic or a silent pass.
+pub fn writer_outcomes(writers: &[ConformanceWriter]) -> (CheckStatus, Vec<WriterOutcome>) {
     let mut outcomes = vec![writer_outcome(
         "self",
         STAMPED_SHA,
         STAMPED_DIRTY,
         STAMPED_SOURCE_DIR,
     )];
-    for name in CROSS_BINARY_WRITERS {
-        outcomes.push(cross_binary_outcome(name));
+    for writer in writers {
+        outcomes.push(cross_binary_outcome(writer));
     }
     let mut overall_status = CheckStatus::Pass;
     for outcome in &outcomes {
@@ -285,12 +291,13 @@ pub fn writer_outcomes() -> (CheckStatus, Vec<WriterOutcome>) {
 }
 
 /// Run the `toolchain-freshness` check across every registered writer: `mev` itself
-/// (the compiled-in stamp, as before) plus every binary named in
-/// [`CROSS_BINARY_WRITERS`], queried via `--build-stamp`. The overall status is
-/// worst-wins; `findings` names every writer's individual verdict so a reader can see
-/// exactly which binary drifted or could not be evaluated, not just an aggregate.
-pub fn run(_ctx: &ConformanceCtx) -> CheckOutcome {
-    let (_, outcomes) = writer_outcomes();
+/// (the compiled-in stamp, as before) plus every writer named in `brain.toml`'s
+/// `[[conformance_writers]]` table (`ctx.config.conformance_writers`), queried via
+/// `--build-stamp`. The overall status is worst-wins; `findings` names every writer's
+/// individual verdict so a reader can see exactly which binary drifted or could not be
+/// evaluated, not just an aggregate.
+pub fn run(ctx: &ConformanceCtx) -> CheckOutcome {
+    let (_, outcomes) = writer_outcomes(&ctx.config.conformance_writers);
 
     let left = FactSide {
         label: "compiled-in build stamp (self)".to_string(),
@@ -321,7 +328,7 @@ pub fn run(_ctx: &ConformanceCtx) -> CheckOutcome {
     }
 
     let right = FactSide {
-        label: "per-writer verdict (self + CROSS_BINARY_WRITERS)".to_string(),
+        label: "per-writer verdict (self + brain.toml [[conformance_writers]])".to_string(),
         source: "self's live source tree HEAD; each cross-binary writer via `--build-stamp`"
             .to_string(),
         digest: super::digest(&right_items),
@@ -566,7 +573,11 @@ mod tests {
 
     #[test]
     fn cross_binary_outcome_names_missing_writer_not_evaluable_never_pass() {
-        let outcome = cross_binary_outcome("/definitely/not/a/real/path/mev_test_ghost_writer");
+        let writer = ConformanceWriter {
+            name: "/definitely/not/a/real/path/mev_test_ghost_writer".to_string(),
+            repo_path: None,
+        };
+        let outcome = cross_binary_outcome(&writer);
         assert_eq!(outcome.status, CheckStatus::NotEvaluable);
         assert_ne!(outcome.status, CheckStatus::Pass);
         assert!(outcome.reason.is_some());
@@ -577,6 +588,17 @@ mod tests {
                 .unwrap()
                 .contains("mev_test_ghost_writer")
         );
+    }
+
+    #[test]
+    fn cross_binary_outcome_not_evaluable_reason_names_repo_path() {
+        let writer = ConformanceWriter {
+            name: "/definitely/not/a/real/path/mev_test_ghost_writer".to_string(),
+            repo_path: Some("bastion".to_string()),
+        };
+        let outcome = cross_binary_outcome(&writer);
+        assert_eq!(outcome.status, CheckStatus::NotEvaluable);
+        assert!(outcome.reason.as_ref().unwrap().contains("bastion"));
     }
 
     #[test]
@@ -606,9 +628,14 @@ mod tests {
 
     #[test]
     fn run_aggregates_worst_across_writers_and_names_each() {
+        let mut config = crate::brain::config::BrainConfig::default();
+        config.conformance_writers = vec![ConformanceWriter {
+            name: "bastion".to_string(),
+            repo_path: Some("bastion".to_string()),
+        }];
         let ctx = ConformanceCtx {
             root: std::path::PathBuf::from("."),
-            config: crate::brain::config::BrainConfig::default(),
+            config,
             files: Vec::new(),
         };
         let outcome = run(&ctx);
@@ -622,8 +649,8 @@ mod tests {
                 .iter()
                 .any(|i| i.starts_with("self:"))
         );
-        // every CROSS_BINARY_WRITERS entry is named too, whatever its verdict.
-        for name in CROSS_BINARY_WRITERS {
+        // every registered writer is named too, whatever its verdict.
+        for writer in &ctx.config.conformance_writers {
             assert!(
                 outcome
                     .right
@@ -631,7 +658,7 @@ mod tests {
                     .unwrap()
                     .items
                     .iter()
-                    .any(|i| i.starts_with(&format!("{name}:")))
+                    .any(|i| i.starts_with(&format!("{}:", writer.name)))
             );
         }
     }
@@ -649,5 +676,17 @@ mod tests {
         let outcome = run(&ctx);
         assert!(outcome.left.is_some());
         assert!(outcome.right.is_some());
+    }
+
+    #[test]
+    fn writer_outcomes_empty_registry_degrades_to_self_only() {
+        // An empty `[[conformance_writers]]` registry must not panic or silently pass
+        // extra writers — exactly one outcome, named `self`.
+        let (status, outcomes) = writer_outcomes(&[]);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].name, "self");
+        // Status is whatever self's compiled-in stamp evaluates to (Pass or
+        // NotEvaluable depending on the build environment), never a panic.
+        let _ = status;
     }
 }

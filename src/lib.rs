@@ -1502,7 +1502,8 @@ pub fn emit_state(
     //    case-insensitively): promote Drift to a hard failure, checked here, before any
     //    plan is computed or applied, so no write happens.
     if write {
-        let (status, outcomes) = brain::conformance::toolchain::writer_outcomes();
+        let (status, outcomes) =
+            brain::conformance::toolchain::writer_outcomes(&config.conformance_writers);
         if status == CheckStatus::Drift {
             let drifted: Vec<String> = outcomes
                 .iter()
