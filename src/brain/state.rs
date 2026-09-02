@@ -1453,6 +1453,35 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
             ));
         }
 
+        // W_CARRYOVER_MISFILED (D18, MV.ticket.carryover-needs-validation): an entry that
+        // declares `needs: operator` is, by construction, in the wrong container. CLAUDE.md's
+        // carryover-routing section already says work only a human can do belongs in a
+        // `{"type":"operator", slug, exit, start}` depends_on edge on the block it gates, not in
+        // carryover[] — a carryover entry gates nothing, so operator work parked here is never
+        // forced and simply ages, while an operator edge blocks the work behind it and inherits
+        // its effective priority. This is the diagnostic version of that prose rule. Warning
+        // severity, matching every sibling carryover diagnostic; naming the misfiling is the
+        // deliverable — auto-converting the entry into a depends_on edge is explicitly out of
+        // scope, since that would mean rewriting another repo's graph.
+        if matches!(
+            &item.needs,
+            Some(okf_core::CarryoverNeeds::Known(
+                okf_core::KnownCarryoverNeeds::Operator
+            ))
+        ) {
+            diags.push(Diagnostic::warning(
+                path,
+                "W_CARRYOVER_MISFILED",
+                format!(
+                    "carryover item '{}' has needs: operator, which is work only a human can \
+                     do; it belongs in a {{\"type\":\"operator\", slug, exit, start}} depends_on \
+                     edge on the block it gates, not in carryover[] — a carryover entry gates \
+                     nothing, so this work is never forced and simply ages",
+                    item.slug
+                ),
+            ));
+        }
+
         let scope_fields_set = item.scope.repo.is_some() as u8
             + item.scope.tier.is_some() as u8
             + item.scope.cross_repo.is_some() as u8;
