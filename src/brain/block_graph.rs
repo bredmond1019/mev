@@ -655,6 +655,7 @@ mod tests {
     fn single_repo_config() -> BrainConfig {
         BrainConfig {
             repos: vec![crate::brain::config::RepoEntry {
+                public: false,
                 slug: "repo".to_string(),
                 tier: "core".to_string(),
                 repo_path: "repo".to_string(),
@@ -905,6 +906,7 @@ mod tests {
 
     fn repo_entry(slug: &str, tier: &str) -> crate::brain::config::RepoEntry {
         crate::brain::config::RepoEntry {
+            public: false,
             slug: slug.to_string(),
             tier: tier.to_string(),
             repo_path: slug.to_string(),

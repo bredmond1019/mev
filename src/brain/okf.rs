@@ -337,6 +337,7 @@ mod tests {
         let repos = slugs
             .iter()
             .map(|slug| RepoEntry {
+                public: false,
                 slug: slug.to_string(),
                 tier: String::new(),
                 repo_path: String::new(),
@@ -347,6 +348,7 @@ mod tests {
             })
             .collect();
         BrainConfig {
+            surface_allowlist: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),

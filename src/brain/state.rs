@@ -4103,6 +4103,7 @@ mod tests {
     fn make_config_with_alpha(alpha_repo_path: &str) -> BrainConfig {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
+            surface_allowlist: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -4113,6 +4114,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
                     repo_path: ".".to_string(),
@@ -4122,6 +4124,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "alpha".to_string(),
                     tier: "core".to_string(),
                     repo_path: alpha_repo_path.to_string(),
@@ -4192,6 +4195,7 @@ mod tests {
 
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
+            surface_allowlist: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -4202,6 +4206,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
                     repo_path: ".".to_string(),
@@ -4211,6 +4216,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "core".to_string(),
                     tier: "_root".to_string(),
                     repo_path: "core".to_string(),
@@ -4220,6 +4226,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "alpha".to_string(),
                     tier: "core".to_string(),
                     repo_path: "core/alpha".to_string(),
@@ -4277,6 +4284,7 @@ mod tests {
         .unwrap();
 
         let config = BrainConfig {
+            surface_allowlist: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -4287,6 +4295,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
                     repo_path: ".".to_string(),
@@ -4296,6 +4305,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "re-rs".to_string(),
                     tier: "portfolio".to_string(),
                     repo_path: "portfolio/re-rs".to_string(),
@@ -4324,6 +4334,7 @@ mod tests {
         // Add a second repo entry that has no state.json on disk
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
+            surface_allowlist: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -4334,6 +4345,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
                     repo_path: ".".to_string(),
@@ -4343,6 +4355,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "alpha".to_string(),
                     tier: "core".to_string(),
                     repo_path: "core/alpha".to_string(),
@@ -4352,6 +4365,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "missing-repo".to_string(),
                     tier: "core".to_string(),
                     repo_path: "core/missing-repo".to_string(),
@@ -4442,6 +4456,7 @@ mod tests {
         // `discover_dedupes_repo_entry_that_shadows_a_tier_rollup`.
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
+            surface_allowlist: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -4452,6 +4467,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
                     repo_path: ".".to_string(),
@@ -4461,6 +4477,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "core".to_string(),
                     tier: "_root".to_string(),
                     repo_path: "core".to_string(),
@@ -4470,6 +4487,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "alpha".to_string(),
                     tier: "core".to_string(),
                     repo_path: "core/alpha".to_string(),
@@ -8284,6 +8302,7 @@ mod tests {
     fn make_mixed_tier_config() -> BrainConfig {
         use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
+            surface_allowlist: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -8294,6 +8313,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
                     repo_path: ".".to_string(),
@@ -8303,6 +8323,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "alpha".to_string(),
                     tier: "core".to_string(),
                     repo_path: "core/alpha".to_string(),
@@ -8312,6 +8333,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "beta".to_string(),
                     tier: "core".to_string(),
                     repo_path: "core/beta".to_string(),
@@ -8321,6 +8343,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "gamma".to_string(),
                     tier: "portfolio".to_string(),
                     repo_path: "portfolio/gamma".to_string(),
@@ -8377,6 +8400,7 @@ mod tests {
         // self-entry (`slug == repo_path == "business"`). It must still scope to
         // its own tier (not `All`, which would spuriously target it as HQ).
         let config = BrainConfig {
+            surface_allowlist: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -8387,6 +8411,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
                     repo_path: ".".to_string(),
@@ -8396,6 +8421,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "business".to_string(),
                     tier: "_root".to_string(),
                     repo_path: "business".to_string(),
@@ -8874,6 +8900,7 @@ mod tests {
         // A config where "alpha" is (accidentally) listed twice — the second
         // listing must not produce a duplicate (repo, id) block in focus.now.
         let config = BrainConfig {
+            surface_allowlist: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -8884,6 +8911,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    public: false,
                     slug: "alpha".to_string(),
                     tier: "core".to_string(),
                     repo_path: "core/alpha".to_string(),
@@ -8893,6 +8921,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "beta".to_string(),
                     tier: "core".to_string(),
                     repo_path: "core/beta".to_string(),
@@ -8902,6 +8931,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "alpha".to_string(),
                     tier: "core".to_string(),
                     repo_path: "core/alpha".to_string(),
@@ -9060,6 +9090,7 @@ mod tests {
         // dropped entirely because the union loop required `kind == "project"`).
         use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
+            surface_allowlist: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -9070,6 +9101,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
                     repo_path: ".".to_string(),
@@ -9079,6 +9111,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "business".to_string(),
                     tier: "_root".to_string(),
                     repo_path: "business".to_string(),
@@ -9088,6 +9121,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "alpha".to_string(),
                     tier: "core".to_string(),
                     repo_path: "core/alpha".to_string(),
@@ -10286,6 +10320,7 @@ mod check_epics_tests {
     fn epic_config() -> BrainConfig {
         use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
         let entry = |slug: &str, tier: &str, path: &str| RepoEntry {
+            public: false,
             slug: slug.to_string(),
             tier: tier.to_string(),
             repo_path: path.to_string(),
@@ -10295,6 +10330,7 @@ mod check_epics_tests {
             prefix: None,
         };
         BrainConfig {
+            surface_allowlist: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),

@@ -1336,6 +1336,7 @@ mod tests {
 
     fn repo_entry(slug: &str) -> RepoEntry {
         RepoEntry {
+            public: false,
             slug: slug.to_string(),
             tier: "core".to_string(),
             repo_path: slug.to_string(),

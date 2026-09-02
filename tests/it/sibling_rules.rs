@@ -116,6 +116,7 @@ fn empty_self_pair(dir: &Path, repo: &str) -> (StateSource, StateFile) {
 /// resolve identically for both `derive_rollup` and `derive_brain_focus`.
 fn mixed_kind_config() -> BrainConfig {
     BrainConfig {
+        surface_allowlist: Default::default(),
         conformance_writers: Vec::new(),
         contracts: Vec::new(),
         permission_profiles: Default::default(),
@@ -126,6 +127,7 @@ fn mixed_kind_config() -> BrainConfig {
         crawl: CrawlConfig::default(),
         repos: vec![
             RepoEntry {
+                public: false,
                 slug: "subbrain".to_string(),
                 tier: "core".to_string(),
                 repo_path: "core/subbrain".to_string(),
@@ -135,6 +137,7 @@ fn mixed_kind_config() -> BrainConfig {
                 prefix: None,
             },
             RepoEntry {
+                public: false,
                 slug: "leafalpha".to_string(),
                 tier: "core".to_string(),
                 repo_path: "core/leafalpha".to_string(),

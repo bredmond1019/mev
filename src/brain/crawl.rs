@@ -832,6 +832,7 @@ mod tests {
     fn brain_only_config() -> crate::brain::config::BrainConfig {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
+            surface_allowlist: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -849,6 +850,7 @@ mod tests {
                 ],
             },
             repos: vec![RepoEntry {
+                public: false,
                 slug: "brain".to_string(),
                 tier: "primary".to_string(),
                 repo_path: ".".to_string(),
@@ -1048,6 +1050,7 @@ mod tests {
     fn brain_and_subrepo_config() -> crate::brain::config::BrainConfig {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
+            surface_allowlist: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -1065,6 +1068,7 @@ mod tests {
             },
             repos: vec![
                 RepoEntry {
+                    public: false,
                     slug: "brain".to_string(),
                     tier: "primary".to_string(),
                     repo_path: ".".to_string(),
@@ -1074,6 +1078,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "sub".to_string(),
                     tier: "core".to_string(),
                     repo_path: "sub".to_string(),

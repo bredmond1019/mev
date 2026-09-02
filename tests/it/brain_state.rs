@@ -1420,6 +1420,7 @@ fn derive_cross_repo_skips_external_deps() {
 fn make_config_with_repo(slug: &str, tier: &str) -> mev::brain::config::BrainConfig {
     use mev::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
     BrainConfig {
+        surface_allowlist: Default::default(),
         conformance_writers: Vec::new(),
         contracts: Vec::new(),
         permission_profiles: Default::default(),
@@ -1429,6 +1430,7 @@ fn make_config_with_repo(slug: &str, tier: &str) -> mev::brain::config::BrainCon
         vocab: VocabConfig::default(),
         crawl: CrawlConfig::default(),
         repos: vec![RepoEntry {
+            public: false,
             slug: slug.to_string(),
             tier: tier.to_string(),
             repo_path: String::new(),

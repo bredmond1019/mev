@@ -439,6 +439,32 @@ pub struct RepoEntry {
     /// candidate", never an error and never a diagnostic.
     #[serde(default)]
     pub prefix: Option<String>,
+    /// Whether this repo's GitHub remote is public, for
+    /// `brain/conformance/surface.rs`'s `surface-leak` check.
+    ///
+    /// FAIL-CLOSED: defaults to `false`. An entry that omits `public` is
+    /// treated as **private** — never scanned, never silently treated as
+    /// public. Getting this default backwards would publish a scan of a
+    /// private repo's contents into a report, so it must never default to
+    /// `true`.
+    #[serde(default)]
+    pub public: bool,
+}
+
+/// `[surface_allowlist]` section in `brain.toml`.
+///
+/// Address-shaped literals permitted to appear in a public repo's tracked
+/// files without tripping `surface-leak`'s rule 2 (private infra literal) —
+/// documented-example addresses (RFC5737 ranges, loopback, etc.), never a
+/// real fleet address. An absent table means an empty allowlist — additive,
+/// so older/fixture `brain.toml`s still parse.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SurfaceAllowlist {
+    /// Permitted literals. A entry ending in `.` matches as a prefix (so
+    /// `"192.0.2."` covers the whole RFC5737 block); otherwise matched
+    /// exactly.
+    #[serde(default)]
+    pub literals: Vec<String>,
 }
 
 /// Top-level `brain.toml` config.
@@ -487,6 +513,12 @@ pub struct BrainConfig {
     /// `brain.toml`s still parse.
     #[serde(default)]
     pub contracts: Vec<ContractEntry>,
+    /// `[surface_allowlist]` section — address-shaped literals permitted in
+    /// public repos' tracked files, checked by `surface-leak`. An absent
+    /// table means an empty allowlist — additive, so older/fixture
+    /// `brain.toml`s still parse.
+    #[serde(default)]
+    pub surface_allowlist: SurfaceAllowlist,
 }
 
 impl BrainConfig {
@@ -787,6 +819,66 @@ mod tests {
     }
 
     #[test]
+    fn repo_entry_public_defaults_false_when_key_absent() {
+        // FAIL-CLOSED: an entry that omits `public` must parse as private
+        // (false), never as public. The fixture brain.toml's [[repos]]
+        // entries carry no `public` key at all.
+        let cfg = load_brain_config(&fixture_path()).expect("should parse fixture");
+        assert!(
+            cfg.repos.iter().all(|r| !r.public),
+            "every fixture repo entry omits `public` and must parse as false"
+        );
+    }
+
+    #[test]
+    fn repo_entry_public_true_parses_true() {
+        let toml = r#"
+[[repos]]
+slug = "mev"
+tier = "primary"
+repo_path = "core/mev"
+public = true
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert!(cfg.repos[0].public, "public = true must parse as true");
+    }
+
+    #[test]
+    fn repo_entry_public_false_parses_false() {
+        let toml = r#"
+[[repos]]
+slug = "brain"
+tier = "primary"
+repo_path = "."
+public = false
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert!(!cfg.repos[0].public, "public = false must parse as false");
+    }
+
+    #[test]
+    fn surface_allowlist_empty_when_table_absent() {
+        let cfg = load_brain_config(&fixture_path()).expect("should parse fixture");
+        assert!(
+            cfg.surface_allowlist.literals.is_empty(),
+            "an absent [surface_allowlist] table must yield an empty literals list"
+        );
+    }
+
+    #[test]
+    fn surface_allowlist_round_trips_entries() {
+        let toml = r#"
+[surface_allowlist]
+literals = ["192.0.2.", "198.51.100.1", "127.0.0.1"]
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(
+            cfg.surface_allowlist.literals,
+            vec!["192.0.2.", "198.51.100.1", "127.0.0.1"]
+        );
+    }
+
+    #[test]
     fn attention_thresholds_default_when_section_absent() {
         // The fixture brain.toml has no [attention] table → all defaults.
         let cfg = load_brain_config(&fixture_path()).expect("should parse fixture");
@@ -1061,6 +1153,7 @@ enforce_blocks = true
 
     fn repo_entry(slug: &str, tier: &str, repo_path: &str) -> RepoEntry {
         RepoEntry {
+            public: false,
             slug: slug.to_string(),
             tier: tier.to_string(),
             repo_path: repo_path.to_string(),
@@ -1075,6 +1168,7 @@ enforce_blocks = true
     /// self-entries (`core`, `business`), and one leaf repo under each tier.
     fn scoped_fixture_config() -> BrainConfig {
         BrainConfig {
+            surface_allowlist: Default::default(),
             permission_profiles: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
@@ -1085,6 +1179,7 @@ enforce_blocks = true
             contracts: Vec::new(),
             repos: vec![
                 RepoEntry {
+                    public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
                     repo_path: ".".to_string(),

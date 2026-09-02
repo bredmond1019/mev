@@ -46,6 +46,7 @@ fn temp_dir(suffix: &str) -> std::path::PathBuf {
 /// This is the canonical fixture config for all tests in this module.
 fn three_unit_config() -> BrainConfig {
     BrainConfig {
+        surface_allowlist: Default::default(),
         conformance_writers: Vec::new(),
         contracts: Vec::new(),
         permission_profiles: Default::default(),
@@ -72,6 +73,7 @@ fn three_unit_config() -> BrainConfig {
         },
         repos: vec![
             RepoEntry {
+                public: false,
                 slug: "brain".to_string(),
                 tier: "primary".to_string(),
                 repo_path: ".".to_string(),
@@ -81,6 +83,7 @@ fn three_unit_config() -> BrainConfig {
                 prefix: None,
             },
             RepoEntry {
+                public: false,
                 slug: "core".to_string(),
                 tier: "tier".to_string(),
                 repo_path: "core".to_string(),
@@ -90,6 +93,7 @@ fn three_unit_config() -> BrainConfig {
                 prefix: None,
             },
             RepoEntry {
+                public: false,
                 slug: "mev".to_string(),
                 tier: "primary".to_string(),
                 repo_path: "core/mev".to_string(),

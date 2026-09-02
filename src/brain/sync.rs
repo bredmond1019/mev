@@ -296,6 +296,7 @@ mod tests {
     /// at `status_file_rel` and `cache_doc_rel` (relative to the temp root).
     fn make_config(status_file_rel: &str, cache_doc_rel: &str) -> BrainConfig {
         BrainConfig {
+            surface_allowlist: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -305,6 +306,7 @@ mod tests {
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![RepoEntry {
+                public: false,
                 slug: "test-repo".to_string(),
                 tier: "primary".to_string(),
                 repo_path: ".".to_string(),

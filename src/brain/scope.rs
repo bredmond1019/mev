@@ -98,6 +98,7 @@ mod tests {
     /// Build a test config with brain (root), core (tier), and mev (core/mev) units.
     fn three_unit_config() -> BrainConfig {
         BrainConfig {
+            surface_allowlist: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -108,6 +109,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    public: false,
                     slug: "brain".to_string(),
                     tier: "primary".to_string(),
                     repo_path: ".".to_string(),
@@ -117,6 +119,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "core".to_string(),
                     tier: "tier".to_string(),
                     repo_path: "core".to_string(),
@@ -126,6 +129,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "mev".to_string(),
                     tier: "primary".to_string(),
                     repo_path: "core/mev".to_string(),
@@ -227,6 +231,7 @@ mod tests {
             carryover: Default::default(),
             repos: vec![
                 RepoEntry {
+                    public: false,
                     slug: "brain".to_string(),
                     repo_path: ".".to_string(),
                     tier: String::new(),
@@ -236,6 +241,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    public: false,
                     slug: "mev".to_string(),
                     repo_path: "core/mev".to_string(),
                     tier: String::new(),

@@ -236,6 +236,7 @@ mod tests {
     fn config_with_prefix(slug: &str, prefix: Option<&str>) -> BrainConfig {
         BrainConfig {
             repos: vec![RepoEntry {
+                public: false,
                 slug: slug.to_string(),
                 prefix: prefix.map(|p| p.to_string()),
                 tier: String::new(),
