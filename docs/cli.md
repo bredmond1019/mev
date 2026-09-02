@@ -35,6 +35,9 @@ bastion validate-brain --state
 # What is open across the fleet?
 mev carryover
 
+# ...and what is open for one repo, including the cross-repo items it shares
+mev carryover --repo mev --include-cross-repo
+
 # What could I start right now?
 mev frontier
 
@@ -48,7 +51,7 @@ mev emit-state --write
 | `mev` on `PATH` | `cargo install --path .` from `core/mev` |
 | A `brain.toml` above you | You are outside the brain; `cd` into it |
 
-**Three traps that produce a confident wrong answer**, all of them measured here:
+**Four traps that produce a confident wrong answer**, all of them measured here:
 
 - **`validate-brain`'s flags do not compose.** It is an if/else-if chain; the first flag wins and
   the rest are silently ignored. One flag per invocation.
@@ -57,6 +60,11 @@ mev emit-state --write
 - **Every `--write` verb rewrites the whole corpus**, not just your repo, and re-runs the full
   derivation internally. A stale installed binary rewrites surfaces in an old format. Install
   first; commit immediately after.
+- **A bare `mev carryover --repo <slug>` is not that repo's whole picture.** Entries scoped
+  `cross_repo: true` or to a tier belong to no single repo, so they match no `--repo` filter —
+  measured 2026-09-01, `--repo bastion` alone hides 47 entries. Add **`--include-cross-repo`** to
+  widen the filter to the cross-repo ones (it requires `--repo`; passed alone it errors and exits
+  non-zero). See [carryover](cli/carryover.md).
 
 ## The 27 commands
 

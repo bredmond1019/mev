@@ -93,7 +93,9 @@ fn refuse_if_quiesced(
                 "error [{E_QUIESCE_LEASE_HELD}] refusing to {verb}: lane '{}' (agent '{}') holds \
                  a {}-scope exclusive lease at {} — this is a declared quiet window, a different \
                  condition from E_EMIT_LOCK_HELD (contention; retry shortly). Do NOT retry: wait \
-                 for the lease to be released, or contact the holding lane. Nothing was written.",
+                 for the lease to be released, or contact the holding lane — or, if you ARE the \
+                 holding lane, re-run with `--agent <holder>` naming that agent. Nothing was \
+                 written.",
                 held.lane,
                 held.agent,
                 held.scope,
