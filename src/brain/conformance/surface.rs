@@ -694,12 +694,20 @@ mod tests {
     /// (never fails) when brain.toml is absent, matching this repo's other live-corpus
     /// tests — a CI checkout without the private HQ vault must not go red on it.
     #[test]
-    fn live_corpus_surface_leak_is_clean() {
+    /// Runs the real check over the live fleet and REPORTS — it deliberately does not
+    /// assert the corpus is clean, because it is not: the first real run on 2026-09-02
+    /// produced 379 findings, one a genuine Tailscale disclosure in a public repo. The
+    /// block record routes live findings to `carryover[]` rather than failing a gate, so
+    /// what this test proves is that the check EXECUTES over the real corpus without
+    /// panicking, and prints what it saw. It is named for what it does; the earlier name
+    /// (`..._is_clean`) claimed a verdict it never checked — the same silent-green shape
+    /// this check exists to catch.
+    fn live_corpus_surface_leak_runs_and_reports_without_panicking() {
         let live_root = std::path::Path::new("../..");
         let live_brain_toml = live_root.join("brain.toml");
         if !live_brain_toml.exists() {
             eprintln!(
-                "skipping live_corpus_surface_leak_is_clean: {} has no brain.toml \
+                "skipping live_corpus_surface_leak_runs_and_reports_without_panicking: {} has no brain.toml \
                  (fresh clone or CI runner without the sibling HQ checkout)",
                 live_root.display()
             );
@@ -710,7 +718,7 @@ mod tests {
             Ok(c) => c,
             Err(e) => {
                 eprintln!(
-                    "skipping live_corpus_surface_leak_is_clean: live brain.toml errored: {e}"
+                    "skipping live_corpus_surface_leak_runs_and_reports_without_panicking: live brain.toml errored: {e}"
                 );
                 return;
             }
@@ -728,7 +736,7 @@ mod tests {
         // than fixing it here. Still, print the findings so a CI log shows them.
         if outcome.status != CheckStatus::Pass {
             eprintln!(
-                "live_corpus_surface_leak_is_clean: check reported {:?}: {:?} (reason: {:?})",
+                "live_corpus_surface_leak_runs_and_reports_without_panicking: check reported {:?}: {:?} (reason: {:?})",
                 outcome.status, outcome.findings, outcome.reason
             );
         }
