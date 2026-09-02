@@ -11,6 +11,52 @@ related: [status]
 timestamp: "2026-09-01T00:30:00-03:00"
 ---
 
+## [run: 2026-09-02]
+
+### `MV.14.B` CLOSED — block/ticket creation verb (`mev create-block`)
+
+- **What:** Shipped `mev create-block`, the first authored writer that can register a new block or
+  ticket into a repo's `planning/blocks/` and `state.json` from the CLI. `src/brain/block_create.rs`
+  is a new sibling of `blocks.rs` (which stays status-mutation only): `CreateBlockPayload` is the
+  `--from <file>` deserialization target, and `validate_payload` enforces `block.schema.json`'s
+  `kind`/`sdlc_workflow`/`model` enums, non-empty `epics`, non-empty text fields/`out_of_scope`/
+  `acceptance_criteria`, and kind-conditional requirements (block needs `phase`; ticket needs
+  `testing_strategy`) — task 1. `plan_create_block` builds one `EmitPlan` writing both the block
+  record and the target repo's `state.json`, with wave allocation (`10 * phase` for blocks, next
+  multiple of ten past the repo's max wave for ticket/chore), refusal on a dangling `depends_on`
+  target, refusal on an existing id (no-op, never overwrite), refusal on an unknown repo, and
+  byte-identical `depends_on` edges between the record and state.json via a `why`/`what` gloss-field
+  remap — task 2. `CreateBlock` clap command (`src/main.rs`) + `mev::create_block` driver
+  (`src/lib.rs`) wired to the same dry-run/`--write`/advisory-lock/linked-worktree-refusal/`--scope`
+  contract as `set-block-status`, chaining a scoped `emit-state --write` on success — task 3. 15
+  driver-level tests in `tests/it/brain_block_create.rs` (schema validity, all three enum
+  rejections, dangling-dependency refusal, dependency-before-dependent ordering, both wave rules,
+  `depends_on` parity, existing-id no-op, dry-run, cross-repo isolation) — task 4. Task 5 was
+  validation-only: re-ran `scripts/check_consumers.sh` with more headroom and confirmed the prior
+  2-minute timeout was environmental (passes in ~2:39, not a defect), then built the un-gateable
+  board-rendering AC's evidence in a disposable scratch corpus rather than the live one — the
+  created block rendered on the HQ board's NEXT list under `--scope alpha`, and a second unscoped
+  run confirmed the roadmap epic-sequence table also renders correctly (`--scope` deliberately
+  excludes non-repo-local epic docs; not a defect).
+- **Why:** Nothing could create a block before this — every block record and every `state.json`
+  entry in the fleet was hand-written or agent-written by hand, which is why registration drifts and
+  a run can't file its own next work. This block is upstream of engine-rs's lane-engine SQ-41 (the
+  conductor node that will shell out to this verb).
+- **Verdict:** PASS. All five tasks passed; full-suite review PASS with zero findings; all four
+  harness gates green (fmt, clippy `-D warnings`, `cargo test`, release build).
+- Next: pull the next item from the master-plan or HQ backlog.
+
+```
+18b22c7 docs: update docs for MV.14.B
+f21a677 feat: implement MV.14.B-task4
+e25ac3a feat: implement MV.14.B-task3
+6e01d8e feat: implement MV.14.B-task2
+bd12d53 feat: implement MV.14.B-task1
+85da2e1 feat: implement MV.16.D-task3
+87b0323 feat: implement MV.16.D-task2
+14aaa26 feat: implement MV.16.D-task1
+```
+
 ## [run: 2026-09-01]
 
 ### `planning/context.md` audit + the "25 integration-test binaries" claim corrected fleet-locally
