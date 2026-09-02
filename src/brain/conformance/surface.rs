@@ -628,6 +628,67 @@ mod tests {
         assert_eq!(outcome.status, CheckStatus::Pass);
     }
 
+    /// Positive control for rule 2 (MV.ticket.surface-leak-check task 4, acceptance
+    /// criterion "positive control -- the check re-detects a known-historical leak when
+    /// it is reintroduced", `gateable: false`). Reconstructs the SHAPE of the
+    /// 2026-08-29 `core/bastion-ui/docs/device-install.md` leak — a Tailscale `.ts.net`
+    /// hostname alongside a dotted-quad IP and port, in a device-install-style doc — in
+    /// a disposable scratch fixture. DOES NOT touch the real file: that file belongs to
+    /// another repo and another lane, and a test that mutates it (even temporarily)
+    /// risks losing that lane's live work. A check that reports Pass fleet-wide on its
+    /// first run is otherwise indistinguishable from a check that never ran; this test
+    /// is what tells the two apart.
+    #[test]
+    fn historical_tailscale_device_install_leak_shape_fires_rule2() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        write(
+            dir.path(),
+            "docs/device-install.md",
+            "## Connect over Tailscale\n\
+             \n\
+             SSH in at `mini.tailnet-abc123.ts.net` or directly via `100.64.1.23:8080`.\n",
+        );
+        commit_all(dir.path());
+
+        let repo = repo_entry("bastion-ui", "", true);
+        let findings = evaluate_repo(dir.path(), &repo, &[]).unwrap();
+
+        let rule2: Vec<&Finding> = findings.iter().filter(|f| f.rule == "rule2").collect();
+        assert_eq!(
+            rule2.len(),
+            2,
+            "expected both literals to fire: {findings:?}"
+        );
+        assert!(rule2.iter().any(|f| f.detail.contains("ts.net")));
+        assert!(rule2.iter().any(|f| f.detail.contains("100.64.1.23")));
+        assert!(rule2.iter().all(|f| f.file == "docs/device-install.md"));
+    }
+
+    /// Positive control for rule 1 (same acceptance criterion as above, mirror image).
+    /// Reconstructs the SHAPE of the base-template/mev climb-out class found in the
+    /// 2026-08-29 audit — a tracked doc linking above its own repo root, e.g. into the
+    /// HQ root — in a disposable scratch fixture, not any real repo.
+    #[test]
+    fn historical_climb_out_leak_shape_fires_rule1() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        write(
+            dir.path(),
+            "docs/index.md",
+            "See [the master plan](../../core/planning/master-plan.md) for context.\n",
+        );
+        commit_all(dir.path());
+
+        let repo = repo_entry("base-template", "", true);
+        let findings = evaluate_repo(dir.path(), &repo, &[]).unwrap();
+
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        assert_eq!(findings[0].rule, "rule1");
+        assert_eq!(findings[0].file, "docs/index.md");
+        assert!(findings[0].detail.contains("climbs above"));
+    }
+
     /// Live-corpus test: run the real check against the real fleet and assert Pass —
     /// the 2026-08-29 fixes are expected to hold on a clean checkout. Skips cleanly
     /// (never fails) when brain.toml is absent, matching this repo's other live-corpus
