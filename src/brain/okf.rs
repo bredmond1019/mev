@@ -348,6 +348,7 @@ mod tests {
             .collect();
         BrainConfig {
             conformance_writers: Vec::new(),
+            contracts: Vec::new(),
             permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),

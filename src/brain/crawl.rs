@@ -833,6 +833,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
             conformance_writers: Vec::new(),
+            contracts: Vec::new(),
             permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
@@ -1048,6 +1049,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
             conformance_writers: Vec::new(),
+            contracts: Vec::new(),
             permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),

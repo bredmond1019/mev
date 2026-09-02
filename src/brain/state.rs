@@ -4104,6 +4104,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
             conformance_writers: Vec::new(),
+            contracts: Vec::new(),
             permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
@@ -4192,6 +4193,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
             conformance_writers: Vec::new(),
+            contracts: Vec::new(),
             permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
@@ -4276,6 +4278,7 @@ mod tests {
 
         let config = BrainConfig {
             conformance_writers: Vec::new(),
+            contracts: Vec::new(),
             permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
@@ -4322,6 +4325,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
             conformance_writers: Vec::new(),
+            contracts: Vec::new(),
             permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
@@ -4439,6 +4443,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
             conformance_writers: Vec::new(),
+            contracts: Vec::new(),
             permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
@@ -8280,6 +8285,7 @@ mod tests {
         use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
             conformance_writers: Vec::new(),
+            contracts: Vec::new(),
             permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
@@ -8372,6 +8378,7 @@ mod tests {
         // its own tier (not `All`, which would spuriously target it as HQ).
         let config = BrainConfig {
             conformance_writers: Vec::new(),
+            contracts: Vec::new(),
             permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
@@ -8868,6 +8875,7 @@ mod tests {
         // listing must not produce a duplicate (repo, id) block in focus.now.
         let config = BrainConfig {
             conformance_writers: Vec::new(),
+            contracts: Vec::new(),
             permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
@@ -9053,6 +9061,7 @@ mod tests {
         use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
             conformance_writers: Vec::new(),
+            contracts: Vec::new(),
             permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
@@ -10287,6 +10296,7 @@ mod check_epics_tests {
         };
         BrainConfig {
             conformance_writers: Vec::new(),
+            contracts: Vec::new(),
             permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),

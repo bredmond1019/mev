@@ -297,6 +297,7 @@ mod tests {
     fn make_config(status_file_rel: &str, cache_doc_rel: &str) -> BrainConfig {
         BrainConfig {
             conformance_writers: Vec::new(),
+            contracts: Vec::new(),
             permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),

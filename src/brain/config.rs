@@ -372,6 +372,41 @@ pub struct ConformanceWriter {
     pub repo_path: Option<String>,
 }
 
+/// One endpoint (canonical or consumer) inside a `[[contracts]]` entry.
+///
+/// `path` is HQ-root-relative and must be resolved against
+/// `ConformanceCtx.root`, never against the mev crate directory or the cwd.
+/// `format` is one of `"md-version-line"` or `"dart-const"`. `key` is
+/// required in practice only by `dart-const` (the Dart constant's name, e.g.
+/// `kServeApiPin`) and is `None` for `md-version-line`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContractEndpoint {
+    /// The endpoint's repo slug (e.g. `"bastion"`, `"synapse"`).
+    pub repo: String,
+    /// HQ-root-relative path to the file carrying the version marker.
+    pub path: String,
+    /// Extraction format: `"md-version-line"` or `"dart-const"`.
+    pub format: String,
+    /// The named constant to extract (`dart-const` only).
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+/// One `[[contracts]]` entry in `brain.toml`.
+///
+/// Models a single canonical contract doc/const plus every consumer pinned
+/// to it, for `brain/conformance/contracts.rs`'s `contract-freshness` check.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContractEntry {
+    /// Short name for the contract (e.g. `"data-contract"`, `"serve-api"`).
+    pub name: String,
+    /// The single source-of-truth endpoint.
+    pub canonical: ContractEndpoint,
+    /// Every consumer endpoint pinned to `canonical`.
+    #[serde(default)]
+    pub consumers: Vec<ContractEndpoint>,
+}
+
 /// One `[[repos]]` entry in `brain.toml`.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct RepoEntry {
@@ -446,6 +481,12 @@ pub struct BrainConfig {
     /// `[[repos]]` entries.
     #[serde(default)]
     pub repos: Vec<RepoEntry>,
+    /// `[[contracts]]` entries — canonical contract docs/consts plus their
+    /// pinned consumers, checked for drift by `contract-freshness`. An
+    /// absent table means an empty registry — additive, so older/fixture
+    /// `brain.toml`s still parse.
+    #[serde(default)]
+    pub contracts: Vec<ContractEntry>,
 }
 
 impl BrainConfig {
@@ -1041,6 +1082,7 @@ enforce_blocks = true
             history: HistoryConfig::default(),
             carryover: CarryoverConfig::default(),
             conformance_writers: Vec::new(),
+            contracts: Vec::new(),
             repos: vec![
                 RepoEntry {
                     slug: "brain".to_string(),
@@ -1424,5 +1466,113 @@ repo_path = "bella"
                 "default profile must not be the most permissive level"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // `[[contracts]]` parsing (MV.ticket.contract-freshness-check task 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn contracts_table_absent_yields_empty_vec() {
+        let toml = r#"
+[[repos]]
+slug = "brain"
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert!(
+            cfg.contracts.is_empty(),
+            "an absent [[contracts]] table must yield an empty vec, not an error"
+        );
+    }
+
+    #[test]
+    fn contracts_one_entry_with_two_consumers_preserves_order() {
+        let toml = r#"
+[[contracts]]
+name = "data-contract"
+canonical = { repo = "engine-rs", path = "core/engine-rs/docs/data-contract.md", format = "md-version-line" }
+
+  [[contracts.consumers]]
+  repo = "bastion"
+  path = "core/bastion/docs/data-contract.md"
+  format = "md-version-line"
+
+  [[contracts.consumers]]
+  repo = "synapse"
+  path = "core/synapse/docs/data-contract.md"
+  format = "md-version-line"
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.contracts.len(), 1);
+        let entry = &cfg.contracts[0];
+        assert_eq!(entry.name, "data-contract");
+        assert_eq!(entry.canonical.repo, "engine-rs");
+        assert_eq!(entry.canonical.format, "md-version-line");
+        assert_eq!(entry.canonical.key, None);
+        assert_eq!(entry.consumers.len(), 2);
+        assert_eq!(
+            entry.consumers[0].repo, "bastion",
+            "consumer order must be preserved (bastion first)"
+        );
+        assert_eq!(
+            entry.consumers[1].repo, "synapse",
+            "consumer order must be preserved (synapse second)"
+        );
+    }
+
+    #[test]
+    fn contracts_dart_const_consumer_roundtrips_key() {
+        let toml = r#"
+[[contracts]]
+name = "serve-api"
+canonical = { repo = "bastion", path = "core/bastion/docs/serve/serve-api.md", format = "md-version-line" }
+
+  [[contracts.consumers]]
+  repo = "bastion-ui"
+  path = "core/bastion-ui/lib/services/serve_api_version.dart"
+  format = "dart-const"
+  key = "kServeApiPin"
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        let consumer = &cfg.contracts[0].consumers[0];
+        assert_eq!(consumer.format, "dart-const");
+        assert_eq!(consumer.key.as_deref(), Some("kServeApiPin"));
+    }
+
+    #[test]
+    fn contracts_md_version_line_consumer_has_no_key() {
+        let toml = r#"
+[[contracts]]
+name = "carryover-contract"
+canonical = { repo = "mev", path = "core/mev/docs/carryover-contract.md", format = "md-version-line" }
+
+  [[contracts.consumers]]
+  repo = "bastion"
+  path = "core/bastion/docs/carryover-contract.md"
+  format = "md-version-line"
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.contracts[0].consumers[0].key, None);
+    }
+
+    #[test]
+    fn contracts_entry_missing_canonical_is_a_parse_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let toml_path = dir.path().join("brain.toml");
+        std::fs::write(
+            &toml_path,
+            r#"
+[[contracts]]
+name = "data-contract"
+"#,
+        )
+        .expect("write fixture brain.toml");
+
+        let result = load_brain_config(&toml_path);
+        assert!(
+            matches!(result, Err(ConfigError::Parse { .. })),
+            "expected ConfigError::Parse for a [[contracts]] entry missing the \
+             required `canonical` table, got: {result:?}"
+        );
     }
 }
