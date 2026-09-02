@@ -1129,6 +1129,113 @@ pub fn set_block_status(
     Ok(report)
 }
 
+/// File a new block/ticket/chore record (`mev create-block --from <file>`).
+///
+/// The creation-side sibling of [`set_block_status`], and deliberately the same
+/// shape: resolve `brain.toml`, discover + load every `state.json`, refuse to
+/// write against an incomplete corpus, plan via
+/// [`brain::block_create::plan_create_block`], then apply and re-run
+/// [`emit_state`] so the derived surfaces (boards, wave tables, the
+/// epic-sequence table) agree with the new block in the same invocation.
+///
+/// Dry-run by default: without `write` the proposed plan is reported and
+/// nothing on disk is touched. `payload` is already-parsed (the CLI layer
+/// owns reading and deserializing `--from <file>`, so this stays testable
+/// without a filesystem).
+///
+/// See `brain::block_create`'s module docs for the full diagnostic catalogue
+/// (`E_BLOCK_CREATE_*`) this can surface — every one of them returns a plan
+/// with zero actions, so a payload that fails any check writes nothing at
+/// all.
+pub fn create_block(
+    root: &std::path::Path,
+    payload: &brain::block_create::CreateBlockPayload,
+    write: bool,
+    scope: Option<&brain::config::ScopeDependencySet>,
+) -> anyhow::Result<Report> {
+    use brain::block_create::plan_create_block;
+    use brain::config::find_brain_config;
+    use brain::emit::apply_plan;
+    use brain::state::{StateLoadError, discover_state_files, load_state};
+
+    let mut report = Report::default();
+
+    let _config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    let (sources, discovery_diags) = discover_state_files(root, &_config);
+    report.diagnostics.extend(discovery_diags);
+
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    let mut load_failed = false;
+    for src in &sources {
+        match load_state(&src.abs_path) {
+            Ok(file) => loaded.push((src.clone(), file)),
+            Err(StateLoadError::Parse { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("state.json is not valid JSON or does not match the schema: {source}"),
+                ));
+            }
+            Err(StateLoadError::Io { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("could not read state.json: {source}"),
+                ));
+            }
+        }
+    }
+
+    // Same completeness guard as set_block_status: the target repo may be the
+    // one that failed to load, and a dangling-dependency check must see the
+    // WHOLE corpus to be trustworthy — a partial load could report a false
+    // E_BLOCK_CREATE_DANGLING_DEPENDENCY for a dependency that in fact lives
+    // in the repo that failed to parse.
+    if write && load_failed {
+        report.diagnostics.push(Diagnostic::error(
+            root,
+            "E_EMIT_INCOMPLETE_CORPUS",
+            "refusing to write: at least one state.json failed to load, so dependency \
+             resolution and the chained emit-state would run against a partial corpus"
+                .to_string(),
+        ));
+        return Ok(report);
+    }
+
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let plan = plan_create_block(payload, &loaded, &today);
+
+    let had_actions = !plan.actions.is_empty();
+    report.diagnostics.extend(apply_plan(&plan, write));
+
+    // Regenerate derived views so the boards and wave/epic-sequence tables
+    // agree with the newly filed block. `scope` narrows which repo's derived
+    // surfaces the chained emit regenerates; unscoped (None) regenerates the
+    // whole corpus.
+    if write && had_actions && !report.is_failure() {
+        let emit = emit_state(root, true, scope)?;
+        report.diagnostics.extend(emit.diagnostics);
+    }
+
+    Ok(report)
+}
+
 /// Close an operator gate fleet-wide (`mev close-operator-gate <slug> --exit-verified`).
 ///
 /// Removes every `depends_on` `{type:"operator", slug: <slug>}` entry across every
