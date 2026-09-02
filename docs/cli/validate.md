@@ -223,11 +223,12 @@ close bracket, and a call — the array-indexing-then-call shape that reads as m
 if you don't special-case it).
 
 As of 2026-08-09, `mev validate --lint` reports zero `E_LINT_DEAD_LOCAL_LINK` over the live learn
-tree, and `mev validate --blog` reports **two** — the same `/learn/12-factor-agent-development`
-target in the EN and pt-BR copies of the 12-factor post, surfaced by the known-invalid rule above.
-Those are content bugs owned by learn-ai's `LA.ticket.content-lint-cleanup`, not mev bugs. Both
-figures are pinned by live-tree tests; the blog-side test allowlists that one tracked target and
-still fails on any other dead link, so the guard against new regressions is intact.
+tree. `mev validate --blog` briefly reported **two** — the same `/learn/12-factor-agent-development`
+target in the EN and pt-BR copies of the 12-factor post, surfaced by the known-invalid rule above,
+owned by learn-ai's `LA.ticket.content-lint-cleanup` — but that ticket closed and repointed both
+links to `/learn/paths/12-factor-agent-development`, so `--blog` is back to zero as well. Both
+figures are pinned by live-tree tests asserting zero dead links, so the guard against new
+regressions is intact.
 
 ---
 
