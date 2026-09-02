@@ -689,4 +689,60 @@ mod tests {
         // NotEvaluable depending on the build environment), never a panic.
         let _ = status;
     }
+
+    #[test]
+    fn writer_outcomes_two_registry_entries_both_named_alongside_self() {
+        // SOURCE-level evidence for the un-gateable "config-only edit adds a writer"
+        // acceptance criterion (MV.ticket.conformance-writer-registry task 4):
+        // `writer_outcomes` takes its writer list purely from its argument, so a
+        // second `ConformanceWriter` reaches it exactly the same way as the first —
+        // no code path can special-case "the writers the const used to name". This
+        // proves the SOURCE behaviour only: that the running-from-this-build binary
+        // iterates whatever registry it is handed. It does NOT prove that an already
+        // -installed `mev` on PATH would observe a `brain.toml` edit without being
+        // rebuilt/reinstalled — that installed-artefact claim is exactly what the
+        // block record's acceptance criterion marks `gateable: false` and leaves to
+        // manual fixture verification, not an in-repo test.
+        let first = fake_writer_script(
+            "two_entry_first",
+            r#"{"git_sha":"aaaa111","dirty":false,"source_dir":"/tmp/does-not-exist-first"}"#,
+            0,
+        );
+        let second = fake_writer_script(
+            "two_entry_second",
+            r#"{"git_sha":"bbbb222","dirty":false,"source_dir":"/tmp/does-not-exist-second"}"#,
+            0,
+        );
+        let writers = vec![
+            ConformanceWriter {
+                name: first.to_str().unwrap().to_string(),
+                repo_path: Some("writer-one-repo".to_string()),
+            },
+            ConformanceWriter {
+                name: second.to_str().unwrap().to_string(),
+                repo_path: Some("writer-two-repo".to_string()),
+            },
+        ];
+
+        let (_status, outcomes) = writer_outcomes(&writers);
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+
+        assert_eq!(outcomes.len(), 3, "self + two registered writers");
+        assert_eq!(outcomes[0].name, "self");
+        assert_eq!(
+            outcomes[1].name,
+            first.to_str().unwrap(),
+            "writers must appear in registry order"
+        );
+        assert_eq!(
+            outcomes[2].name,
+            second.to_str().unwrap(),
+            "writers must appear in registry order"
+        );
+        // Both fake writers report a nonexistent source_dir, so both are named and
+        // NotEvaluable — never silently Pass, never dropped from the report.
+        assert_eq!(outcomes[1].status, CheckStatus::NotEvaluable);
+        assert_eq!(outcomes[2].status, CheckStatus::NotEvaluable);
+    }
 }

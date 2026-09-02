@@ -1326,6 +1326,37 @@ repo_path = "bastion"
         );
     }
 
+    #[test]
+    fn conformance_writers_two_entries_both_roundtrip() {
+        // CONFIG-SIDE evidence for the un-gateable "config-only edit adds a writer"
+        // acceptance criterion (MV.ticket.conformance-writer-registry task 4): proves
+        // BrainConfig's parse itself scales to N entries, not just one. This is
+        // evidence about SOURCE behaviour (a fixture brain.toml parsed in-process) —
+        // it says nothing about whether an already-installed `mev` binary on PATH
+        // would pick up a second entry without being rebuilt/reinstalled.
+        let toml = r#"
+[[conformance_writers]]
+name = "bastion"
+repo_path = "bastion"
+
+[[conformance_writers]]
+name = "bella"
+repo_path = "bella"
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.conformance_writers.len(), 2);
+        assert_eq!(cfg.conformance_writers[0].name, "bastion");
+        assert_eq!(
+            cfg.conformance_writers[0].repo_path,
+            Some("bastion".to_string())
+        );
+        assert_eq!(cfg.conformance_writers[1].name, "bella");
+        assert_eq!(
+            cfg.conformance_writers[1].repo_path,
+            Some("bella".to_string())
+        );
+    }
+
     /// Conformance: pins mev's parse against the REAL fleet `brain.toml`, not a
     /// checked-in fixture — the backlog ticket's explicit ask ("a conformance test
     /// pinning mev's parse against the real brain.toml table") since a fixture
