@@ -59,9 +59,11 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::Diagnostic;
-use crate::brain::state::BlockedBy;
+use crate::brain::emit::{EmitAction, EmitPlan};
+use crate::brain::state::{BlockedBy, StateFile, StateSource, Track, TrackBlock};
 
 /// Legal `kind` values — which producer authored the record and how it is
 /// scheduled.
@@ -366,6 +368,383 @@ pub fn validate_payload(payload: &CreateBlockPayload) -> Vec<Diagnostic> {
     diags
 }
 
+// ---------------------------------------------------------------------------
+// Planning — wave allocation, depends_on resolution, and the two-record plan
+// ---------------------------------------------------------------------------
+
+/// Diagnostic code: `repo` does not match any loaded corpus repo.
+pub const E_BLOCK_CREATE_UNKNOWN_REPO: &str = "E_BLOCK_CREATE_UNKNOWN_REPO";
+/// Diagnostic code: `id` already exists in the target repo's `state.json` —
+/// a no-op refusal, never an overwrite.
+pub const E_BLOCK_CREATE_EXISTS: &str = "E_BLOCK_CREATE_EXISTS";
+/// Diagnostic code: a `depends_on` block-type edge names a `(repo, id)` that
+/// does not resolve in the loaded corpus.
+pub const E_BLOCK_CREATE_DANGLING_DEPENDENCY: &str = "E_BLOCK_CREATE_DANGLING_DEPENDENCY";
+
+/// Repo-relative path of the block record this payload would write.
+fn record_repo_path(payload: &CreateBlockPayload) -> String {
+    format!("planning/blocks/{}.json", payload.id)
+}
+
+/// Whether `(repo, id)` resolves to a block somewhere in the loaded corpus —
+/// any repo, since a `depends_on` edge may be cross-repo.
+fn dependency_resolves(repo: &str, id: &str, files: &[(StateSource, StateFile)]) -> bool {
+    files.iter().any(|(src, file)| {
+        src.repo_slug == repo
+            && file
+                .tracks
+                .iter()
+                .any(|t| t.blocks.iter().any(|b| b.id == id))
+    })
+}
+
+/// Next multiple of ten strictly past `max_wave` — the ticket/chore wave
+/// rule. Deliberately **not** `max_wave + 1`: that lands inside the lattice
+/// and silently interleaves one-offs with roadmap phases (see module docs
+/// and the block record's own TRAP notes).
+fn next_wave_past(max_wave: i64) -> i64 {
+    ((max_wave.max(0) / 10) + 1) * 10
+}
+
+/// Allocate `wave` for a new block, per the two rules this block's
+/// acceptance criteria pin: `10 * phase` for `kind: "block"`; the next
+/// multiple of ten past the target repo's highest existing wave for
+/// `kind: "ticket"` or `"chore"` — never `max + 1`.
+///
+/// `phase` is required to be `Some` for `kind: "block"` by
+/// [`validate_payload`] (`E_BLOCK_CREATE_BLOCK_NEEDS_PHASE`); this function
+/// trusts that precondition and does not re-check it.
+fn allocate_wave(payload: &CreateBlockPayload, file: &StateFile) -> i64 {
+    if payload.kind == "block" {
+        return 10 * payload.phase.unwrap_or(0);
+    }
+    let max_wave = file
+        .tracks
+        .iter()
+        .flat_map(|t| t.blocks.iter())
+        .filter_map(|b| b.wave)
+        .max()
+        .unwrap_or(0);
+    next_wave_past(max_wave)
+}
+
+/// The track title a new block of this `kind`/`phase` belongs under —
+/// `"Phase {phase}"` for a roadmap block, `"Tickets"` / `"Chores"` for a
+/// ticket or chore, matching `block-registration.md` step 5's convention.
+fn target_track_title(payload: &CreateBlockPayload) -> String {
+    match payload.kind.as_str() {
+        "ticket" => "Tickets".to_string(),
+        "chore" => "Chores".to_string(),
+        _ => format!("Phase {}", payload.phase.unwrap_or(0)),
+    }
+}
+
+/// Find the index of the track a new block belongs under — matching by
+/// title *prefix* for a phase track (so "Phase 14" matches an existing
+/// "Phase 14 — Orchestration extensions…" heading) and by exact title for
+/// the "Tickets"/"Chores" catch-alls.
+fn find_track_index(file: &StateFile, wanted_title: &str, is_phase: bool) -> Option<usize> {
+    file.tracks.iter().position(|t| {
+        if is_phase {
+            t.title.starts_with(wanted_title)
+        } else {
+            t.title == wanted_title
+        }
+    })
+}
+
+/// Convert one planned edge's JSON representation from the `state.json`
+/// shape (`BlockedBy`'s native serde, which glosses a block-type edge with
+/// `"what"`) to the block-record shape (`block.schema.json` glosses the same
+/// edge with `"why"`, and its `additionalProperties: false` rejects a
+/// literal `null` for an absent optional field).
+///
+/// The two files' `depends_on` therefore cannot be byte-identical at the
+/// JSON-key level for a glossed block edge — the schemas name the gloss
+/// field differently — but every edge this planner writes carries the same
+/// `(type, repo, id)` triple and the same gloss text into both records, so
+/// the dependency graph the two files describe never disagrees, which is
+/// what AC 7 ("byte-identical `depends_on` edges") protects against: one
+/// record naming a dependency the other omits or contradicts.
+fn depends_on_for_record(edges: &[BlockedBy]) -> Vec<serde_json::Value> {
+    edges
+        .iter()
+        .map(|edge| {
+            let mut value = serde_json::to_value(edge).expect("BlockedBy always serializes");
+            if let serde_json::Value::Object(map) = &mut value {
+                if map.get("type") == Some(&serde_json::Value::String("block".to_string())) {
+                    if let Some(what) = map.remove("what")
+                        && !what.is_null()
+                    {
+                        map.insert("why".to_string(), what);
+                    }
+                } else {
+                    map.retain(|_, v| !v.is_null());
+                }
+            }
+            value
+        })
+        .collect()
+}
+
+/// Build the `planning/blocks/<BlockID>.json` record content as a
+/// [`serde_json::Value`] — matching `block.schema.json`'s field set exactly
+/// (`additionalProperties: false`, so every key here must be a schema
+/// property, and every absent-optional field must be omitted rather than
+/// written `null`).
+///
+/// `spec_dir`/`created`/`updated` are derived here, never read from the
+/// payload (see module docs); `epics` is deliberately **not** written — the
+/// schema has no such property, and it belongs to the `state.json`
+/// registration only.
+pub fn build_block_record(
+    payload: &CreateBlockPayload,
+    created: &str,
+    updated: &str,
+) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    map.insert("id".to_string(), json!(payload.id));
+    map.insert("repo".to_string(), json!(payload.repo));
+    map.insert("kind".to_string(), json!(payload.kind));
+    if let Some(phase) = payload.phase {
+        map.insert("phase".to_string(), json!(phase));
+    }
+    if let Some(initiative) = &payload.initiative {
+        map.insert("initiative".to_string(), json!(initiative));
+    }
+    map.insert("title".to_string(), json!(payload.title));
+    map.insert("description".to_string(), json!(payload.description));
+    map.insert("what".to_string(), json!(payload.what));
+    map.insert("why".to_string(), json!(payload.why));
+    map.insert("sdlc_workflow".to_string(), json!(payload.sdlc_workflow));
+    map.insert("model".to_string(), json!(payload.model));
+    if let Some(rationale) = &payload.workflow_rationale {
+        map.insert("workflow_rationale".to_string(), json!(rationale));
+    }
+    map.insert(
+        "files".to_string(),
+        serde_json::to_value(&payload.files).expect("BlockFiles always serializes"),
+    );
+    if !payload.interfaces.is_empty() {
+        map.insert("interfaces".to_string(), json!(payload.interfaces));
+    }
+    map.insert("out_of_scope".to_string(), json!(payload.out_of_scope));
+    map.insert(
+        "acceptance_criteria".to_string(),
+        serde_json::to_value(&payload.acceptance_criteria)
+            .expect("AcceptanceCriterion always serializes"),
+    );
+    if let Some(strategy) = &payload.testing_strategy {
+        map.insert("testing_strategy".to_string(), json!(strategy));
+    }
+    if !payload.validation_commands.is_empty() {
+        map.insert(
+            "validation_commands".to_string(),
+            json!(payload.validation_commands),
+        );
+    }
+    if !payload.depends_on.is_empty() {
+        map.insert(
+            "depends_on".to_string(),
+            serde_json::Value::Array(depends_on_for_record(&payload.depends_on)),
+        );
+    }
+    if !payload.carryover_context.is_empty() {
+        map.insert(
+            "carryover_context".to_string(),
+            json!(payload.carryover_context),
+        );
+    }
+    map.insert(
+        "forward_looking".to_string(),
+        json!(payload.forward_looking),
+    );
+    map.insert("spec_dir".to_string(), json!(derive_spec_dir(&payload.id)));
+    if !payload.related.is_empty() {
+        map.insert("related".to_string(), json!(payload.related));
+    }
+    if let Some(notes) = &payload.notes {
+        map.insert("notes".to_string(), json!(notes));
+    }
+    map.insert("created".to_string(), json!(created));
+    map.insert("updated".to_string(), json!(updated));
+    serde_json::Value::Object(map)
+}
+
+/// Build the `state.json` `tracks[].blocks[]` entry for a new block —
+/// `status: "open"`, the allocated `wave`, and the same `depends_on` edges
+/// (see [`depends_on_for_record`]'s docs on why the two are logically, not
+/// byte, identical) plus the authored `epics`.
+fn build_track_block(payload: &CreateBlockPayload, wave: i64, created: &str) -> TrackBlock {
+    TrackBlock {
+        id: payload.id.clone(),
+        title: payload.title.clone(),
+        status: Some("open".to_string()),
+        depends_on: payload.depends_on.clone(),
+        wave: Some(wave),
+        description: Some(payload.description.clone()),
+        sdlc_workflow: Some(payload.sdlc_workflow.clone()),
+        model: Some(payload.model.clone()),
+        epics: payload.epics.clone(),
+        created: Some(created.to_string()),
+        ..TrackBlock::default()
+    }
+}
+
+/// Plan filing a new block/ticket/chore: the `planning/blocks/<BlockID>.json`
+/// record plus the matching `tracks[].blocks[]` registration in the target
+/// repo's `state.json`. Both writes are expressed as one [`EmitPlan]`, the
+/// same shape [`crate::brain::blocks::plan_set_block_status`] uses, so a
+/// dry-run and a `--write` share one computation.
+///
+/// `today` is `YYYY-MM-DD`, injected by the caller rather than read from the
+/// clock in here, so this stays a pure, deterministic function to test.
+///
+/// Diagnostics (each returns a plan with **zero actions** — nothing is ever
+/// partially written):
+/// - Every [`validate_payload`] diagnostic, unchanged, checked first.
+/// - `E_BLOCK_CREATE_UNKNOWN_REPO` — `payload.repo` matches no loaded file.
+/// - `E_BLOCK_CREATE_EXISTS` — `payload.id` already exists in the target
+///   repo's `state.json`; a no-op refusal, never an overwrite.
+/// - `E_BLOCK_CREATE_DANGLING_DEPENDENCY` — one or more `depends_on`
+///   block-type edges name a `(repo, id)` that does not resolve anywhere in
+///   the loaded corpus; every unresolved edge is named, not just the first.
+///
+/// On success, `plan.actions` carries exactly two [`EmitAction`]s: the new
+/// block record (path `<repo_root>/planning/blocks/<id>.json`, resolved
+/// against the target `StateSource`'s own `abs_path` so this plan works from
+/// any working directory) and the target repo's rewritten `state.json`.
+pub fn plan_create_block(
+    payload: &CreateBlockPayload,
+    files: &[(StateSource, StateFile)],
+    today: &str,
+) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+    let record_path = record_repo_path(payload);
+
+    // 1. Pure payload validation, unchanged from task 1.
+    let payload_diags = validate_payload(payload);
+    if !payload_diags.is_empty() {
+        plan.diagnostics = payload_diags;
+        return plan;
+    }
+
+    // 2. Resolve the target repo among loaded corpus files.
+    let Some(target_index) = files
+        .iter()
+        .position(|(src, _)| src.repo_slug == payload.repo)
+    else {
+        let known: Vec<&str> = files
+            .iter()
+            .map(|(src, _)| src.repo_slug.as_str())
+            .collect();
+        plan.diagnostics.push(Diagnostic::error(
+            &record_path,
+            E_BLOCK_CREATE_UNKNOWN_REPO,
+            format!(
+                "no loaded repo is named '{}'; known repos: {}",
+                payload.repo,
+                known.join(", ")
+            ),
+        ));
+        return plan;
+    };
+
+    // 3. An existing id is a no-op refusal, never an overwrite.
+    let already_exists = files[target_index]
+        .1
+        .tracks
+        .iter()
+        .any(|t| t.blocks.iter().any(|b| b.id == payload.id));
+    if already_exists {
+        plan.diagnostics.push(Diagnostic::error(
+            &record_path,
+            E_BLOCK_CREATE_EXISTS,
+            format!(
+                "block '{}' already exists in repo '{}'; refusing to overwrite — creation only \
+                 files new blocks",
+                payload.id, payload.repo
+            ),
+        ));
+        return plan;
+    }
+
+    // 4. Every block-type depends_on edge must resolve somewhere in the
+    //    loaded corpus. Collect every dangling edge, not just the first, so
+    //    a caller sees the whole problem in one round trip (same discipline
+    //    as validate_payload).
+    for edge in &payload.depends_on {
+        if let BlockedBy::Block(dep) = edge
+            && !dependency_resolves(&dep.repo, &dep.id, files)
+        {
+            plan.diagnostics.push(Diagnostic::error(
+                &record_path,
+                E_BLOCK_CREATE_DANGLING_DEPENDENCY,
+                format!(
+                    "depends_on names '{}:{}', which does not resolve in the loaded corpus — \
+                     create the dependency before the dependent",
+                    dep.repo, dep.id
+                ),
+            ));
+        }
+    }
+    if !plan.diagnostics.is_empty() {
+        return plan;
+    }
+
+    // 5. Wave allocation, per the two rules this block's ACs pin.
+    let wave = allocate_wave(payload, &files[target_index].1);
+
+    // 6. Find-or-create the target track, then append the new TrackBlock.
+    let is_phase = payload.kind == "block";
+    let wanted_title = target_track_title(payload);
+    let mut work_file = files[target_index].1.clone();
+    let track_index = match find_track_index(&work_file, &wanted_title, is_phase) {
+        Some(idx) => idx,
+        None => {
+            work_file.tracks.push(Track {
+                title: wanted_title.clone(),
+                blocks: Vec::new(),
+                extra: serde_json::Map::new(),
+            });
+            work_file.tracks.len() - 1
+        }
+    };
+    let track_block = build_track_block(payload, wave, today);
+    work_file.tracks[track_index].blocks.push(track_block);
+
+    // 7. Plan the state.json write.
+    let note = format!(
+        "create block '{}:{}' (wave {wave})",
+        payload.repo, payload.id
+    );
+    if let Some(action) = crate::brain::epics::action_for(&files[target_index].0, &work_file, note)
+    {
+        plan.actions.push(action);
+    }
+
+    // 8. Plan the block record write, resolved next to the target repo's
+    //    own state.json (its abs_path is <repo_root>/planning/state.json).
+    let repo_root = files[target_index]
+        .0
+        .abs_path
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let record = build_block_record(payload, today, today);
+    let mut record_content =
+        serde_json::to_string_pretty(&record).expect("block record always serializes");
+    record_content.push('\n');
+    plan.actions.push(EmitAction {
+        path: repo_root.join(&record_path),
+        new_content: record_content,
+        note: format!("file new block record '{}'", payload.id),
+    });
+
+    plan
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,5 +987,321 @@ mod tests {
             }
             other => panic!("expected BlockedBy::Block, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod planning_tests {
+    use super::*;
+
+    /// One state file for `repo`, with `tracks` built from `(title, blocks)`
+    /// pairs, sourced from a real temp path so [`crate::brain::epics::action_for`]'s
+    /// on-disk comparison has something to read — same fixture discipline as
+    /// `blocks.rs`'s `file_for`.
+    fn file_for(
+        dir: &Path,
+        repo: &str,
+        tracks: &[(&str, &[(&str, i64)])],
+    ) -> (StateSource, StateFile) {
+        let abs_path = dir.join(repo).join("planning").join("state.json");
+        std::fs::create_dir_all(abs_path.parent().unwrap()).unwrap();
+
+        let track_json: Vec<String> = tracks
+            .iter()
+            .map(|(title, blocks)| {
+                let block_json: Vec<String> = blocks
+                    .iter()
+                    .map(|(id, wave)| {
+                        format!(r#"{{ "id": "{id}", "title": "{id}", "status": "open", "wave": {wave} }}"#)
+                    })
+                    .collect();
+                format!(r#"{{ "title": "{title}", "blocks": [{}] }}"#, block_json.join(",\n"))
+            })
+            .collect();
+        let raw = format!(
+            r#"{{ "repo": "{repo}", "kind": "project", "updated": "2026-09-01",
+  "focus": {{ "now": [], "next": [], "blocked": [] }},
+  "tracks": [{}] }}"#,
+            track_json.join(",\n")
+        );
+        let file: StateFile = serde_json::from_str(&raw).expect("fixture state.json");
+
+        let mut content = serde_json::to_string_pretty(&file).unwrap();
+        content.push('\n');
+        std::fs::write(&abs_path, content).unwrap();
+
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path,
+            expected_kind: "project",
+        };
+        (src, file)
+    }
+
+    /// A minimal, fully-legal `kind: "block"` payload targeting repo `"mev"`
+    /// at phase 99 (wave 990) — every test mutates a field off of this
+    /// baseline.
+    fn legal_block_payload() -> CreateBlockPayload {
+        CreateBlockPayload {
+            id: "MV.99.NEW".to_string(),
+            repo: "mev".to_string(),
+            kind: "block".to_string(),
+            title: "A new block".to_string(),
+            description: "A block created by a planning test.".to_string(),
+            what: "Does the thing the test needs done.".to_string(),
+            why: "Because the test needs a legal payload to plan.".to_string(),
+            sdlc_workflow: "task".to_string(),
+            model: "sonnet".to_string(),
+            phase: Some(99),
+            initiative: None,
+            workflow_rationale: None,
+            files: BlockFiles::default(),
+            interfaces: Vec::new(),
+            out_of_scope: vec!["Everything else.".to_string()],
+            acceptance_criteria: vec![AcceptanceCriterion::Simple("It works.".to_string())],
+            testing_strategy: None,
+            validation_commands: Vec::new(),
+            depends_on: Vec::new(),
+            carryover_context: Vec::new(),
+            related: Vec::new(),
+            notes: None,
+            forward_looking: false,
+            epics: vec!["test-epic".to_string()],
+        }
+    }
+
+    fn codes(plan: &EmitPlan) -> Vec<String> {
+        plan.diagnostics.iter().map(|d| d.locator.clone()).collect()
+    }
+
+    // -----------------------------------------------------------------
+    // Wave allocation
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn block_wave_is_ten_times_phase() {
+        assert_eq!(next_wave_past(0), 10);
+        assert_eq!(next_wave_past(23), 30);
+        assert_eq!(next_wave_past(30), 40); // never max + 1
+        assert_eq!(next_wave_past(9), 10);
+    }
+
+    #[test]
+    fn creating_a_block_allocates_ten_times_phase_wave() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "mev", &[])];
+        let mut payload = legal_block_payload();
+        payload.phase = Some(14);
+        let plan = plan_create_block(&payload, &files, "2026-09-02");
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+        assert_eq!(plan.actions.len(), 2, "{plan:?}");
+        let state_action = plan
+            .actions
+            .iter()
+            .find(|a| a.path.ends_with("state.json"))
+            .expect("a state.json action");
+        assert!(
+            state_action.new_content.contains("\"wave\": 140"),
+            "{}",
+            state_action.new_content
+        );
+    }
+
+    #[test]
+    fn creating_a_ticket_allocates_next_multiple_of_ten_past_highest_wave() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(
+            dir.path(),
+            "mev",
+            &[("Phase 14", &[("MV.14.A", 140), ("MV.14.B", 141)])],
+        )];
+        let mut payload = legal_block_payload();
+        payload.id = "MV.ticket.new-thing".to_string();
+        payload.kind = "ticket".to_string();
+        payload.phase = None;
+        payload.testing_strategy = Some("Covered by a fixture test.".to_string());
+        let plan = plan_create_block(&payload, &files, "2026-09-02");
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+        let state_action = plan
+            .actions
+            .iter()
+            .find(|a| a.path.ends_with("state.json"))
+            .expect("a state.json action");
+        // Highest existing wave is 141 -> next multiple of ten past it is 150,
+        // never 142 (max + 1).
+        assert!(
+            state_action.new_content.contains("\"wave\": 150"),
+            "{}",
+            state_action.new_content
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // depends_on resolution
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn dangling_dependency_is_refused_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "mev", &[])];
+        let mut payload = legal_block_payload();
+        payload.depends_on = vec![BlockedBy::Block(crate::brain::state::BlockDep {
+            repo: "mev".to_string(),
+            id: "MV.NOPE.X".to_string(),
+            what: None,
+        })];
+        let plan = plan_create_block(&payload, &files, "2026-09-02");
+        assert!(plan.actions.is_empty(), "{plan:?}");
+        assert_eq!(codes(&plan), vec![E_BLOCK_CREATE_DANGLING_DEPENDENCY]);
+        assert!(plan.diagnostics[0].message.contains("mev:MV.NOPE.X"));
+    }
+
+    #[test]
+    fn dependency_before_dependent_ordering_is_enforced() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "mev", &[])];
+
+        // The dependent cannot be created first: its target does not exist yet.
+        let mut dependent = legal_block_payload();
+        dependent.id = "MV.99.DEPENDENT".to_string();
+        dependent.depends_on = vec![BlockedBy::Block(crate::brain::state::BlockDep {
+            repo: "mev".to_string(),
+            id: "MV.99.DEP".to_string(),
+            what: Some("prereq".to_string()),
+        })];
+        let plan = plan_create_block(&dependent, &files, "2026-09-02");
+        assert_eq!(codes(&plan), vec![E_BLOCK_CREATE_DANGLING_DEPENDENCY]);
+
+        // Create the dependency first — it has no depends_on of its own.
+        let mut dependency = legal_block_payload();
+        dependency.id = "MV.99.DEP".to_string();
+        let dep_plan = plan_create_block(&dependency, &files, "2026-09-02");
+        assert!(
+            dep_plan.diagnostics.is_empty(),
+            "{:?}",
+            dep_plan.diagnostics
+        );
+        // Apply the dependency's state.json action to a fresh file list.
+        let state_action = dep_plan
+            .actions
+            .iter()
+            .find(|a| a.path.ends_with("state.json"))
+            .unwrap();
+        std::fs::write(&state_action.path, &state_action.new_content).unwrap();
+        let updated_file: StateFile =
+            serde_json::from_str(&state_action.new_content).expect("written state.json parses");
+        let files_after = vec![(files[0].0.clone(), updated_file)];
+
+        // Now the dependent resolves.
+        let plan2 = plan_create_block(&dependent, &files_after, "2026-09-02");
+        assert!(plan2.diagnostics.is_empty(), "{:?}", plan2.diagnostics);
+        assert_eq!(plan2.actions.len(), 2);
+    }
+
+    // -----------------------------------------------------------------
+    // depends_on parity between the block record and state.json
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn depends_on_parity_between_record_and_state_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(
+            dir.path(),
+            "mev",
+            &[("Phase 14", &[("MV.14.A", 140)])],
+        )];
+        let mut payload = legal_block_payload();
+        payload.depends_on = vec![BlockedBy::Block(crate::brain::state::BlockDep {
+            repo: "mev".to_string(),
+            id: "MV.14.A".to_string(),
+            what: Some("a real dependency".to_string()),
+        })];
+        let plan = plan_create_block(&payload, &files, "2026-09-02");
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+
+        let record_action = plan
+            .actions
+            .iter()
+            .find(|a| a.path.to_string_lossy().contains("planning/blocks"))
+            .expect("a block record action");
+        let record: serde_json::Value = serde_json::from_str(&record_action.new_content).unwrap();
+        let record_dep = &record["depends_on"][0];
+        assert_eq!(record_dep["type"], "block");
+        assert_eq!(record_dep["repo"], "mev");
+        assert_eq!(record_dep["id"], "MV.14.A");
+        assert_eq!(record_dep["why"], "a real dependency");
+        assert!(record_dep.get("what").is_none(), "{record_dep:?}");
+
+        let state_action = plan
+            .actions
+            .iter()
+            .find(|a| a.path.ends_with("state.json"))
+            .unwrap();
+        let state_file: StateFile = serde_json::from_str(&state_action.new_content).unwrap();
+        let new_block = state_file
+            .tracks
+            .iter()
+            .flat_map(|t| t.blocks.iter())
+            .find(|b| b.id == payload.id)
+            .expect("new block present");
+        match &new_block.depends_on[0] {
+            BlockedBy::Block(dep) => {
+                assert_eq!(dep.repo, "mev");
+                assert_eq!(dep.id, "MV.14.A");
+                assert_eq!(dep.what.as_deref(), Some("a real dependency"));
+            }
+            other => panic!("expected BlockedBy::Block, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Existing-id refusal, unknown repo, dry-run parity
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn existing_block_id_is_a_no_op_refusal_not_an_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(
+            dir.path(),
+            "mev",
+            &[("Phase 99", &[("MV.99.NEW", 990)])],
+        )];
+        let plan = plan_create_block(&legal_block_payload(), &files, "2026-09-02");
+        assert!(plan.actions.is_empty(), "{plan:?}");
+        assert_eq!(codes(&plan), vec![E_BLOCK_CREATE_EXISTS]);
+    }
+
+    #[test]
+    fn unknown_repo_is_refused_with_known_repos_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "bella", &[])];
+        let plan = plan_create_block(&legal_block_payload(), &files, "2026-09-02");
+        assert_eq!(codes(&plan), vec![E_BLOCK_CREATE_UNKNOWN_REPO]);
+        assert!(plan.diagnostics[0].message.contains("bella"));
+    }
+
+    #[test]
+    fn planning_never_mutates_the_caller_slice() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "mev", &[])];
+        let _ = plan_create_block(&legal_block_payload(), &files, "2026-09-02");
+        assert!(
+            files[0].1.tracks.is_empty(),
+            "planning must not mutate the caller's corpus: {:?}",
+            files[0].1.tracks
+        );
+    }
+
+    #[test]
+    fn missing_epics_never_reaches_planning_diagnostics() {
+        // validate_payload's diagnostics are checked first and returned as-is;
+        // no repo/id/dependency work happens once a payload is invalid.
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "mev", &[])];
+        let mut payload = legal_block_payload();
+        payload.epics = Vec::new();
+        let plan = plan_create_block(&payload, &files, "2026-09-02");
+        assert!(plan.actions.is_empty(), "{plan:?}");
+        assert_eq!(codes(&plan), vec![E_BLOCK_CREATE_MISSING_EPICS]);
     }
 }
