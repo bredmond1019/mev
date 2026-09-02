@@ -4803,6 +4803,171 @@ mod tests {
         );
     }
 
+    // ---- W_STATE_CARRYOVER_BROKEN_PREDICATE_* (MV.ticket.broken-predicate-diagnostic
+    // task 3). Fixtures reproduce the SHAPE of the live faults only — never a live
+    // slug, since the live instance set churns daily and a slug-pinned test would go
+    // red the day someone repairs that exact entry. ----
+
+    /// POSITIVE 1 (shown-failing gate): a `file_contains` predicate whose path does
+    /// not resolve to a readable file must fire
+    /// `W_STATE_CARRYOVER_BROKEN_PREDICATE_UNREADABLE`, naming both the entry slug
+    /// and the path. Observed red before `check_carryover_broken_predicate` existed
+    /// (task 2's emission): with the function absent/uncalled this assertion has no
+    /// diagnostic to find and fails on `d.len() == 1` — this is that same assertion,
+    /// now green with the emission wired in task 2.
+    #[test]
+    fn broken_predicate_unreadable_fires_for_a_file_contains_on_a_missing_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Deliberately no `moved.txt` on disk — the path cannot be read.
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let file = parse_file(
+            r#"{"repo":"mev","kind":"project","updated":"2026-08-19",
+                "carryover":[{"slug":"path-moved-fixture","scope":{"repo":"test"},"kind":"deferred",
+                              "text":"x","created":"2026-08-19",
+                              "clears_when":{"type":"file_contains","path":"moved.txt","pattern":"done"}}]}"#,
+        );
+
+        let report = evaluate_one(&src, &file, dir.path());
+        let d = check_carryover_broken_predicate(&src, &file, &report);
+        assert_eq!(
+            d.len(),
+            1,
+            "a file_contains on an unreadable path must warn: {d:?}"
+        );
+        assert_eq!(
+            d[0].locator,
+            "W_STATE_CARRYOVER_BROKEN_PREDICATE_UNREADABLE"
+        );
+        assert_eq!(d[0].severity, crate::Severity::Warning);
+        assert!(
+            d[0].message.contains("path-moved-fixture"),
+            "message should name the entry slug: {}",
+            d[0].message
+        );
+        assert!(
+            d[0].message.contains("moved.txt"),
+            "message should name the unreadable path: {}",
+            d[0].message
+        );
+
+        let mut rep = crate::Report::default();
+        rep.diagnostics.extend(d);
+        assert!(
+            !rep.is_failure(),
+            "warning severity must never fail the state pass"
+        );
+    }
+
+    /// POSITIVE 2: a `file_contains` whose pattern is regex-shaped (the shape of the
+    /// one live `pattern-not-literal` instance, `ChatAbout .*live`) must fire
+    /// `W_STATE_CARRYOVER_BROKEN_PREDICATE_PATTERN`, naming the entry slug and the
+    /// pattern.
+    #[test]
+    fn broken_predicate_pattern_fires_for_a_regex_shaped_file_contains_pattern() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("marker.txt"), "hello world").unwrap();
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let file = parse_file(
+            r#"{"repo":"mev","kind":"project","updated":"2026-08-19",
+                "carryover":[{"slug":"regex-shaped-fixture","scope":{"repo":"test"},"kind":"deferred",
+                              "text":"x","created":"2026-08-19",
+                              "clears_when":{"type":"file_contains","path":"marker.txt","pattern":"ChatAbout .*live"}}]}"#,
+        );
+
+        let report = evaluate_one(&src, &file, dir.path());
+        let d = check_carryover_broken_predicate(&src, &file, &report);
+        assert_eq!(
+            d.len(),
+            1,
+            "a regex-shaped file_contains pattern must warn: {d:?}"
+        );
+        assert_eq!(d[0].locator, "W_STATE_CARRYOVER_BROKEN_PREDICATE_PATTERN");
+        assert_eq!(d[0].severity, crate::Severity::Warning);
+        assert!(
+            d[0].message.contains("regex-shaped-fixture"),
+            "message should name the entry slug: {}",
+            d[0].message
+        );
+        assert!(
+            d[0].message.contains("ChatAbout .*live"),
+            "message should name the offending pattern: {}",
+            d[0].message
+        );
+    }
+
+    /// NEGATIVE CONTROL 1 (the one that matters most): a `file_exists` predicate on
+    /// a path that does not exist is healthy — many live entries correctly wait for
+    /// an artifact to appear — and must never fire this gate, even though its lane
+    /// is also `NotEvaluable`-adjacent in spirit. `file_exists`'s missing-path
+    /// outcome does not classify as `FileUnreadable`/`PatternNotLiteral` at all (see
+    /// `evaluate_carryover`'s `FileExists` arm), so this asserts the gate stays
+    /// silent for a predicate shape this diagnostic must never touch.
+    #[test]
+    fn broken_predicate_silent_for_file_exists_on_a_path_that_does_not_exist_yet() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No `not-yet-built.txt` on disk — waiting for an artifact, not broken.
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let file = parse_file(
+            r#"{"repo":"mev","kind":"project","updated":"2026-08-19",
+                "carryover":[{"slug":"waiting-for-artifact-fixture","scope":{"repo":"test"},"kind":"deferred",
+                              "text":"x","created":"2026-08-19",
+                              "clears_when":{"type":"file_exists","path":"not-yet-built.txt"}}]}"#,
+        );
+
+        let report = evaluate_one(&src, &file, dir.path());
+        let d = check_carryover_broken_predicate(&src, &file, &report);
+        assert!(
+            d.is_empty(),
+            "file_exists on a not-yet-created path is healthy and must never warn: {d:?}"
+        );
+    }
+
+    /// NEGATIVE CONTROL 2: a `file_contains` whose file reads cleanly and whose
+    /// literal pattern is genuinely absent is a healthy `Actionable` predicate — the
+    /// finding simply is not yet true — and must produce no diagnostic here.
+    #[test]
+    fn broken_predicate_silent_for_a_readable_file_with_a_genuinely_absent_literal_pattern() {
+        use crate::brain::carryover::CarryoverLane;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("marker.txt"), "hello world").unwrap();
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let file = parse_file(
+            r#"{"repo":"mev","kind":"project","updated":"2026-08-19",
+                "carryover":[{"slug":"not-yet-true-fixture","scope":{"repo":"test"},"kind":"deferred",
+                              "text":"x","created":"2026-08-19",
+                              "clears_when":{"type":"file_contains","path":"marker.txt","pattern":"goodbye"}}]}"#,
+        );
+
+        let report = evaluate_one(&src, &file, dir.path());
+        let d = check_carryover_broken_predicate(&src, &file, &report);
+        assert!(
+            d.is_empty(),
+            "a readable file with a genuinely absent literal pattern must not warn: {d:?}"
+        );
+
+        // And it must still evaluate as Actionable, not NotEvaluable — a predicate
+        // that is simply not yet true is healthy, not broken.
+        let verdict = report
+            .entries
+            .iter()
+            .find(|v| v.repo == src.repo_slug && v.slug == "not-yet-true-fixture")
+            .expect("verdict for not-yet-true-fixture");
+        assert_eq!(
+            verdict.lane,
+            CarryoverLane::Actionable,
+            "genuinely-absent literal pattern must evaluate Actionable, not NotEvaluable: {verdict:?}"
+        );
+    }
+
     // Replaces `carryover_staleness_permanent_constraint_still_nags` (D72 §5):
     // permanently-true material now lives in `reference[]`, which has no clock
     // by design, rather than as a `carryover[]` entry that "still nags" forever.
