@@ -1,9 +1,11 @@
 //! Block-level authored mutation — the sibling of [`crate::brain::epics`] one
-//! level down.
+//! level down, and of [`crate::brain::block_create`] one step earlier in a
+//! block's life.
 //!
 //! [`crate::brain::epics`] mutates an *initiative* (an epic plus its member
-//! blocks, as a cascade). This module mutates exactly **one** block's authored
-//! `status` and nothing else:
+//! blocks, as a cascade). [`crate::brain::block_create`] **creates** a new
+//! block/ticket/chore record. This module mutates exactly **one** *existing*
+//! block's authored `status` and nothing else:
 //!
 //! | Command | Planner | Effect |
 //! |---|---|---|
