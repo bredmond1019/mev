@@ -40,6 +40,12 @@ fn write_file(root: &Path, rel: &str, content: &str) {
 /// Minimal `brain.toml` registering a single leaf repo — just enough for `emit_state`
 /// to run cleanly with no unrelated errors, mirroring
 /// `tests/emit_state_lock.rs::write_brain_toml`.
+///
+/// Also registers `bastion` via `[[conformance_writers]]` (MV.ticket.conformance-writer-registry):
+/// `toolchain-freshness` now reads its cross-binary writer list from this registry
+/// instead of the removed `CROSS_BINARY_WRITERS` const, so a fixture with no such
+/// table would check zero cross-binary writers and never see the fake `bastion` this
+/// file plants on `PATH`.
 fn write_brain_toml(root: &Path) {
     let toml = r#"[vocab]
 layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
@@ -55,6 +61,9 @@ repo_path = "repos/alpha"
 status_file = "repos/alpha/planning/status.md"
 cache_doc = "docs/projects/alpha.md"
 heading = "Alpha"
+
+[[conformance_writers]]
+name = "bastion"
 "#;
     fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
 }
