@@ -69,6 +69,13 @@
 //!   CLEARED report: either the entry should never have been filed, or it is
 //!   predicated on the wrong observable. Warning severity only — never fails the
 //!   state pass.
+//! - `W_STATE_CARRYOVER_BROKEN_PREDICATE_UNREADABLE` — a carryover `clears_when`
+//!   `file_contains` predicate's path could not be read (`NotEvaluableReason::FileUnreadable`);
+//!   the predicate can never fire and the path likely moved. Warning severity only.
+//! - `W_STATE_CARRYOVER_BROKEN_PREDICATE_PATTERN` — a carryover `clears_when`
+//!   `file_contains` predicate's pattern is regex-shaped (`NotEvaluableReason::PatternNotLiteral`);
+//!   the evaluator is literal-substring only, so the predicate can never fire.
+//!   Warning severity only.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -669,6 +676,98 @@ pub fn check_carryover_already_satisfied(
                 item.slug
             ),
         ));
+    }
+    diags
+}
+
+/// Broken-predicate gate over `carryover[].clears_when` — a predicate the evaluator
+/// already knows can never fire, surfaced to the author instead of sitting silent in
+/// `mev carryover`'s not-evaluable lane (`MV.ticket.broken-predicate-diagnostic`).
+///
+/// **Detection is not new here.** `NotEvaluableReason::FileUnreadable` and
+/// `::PatternNotLiteral` (`src/brain/carryover.rs`) already classify these two fault
+/// shapes correctly — this function is pure outflow, reusing
+/// [`check_carryover_already_satisfied`]'s exact `report.entries.iter().find(...)`
+/// lookup by `(repo_slug, slug)` (see that function's task-1 doc note) to reach
+/// `verdict.reason` and turn it into a named diagnostic:
+///
+/// - [`crate::brain::carryover::NotEvaluableReason::FileUnreadable`] →
+///   `W_STATE_CARRYOVER_BROKEN_PREDICATE_UNREADABLE`, naming the entry slug and the
+///   path — usually means the path moved and wants repointing.
+/// - [`crate::brain::carryover::NotEvaluableReason::PatternNotLiteral`] →
+///   `W_STATE_CARRYOVER_BROKEN_PREDICATE_PATTERN`, naming the entry slug and the
+///   pattern — the matcher is literal-substring only, so a regex-shaped pattern can
+///   never match; the pattern wants rewriting as a literal.
+///
+/// Two distinct codes because the fixes differ (out_of_scope: this gate names the
+/// fault, it never guesses or auto-repairs the fix).
+///
+/// Every other [`crate::brain::carryover::NotEvaluableReason`] variant — `Prose`,
+/// `NoPredicate`, `AmbiguousReference`, `NoClosureVerb`, `ExecutionNotAllowed`,
+/// `CommandTimedOut`, `CommandSpawnFailed`, `GateMentionNotCheckable` — is left
+/// alone: none of them is a predicate the evaluator has proven broken (a
+/// `file_exists` on a path that simply doesn't exist yet, for instance, is healthy
+/// `Actionable` and must never fire this gate — see the negative-control tests).
+///
+/// **Severity is Warning and must stay Warning** — matching
+/// [`check_carryover_already_satisfied`]: `out_of_scope` forbids blocking the write,
+/// so [`crate::Report::is_failure`] (which only counts `Error`) never sees these.
+pub fn check_carryover_broken_predicate(
+    src: &StateSource,
+    file: &StateFile,
+    report: &crate::brain::carryover::CarryoverReport,
+) -> Vec<Diagnostic> {
+    use crate::brain::carryover::NotEvaluableReason;
+
+    let mut diags = Vec::new();
+    let path = &src.abs_path;
+
+    for item in &file.carryover {
+        let Some(verdict) = report
+            .entries
+            .iter()
+            .find(|v| v.repo == src.repo_slug && v.slug == item.slug)
+        else {
+            continue;
+        };
+
+        let Some(ClearsWhen::Predicate(predicate)) = &item.clears_when else {
+            continue;
+        };
+
+        match verdict.reason {
+            Some(NotEvaluableReason::FileUnreadable) => {
+                if let ClearsWhenPredicate::FileContains { path: fpath, .. } = predicate {
+                    diags.push(Diagnostic::warning(
+                        path,
+                        "W_STATE_CARRYOVER_BROKEN_PREDICATE_UNREADABLE",
+                        format!(
+                            "carryover '{}' clears_when names a file_contains path that could \
+                             not be read: '{fpath}'. This predicate can never fire — the path \
+                             likely moved or was renamed since the entry was filed and wants \
+                             repointing at the file's current location.",
+                            item.slug
+                        ),
+                    ));
+                }
+            }
+            Some(NotEvaluableReason::PatternNotLiteral) => {
+                if let ClearsWhenPredicate::FileContains { pattern, .. } = predicate {
+                    diags.push(Diagnostic::warning(
+                        path,
+                        "W_STATE_CARRYOVER_BROKEN_PREDICATE_PATTERN",
+                        format!(
+                            "carryover '{}' clears_when has a regex-shaped file_contains \
+                             pattern: '{pattern}'. The evaluator matches literal substrings \
+                             only, so this predicate can never fire — rewrite the pattern as \
+                             the literal text it should find.",
+                            item.slug
+                        ),
+                    ));
+                }
+            }
+            _ => {}
+        }
     }
     diags
 }
