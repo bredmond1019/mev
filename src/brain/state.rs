@@ -101,11 +101,11 @@ use crate::brain::config::BrainConfig;
 /// `BrainConfig`/`Diagnostic` types and stays here — it consumes these shared
 /// types instead of duplicating them.
 pub use okf_core::{
-    ApprovalDep, Backlog, BacklogOrigin, Block, BlockDep, BlockedBy, Carryover, CarryoverScope,
-    ClearsWhen, ClearsWhenPredicate, CrossRepoEdge, Endpoint, Epic, ExternalDep, Focus,
-    OperatorDep, Origin, Reference, RepoRollup, StateEdge, StateEdgeKind, StateFile, StateGraph,
-    StateLoadError, StateNode, StateSource, TierEntry, Track, TrackBlock, build_state_graph,
-    load_state,
+    ApprovalDep, Backlog, BacklogOrigin, Block, BlockDep, BlockedBy, Carryover, CarryoverNeeds,
+    CarryoverScope, ClearsWhen, ClearsWhenPredicate, CrossRepoEdge, Endpoint, Epic, ExternalDep,
+    Focus, KnownCarryoverNeeds, OperatorDep, Origin, Reference, RepoRollup, StateEdge,
+    StateEdgeKind, StateFile, StateGraph, StateLoadError, StateNode, StateSource, TierEntry, Track,
+    TrackBlock, build_state_graph, load_state,
 };
 
 // ---------------------------------------------------------------------------
@@ -398,6 +398,44 @@ pub fn carryover_kind_from_str(kind: &str) -> okf_core::CarryoverKind {
         "drift" => okf_core::CarryoverKind::Known(okf_core::KnownCarryoverKind::Drift),
         "env" => okf_core::CarryoverKind::Known(okf_core::KnownCarryoverKind::Env),
         other => okf_core::CarryoverKind::Unknown(other.to_string()),
+    }
+}
+
+/// The fixed, known `Carryover.needs` vocabulary (D18, `OK.ticket.carryover-needs-field`):
+/// what kind of work closes an entry, as distinct from `kind`, which says why the entry
+/// exists. Absent (`None`) is the overwhelming live default — 361 of 361 entries as of
+/// 2026-09-02 — and is deliberately not part of this list: an absent `needs` produces no
+/// diagnostic at all (see `check_schema`'s carryover pass).
+pub const VALID_CARRYOVER_NEEDS: &[&str] = &["code", "docs", "state", "operator", "dedupe"];
+
+/// The plain string form of a [`okf_core::CarryoverNeeds`], mirroring [`carryover_kind_str`]
+/// exactly: known values render in their `snake_case` name, an unrecognized value round trips
+/// verbatim rather than being coerced or rejected.
+pub fn carryover_needs_str(needs: &okf_core::CarryoverNeeds) -> std::borrow::Cow<'_, str> {
+    match needs {
+        okf_core::CarryoverNeeds::Known(k) => std::borrow::Cow::Borrowed(match k {
+            okf_core::KnownCarryoverNeeds::Code => "code",
+            okf_core::KnownCarryoverNeeds::Docs => "docs",
+            okf_core::KnownCarryoverNeeds::State => "state",
+            okf_core::KnownCarryoverNeeds::Operator => "operator",
+            okf_core::KnownCarryoverNeeds::Dedupe => "dedupe",
+        }),
+        okf_core::CarryoverNeeds::Unknown(s) => std::borrow::Cow::Borrowed(s.as_str()),
+    }
+}
+
+/// The inverse of [`carryover_needs_str`]: parse a plain string into a
+/// [`okf_core::CarryoverNeeds`], recognising the fixed known vocabulary and falling back to
+/// `Unknown(s)` — preserved verbatim, never coerced or rejected — for everything else.
+/// Test-fixture and adaptation helper only.
+pub fn carryover_needs_from_str(needs: &str) -> okf_core::CarryoverNeeds {
+    match needs {
+        "code" => okf_core::CarryoverNeeds::Known(okf_core::KnownCarryoverNeeds::Code),
+        "docs" => okf_core::CarryoverNeeds::Known(okf_core::KnownCarryoverNeeds::Docs),
+        "state" => okf_core::CarryoverNeeds::Known(okf_core::KnownCarryoverNeeds::State),
+        "operator" => okf_core::CarryoverNeeds::Known(okf_core::KnownCarryoverNeeds::Operator),
+        "dedupe" => okf_core::CarryoverNeeds::Known(okf_core::KnownCarryoverNeeds::Dedupe),
+        other => okf_core::CarryoverNeeds::Unknown(other.to_string()),
     }
 }
 
@@ -1391,6 +1429,26 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                     item.slug,
                     kind_str,
                     VALID_CARRYOVER_KINDS.join(", ")
+                ),
+            ));
+        }
+
+        // `needs` (D18, OK.ticket.carryover-needs-field / MV.ticket.carryover-needs-validation):
+        // absent produces no diagnostic at all — 361 of 361 live entries as of 2026-09-02 carry
+        // no value, so warning on absence would fire on the overwhelming default. An
+        // unrecognized value warns (mirroring W_STATE_LEGACY_KIND's shape) rather than erroring:
+        // the field is fixable in place, so the file must still load.
+        if let Some(needs) = &item.needs
+            && let okf_core::CarryoverNeeds::Unknown(value) = needs
+        {
+            diags.push(Diagnostic::warning(
+                path,
+                "W_STATE_CARRYOVER_UNKNOWN_NEEDS",
+                format!(
+                    "carryover item '{}' has unrecognized needs value '{}'; expected one of: {}",
+                    item.slug,
+                    value,
+                    VALID_CARRYOVER_NEEDS.join(", ")
                 ),
             ));
         }
@@ -5309,6 +5367,141 @@ mod tests {
                 "legacy kind '{legacy}' must not also raise E_STATE_SCHEMA_BAD_KIND: {diags:?}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // carryover[].needs (D18, MV.ticket.carryover-needs-validation)
+    // -----------------------------------------------------------------------
+
+    /// The untagged-order trap, pinned on this side: `CarryoverNeeds` is
+    /// `#[serde(untagged)]` with `Known` declared FIRST. If that ordering
+    /// were ever reversed, every round-trip test would still pass while the
+    /// vocabulary check silently never fires (a known value would always
+    /// deserialize as `Unknown` instead). Assert the variant directly, not
+    /// just that it round-trips.
+    #[test]
+    fn carryover_needs_known_value_deserializes_as_known_not_unknown() {
+        for known in ["code", "docs", "state", "operator", "dedupe"] {
+            let parsed = carryover_needs_from_str(known);
+            assert!(
+                matches!(parsed, okf_core::CarryoverNeeds::Known(_)),
+                "expected {known:?} to deserialize as CarryoverNeeds::Known, got {parsed:?} — \
+                 if this fails, the untagged variant order was reversed and the vocabulary \
+                 check can never fire again"
+            );
+            assert_eq!(
+                carryover_needs_str(&parsed),
+                known,
+                "expected {known:?} to round-trip byte-identically through carryover_needs_str"
+            );
+        }
+    }
+
+    #[test]
+    fn carryover_needs_unknown_value_round_trips_verbatim() {
+        for weird in ["bogus", "Code", "totally-novel-needs"] {
+            let parsed = carryover_needs_from_str(weird);
+            assert_eq!(
+                parsed,
+                okf_core::CarryoverNeeds::Unknown(weird.to_string()),
+                "expected {weird:?} to parse as Unknown(verbatim)"
+            );
+        }
+    }
+
+    /// Each of the five known `needs` values must produce no diagnostic at all.
+    #[test]
+    fn known_carryover_needs_value_emits_no_diagnostic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        for known in VALID_CARRYOVER_NEEDS {
+            let json = format!(
+                r#"{{"repo":"mev","kind":"project","updated":"2026-09-02",
+                    "carryover":[{{"slug":"needs-{known}","scope":{{"repo":"mev"}},
+                                  "kind":"deferred","needs":"{known}","text":"x",
+                                  "created":"2026-09-01"}}]}}"#
+            );
+            let file = parse_file(&json);
+            let diags = check_schema(&src, &file);
+            let needs_diags: Vec<_> = diags
+                .iter()
+                .filter(|d| d.locator == "W_STATE_CARRYOVER_UNKNOWN_NEEDS")
+                .collect();
+            assert!(
+                needs_diags.is_empty(),
+                "known needs value '{known}' must not raise W_STATE_CARRYOVER_UNKNOWN_NEEDS: {diags:?}"
+            );
+        }
+    }
+
+    /// An unrecognized `needs` value must warn, name the entry and the value, and the
+    /// file must still load (this is a warning, never an error).
+    #[test]
+    fn unrecognized_carryover_needs_warns_names_entry_and_value_and_still_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{"repo":"mev","kind":"project","updated":"2026-09-02",
+            "carryover":[{"slug":"bogus-needs-entry","scope":{"repo":"mev"},
+                          "kind":"deferred","needs":"bogus","text":"x",
+                          "created":"2026-09-01"}]}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+
+        let needs_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_CARRYOVER_UNKNOWN_NEEDS")
+            .collect();
+        assert_eq!(
+            needs_diags.len(),
+            1,
+            "unrecognized needs value should produce exactly one \
+             W_STATE_CARRYOVER_UNKNOWN_NEEDS: {diags:?}"
+        );
+        assert_eq!(
+            needs_diags[0].severity,
+            crate::Severity::Warning,
+            "W_STATE_CARRYOVER_UNKNOWN_NEEDS must be Warning severity, not error — the \
+             file must still load"
+        );
+        assert!(
+            needs_diags[0].message.contains("bogus-needs-entry"),
+            "message must name the entry slug: {}",
+            needs_diags[0].message
+        );
+        assert!(
+            needs_diags[0].message.contains("bogus"),
+            "message must name the offending value: {}",
+            needs_diags[0].message
+        );
+    }
+
+    /// An absent `needs` produces no diagnostic at all — the overwhelming live default
+    /// (0 of 361 live entries as of 2026-09-02 carry the field).
+    #[test]
+    fn absent_carryover_needs_emits_no_diagnostic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{"repo":"mev","kind":"project","updated":"2026-09-02",
+            "carryover":[{"slug":"no-needs-entry","scope":{"repo":"mev"},
+                          "kind":"deferred","text":"x","created":"2026-09-01"}]}"#;
+        let file = parse_file(json);
+        assert!(
+            file.carryover[0].needs.is_none(),
+            "fixture must actually leave needs absent"
+        );
+        let diags = check_schema(&src, &file);
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.locator != "W_STATE_CARRYOVER_UNKNOWN_NEEDS"),
+            "absent needs must produce no diagnostic at all: {diags:?}"
+        );
     }
 
     #[test]
