@@ -5533,6 +5533,103 @@ mod tests {
         );
     }
 
+    /// W_CARRYOVER_MISFILED (task 3): an entry declaring `needs: operator` is, by
+    /// construction, in the wrong container and must be named as such.
+    ///
+    /// The fixture reproduces the SHAPE of one of the 6 real misfiled entries the
+    /// 2026-09-01 triage found (5 in bastiel, 1 in brazilianportugui) — prose that is
+    /// plainly operator-only work — but, per the block's notes and task 4's own
+    /// description, it SETS `needs: "operator"` itself. The 6 live entries carry no
+    /// `needs` value at all (they predate the field), so a fixture copied from them
+    /// verbatim would never fire the lint; only a fixture that authors the field can
+    /// prove the diagnostic actually fires.
+    ///
+    /// Observed red before task 3's `W_CARRYOVER_MISFILED` emission existed (verified
+    /// here by temporarily commenting out that `diags.push` block and re-running this
+    /// test): 0 diagnostics with locator `W_CARRYOVER_MISFILED` were produced —
+    /// `needs_diags.len()` was `0`, failing the `assert_eq!(needs_diags.len(), 1, ...)`
+    /// below with `left: 0, right: 1`. Restoring task 3's emission turns it green.
+    #[test]
+    fn needs_operator_entry_produces_misfiling_diagnostic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{"repo":"bastiel","kind":"project","updated":"2026-09-01",
+            "carryover":[{"slug":"needs-mac-mini-credential-rotation","scope":{"repo":"bastiel"},
+                          "kind":"deferred","needs":"operator",
+                          "text":"rotate the Tailscale auth key on the Mac Mini; only the operator holds the admin console login",
+                          "created":"2026-08-20"}]}"#;
+        let file = parse_file(json);
+        assert_eq!(
+            file.carryover[0].needs,
+            Some(okf_core::CarryoverNeeds::Known(
+                okf_core::KnownCarryoverNeeds::Operator
+            )),
+            "fixture must actually set needs: operator, not merely read as operator work \
+             by its prose — a fixture copied verbatim from the 6 live entries (which carry \
+             no needs value at all) would make this lint untestable"
+        );
+
+        let diags = check_schema(&src, &file);
+        let needs_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_CARRYOVER_MISFILED")
+            .collect();
+        assert_eq!(
+            needs_diags.len(),
+            1,
+            "needs: operator should produce exactly one W_CARRYOVER_MISFILED: {diags:?}"
+        );
+        assert_eq!(
+            needs_diags[0].severity,
+            crate::Severity::Warning,
+            "W_CARRYOVER_MISFILED must be Warning severity, like every sibling carryover \
+             diagnostic — naming the misfiling is the deliverable, not failing the file"
+        );
+        assert!(
+            needs_diags[0]
+                .message
+                .contains("needs-mac-mini-credential-rotation"),
+            "message must name the entry slug: {}",
+            needs_diags[0].message
+        );
+        assert!(
+            needs_diags[0].message.contains("depends_on"),
+            "message must point at the depends_on operator edge as the correct home: {}",
+            needs_diags[0].message
+        );
+        assert!(
+            needs_diags[0].message.to_lowercase().contains("carryover"),
+            "message must say why: a carryover entry gates nothing: {}",
+            needs_diags[0].message
+        );
+    }
+
+    /// The five known values other than `operator` must never trip the misfiling lint —
+    /// it is specific to `operator`, not to having a `needs` value at all.
+    #[test]
+    fn non_operator_known_needs_values_do_not_trip_misfiling_lint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        for known in ["code", "docs", "state", "dedupe"] {
+            let json = format!(
+                r#"{{"repo":"mev","kind":"project","updated":"2026-09-02",
+                    "carryover":[{{"slug":"needs-{known}-not-misfiled","scope":{{"repo":"mev"}},
+                                  "kind":"deferred","needs":"{known}","text":"x",
+                                  "created":"2026-09-01"}}]}}"#
+            );
+            let file = parse_file(&json);
+            let diags = check_schema(&src, &file);
+            assert!(
+                diags.iter().all(|d| d.locator != "W_CARRYOVER_MISFILED"),
+                "needs: {known} must never trip W_CARRYOVER_MISFILED: {diags:?}"
+            );
+        }
+    }
+
     #[test]
     fn unknown_carryover_kind_errors_and_message_omits_legacy_values() {
         let dir = tempfile::tempdir().expect("tempdir");
