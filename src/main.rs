@@ -1186,7 +1186,8 @@ enum Command {
     /// (`MV.ticket.conformance-check-registry`).
     ///
     /// Each registered check canonicalizes and digests both sides of a duplicated fact
-    /// and reports divergence with the concrete set difference. Four checks ship today:
+    /// and reports divergence with the concrete set difference. Checks ship today
+    /// (see `brain::conformance::all_checks` for the authoritative, current list):
     ///   backlog-parity           — HQ planning/backlog.md ## Active + ## Promoted vs
     ///                               state.json backlog[]
     ///   epics-index-parity       — core/planning/epics/index.md vs the HQ epics[] registry
@@ -1195,6 +1196,10 @@ enum Command {
     ///                               `mev validate-brain --sync`)
     ///   toolchain-freshness      — the running mev binary's compiled-in build stamp vs its
     ///                               source tree's current HEAD
+    ///   sibling-rule-coverage    — declared sibling-function pairs vs shared-helper /
+    ///                               forbidden-pattern / covering-test compliance
+    ///   contract-freshness       — canonical contract doc version vs each consumer's
+    ///                               pinned copy, across repos
     ///
     /// Each check reports one of three statuses: pass (both sides match), drift (the
     /// sides diverge — see the findings for the concrete set difference), or

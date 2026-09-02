@@ -14,6 +14,7 @@
 
 mod backlog;
 pub(crate) mod consumers;
+pub mod contracts;
 mod epics_index;
 mod project_cache;
 mod sibling;
@@ -141,6 +142,12 @@ pub fn all_checks() -> Vec<ConformanceCheck> {
             description: "declared sibling-function pairs vs whether both route through their shared helper, avoid the forbidden inline pattern, and share a covering test",
             run: sibling::run,
             reads_live_checkout: true,
+        },
+        ConformanceCheck {
+            name: "contract-freshness",
+            description: "canonical contract doc version vs each consumer's pinned copy, across repos",
+            run: contracts::run,
+            reads_live_checkout: false,
         },
     ]
 }
