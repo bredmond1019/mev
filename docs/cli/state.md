@@ -29,6 +29,7 @@ then re-derive. A hand-edit is overwritten on the next run and looks like data l
 | [`emit-state`](#emit-state---write-path) | Regenerates **every** derived surface from authored state |
 | [`state-history`](#state-history-path---restore-seq) | Lists, and can restore, the revisions `emit-state` records |
 | [`set-block-status`](#set-block-status-repoid-status-path---write---force-operator-gate---scope-slug) | Flips one block's authored `status`, then re-derives |
+| [`create-block`](#create-block---from-file-path---write---scope-slug) | Files a new block/ticket/chore record, then re-derives |
 | [`manifest`](#manifest---pretty-path) | Emits a JSON manifest of every file in the corpus |
 
 ## Quickstart
@@ -44,6 +45,9 @@ mev emit-state --write
 
 # Flip one block, which re-derives internally
 mev set-block-status mev:MV.1.A closed --write
+
+# File a new block/ticket/chore record from a JSON payload, which also re-derives
+mev create-block --from payload.json --write
 
 # If a write went wrong, list revisions and roll back
 mev state-history core/mev/planning/state.json
@@ -639,6 +643,93 @@ any error-severity diagnostic or a write failure.
 | `E_QUIESCE_LEASE_HELD` | a sibling lane's exclusive lease declares a quiet window; do not retry — see [Quiesce lease on `--write`](#quiesce-lease-on---write---agent---lock-dir) |
 | `E_BLOCK_OPERATOR_GATED` | `--write`ing a block to `in_progress` while it carries an unmet `Operator` `depends_on` edge, without `--force-operator-gate` |
 | `E_FORCE_OPERATOR_GATE_NOT_TTY` | `--force-operator-gate` was passed but stdin is not a TTY |
+| `E_EMIT_UNKNOWN_SCOPE` | `--scope` names a slug with no matching `[[repos]]` entry in `brain.toml`; the message names every valid slug |
+
+---
+
+### `create-block --from <file> [path] [--write] [--scope <slug>]`
+
+File a **new** block, ticket, or chore: write `planning/blocks/<BlockID>.json` plus its matching
+`tracks[].blocks[]` registration in the target repo's `state.json`. The creation counterpart to
+`set-block-status` above — that command moves one *existing* block's status, this one adds a block
+that does not exist yet — on the same dry-run/`--write`/`--scope` driver contract.
+
+**The authored fields arrive as a JSON payload via `--from <FILE>`, not per-field flags.**
+`block.schema.json` has 15 required fields and several are long prose or arrays
+(`what`, `why`, `files`, `acceptance_criteria`), which is unusable as shell arguments. See
+[`CreateBlockPayload`](../../src/brain/block_create.rs) for the full payload shape; the vocabularies
+it enforces:
+
+| Field | Legal values |
+|---|---|
+| `kind` | `block` \| `ticket` \| `chore` |
+| `sdlc_workflow` | `none` \| `patch` \| `task` \| `run` \| `flow` |
+| `model` | `sonnet` \| `gemini-pro` \| `gemini-flash` \| `either` — deliberately **not** the SDLC engines' `{haiku, sonnet, opus}` stage-model set; `"opus"` is not a legal block-record `model` |
+
+**`epics` is payload-only, not a `block.schema.json` field.** The block record itself never carries
+it (the schema is `additionalProperties: false`); it drives only the `state.json`
+`tracks[].blocks[].epics` registration, which the epic-sequence table renders from. A payload with
+no `epics` is refused, never written with an empty list — a block created with no epic renders on
+no epic-sequence table.
+
+**`spec_dir` is always derived**, never read from the payload — always exactly
+`planning/<BlockID>/`, so a typo in the payload can never diverge from the schema's own pattern
+constraint.
+
+**Dry-run by default**, exactly like `set-block-status`: without `--write` the proposed record and
+`state.json` edit print and not a byte is touched. A successful `--write` takes the same advisory
+lock, and then runs `emit-state --write` so the boards, wave table, and epic-sequence table show the
+new block in the same invocation.
+
+**An existing block id is a no-op refusal, never an overwrite.** `E_BLOCK_CREATE_EXISTS` fires and
+nothing is written — creation only files new blocks.
+
+**A `depends_on` edge naming a block that does not resolve in the loaded corpus is refused**, with
+every unresolved `(repo, id)` named in the error (not just the first) — create the dependency before
+the dependent.
+
+**Wave allocation**: `10 * phase` for `kind: block`; for `kind: ticket`/`chore`, the next multiple of
+ten past the target track's current max wave (never `max + 1`). The target track is matched by title
+— `"Phase {phase}"` for a block, `"Tickets"`/`"Chores"` (exact) for a ticket/chore — and created if
+none matches.
+
+**`--scope <slug>` narrows only the chained `emit-state` regeneration**, identically to
+`set-block-status --scope` — the new record and its `state.json` registration are always written to
+exactly the target repo regardless of scope. Note that `--scope` excludes HQ-level docs outside the
+scoped repo's own path (e.g. a cross-repo `master-plan.md` epic-sequence table); omit `--scope` if a
+non-repo-local surface needs to see the new block too.
+
+```bash
+# See what create-block would write (dry run — writes nothing)
+mev create-block --from payload.json ~/Dev/agentic-portfolio
+
+# File it, and regenerate every derived view
+mev create-block --from payload.json ~/Dev/agentic-portfolio --write
+
+# File it, regenerating only the target repo's own derived surfaces
+mev create-block --from payload.json ~/Dev/agentic-portfolio --write --scope mev
+```
+
+Exit codes: `0` planned (dry-run) or applied · `1` unreadable/unparseable `--from` file, any
+`E_BLOCK_CREATE_*` payload or plan diagnostic, a write failure, `E_EMIT_UNKNOWN_SCOPE`,
+`E_EMIT_LOCK_HELD`, `E_QUIESCE_LEASE_HELD`, or a linked-worktree refusal.
+
+| Diagnostic | Cause |
+|---|---|
+| `E_BLOCK_CREATE_KIND_ENUM` | `kind` is outside `block`/`ticket`/`chore` |
+| `E_BLOCK_CREATE_SDLC_WORKFLOW_ENUM` | `sdlc_workflow` is outside `none`/`patch`/`task`/`run`/`flow` |
+| `E_BLOCK_CREATE_MODEL_ENUM` | `model` is outside `sonnet`/`gemini-pro`/`gemini-flash`/`either` — this is what rejects `"opus"` |
+| `E_BLOCK_CREATE_MISSING_EPICS` | `epics` is empty or absent |
+| `E_BLOCK_CREATE_EMPTY_FIELD` | a required prose field is empty |
+| `E_BLOCK_CREATE_BLOCK_NEEDS_PHASE` | `kind: block` with no `phase` |
+| `E_BLOCK_CREATE_TICKET_NEEDS_TESTING_STRATEGY` | `kind: ticket` with no `testing_strategy` |
+| `E_BLOCK_CREATE_EMPTY_OUT_OF_SCOPE` | `out_of_scope` is empty |
+| `E_BLOCK_CREATE_EMPTY_ACCEPTANCE_CRITERIA` | `acceptance_criteria` is empty |
+| `E_BLOCK_CREATE_UNKNOWN_REPO` | `payload.repo` matches no loaded `state.json`; the message lists the known repo slugs |
+| `E_BLOCK_CREATE_EXISTS` | `payload.id` already exists in the target repo — refused, never overwritten |
+| `E_BLOCK_CREATE_DANGLING_DEPENDENCY` | a `depends_on` block-type edge names a `(repo, id)` that does not resolve in the loaded corpus |
+| `E_EMIT_LOCK_HELD` | another mev write holds the brain-root advisory lock |
+| `E_QUIESCE_LEASE_HELD` | a sibling lane's exclusive lease declares a quiet window; do not retry — see [Quiesce lease on `--write`](#quiesce-lease-on---write---agent---lock-dir) |
 | `E_EMIT_UNKNOWN_SCOPE` | `--scope` names a slug with no matching `[[repos]]` entry in `brain.toml`; the message names every valid slug |
 
 ---
