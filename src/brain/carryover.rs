@@ -279,6 +279,16 @@ pub struct CarryoverReport {
     pub entries: Vec<CarryoverVerdict>,
     /// Every `carryover[]` entry sharing an authored `finding_id`, grouped one
     /// cluster per distinct id. See [`cluster_by_finding_id`].
+    ///
+    /// This is also the corpus-wide `finding_id -> {repos, slugs}` view the
+    /// state pass reasons about for `W_STATE_FINDING_ID_ORPHAN`
+    /// (`MV.16.D`): each [`FindingCluster`] already carries every repo and
+    /// slug an id was used from, keyed by the exact authored string — no
+    /// second pass or new plumbing route is needed, the same way
+    /// `check_carryover_broken_predicate` (`state.rs`) consumes this report
+    /// directly rather than re-walking `files`. `cluster_by_finding_id`'s own
+    /// semantics (exact-string grouping, deterministic ordering,
+    /// finding_id-less entries excluded) are unchanged by this use.
     pub clusters: Vec<FindingCluster>,
     /// Heuristic candidate-duplicate pairs over entries that carry no
     /// `finding_id` yet. Always unconfirmed — see [`suggest_duplicates`].
@@ -8491,6 +8501,41 @@ mod tests {
             single_repo: true,
         };
         assert_eq!(cluster.finding_id, "id");
+    }
+
+    #[test]
+    fn clusters_exposes_id_to_repos_and_slugs_view_for_state_pass() {
+        // MV.16.D task 1: confirms `CarryoverReport::clusters` (built from
+        // `cluster_by_finding_id`) already carries, per finding_id, every repo
+        // and slug it was used from — the exact "id -> {repos, slugs}" shape
+        // the state pass's forthcoming `W_STATE_FINDING_ID_ORPHAN` check
+        // (task 2) needs, reachable the same way
+        // `check_carryover_broken_predicate` already consumes `entries` off
+        // this same report. No new plumbing route, no change to
+        // `cluster_by_finding_id`'s own grouping/ordering semantics.
+        let entries = vec![
+            verdict("bastion", "b-slug", Some(1), Some("shared-typo-guard")),
+            verdict("mev", "m-slug", Some(2), Some("shared-typo-guard")),
+            verdict("mev", "solo-slug", None, Some("solo-finding")),
+        ];
+        let clusters = cluster_by_finding_id(&entries);
+
+        let cross_repo = clusters
+            .iter()
+            .find(|c| c.finding_id == "shared-typo-guard")
+            .expect("cross-repo cluster present");
+        assert_eq!(cross_repo.repos, vec!["bastion", "mev"]);
+        let slugs: Vec<&str> = cross_repo.members.iter().map(|m| m.slug.as_str()).collect();
+        assert_eq!(slugs, vec!["b-slug", "m-slug"]);
+        assert!(!cross_repo.single_repo);
+
+        let solo = clusters
+            .iter()
+            .find(|c| c.finding_id == "solo-finding")
+            .expect("single-repo cluster present");
+        assert_eq!(solo.repos, vec!["mev"]);
+        assert_eq!(solo.members[0].slug, "solo-slug");
+        assert!(solo.single_repo);
     }
 
     // -- suggest_duplicates ---------------------------------------------------

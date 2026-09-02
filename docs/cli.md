@@ -92,6 +92,7 @@ block with no `sdlc_workflow` field — never blocking, paired asymmetrically wi
 | `emit-state` | Regenerate every derived surface from authored state | [state](cli/state.md) |
 | `state-history` | List or restore the revisions a write recorded | [state](cli/state.md) |
 | `set-block-status` | Flip one block's authored status, then re-derive | [state](cli/state.md) |
+| `create-block` | File a new block/ticket/chore record, then re-derive | [state](cli/state.md) |
 | `manifest` | Emit a JSON manifest of every file in the corpus | [state](cli/state.md) |
 
 ### Move an initiative, or clear a human gate
@@ -132,7 +133,7 @@ block with no `sdlc_workflow` field — never blocking, paired asymmetrically wi
 | Page | Covers |
 |---|---|
 | [validate](cli/validate.md) | `validate` · `validate-brain` · `validate-state` · `conformance` |
-| [state](cli/state.md) | `emit-state` · `state-history` · `set-block-status` · `manifest` |
+| [state](cli/state.md) | `emit-state` · `state-history` · `set-block-status` · `create-block` · `manifest` |
 | [epics](cli/epics.md) | the four `*-epic` verbs · `close-operator-gate` · `approve`/`reject` · `normalize-op-slugs` |
 | [carryover](cli/carryover.md) | `carryover` · `graph-findings` · `attention-queue` |
 | [lanes](cli/lanes.md) | `frontier` · `lanes` · `blocks` · `emit-block-graph` · `emit-graph` · `generate-graph` · `check-consumers` · `doc` |

@@ -711,6 +711,58 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         lock_dir: Option<PathBuf>,
     },
+    /// File a new block/ticket/chore record: write `planning/blocks/<BlockID>.json`
+    /// plus its matching `tracks[].blocks[]` registration in the target repo's
+    /// `state.json`, on the same driver contract as `set-block-status`.
+    ///
+    /// The authored fields arrive as a JSON payload via `--from <FILE>`, not per-field
+    /// flags — `block.schema.json` has 15 required fields and several are long prose
+    /// or arrays, which is unusable as shell arguments. See
+    /// `mev::brain::block_create::CreateBlockPayload` for the payload shape.
+    ///
+    /// Dry-run by default; pass --write to apply. A successful --write also runs
+    /// `emit-state --write`, so the boards, wave table, and epic-sequence table show
+    /// the new block in the same invocation.
+    ///
+    /// An existing block id is a no-op refusal, never an overwrite. A `depends_on`
+    /// edge naming a block that does not resolve in the loaded corpus is refused,
+    /// with the unresolved `(repo, id)` named in the error — create the dependency
+    /// before the dependent. A payload with no `epics` is refused, never written
+    /// with an empty list — a block created with no epic renders on no
+    /// epic-sequence table.
+    ///
+    /// Exit codes:
+    ///   0 — planned (dry-run) or applied
+    ///   1 — unreadable/unparseable `--from` file, any `E_BLOCK_CREATE_*` payload or
+    ///       plan diagnostic (out-of-vocabulary `kind`/`sdlc_workflow`/`model`,
+    ///       missing `epics`, empty `out_of_scope`/`acceptance_criteria`, an unknown
+    ///       target repo, an existing id, a dangling `depends_on` target), a write
+    ///       failure, E_EMIT_UNKNOWN_SCOPE, E_EMIT_LOCK_HELD, E_QUIESCE_LEASE_HELD,
+    ///       or a linked-worktree refusal
+    CreateBlock {
+        /// Path to the JSON payload — see `CreateBlockPayload`.
+        #[arg(long, value_name = "FILE")]
+        from: PathBuf,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Apply the edit. Without this the command prints what it would change.
+        #[arg(long)]
+        write: bool,
+        /// Limit the chained emit's regeneration to one repo's derived surfaces. Same
+        /// resolution as `set-block-status --scope` / `emit-state --scope`; an
+        /// unknown or blank slug exits with `E_EMIT_UNKNOWN_SCOPE`.
+        #[arg(long, value_name = "REPO")]
+        scope: Option<String>,
+        /// Calling agent's identity for the quiesce-lease self-exemption, consulted
+        /// only when `--write` mutates. See `emit-state --agent`.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override the fleet lock directory the quiesce-lease check consults.
+        /// See `emit-state --lock-dir`.
+        #[arg(long, value_name = "PATH")]
+        lock_dir: Option<PathBuf>,
+    },
     /// Close an operator gate fleet-wide: remove every `depends_on` `{type:"operator"}`
     /// entry carrying SLUG, across every loaded `state.json`.
     ///
@@ -3392,6 +3444,120 @@ fn main() -> ExitCode {
                 write,
                 cli.json,
                 mev::set_block_status(&root, &key, &status, write, scope_deps.as_ref()),
+            )
+        }
+        Command::CreateBlock {
+            from,
+            path,
+            write,
+            scope,
+            agent,
+            lock_dir,
+        } => {
+            // Same worktree guard as set-block-status: a --write here chains into
+            // emit-state, which resolves every repo's paths from brain.toml rather
+            // than CWD.
+            if write && mev::brain::config::is_linked_worktree(&path) {
+                eprintln!(
+                    "error: refusing to write from inside a linked git worktree ({}) — create-block chains into emit-state, which resolves derived-file paths from brain.toml, not CWD, so this would regenerate the MAIN checkout's files. Run from the main working tree instead.",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            let payload_content = match std::fs::read_to_string(&from) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error: could not read {}: {e}", from.display());
+                    return ExitCode::FAILURE;
+                }
+            };
+            let payload: mev::brain::block_create::CreateBlockPayload =
+                match serde_json::from_str(&payload_content) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("error: could not parse {} as JSON: {e}", from.display());
+                        return ExitCode::FAILURE;
+                    }
+                };
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // Quiesce check: only --write mutates, so only --write is gated.
+            if write
+                && let Some(exit) = refuse_if_quiesced(
+                    &root,
+                    &path,
+                    agent.as_deref(),
+                    lock_dir.as_deref(),
+                    "create-block",
+                )
+            {
+                return exit;
+            }
+            // Advisory lock, same contract as set-block-status: only --write
+            // mutates the corpus, so only --write needs mutual exclusion. Released
+            // via Drop on every exit path below.
+            let _lock_guard = if write {
+                match mev::brain::lock::acquire_lock(&root, mev::brain::lock::DEFAULT_LOCK_TIMEOUT)
+                {
+                    Ok(guard) => Some(guard),
+                    Err(mev::brain::lock::LockError::Held {
+                        holder_pid,
+                        lock_path,
+                        waited_secs,
+                    }) => {
+                        eprintln!(
+                            "error [E_EMIT_LOCK_HELD] another write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
+                            lock_path.display()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                    Err(e) => {
+                        eprintln!("error [E_EMIT_LOCK_HELD] {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                None
+            };
+            // Resolve --scope the same way set-block-status / emit-state do.
+            let scope_deps = match &scope {
+                Some(slug) => {
+                    let config =
+                        match mev::brain::config::load_brain_config(&root.join("brain.toml")) {
+                            Ok(cfg) => cfg,
+                            Err(e) => {
+                                eprintln!("error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                    match config.scope_dependencies(slug) {
+                        Ok(deps) => Some(deps),
+                        Err(mev::brain::config::ScopeError::UnknownSlug { slug, valid_slugs }) => {
+                            eprintln!(
+                                "error [E_EMIT_UNKNOWN_SCOPE] unknown --scope slug '{slug}'; valid slugs: {}",
+                                valid_slugs.join(", ")
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                        Err(e) => {
+                            eprintln!("error [E_EMIT_UNKNOWN_SCOPE] {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+                None => None,
+            };
+            report_doc(
+                "create-block",
+                &root,
+                write,
+                cli.json,
+                mev::create_block(&root, &payload, write, scope_deps.as_ref()),
             )
         }
         Command::CloseOperatorGate {
