@@ -85,6 +85,16 @@ pub enum CarryoverLane {
 }
 
 /// Why an entry could not be evaluated.
+///
+/// Confirmed reachable from `src/brain/state.rs`'s state pass (`MV.ticket.broken-predicate-diagnostic`
+/// task 1): [`CarryoverVerdict::reason`] already carries this value out of [`evaluate_carryover`],
+/// and [`CarryoverVerdict::repo`] + [`CarryoverVerdict::slug`] are the exact lookup key
+/// `check_carryover_already_satisfied` (`state.rs`) already uses to find a `carryover[]` item's
+/// verdict inside a loaded [`CarryoverReport`] — see that function's `report.entries.iter().find(...)`
+/// pattern, which `check_carryover_broken_predicate` (state.rs) reuses verbatim. In particular
+/// [`Self::FileUnreadable`] and [`Self::PatternNotLiteral`] need no new plumbing here: the state
+/// pass reads `verdict.reason` directly. Nothing in this module changed for that outflow — the
+/// classification below is unmodified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NotEvaluableReason {

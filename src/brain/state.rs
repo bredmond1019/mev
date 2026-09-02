@@ -578,6 +578,14 @@ fn describe_matched_refs(refs: &[crate::brain::carryover::CarryoverRef]) -> Stri
         .join("; ")
 }
 
+/// `MV.ticket.broken-predicate-diagnostic` task 1 note: the `report.entries.iter().find(|v| v.repo
+/// == src.repo_slug && v.slug == item.slug)` lookup immediately below already exposes each entry's
+/// `CarryoverVerdict.reason: Option<NotEvaluableReason>` — including
+/// `NotEvaluableReason::FileUnreadable` and `NotEvaluableReason::PatternNotLiteral` — to this state
+/// pass with no plumbing changes required. `check_carryover_broken_predicate` (this module) reuses
+/// this exact lookup pattern to reach those two variants; the evaluator's classification logic in
+/// `src/brain/carryover.rs` is untouched.
+///
 /// Already-satisfied gate over `carryover[].clears_when` — `W_STATE_CARRYOVER_ALREADY_SATISFIED`.
 ///
 /// For every `carryover[]` entry in `file` whose evaluated verdict in `report`
