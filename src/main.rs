@@ -2718,6 +2718,11 @@ fn print_carryover_report(
              to group with its intended cross-repo match."
         );
     }
+
+    let needs_summary = mev::brain::carryover::render_needs_distribution_summary(&report.entries);
+    if !needs_summary.is_empty() {
+        print!("{needs_summary}");
+    }
 }
 
 /// Human-readable, detector-class-grouped summary for `mev graph-findings`'s default

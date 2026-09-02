@@ -60,8 +60,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use okf_core::{
-    ApprovalDep, BlockDep, BlockedBy, Carryover, CarryoverScope, ClearsWhen, ClearsWhenPredicate,
-    ExternalDep, OperatorDep, StateFile, StateSource,
+    ApprovalDep, BlockDep, BlockedBy, Carryover, CarryoverNeeds, CarryoverScope, ClearsWhen,
+    ClearsWhenPredicate, ExternalDep, KnownCarryoverNeeds, OperatorDep, StateFile, StateSource,
 };
 
 use crate::brain::config::AttentionThresholds;
@@ -267,6 +267,127 @@ pub struct CarryoverVerdict {
     /// derivation (`okf-core/src/state.rs:1226`) rather than re-deriving it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enforce: Option<bool>,
+    /// What kind of work closes this entry (`code`/`docs`/`state`/`operator`/
+    /// `dedupe`), passed through verbatim from the source [`Carryover`]
+    /// item's `needs` field. `None` when the entry carries no `needs` value
+    /// at all — the overwhelming live default (D18,
+    /// `MV.ticket.carryover-needs-validation`). Kept as the typed
+    /// [`okf_core::CarryoverNeeds`] (not a plain string) so
+    /// [`compute_needs_distribution`] can distinguish a known value from an
+    /// [`okf_core::CarryoverNeeds::Unknown`] one without re-parsing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs: Option<CarryoverNeeds>,
+}
+
+/// Per-`needs`-value counts, computed by [`compute_needs_distribution`].
+///
+/// The five known values, `unknown` (an authored value outside the fixed
+/// vocabulary — [`okf_core::CarryoverNeeds::Unknown`]), and `absent` (no
+/// `needs` field at all) are counted SEPARATELY and never folded into a
+/// single total: `absent` is currently 361 of 361 live entries, so a report
+/// that silently merged it into `unknown` or dropped it would tell the
+/// reader nothing about the field's actual coverage — which is the whole
+/// point of reporting the distribution from day one rather than assuming it
+/// (D18, `MV.ticket.carryover-needs-validation`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct NeedsCounts {
+    pub code: usize,
+    pub docs: usize,
+    pub state: usize,
+    pub operator: usize,
+    pub dedupe: usize,
+    pub unknown: usize,
+    pub absent: usize,
+}
+
+impl NeedsCounts {
+    /// Total entries counted across every bucket, `absent` included.
+    pub fn total(&self) -> usize {
+        self.code
+            + self.docs
+            + self.state
+            + self.operator
+            + self.dedupe
+            + self.unknown
+            + self.absent
+    }
+
+    fn record(&mut self, needs: Option<&CarryoverNeeds>) {
+        match needs {
+            None => self.absent += 1,
+            Some(CarryoverNeeds::Known(KnownCarryoverNeeds::Code)) => self.code += 1,
+            Some(CarryoverNeeds::Known(KnownCarryoverNeeds::Docs)) => self.docs += 1,
+            Some(CarryoverNeeds::Known(KnownCarryoverNeeds::State)) => self.state += 1,
+            Some(CarryoverNeeds::Known(KnownCarryoverNeeds::Operator)) => self.operator += 1,
+            Some(CarryoverNeeds::Known(KnownCarryoverNeeds::Dedupe)) => self.dedupe += 1,
+            Some(CarryoverNeeds::Unknown(_)) => self.unknown += 1,
+        }
+    }
+}
+
+/// Computes the `needs` distribution over `entries`, per repo AND
+/// fleet-wide, in one pass.
+///
+/// Called from every site that builds a [`CarryoverReport`]'s final entry
+/// list — the unfiltered evaluator and the `--grep`-narrowed one alike — so
+/// the distribution always describes the same set the report's other counts
+/// (`total`/`cleared`/`actionable`/`not_evaluable`) describe, never the whole
+/// (unfiltered) corpus. Mirrors that recompute-after-filter discipline
+/// exactly (see [`evaluate_carryover_with_grep`]'s doc comment for why).
+///
+/// Returns `(per_repo, fleet_wide)`. `per_repo` is a [`BTreeMap`] for
+/// deterministic iteration order in both the printed summary and `--json`.
+pub fn compute_needs_distribution(
+    entries: &[CarryoverVerdict],
+) -> (BTreeMap<String, NeedsCounts>, NeedsCounts) {
+    let mut per_repo: BTreeMap<String, NeedsCounts> = BTreeMap::new();
+    let mut fleet = NeedsCounts::default();
+    for entry in entries {
+        per_repo
+            .entry(entry.repo.clone())
+            .or_default()
+            .record(entry.needs.as_ref());
+        fleet.record(entry.needs.as_ref());
+    }
+    (per_repo, fleet)
+}
+
+/// Renders [`compute_needs_distribution`]'s output as the `needs`
+/// distribution block of `mev carryover`'s human summary — per-repo rows
+/// followed by the fleet-wide total, each bucket named explicitly (including
+/// `absent`) so coverage is legible rather than assumed. Returns an empty
+/// string (nothing to print) when `entries` is empty, matching how the rest
+/// of `mev carryover`'s summary skips empty sections.
+pub fn render_needs_distribution_summary(entries: &[CarryoverVerdict]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let (per_repo, fleet) = compute_needs_distribution(entries);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "\nneeds distribution (fleet-wide, {} entries): code={} docs={} state={} operator={} dedupe={} unknown={} absent={}\n",
+        fleet.total(),
+        fleet.code,
+        fleet.docs,
+        fleet.state,
+        fleet.operator,
+        fleet.dedupe,
+        fleet.unknown,
+        fleet.absent
+    ));
+    for (repo, counts) in &per_repo {
+        out.push_str(&format!(
+            "  {repo}: code={} docs={} state={} operator={} dedupe={} unknown={} absent={}\n",
+            counts.code,
+            counts.docs,
+            counts.state,
+            counts.operator,
+            counts.dedupe,
+            counts.unknown,
+            counts.absent
+        ));
+    }
+    out
 }
 
 /// The full fleet-wide sweep result.
@@ -277,6 +398,14 @@ pub struct CarryoverReport {
     pub actionable: usize,
     pub not_evaluable: usize,
     pub entries: Vec<CarryoverVerdict>,
+    /// `needs` distribution over `entries`, per repo. See
+    /// [`compute_needs_distribution`].
+    #[serde(default)]
+    pub needs_by_repo: BTreeMap<String, NeedsCounts>,
+    /// `needs` distribution over `entries`, fleet-wide. See
+    /// [`compute_needs_distribution`].
+    #[serde(default)]
+    pub needs_fleet: NeedsCounts,
     /// Every `carryover[]` entry sharing an authored `finding_id`, grouped one
     /// cluster per distinct id. See [`cluster_by_finding_id`].
     ///
@@ -1419,6 +1548,7 @@ pub fn evaluate_carryover_with_dedup_and_widening(
                 finding_id: item.finding_id.clone(),
                 blocks: item.blocks.clone(),
                 enforce: item.enforce,
+                needs: item.needs.clone(),
             });
         }
     }
@@ -1469,12 +1599,16 @@ pub fn evaluate_carryover_with_dedup_and_widening(
         (Vec::new(), Vec::new(), Vec::new())
     };
 
+    let (needs_by_repo, needs_fleet) = compute_needs_distribution(&entries);
+
     CarryoverReport {
         total,
         cleared,
         actionable,
         not_evaluable,
         entries,
+        needs_by_repo,
+        needs_fleet,
         clusters,
         suggestions,
         single_repo_finding_ids,
@@ -1568,12 +1702,16 @@ pub fn evaluate_carryover_with_grep(
         .count();
     let total = entries.len();
 
+    let (needs_by_repo, needs_fleet) = compute_needs_distribution(&entries);
+
     Ok(CarryoverReport {
         total,
         cleared,
         actionable,
         not_evaluable,
         entries,
+        needs_by_repo,
+        needs_fleet,
         clusters: Vec::new(),
         suggestions: Vec::new(),
         single_repo_finding_ids: Vec::new(),
@@ -8373,6 +8511,7 @@ mod tests {
             finding_id: finding_id.map(str::to_string),
             blocks: Vec::new(),
             enforce: None,
+            needs: None,
         }
     }
 
@@ -8562,6 +8701,7 @@ mod tests {
             finding_id: finding_id.map(str::to_string),
             blocks: Vec::new(),
             enforce: None,
+            needs: None,
         }
     }
 
@@ -8746,6 +8886,7 @@ mod tests {
             finding_id: None,
             blocks: Vec::new(),
             enforce: None,
+            needs: None,
         }
     }
 
@@ -8839,6 +8980,7 @@ mod tests {
             finding_id: None,
             blocks,
             enforce: None,
+            needs: None,
         }
     }
 
@@ -9996,6 +10138,7 @@ mod tests {
             finding_id: None,
             blocks: vec![],
             enforce: None,
+            needs: None,
         };
         assert_eq!(
             describe_clearing_evidence(&verdict, COMMAND_EXEC_TIMEOUT),
@@ -10024,6 +10167,7 @@ mod tests {
             finding_id: None,
             blocks: vec![],
             enforce: None,
+            needs: None,
         };
         assert_eq!(
             describe_clearing_evidence(&verdict, std::time::Duration::from_secs(5)),
@@ -11406,6 +11550,7 @@ mod tests {
             finding_id: None,
             blocks: Vec::new(),
             enforce: None,
+            needs: None,
         }
     }
 
@@ -11750,5 +11895,111 @@ heading = "{slug}"
                 "error should name valid slugs: {err}"
             );
         }
+    }
+
+    // -------------------------------------------------------------------
+    // needs distribution (MV.ticket.carryover-needs-validation, task 2)
+    // -------------------------------------------------------------------
+
+    fn needs_verdict(repo: &str, slug: &str, needs: Option<CarryoverNeeds>) -> CarryoverVerdict {
+        CarryoverVerdict {
+            repo: repo.to_string(),
+            slug: slug.to_string(),
+            kind: "deferred".to_string(),
+            text: "text".to_string(),
+            clears_when: None,
+            created: "2026-01-01".to_string(),
+            age_days: None,
+            stale: false,
+            lane: CarryoverLane::NotEvaluable,
+            refs: Vec::new(),
+            reason: None,
+            priority: None,
+            finding_id: None,
+            blocks: Vec::new(),
+            enforce: None,
+            needs,
+        }
+    }
+
+    #[test]
+    fn needs_distribution_counts_known_unknown_and_absent_separately() {
+        let entries = vec![
+            needs_verdict(
+                "mev",
+                "a",
+                Some(CarryoverNeeds::Known(KnownCarryoverNeeds::Code)),
+            ),
+            needs_verdict(
+                "mev",
+                "b",
+                Some(CarryoverNeeds::Known(KnownCarryoverNeeds::Operator)),
+            ),
+            needs_verdict("mev", "c", Some(CarryoverNeeds::Unknown("bogus".into()))),
+            needs_verdict("mev", "d", None),
+            needs_verdict(
+                "bastiel",
+                "e",
+                Some(CarryoverNeeds::Known(KnownCarryoverNeeds::Docs)),
+            ),
+        ];
+
+        let (per_repo, fleet) = compute_needs_distribution(&entries);
+
+        assert_eq!(fleet.code, 1);
+        assert_eq!(fleet.operator, 1);
+        assert_eq!(fleet.unknown, 1);
+        assert_eq!(fleet.absent, 1);
+        assert_eq!(fleet.docs, 1);
+        assert_eq!(fleet.total(), 5);
+
+        let mev = per_repo.get("mev").expect("mev row present");
+        assert_eq!(mev.code, 1);
+        assert_eq!(mev.operator, 1);
+        assert_eq!(mev.unknown, 1);
+        assert_eq!(mev.absent, 1);
+        assert_eq!(mev.total(), 4);
+
+        let bastiel = per_repo.get("bastiel").expect("bastiel row present");
+        assert_eq!(bastiel.docs, 1);
+        assert_eq!(bastiel.total(), 1);
+    }
+
+    #[test]
+    fn needs_distribution_empty_corpus_yields_zero_counts_everywhere() {
+        let (per_repo, fleet) = compute_needs_distribution(&[]);
+        assert!(per_repo.is_empty());
+        assert_eq!(fleet.total(), 0);
+    }
+
+    #[test]
+    fn render_needs_distribution_summary_names_every_bucket_including_absent() {
+        let entries = vec![
+            needs_verdict(
+                "mev",
+                "a",
+                Some(CarryoverNeeds::Known(KnownCarryoverNeeds::State)),
+            ),
+            needs_verdict("mev", "b", None),
+        ];
+        let out = render_needs_distribution_summary(&entries);
+        assert!(
+            out.contains("needs distribution"),
+            "summary should be labeled: {out}"
+        );
+        assert!(out.contains("state=1"), "summary should count state: {out}");
+        assert!(
+            out.contains("absent=1"),
+            "summary should count absent distinctly: {out}"
+        );
+        assert!(
+            out.contains("mev:"),
+            "summary should have a per-repo row: {out}"
+        );
+    }
+
+    #[test]
+    fn render_needs_distribution_summary_empty_entries_yields_empty_string() {
+        assert_eq!(render_needs_distribution_summary(&[]), "");
     }
 }
