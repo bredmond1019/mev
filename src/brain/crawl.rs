@@ -832,6 +832,7 @@ mod tests {
     fn brain_only_config() -> crate::brain::config::BrainConfig {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
+            conformance_writers: Vec::new(),
             permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),
@@ -1046,6 +1047,7 @@ mod tests {
     fn brain_and_subrepo_config() -> crate::brain::config::BrainConfig {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
+            conformance_writers: Vec::new(),
             permission_profiles: Default::default(),
             attention: Default::default(),
             history: Default::default(),

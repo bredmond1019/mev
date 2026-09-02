@@ -354,6 +354,24 @@ pub struct PermissionProfileLevel {
     pub cross_repo_write: bool,
 }
 
+/// One `[[conformance_writers]]` entry in `brain.toml`.
+///
+/// Registers a binary (other than `mev` itself) that also writes into this
+/// corpus via `emit-state --write`, and so must be checked for stamp drift by
+/// `brain/conformance/toolchain.rs`'s `toolchain-freshness` check. Replaces the
+/// formerly hardcoded `CROSS_BINARY_WRITERS` const — adding a writer is now a
+/// config edit, not a mev recompile.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConformanceWriter {
+    /// Binary name spawned as `<name> --build-stamp`, resolved via PATH.
+    pub name: String,
+    /// The writer's source repo, HQ-root-relative. Informational — carried
+    /// into the `NotEvaluable` reason when the writer's build stamp cannot be
+    /// queried, so a reader can find where to go look.
+    #[serde(default)]
+    pub repo_path: Option<String>,
+}
+
 /// One `[[repos]]` entry in `brain.toml`.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct RepoEntry {
@@ -417,6 +435,14 @@ pub struct BrainConfig {
     /// case every field defaults empty/off.
     #[serde(default)]
     pub permission_profiles: PermissionProfilesConfig,
+    /// `[[conformance_writers]]` entries — binaries other than `mev` itself
+    /// that write into this corpus and so are checked for build-stamp drift
+    /// by `toolchain-freshness`. Replaces the hardcoded writer list formerly
+    /// in `brain/conformance/toolchain.rs`. An absent table means an empty
+    /// registry (mev-self only) — additive, so older/fixture `brain.toml`s
+    /// still parse.
+    #[serde(default)]
+    pub conformance_writers: Vec<ConformanceWriter>,
     /// `[[repos]]` entries.
     #[serde(default)]
     pub repos: Vec<RepoEntry>,
@@ -1014,6 +1040,7 @@ enforce_blocks = true
             attention: AttentionThresholds::default(),
             history: HistoryConfig::default(),
             carryover: CarryoverConfig::default(),
+            conformance_writers: Vec::new(),
             repos: vec![
                 RepoEntry {
                     slug: "brain".to_string(),
@@ -1232,6 +1259,70 @@ cross_repo_write = true
         assert_eq!(unrestricted.id, "unrestricted");
         assert!(
             unrestricted.mini_install && unrestricted.main_push && unrestricted.cross_repo_write
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // conformance_writers (MV.ticket.conformance-writer-registry task 1) —
+    // additive registry replacing the hardcoded CROSS_BINARY_WRITERS const in
+    // brain/conformance/toolchain.rs. No behaviour change in this task; the
+    // const is still in place and unused by these tests.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn conformance_writers_absent_table_yields_empty_vec() {
+        // The checked-in fixture brain.toml has no [[conformance_writers]]
+        // table -> must parse, not error, with an empty registry.
+        let cfg = load_brain_config(&fixture_path()).expect("should parse fixture");
+        assert!(cfg.conformance_writers.is_empty());
+    }
+
+    #[test]
+    fn conformance_writers_one_entry_parses_name_and_repo_path() {
+        let toml = r#"
+[[conformance_writers]]
+name = "bastion"
+repo_path = "bastion"
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.conformance_writers.len(), 1);
+        assert_eq!(cfg.conformance_writers[0].name, "bastion");
+        assert_eq!(
+            cfg.conformance_writers[0].repo_path,
+            Some("bastion".to_string())
+        );
+    }
+
+    #[test]
+    fn conformance_writers_entry_without_repo_path_defaults_to_none() {
+        let toml = r#"
+[[conformance_writers]]
+name = "bastion"
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.conformance_writers.len(), 1);
+        assert_eq!(cfg.conformance_writers[0].name, "bastion");
+        assert_eq!(cfg.conformance_writers[0].repo_path, None);
+    }
+
+    #[test]
+    fn conformance_writers_entry_missing_name_is_a_parse_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let toml_path = dir.path().join("brain.toml");
+        std::fs::write(
+            &toml_path,
+            r#"
+[[conformance_writers]]
+repo_path = "bastion"
+"#,
+        )
+        .expect("write fixture brain.toml");
+
+        let result = load_brain_config(&toml_path);
+        assert!(
+            matches!(result, Err(ConfigError::Parse { .. })),
+            "expected ConfigError::Parse for a conformance_writers entry missing \
+             the required `name` field, got: {result:?}"
         );
     }
 
