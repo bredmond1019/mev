@@ -366,3 +366,94 @@ fn full_fixture_tallies_sum_to_results_len() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------------------
+// `toolchain::differ_build_inputs` — the impure git-diff helper `toolchain-freshness`
+// consults before reporting Drift, exercised against a throwaway repo (never the real
+// repo or corpus — `conformance-fixture-tests-depend-on-live-repo-state` is a recorded
+// trap here). `MV.ticket.toolchain-freshness-keys-on-build-inputs-not-head` — Task 2.
+// ---------------------------------------------------------------------------------------
+
+/// Run `git` with `-C dir`, asserting success, mirroring `brain_emit.rs`'s `run_git` — the
+/// established pattern for throwaway-repo fixtures in this integration binary.
+fn differ_run_git(dir: &Path, args: &[&str]) -> String {
+    let output = mev::testsupport::git_command()
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("failed to spawn git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed in {}: {}",
+        args,
+        dir.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[test]
+fn differ_build_inputs_covers_same_differ_and_unknown() {
+    let dir = temp_dir("differ-build-inputs");
+
+    differ_run_git(&dir, &["init", "-q"]);
+    differ_run_git(&dir, &["config", "user.email", "test@example.com"]);
+    differ_run_git(&dir, &["config", "user.name", "Test"]);
+
+    // Commit 1: a docs file only.
+    write_file(&dir, "docs/x.md", "# hello\n");
+    differ_run_git(&dir, &["add", "."]);
+    differ_run_git(&dir, &["commit", "-q", "-m", "add docs/x.md"]);
+    let sha1 = differ_run_git(&dir, &["rev-parse", "HEAD"]);
+
+    // Commit 2: another docs-only change. Nothing under a build input path differs
+    // between sha1 and sha2 -> Same.
+    write_file(&dir, "docs/x.md", "# hello again\n");
+    differ_run_git(&dir, &["add", "."]);
+    differ_run_git(&dir, &["commit", "-q", "-m", "edit docs/x.md"]);
+    let sha2 = differ_run_git(&dir, &["rev-parse", "HEAD"]);
+
+    let same = mev::brain::conformance::toolchain::differ_build_inputs(
+        dir.to_str().unwrap(),
+        &sha1,
+        &sha2,
+    );
+    assert_eq!(
+        same,
+        mev::brain::conformance::toolchain::BuildInputComparison::Same,
+        "a docs-only difference between two commits must not read as a build-input change"
+    );
+
+    // Commit 3: touches src/x.rs, a build input path -> Differ against sha2.
+    write_file(&dir, "src/x.rs", "fn main() {}\n");
+    differ_run_git(&dir, &["add", "."]);
+    differ_run_git(&dir, &["commit", "-q", "-m", "add src/x.rs"]);
+    let sha3 = differ_run_git(&dir, &["rev-parse", "HEAD"]);
+
+    let differ = mev::brain::conformance::toolchain::differ_build_inputs(
+        dir.to_str().unwrap(),
+        &sha2,
+        &sha3,
+    );
+    assert_eq!(
+        differ,
+        mev::brain::conformance::toolchain::BuildInputComparison::Differ,
+        "a src/ change between two commits must read as a build-input change"
+    );
+
+    // A fabricated, unresolvable SHA -> Unknown. Absence of a diff answer must never be
+    // read as "no difference".
+    let unknown = mev::brain::conformance::toolchain::differ_build_inputs(
+        dir.to_str().unwrap(),
+        "0000000000000000000000000000000000000000",
+        &sha3,
+    );
+    assert_eq!(
+        unknown,
+        mev::brain::conformance::toolchain::BuildInputComparison::Unknown,
+        "an unresolvable SHA must report Unknown, never Same"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

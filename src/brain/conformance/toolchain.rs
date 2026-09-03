@@ -41,8 +41,13 @@ const BUILD_INPUT_PATHS: &[&str] = &[
 /// reports when git cannot answer (e.g. the stamped SHA was rebased or garbage-collected
 /// away), and absence of a diff answer must never be read as "no difference" — callers
 /// treat `Unknown` the same as `Differ`.
+///
+/// `pub` (rather than `pub(crate)`) and `#[doc(hidden)]` only so `tests/it` — a separate
+/// integration-test crate — can assert on [`differ_build_inputs`] directly, matching the
+/// `testsupport` module's precedent for exposing impure test-only surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BuildInputComparison {
+#[doc(hidden)]
+pub enum BuildInputComparison {
     /// `git diff` between the two commits over the build input paths reported no change.
     Same,
     /// `git diff` between the two commits over the build input paths reported a change.
@@ -96,6 +101,25 @@ fn verdict(
         );
     }
 
+    // `dirty` is checked BEFORE the SHA-differs branch below, deliberately: a binary
+    // built from an uncommitted tree has unverifiable provenance regardless of what the
+    // build-input comparison says, and it must win even when `build_inputs` independently
+    // reports `Same` for the (stamped_sha, live_sha) pair. Checking it only after a SHA
+    // mismatch previously let a `Same` verdict return Pass early and skip this check
+    // entirely whenever the SHAs also happened to differ — the collapse this ticket's
+    // fixtures exist to catch.
+    if dirty == "1" {
+        return (
+            CheckStatus::Drift,
+            vec![
+                "the binary was built from an uncommitted tree, so its provenance is \
+                 unverifiable"
+                    .to_string(),
+            ],
+            None,
+        );
+    }
+
     if stamped_sha != live_sha {
         match build_inputs {
             BuildInputComparison::Same => {
@@ -133,18 +157,6 @@ fn verdict(
                 );
             }
         }
-    }
-
-    if dirty == "1" {
-        return (
-            CheckStatus::Drift,
-            vec![
-                "the binary was built from an uncommitted tree, so its provenance is \
-                 unverifiable"
-                    .to_string(),
-            ],
-            None,
-        );
     }
 
     (CheckStatus::Pass, Vec::new(), None)
@@ -204,7 +216,12 @@ fn live_head(source_dir: &str) -> Option<String> {
 /// -> `Differ`, anything else — including an unresolvable SHA, git being unavailable, or
 /// the process failing to spawn — -> `Unknown`. `Unknown` is never treated as `Same`; the
 /// caller (`verdict`) reports it as Drift.
-fn differ_build_inputs(source_dir: &str, from: &str, to: &str) -> BuildInputComparison {
+///
+/// `pub`/`#[doc(hidden)]` for the same reason as [`BuildInputComparison`]: `tests/it`
+/// needs to exercise the real git-shelling comparison against a throwaway fixture repo,
+/// and a separate integration-test crate can only link `pub` items.
+#[doc(hidden)]
+pub fn differ_build_inputs(source_dir: &str, from: &str, to: &str) -> BuildInputComparison {
     let mut args: Vec<&str> = vec!["diff", "--quiet", from, to, "--"];
     args.extend(BUILD_INPUT_PATHS.iter().copied());
     let output = crate::shared::git_command()
@@ -576,6 +593,66 @@ mod tests {
         );
         assert_eq!(status, CheckStatus::Pass);
         assert!(findings.is_empty());
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn pass_when_sha_differs_but_build_inputs_same() {
+        // The core behaviour this ticket adds: SHAs differ, but the build-input
+        // comparison says `Same` (e.g. only docs/ changed between the two commits) ->
+        // Pass, not Drift.
+        let (status, findings, reason) = verdict(
+            "abc123",
+            Some("def456"),
+            "0",
+            true,
+            BuildInputComparison::Same,
+        );
+        assert_eq!(status, CheckStatus::Pass);
+        // Must be distinguishable from a bare SHA match: assert on the MESSAGE content,
+        // not only the status, and name both SHAs plus the non-build explanation.
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].contains("abc123"));
+        assert!(findings[0].contains("def456"));
+        assert!(findings[0].contains("build input") || findings[0].contains("non-build"));
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn drift_when_sha_differs_and_build_inputs_unknown() {
+        // Absence of a diff answer (unresolvable stamped SHA, git unavailable) must never
+        // be read as "no difference" -> still Drift, with a message saying the comparison
+        // could not be made.
+        let (status, findings, reason) = verdict(
+            "abc123",
+            Some("def456"),
+            "0",
+            true,
+            BuildInputComparison::Unknown,
+        );
+        assert_eq!(status, CheckStatus::Drift);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].contains("abc123"));
+        assert!(findings[0].contains("def456"));
+        assert!(findings[0].contains("could not be made"));
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn drift_when_dirty_even_with_sha_differing_and_build_inputs_same() {
+        // The other collapse-prone case: dirty==1 still wins even when the SHAs differ
+        // AND the build-input comparison independently says `Same` — a careless refactor
+        // that checks build_inputs before dirty would wrongly report Pass here.
+        let (status, findings, reason) = verdict(
+            "abc123",
+            Some("def456"),
+            "1",
+            true,
+            BuildInputComparison::Same,
+        );
+        assert_eq!(status, CheckStatus::Drift);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].contains("uncommitted"));
         assert!(reason.is_none());
     }
 
