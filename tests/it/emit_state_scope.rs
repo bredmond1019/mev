@@ -274,6 +274,62 @@ fn snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
         .collect()
 }
 
+/// A lane record under `planning/roadmaps/<roadmap>/lane-<lane>.json`, wired to real
+/// blocks in the "mev" and "bella" leaf repos (both registered `[[repos]]` entries in
+/// [`write_brain_toml`] and both carrying a matching `tracks[].blocks[]` entry from
+/// [`write_stale_leaf_state`]), so [`discover_lane_files`] finds it, `owner_index`
+/// resolves both blocks' `repo`, and the three corpus-wide planners
+/// (`plan_lane_segments`, `plan_frontier`, `plan_availability`) have something real to
+/// derive and write — a fixture too thin for them to emit anything would make a test
+/// asserting they stay in scope prove nothing (task 1's description).
+fn write_lane_file(root: &Path) {
+    let lane = serde_json::json!({
+        "lane": "substrate",
+        "roadmap": "scope-leak-fixture",
+        "blocks": [
+            { "id": "MEV.1.A", "origin_roadmap": "scope-leak-fixture", "repo": "mev" },
+            { "id": "BELLA.1.A", "origin_roadmap": "scope-leak-fixture", "repo": "bella" }
+        ]
+    });
+    write_json(
+        root,
+        "planning/roadmaps/scope-leak-fixture/lane-substrate.json",
+        &lane,
+    );
+}
+
+/// Recursively walk every file under `root`, skipping only `.git`, returning
+/// `relative path -> bytes`. Unlike [`snapshot`] (which only reads the fixed
+/// `all_fixture_files()` allowlist), this sees every path the corpus actually
+/// contains — including a fleet-wide artifact `emit_state` creates that nothing
+/// enumerated in advance, which is exactly the class of leak `all_fixture_files()` is
+/// structurally blind to.
+fn walk_all_files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(dir: &Path, root: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {dir:?}: {e}")) {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_dir() {
+                if path.file_name().is_some_and(|n| n == ".git") {
+                    continue;
+                }
+                walk(&path, root, out);
+            } else if file_type.is_file() {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap_or_else(|e| panic!("strip_prefix {root:?} from {path:?}: {e}"))
+                    .to_path_buf();
+                let bytes = fs::read(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+                out.insert(rel, bytes);
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
 fn resolve_mev_scope(root: &Path) -> mev::brain::config::ScopeDependencySet {
     let config = mev::brain::config::load_brain_config(&root.join("brain.toml")).unwrap();
     config.scope_dependencies("mev").expect("mev is registered")
@@ -377,6 +433,101 @@ fn scoped_write_leaves_unrelated_repos_byte_identical() {
             );
         }
     }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// (b2) whole-tree scope-leak test (task 1): a scoped `--scope mev --write` must not
+//      touch, create, or remove ANY file outside `ScopeDependencySet::absolute_targets`
+//      — not just the files `all_fixture_files()` happened to enumerate in advance.
+//      This is the assertion `scoped_write_leaves_unrelated_repos_byte_identical` above
+//      cannot make: its `snapshot()` only reads a fixed 15-path allowlist, so a write
+//      to any path outside that list (a fleet-wide lane-derivation artifact, say) is
+//      invisible to it. See the block record's `what`/`why`: `mev set-block-status
+//      --write --scope mev` regenerated both fleet-wide lane JSONs even though neither
+//      is one of mev's scope surfaces.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scoped_write_touches_no_file_outside_scope() {
+    let dir = temp_dir("touches-no-file-outside-scope");
+    write_fixture(&dir);
+    write_lane_file(&dir);
+
+    let before = walk_all_files(&dir);
+
+    let scope = resolve_mev_scope(&dir);
+    let report = mev::emit_state(&dir, true, Some(&scope)).expect("scoped emit should not error");
+    let errors: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == mev::Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "scoped fixture emit should have no errors; got: {errors:#?}"
+    );
+
+    let after = walk_all_files(&dir);
+
+    let allowed_targets: Vec<PathBuf> = scope
+        .absolute_targets(&dir)
+        .into_iter()
+        .map(|p| {
+            p.strip_prefix(&dir)
+                .unwrap_or_else(|e| panic!("strip_prefix {dir:?} from {p:?}: {e}"))
+                .to_path_buf()
+        })
+        .collect();
+    assert!(
+        !allowed_targets.is_empty(),
+        "mev's scope must resolve at least one target path"
+    );
+
+    // A target's own `<dir>/.mev-history/<name>/` revision sidecar (see
+    // `src/brain/history.rs`) is an expected DERIVATIVE of an in-scope write, not an
+    // out-of-scope leak in its own right — the defect this test is for is a
+    // corpus-wide *artifact* (`planning/lane-segments.json` and its siblings) that is
+    // not derived from any scoped target at all.
+    let allowed_history_dirs: Vec<PathBuf> = allowed_targets
+        .iter()
+        .map(|t| {
+            let parent = t.parent().unwrap_or_else(|| Path::new(""));
+            let name = t
+                .file_name()
+                .unwrap_or_else(|| panic!("scope target '{}' has no file name", t.display()));
+            parent.join(".mev-history").join(name)
+        })
+        .collect();
+    let is_allowed = |path: &Path| {
+        allowed_targets.iter().any(|t| t == path)
+            || allowed_history_dirs.iter().any(|h| path.starts_with(h))
+    };
+
+    let mut violations: Vec<String> = Vec::new();
+
+    for (path, after_bytes) in &after {
+        match before.get(path) {
+            Some(before_bytes) if before_bytes == after_bytes => {}
+            Some(_) if is_allowed(path) => {}
+            Some(_) => violations.push(format!("MODIFIED out-of-scope file: {}", path.display())),
+            None if is_allowed(path) => {}
+            None => violations.push(format!("CREATED out-of-scope file: {}", path.display())),
+        }
+    }
+    for path in before.keys() {
+        if !after.contains_key(path) && !is_allowed(path) {
+            violations.push(format!("REMOVED out-of-scope file: {}", path.display()));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "`mev set-block-status --write --scope mev` (via `emit_state(.., Some(&scope))`) \
+         touched file(s) outside `ScopeDependencySet::absolute_targets`:\n{}",
+        violations.join("\n")
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
