@@ -1819,16 +1819,26 @@ pub fn emit_state(
     let status_fm_diags = apply_plan(&status_fm_plan, write);
 
     // 8. Lane-segments derivation (`MV.13.A` Task 5). A cross-repo, corpus-wide
-    //    artifact rather than one repo's scoped surface, so — unlike every planner
-    //    above — it is never passed through `filter_plan_by_scope`; `--scope <repo>`
-    //    does not narrow it. Any generator writing into the corpus must validate its
-    //    own output and roll back on net-new errors (a generator bug here would
-    //    otherwise be a permanent red gate for every repo, not a one-off — this has
-    //    already happened once, on the push gate's first day), so in `--write` mode
-    //    this is applied through [`apply_with_rollback_on_regression`] rather than a
-    //    plain `apply_plan`. Dry-run is unaffected — same `apply_plan(.., false)`
-    //    every other planner's dry-run path uses.
-    let lane_segments_plan = brain::lane_segments::plan_lane_segments(root, &loaded);
+    //    artifact rather than one repo's scoped surface — none of its target paths
+    //    are among `ScopeDependencySet`'s four per-repo surfaces, so a scoped run
+    //    now filters this planner's actions down to nothing and writes none of it
+    //    (`MV.ticket.emit-state-write-is-corpus-wide-and-unscoped` task 2: a scoped
+    //    run must narrow the WRITE, not only the plan, so a fleet-wide artifact is
+    //    exactly what `--scope <repo>` must NOT touch). The unscoped default
+    //    (`scope == None`) is unaffected — `filter_plan_by_scope` is a no-op there,
+    //    so this still writes in full when no `--scope` is given. Any generator
+    //    writing into the corpus must validate its own output and roll back on
+    //    net-new errors (a generator bug here would otherwise be a permanent red
+    //    gate for every repo, not a one-off — this has already happened once, on
+    //    the push gate's first day), so in `--write` mode this is applied through
+    //    [`apply_with_rollback_on_regression`] rather than a plain `apply_plan`.
+    //    Dry-run is unaffected — same `apply_plan(.., false)` every other
+    //    planner's dry-run path uses.
+    let lane_segments_plan = filter_plan_by_scope(
+        brain::lane_segments::plan_lane_segments(root, &loaded),
+        root,
+        scope,
+    );
     let lane_segments_diags = if write {
         apply_with_rollback_on_regression(&lane_segments_plan, || {
             Ok(validate_brain(root)?.error_count())
@@ -1840,10 +1850,13 @@ pub fn emit_state(
     // 9. Lane-frontier derivation (`MV.13.B` Task 3) — the startable-block frontier
     //    plus gate_rank, computed over the untruncated in-process graph. Same
     //    treatment as the lane-segments planner immediately above: a corpus-wide
-    //    artifact, never passed through `filter_plan_by_scope`, and applied through
+    //    artifact whose paths never match a scope's four target surfaces, so it is
+    //    now run through `filter_plan_by_scope` too and a scoped run writes none of
+    //    it (the unscoped default is unaffected), and applied through
     //    [`apply_with_rollback_on_regression`] in `--write` mode so a generator bug
     //    here cannot leave a permanent red gate either.
-    let frontier_plan = brain::frontier::plan_frontier(root, &loaded);
+    let frontier_plan =
+        filter_plan_by_scope(brain::frontier::plan_frontier(root, &loaded), root, scope);
     let frontier_diags = if write {
         apply_with_rollback_on_regression(&frontier_plan, || {
             Ok(validate_brain(root)?.error_count())
@@ -1855,11 +1868,17 @@ pub fn emit_state(
     // 10. Lane-segment availability derivation (`MV.13.C` Task 5) — six-state
     //    availability plus lane-level unblock leverage, computed over MV.13.B's
     //    frontier. Same treatment as the lane-segments and lane-frontier planners
-    //    immediately above: a corpus-wide artifact, never passed through
-    //    `filter_plan_by_scope`, and applied through
+    //    immediately above: a corpus-wide artifact whose paths never match a
+    //    scope's four target surfaces, so it is now run through
+    //    `filter_plan_by_scope` too and a scoped run writes none of it (the
+    //    unscoped default is unaffected), and applied through
     //    [`apply_with_rollback_on_regression`] in `--write` mode so a generator bug
     //    here cannot leave a permanent red gate either.
-    let availability_plan = brain::availability::plan_availability(root, &loaded);
+    let availability_plan = filter_plan_by_scope(
+        brain::availability::plan_availability(root, &loaded),
+        root,
+        scope,
+    );
     let availability_diags = if write {
         apply_with_rollback_on_regression(&availability_plan, || {
             Ok(validate_brain(root)?.error_count())

@@ -647,6 +647,57 @@ fn unscoped_write_still_regenerates_every_repo() {
 }
 
 // ---------------------------------------------------------------------------
+// (task 2) an UNSCOPED run must keep writing the three corpus-wide lane-derived
+// artifacts (lane-segments, frontier, availability) — the fix for the scope leak
+// is that a scoped run stops writing them, never that they stop being emitted at
+// all. This pins the unscoped path against the regression of "just delete the
+// three planners' calls" satisfying the scoped test above for the wrong reason.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unscoped_write_still_writes_lane_derived_artifacts() {
+    let dir = temp_dir("unscoped-still-writes-lane-derived");
+    write_fixture(&dir);
+    write_lane_file(&dir);
+
+    for artifact in [
+        mev::brain::lane_segments::LANE_SEGMENTS_ARTIFACT,
+        mev::brain::frontier::LANE_FRONTIER_ARTIFACT,
+        mev::brain::availability::LANE_AVAILABILITY_ARTIFACT,
+    ] {
+        assert!(
+            !dir.join(artifact).exists(),
+            "fixture precondition: '{artifact}' must not already exist"
+        );
+    }
+
+    let report = mev::emit_state(&dir, true, None).expect("unscoped emit should not error");
+    let errors: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == mev::Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "unscoped fixture emit should have no errors; got: {errors:#?}"
+    );
+
+    for artifact in [
+        mev::brain::lane_segments::LANE_SEGMENTS_ARTIFACT,
+        mev::brain::frontier::LANE_FRONTIER_ARTIFACT,
+        mev::brain::availability::LANE_AVAILABILITY_ARTIFACT,
+    ] {
+        assert!(
+            dir.join(artifact).exists(),
+            "an unscoped `--write` must still emit '{artifact}' — the scope leak fix must \
+             narrow the WRITE under `--scope`, not stop these planners running at all"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
 // An unknown `--scope` slug is rejected before any write is attempted.
 // ---------------------------------------------------------------------------
 
