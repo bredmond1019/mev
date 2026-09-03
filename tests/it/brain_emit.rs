@@ -9574,3 +9574,60 @@ mod reconcile_failed_rendering {
         assert_eq!(rendered, "");
     }
 }
+
+// ---------------------------------------------------------------------------
+// `write_atomic` creates the parent subtree — carryover
+// `write-atomic-does-not-create-missing-parents`.
+//
+// `write_atomic` computes `dir = path.parent()`, writes a temp file there, then
+// renames. `std::fs::write` does NOT create directories, so before the fix the
+// first write into a corpus subtree that did not exist yet failed ENOENT and the
+// caller saw a write error rather than a created file.
+//
+// It stayed invisible for a long time because every caller either wrote into a
+// subtree that already existed, or compensated: engine-rs pre-created parents in
+// `doc_materializer.rs::ensure_plan_parents` (whose own doc comment documents this
+// gap), and mev's own `doc_materialize` genericity fixture hand-created
+// `docs/content/learning-corpus`. The moment okf-core `85c9db1` repointed
+// `LEARNING_CORPUS_INDEX` to `docs/content/drafts/`, which that fixture does not
+// pre-create, the write produced nothing and the fixture's idempotency assertion
+// failed — the first observed victim, in mev's own suite.
+//
+// This test deliberately does NOT pre-create the parent. That absence IS the test.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn write_atomic_creates_missing_parents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp
+        .path()
+        .join("docs")
+        .join("content")
+        .join("drafts")
+        .join("index.md");
+    assert!(
+        !target.parent().unwrap().exists(),
+        "precondition: the parent subtree must NOT exist, or this test proves nothing"
+    );
+
+    mev::brain::emit::write_atomic(&target, b"# Drafts\n").expect("write into a missing subtree");
+
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "# Drafts\n");
+
+    // Writing again into the now-existing subtree still works (create_dir_all is
+    // idempotent) and overwrites rather than appending.
+    mev::brain::emit::write_atomic(&target, b"# Drafts v2\n").expect("second write");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "# Drafts v2\n");
+
+    // No temp file is left behind by either write.
+    let leftovers: Vec<_> = std::fs::read_dir(target.parent().unwrap())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".mev-tmp-"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "temp files left behind: {leftovers:?}"
+    );
+}

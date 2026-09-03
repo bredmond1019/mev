@@ -3711,6 +3711,18 @@ pub fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
         .unwrap_or("emit-output");
     let temp_path = dir.join(format!(".{file_name}.mev-tmp-{}", std::process::id()));
 
+    // Create the parent subtree before the temp write. Without this, the FIRST
+    // write into a corpus subtree that does not exist yet fails ENOENT and the
+    // caller sees a write error instead of a created file — `std::fs::write`
+    // does not create directories. engine-rs carried a downstream workaround
+    // for exactly this (`doc_materializer.rs::ensure_plan_parents`, whose own
+    // comment documents the gap), and mev's `doc_materialize` fixture only ever
+    // passed because it hand-created the target directory; the moment okf-core
+    // repointed LEARNING_CORPUS_INDEX to a subtree the fixture did not
+    // pre-create, the write silently produced nothing and the idempotency
+    // assertion failed. See carryover `write-atomic-does-not-create-missing-parents`.
+    std::fs::create_dir_all(dir)?;
+
     let write_result = std::fs::write(&temp_path, content);
     if let Err(e) = write_result {
         let _ = std::fs::remove_file(&temp_path);
