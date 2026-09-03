@@ -17,4 +17,3 @@
 #      the consumer is confirmed passing again, delete this row — do not
 #      leave it "just in case".
 #
-bastion | MV.ticket.lane-file-registration-two-clauses | MV.ticket.lane-file-registration-two-clauses Task 2 added SegmentAvailability::HeldUnregistered and LaneAvailabilityArtifact::registration_issues. bastion breaks on both: an exhaustive `match entry.status.availability` in src/serve/session_qa/mod.rs:903 needs a HeldUnregistered arm, and four `LaneAvailabilityArtifact { .. }` struct literals (src/serve/handlers/lanes.rs:314,330; src/serve/session_qa/tests.rs:3226,3264) need `registration_issues`. Both are same-repo, few-line fixes; delete this row once bastion's own commit lands and check-consumers reports it passing again.
