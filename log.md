@@ -13,6 +13,38 @@ timestamp: "2026-09-01T00:30:00-03:00"
 
 ## [run: 2026-09-02]
 
+### `MV.ticket.emit-state-write-is-corpus-wide-and-unscoped` BAILED — `/sdlc-flow`, task 1 of 5
+
+Ran `/sdlc-flow` against the ticket that scopes `mev emit-state --write` to `--scope` (both the
+scope-leak into fleet-wide `planning/lane-{segments,frontier,availability}.json` and the
+authored-field mutation of `related: []`). Task 1 added
+`emit_state_scope::scoped_write_touches_no_file_outside_scope` to `tests/it/emit_state_scope.rs` — a
+whole-tree walk (`walk_all_files`) compared before/after a `--scope mev --write` run against
+`ScopeDependencySet::absolute_targets`, treating each target's own `.mev-history/<name>/` revision
+sidecar as an expected derivative rather than a leak, and extending the fixture with a real lane
+record (`planning/roadmaps/scope-leak-fixture/lane-substrate.json`) so the lane-derivation steps have
+real work to plan against. The test was observed RED as required, failing exactly on the leaked files
+(`planning/lane-availability.json`, `planning/lane-frontier.json`, `planning/lane-segments.json`).
+The run BAILED at task 1's gate: `cargo clippy --all-targets -- -D warnings` fails on 4 pre-existing
+`field_reassign_with_default` errors in `src/brain/conformance/{contracts,surface,toolchain}.rs` —
+independently verified by running the same check against base state (`HEAD~1`, a fresh worktree,
+before this task's only file change), which fails identically (exit 101, same 4 errors, same
+locations). Confirmed out of scope for task 1, whose only change is `tests/it/emit_state_scope.rs`;
+`cargo fmt --check` passes cleanly. Tasks 2-5 (the actual scope-narrowing fix and the authored-field
+round-trip) did not run this session. Next: fix the 4 pre-existing clippy errors (or grant task 1 an
+explicit exemption for them) so the clippy gate can pass, then resume `/sdlc-flow` from task 2.
+
+```
+df76a9f test: whole-tree scope-leak test for emit-state --scope, observed RED
+a6886f9 fix(gitignore): the anchored /planning rule missed nested planning directories
+fa395fc fix: stop leaking client and business names from hooks/README.md
+5476aeb chore(harness): sync base-template — BT.ticket.begin-orchestration-lease-steps-are-wrong — corrected exclusive-lease Steps 3/4
+6aa6ca5 chore(harness): sync base-template — cli-surface-to-skills lane (epic skill, carryover-routing pointers) + block.schema.json operator/origin fixes
+dbc53b3 chore(harness): sync base-template — commit-in-this-fleet: document the HQ-root grouped-commit sweep
+9f7d92c chore(harness): sync base-template — sync-downstream-harness --commit-pending; catch up the pending harness backlog
+6e59821 chore(harness): sync base-template — write-carryover-entry: the needs field
+```
+
 ### `MV.14.B` CLOSED — block/ticket creation verb (`mev create-block`)
 
 - **What:** Shipped `mev create-block`, the first authored writer that can register a new block or
