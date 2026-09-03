@@ -11,7 +11,75 @@ related: [status]
 timestamp: "2026-09-01T00:30:00-03:00"
 ---
 
+## [run: 2026-09-03]
+
+### `MV.ticket.emit-state-write-is-corpus-wide-and-unscoped` CLOSED — `/sdlc-flow`, 5 of 5 tasks, PASS
+
+Resumed the run that bailed at task 1 on a foreign lint gate (see prior entry) and drove it through
+to a clean PASS. Task 1 was already fully implemented and committed by the earlier attempt (the
+whole-tree scope-leak test in `tests/it/emit_state_scope.rs`, observed RED); this run verified it
+still holds and made no changes there. Task 2 fixed the scope leak itself: `plan_lane_segments`,
+`plan_frontier`, and `plan_availability` (steps 8/9/10 in `src/lib.rs`) now route through
+`filter_plan_by_scope` like every other planner, so a `--scope`d write narrows what these three
+fleet-wide derivers actually write, not only what the unscoped path emits — pinned by
+`unscoped_write_still_writes_lane_derived_artifacts`. Task 3 added
+`tests/it/emit_state_authored_roundtrip.rs`: Test A does a field-level (key-presence-aware) diff of
+`reference[]`/`carryover[]` across an unscoped `emit_state` and was observed RED — an authored
+`related: []` came back with the key dropped, not nulled, correcting an earlier "-> null" record
+against the real diff (`PRESENT ([]) -> ABSENT`); Test B is the control, a container-count/slug-set
+comparison in the shape of engine-rs's existing check, and it PASSES on the same unfixed source —
+demonstrating that check is structurally blind to this exact mutation. Task 4 fixed the mutation at
+its actual source in `okf-core`: `Reference::related` no longer drops an authored empty list on
+serialize, and a second, previously undiscovered instance of the same asymmetry —
+`Carryover::clears_when` gaining a phantom explicit `null` — was fixed alongside it; okf-core's own
+round-trip fixtures were updated to match the now-symmetric behavior. Task 5 ran the full validation
+suite (fmt, clippy, `cargo test`, release build, `cargo audit`, `check_consumers.sh`,
+`test_check_consumers.sh`, locked-lockfile check) clean, with `check_consumers.sh` confirming 2 of 2
+consumers (bastion, engine-rs) actually compiled against the working tree. Final review verdict:
+PASS, no findings. Next: `MV.ticket.lane-file-registration-two-clauses` or the next block off the
+priority board.
+
+```
+340aa6a docs: update docs for MV.ticket.emit-state-write-is-corpus-wide-and-unscoped
+ed96658 test: field-level authored round-trip test + container-count control, observed RED
+18a7647 feat: implement MV.ticket.emit-state-write-is-corpus-wide-and-unscoped-task2
+516138a chore: wrap up MV.ticket.emit-state-write-is-corpus-wide-and-unscoped
+df76a9f test: whole-tree scope-leak test for emit-state --scope, observed RED
+```
+
 ## [run: 2026-09-02]
+
+### `MV.ticket.emit-state-write-is-corpus-wide-and-unscoped` BAILED — `/sdlc-flow`, task 1 of 5
+
+Ran `/sdlc-flow` against the ticket that scopes `mev emit-state --write` to `--scope` (both the
+scope-leak into fleet-wide `planning/lane-{segments,frontier,availability}.json` and the
+authored-field mutation of `related: []`). Task 1 added
+`emit_state_scope::scoped_write_touches_no_file_outside_scope` to `tests/it/emit_state_scope.rs` — a
+whole-tree walk (`walk_all_files`) compared before/after a `--scope mev --write` run against
+`ScopeDependencySet::absolute_targets`, treating each target's own `.mev-history/<name>/` revision
+sidecar as an expected derivative rather than a leak, and extending the fixture with a real lane
+record (`planning/roadmaps/scope-leak-fixture/lane-substrate.json`) so the lane-derivation steps have
+real work to plan against. The test was observed RED as required, failing exactly on the leaked files
+(`planning/lane-availability.json`, `planning/lane-frontier.json`, `planning/lane-segments.json`).
+The run BAILED at task 1's gate: `cargo clippy --all-targets -- -D warnings` fails on 4 pre-existing
+`field_reassign_with_default` errors in `src/brain/conformance/{contracts,surface,toolchain}.rs` —
+independently verified by running the same check against base state (`HEAD~1`, a fresh worktree,
+before this task's only file change), which fails identically (exit 101, same 4 errors, same
+locations). Confirmed out of scope for task 1, whose only change is `tests/it/emit_state_scope.rs`;
+`cargo fmt --check` passes cleanly. Tasks 2-5 (the actual scope-narrowing fix and the authored-field
+round-trip) did not run this session. Next: fix the 4 pre-existing clippy errors (or grant task 1 an
+explicit exemption for them) so the clippy gate can pass, then resume `/sdlc-flow` from task 2.
+
+```
+df76a9f test: whole-tree scope-leak test for emit-state --scope, observed RED
+a6886f9 fix(gitignore): the anchored /planning rule missed nested planning directories
+fa395fc fix: stop leaking client and business names from hooks/README.md
+5476aeb chore(harness): sync base-template — BT.ticket.begin-orchestration-lease-steps-are-wrong — corrected exclusive-lease Steps 3/4
+6aa6ca5 chore(harness): sync base-template — cli-surface-to-skills lane (epic skill, carryover-routing pointers) + block.schema.json operator/origin fixes
+dbc53b3 chore(harness): sync base-template — commit-in-this-fleet: document the HQ-root grouped-commit sweep
+9f7d92c chore(harness): sync base-template — sync-downstream-harness --commit-pending; catch up the pending harness backlog
+6e59821 chore(harness): sync base-template — write-carryover-entry: the needs field
+```
 
 ### `MV.14.B` CLOSED — block/ticket creation verb (`mev create-block`)
 
