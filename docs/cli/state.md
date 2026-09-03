@@ -30,6 +30,8 @@ then re-derive. A hand-edit is overwritten on the next run and looks like data l
 | [`state-history`](#state-history-path---restore-seq) | Lists, and can restore, the revisions `emit-state` records |
 | [`set-block-status`](#set-block-status-repoid-status-path---write---force-operator-gate---scope-slug) | Flips one block's authored `status`, then re-derives |
 | [`create-block`](#create-block---from-file-path---write---scope-slug) | Files a new block/ticket/chore record, then re-derives |
+| [`demote-block`](#demote-block-repoid-path---write---scope-slug) | Parks an existing block into `backlog[]`, record intact — `create-block`'s inverse |
+| [`promote-block`](#promote-block-repoid-path---write---scope-slug) | Restores a `parked` backlog entry back into `tracks[]` — `demote-block`'s inverse |
 | [`manifest`](#manifest---pretty-path) | Emits a JSON manifest of every file in the corpus |
 
 ## Quickstart
@@ -48,6 +50,12 @@ mev set-block-status mev:MV.1.A closed --write
 
 # File a new block/ticket/chore record from a JSON payload, which also re-derives
 mev create-block --from payload.json --write
+
+# Park an existing block into backlog[] — its planning/blocks/<ID>.json record is untouched
+mev demote-block mev:MV.10.A --write
+
+# Restore it — the inverse
+mev promote-block mev:MV.10.A --write
 
 # If a write went wrong, list revisions and roll back
 mev state-history core/mev/planning/state.json
@@ -740,3 +748,97 @@ Exit codes: `0` planned (dry-run) or applied · `1` unreadable/unparseable `--fr
 
 ---
 
+
+### `demote-block <repo:id> [path] [--write] [--scope <slug>]`
+
+Park an **existing** block into `backlog[]` while its `planning/blocks/<ID>.json` record stays
+exactly where it is — `create-block`'s inverse (`create-block` files a block that does not exist
+yet; this removes one that does, without discarding its substance). Same dry-run/`--write`/`--scope`
+driver contract as `create-block`/`set-block-status` above, plus `--agent`/`--lock-dir` for the
+quiesce lease.
+
+**`planning/blocks/<id>.json` is never written.** `demote-block` only checks the record exists on
+disk (to read its `kind` and to have something for the backlog pointer to name) — no action this
+plans ever touches the file. The record staying put on disk is the whole feature: a verb that moved
+or deleted it would reintroduce the exact loss `backlog[]` used to cause when an operator hand-parked
+a block by orphaning its record.
+
+**What it writes**, on `--write`: the target's `tracks[].blocks[]` row is removed, and a `backlog[]`
+entry is appended with `status: "parked"`, a `record` pointer at the retained
+`planning/blocks/<id>.json`, and enough of the removed row (`parked_block`, `parked_track`) that
+`promote-block` can restore it losslessly. `created` is set to today, so a parked entry ages on the
+Attention board's backlog lane exactly like any other row — parking a block cannot silently become
+permanent. See [`backlog[]`'s schema](../../../../docs/state/state-schema.md#backlog--authored) for the
+full field table and D12's design rationale
+(`planning/decisions/D12-demote-block-backlog-record-pointer.md`).
+
+**Not HQ-only.** Unlike an `idea`/`ready` backlog node, a `parked` one is written into whichever
+repo's `state.json` owns the block being demoted — `mev:MV.10.A` parks into `mev`'s own `backlog[]`,
+not HQ's — because the record it points at lives in that repo's `planning/blocks/`.
+
+Reuses `set-block-status`'s key-resolution refusals rather than inventing new ones:
+
+```bash
+# See what demote-block would write (dry run — writes nothing)
+mev demote-block mev:MV.10.A ~/Dev/agentic-portfolio
+
+# Park it, and regenerate every derived view
+mev demote-block mev:MV.10.A ~/Dev/agentic-portfolio --write
+
+# Park it, regenerating only the target repo's own derived surfaces
+mev demote-block mev:MV.10.A ~/Dev/agentic-portfolio --write --scope mev
+```
+
+Exit codes: `0` planned (dry-run) or applied · `1` `E_BLOCK_BAD_KEY`, `E_BLOCK_NOT_FOUND`,
+`E_DEMOTE_BLOCK_RECORD_MISSING`, a write failure, `E_EMIT_UNKNOWN_SCOPE`, `E_EMIT_LOCK_HELD`,
+`E_QUIESCE_LEASE_HELD`, or a linked-worktree refusal.
+
+| Diagnostic | Cause |
+|---|---|
+| `E_BLOCK_BAD_KEY` | `key` is not `repo:id` form (block ids are only unique within a repo, so an unqualified id is never guessed) |
+| `E_BLOCK_NOT_FOUND` | no loaded file's `tracks[]` owns that block |
+| `E_DEMOTE_BLOCK_RECORD_MISSING` | the block resolves but `planning/blocks/<id>.json` is not on disk — there would be nothing for the backlog pointer to name |
+| `E_EMIT_LOCK_HELD` | another mev write holds the brain-root advisory lock |
+| `E_QUIESCE_LEASE_HELD` | a sibling lane's exclusive lease declares a quiet window; do not retry — see [Quiesce lease on `--write`](#quiesce-lease-on---write---agent---lock-dir) |
+| `E_EMIT_UNKNOWN_SCOPE` | `--scope` names a slug with no matching `[[repos]]` entry in `brain.toml`; the message names every valid slug |
+
+Every diagnostic returns a plan with zero actions — nothing is ever partially written.
+
+---
+
+### `promote-block <repo:id> [path] [--write] [--scope <slug>]`
+
+Restore a `parked` `backlog[]` entry back into `tracks[].blocks[]` — `demote-block`'s inverse. Same
+driver contract as `demote-block`. Re-inserts the exact row `demote-block` removed, read back from
+the backlog entry's own `parked_block`/`parked_track` snapshot, so no field is lost in the round
+trip. The backlog entry is never deleted, matching how an ordinary idea promotion leaves its origin
+behind — it flips to `status: "promoted"` with `block` set to the restored id, and its
+`record`/`parked_block`/`parked_track` extras are cleared.
+
+```bash
+# See what promote-block would restore (dry run — writes nothing)
+mev promote-block mev:MV.10.A ~/Dev/agentic-portfolio
+
+# Restore it, and regenerate every derived view
+mev promote-block mev:MV.10.A ~/Dev/agentic-portfolio --write
+```
+
+Exit codes: `0` planned (dry-run) or applied · `1` `E_BLOCK_BAD_KEY`, `E_BLOCK_NOT_FOUND`,
+`E_PROMOTE_BLOCK_NOT_PARKED`, `E_PROMOTE_BLOCK_EXISTS`, `E_PROMOTE_BLOCK_MISSING_SNAPSHOT`, a write
+failure, `E_EMIT_UNKNOWN_SCOPE`, `E_EMIT_LOCK_HELD`, `E_QUIESCE_LEASE_HELD`, or a linked-worktree
+refusal.
+
+| Diagnostic | Cause |
+|---|---|
+| `E_BLOCK_BAD_KEY` | `key` is not `repo:id` form |
+| `E_BLOCK_NOT_FOUND` | no loaded file's `backlog[]` carries that slug in that repo |
+| `E_PROMOTE_BLOCK_NOT_PARKED` | the slug exists but its `status` is not `"parked"` — nothing to restore, or it was already restored |
+| `E_PROMOTE_BLOCK_EXISTS` | a block with this id is already registered in the target repo's `tracks[]`; refused rather than overwritten |
+| `E_PROMOTE_BLOCK_MISSING_SNAPSHOT` | the entry is `parked` but carries no restorable `parked_block` snapshot, or the snapshot doesn't deserialize as a track block — hand-edited or corrupt state |
+| `E_EMIT_LOCK_HELD` | another mev write holds the brain-root advisory lock |
+| `E_QUIESCE_LEASE_HELD` | a sibling lane's exclusive lease declares a quiet window; do not retry |
+| `E_EMIT_UNKNOWN_SCOPE` | `--scope` names a slug with no matching `[[repos]]` entry in `brain.toml`; the message names every valid slug |
+
+Every diagnostic returns a plan with zero actions — nothing is ever partially written.
+
+---
