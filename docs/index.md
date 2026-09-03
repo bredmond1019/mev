@@ -43,3 +43,4 @@ a Quickstart.
 | [SDLC workflows](workflows/index.md) | The Claude Code pipeline commands and engines |
 
 For project strategy and current focus, see the planning vault at `core/mev/planning/index.md`.
+<!-- freshness proof 1788440499 -->
