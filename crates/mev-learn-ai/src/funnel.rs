@@ -75,7 +75,7 @@ impl CtaVocabulary {
     }
 }
 
-const DEFAULT_CTA_VOCABULARY_TOML: &str = include_str!("../../data/cta-vocabulary.toml");
+const DEFAULT_CTA_VOCABULARY_TOML: &str = include_str!("../data/cta-vocabulary.toml");
 
 /// The shipped vocabulary, parsed once and cached. `expect` is safe here: this is our own
 /// compile-time-embedded file, not runtime input — a malformed shipped file is a build defect

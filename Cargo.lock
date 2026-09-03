@@ -419,6 +419,14 @@ dependencies = [
 [[package]]
 name = "mev-learn-ai"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror",
+ "toml",
+ "walkdir",
+]
 
 [[package]]
 name = "num-traits"

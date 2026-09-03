@@ -8,7 +8,6 @@
 pub mod brain;
 pub mod consumers;
 pub mod doc;
-mod learn_ai;
 mod shared;
 pub mod testsupport;
 pub mod theme;
@@ -60,10 +59,17 @@ pub use doc::{
     OpportunityKind, plan_add_action, plan_document, plan_index_reconcile, plan_ingest,
     plan_merge_contacts, plan_set_stage,
 };
-pub use learn_ai::LearnAiValidator;
-pub use learn_ai::blog::{BlogPost, BlogValidator};
-pub use learn_ai::crawl::{ContentFile, Corpus, FileKind, Locale, crawl};
-pub use learn_ai::meta::validate_file;
+// Business-specific learn-ai/funnel content tooling, extracted to `crates/mev-learn-ai` so the
+// public mev binary and its default-feature source carry no reference to it. See
+// `crates/mev-learn-ai/src/lib.rs` for why that crate cannot depend back on `mev`.
+#[cfg(feature = "learn-ai")]
+pub use mev_learn_ai::LearnAiValidator;
+#[cfg(feature = "learn-ai")]
+pub use mev_learn_ai::blog::{BlogPost, BlogValidator};
+#[cfg(feature = "learn-ai")]
+pub use mev_learn_ai::crawl::{ContentFile, Corpus, FileKind, Locale, crawl};
+#[cfg(feature = "learn-ai")]
+pub use mev_learn_ai::meta::validate_file;
 pub use validator::ContentValidator;
 
 use std::path::PathBuf;
@@ -165,19 +171,27 @@ impl Report {
 /// Always constructs the **default** validator (`lint: false`) — this function's behaviour is
 /// pinned by a byte-identical regression test, so the shared lint passes never run here. Use
 /// [`validate_with_lint`] to opt into them.
+#[cfg(feature = "learn-ai")]
 pub fn validate(root: &std::path::Path) -> anyhow::Result<Report> {
-    Ok(LearnAiValidator::default().run(root))
+    use mev_learn_ai::ContentValidator;
+    Ok(learn_ai_report_into_report(
+        LearnAiValidator::default().run(root),
+    ))
 }
 
 /// Validate the learn-agentic-ai.com module tree with the shared content-lint passes
-/// ([`learn_ai::lint::lint_code_blocks`] / [`learn_ai::lint::lint_local_links`]) turned on.
+/// (`mev_learn_ai::lint::lint_code_blocks` / `mev_learn_ai::lint::lint_local_links`) turned on.
 ///
 /// Phase 12, Block A: identical crawl and frontmatter/struct checks to [`validate`], plus
 /// `W_LINT_UNTAGGED_CODE_BLOCK` / `E_LINT_DEAD_LOCAL_LINK` / `E_LINT_DEAD_ASSET` over
 /// `FileKind::ModuleMdx` items. `validate` itself is unaffected — it always builds the
 /// default (lint-off) validator.
+#[cfg(feature = "learn-ai")]
 pub fn validate_with_lint(root: &std::path::Path) -> anyhow::Result<Report> {
-    Ok(LearnAiValidator::with_lint(true).run(root))
+    use mev_learn_ai::ContentValidator;
+    Ok(learn_ai_report_into_report(
+        LearnAiValidator::with_lint(true).run(root),
+    ))
 }
 
 /// Validate the learn-agentic-ai.com blog tree (EN + pt-BR) rooted at `root`.
@@ -192,8 +206,37 @@ pub fn validate_with_lint(root: &std::path::Path) -> anyhow::Result<Report> {
 /// `MV.12.B`: also constructs [`BlogValidator`] with its `learn_root` resolved from `root`
 /// (`<content>/blog/published` -> `<content>/learn`) so the funnel checks' `cta: module`
 /// existence resolution actually runs.
+#[cfg(feature = "learn-ai")]
 pub fn validate_blog(root: &std::path::Path) -> anyhow::Result<Report> {
-    Ok(BlogValidator::from_blog_root(root).run(root))
+    use mev_learn_ai::ContentValidator;
+    Ok(learn_ai_report_into_report(
+        BlogValidator::from_blog_root(root).run(root),
+    ))
+}
+
+/// Convert a `mev_learn_ai::Report` into `mev`'s own `Report`.
+///
+/// `mev-learn-ai` carries its own `Diagnostic`/`Severity`/`Report` types rather than
+/// depending on `mev`'s (see `crates/mev-learn-ai/src/lib.rs`'s crate doc comment for why),
+/// so the bridge functions above convert on the way out — the rest of `mev`, including its
+/// `--json` output (`JsonReport`), only ever handles one `Report` type.
+#[cfg(feature = "learn-ai")]
+fn learn_ai_report_into_report(report: mev_learn_ai::Report) -> Report {
+    Report {
+        diagnostics: report
+            .diagnostics
+            .into_iter()
+            .map(|d| Diagnostic {
+                severity: match d.severity {
+                    mev_learn_ai::Severity::Error => Severity::Error,
+                    mev_learn_ai::Severity::Warning => Severity::Warning,
+                },
+                file: d.file,
+                locator: d.locator,
+                message: d.message,
+            })
+            .collect(),
+    }
 }
 
 /// Validate the company-brain repo rooted at `root` for OKF frontmatter compliance.
@@ -3286,6 +3329,7 @@ mod entry_point_tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "learn-ai")]
     fn validate_blog_on_empty_dir_returns_empty_report() {
         let dir = testsupport::unique_temp_dir("mev-validate-blog-empty-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -3301,6 +3345,7 @@ mod entry_point_tests {
     }
 
     #[test]
+    #[cfg(feature = "learn-ai")]
     fn validate_with_lint_reports_lint_diagnostics_where_validate_reports_none() {
         let dir = testsupport::unique_temp_dir("mev-validate-with-lint-test");
         let modules_dir = dir.join("paths").join("demo").join("modules");

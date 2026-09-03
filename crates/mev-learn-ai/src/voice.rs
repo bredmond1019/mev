@@ -1,7 +1,7 @@
 //! Voice tripwire scanner (Phase 12, Block C, Task 2).
 //!
 //! [`check_voice`] scans prose lines for the banned phrases named in `learn-ai/CLAUDE.md`'s
-//! "Voice and tone" bullet — loaded, per [`crate::learn_ai::voice_tells`], from
+//! "Voice and tone" bullet — loaded, per [`crate::voice_tells`], from
 //! `data/voice-tells.toml` (or a caller-supplied override list, which is what proves the list
 //! is genuinely data-driven rather than hardcoded here).
 //!
@@ -12,14 +12,14 @@
 //!
 //! Four kinds of content are exempt from matching: fenced code blocks, inline code spans,
 //! blockquote lines, and the YAML frontmatter block. The fenced-code-block exemption reuses
-//! [`crate::learn_ai::lint::lines_in_code_fence`] — the same fence-tracking logic
+//! [`crate::lint::lines_in_code_fence`] — the same fence-tracking logic
 //! `lint_local_links` uses — rather than a second, independently-drifting scanner.
 
 use std::path::Path;
 
 use crate::Diagnostic;
-use crate::learn_ai::lint::lines_in_code_fence;
-use crate::learn_ai::voice_tells::VoiceTell;
+use crate::lint::lines_in_code_fence;
+use crate::voice_tells::VoiceTell;
 
 /// Scan `source` (the content of file `rel`) for every phrase in `tells`, outside code and
 /// quotation, and return one `W_VOICE_TELL` warning per match.
@@ -134,7 +134,7 @@ fn frontmatter_lines(source: &str) -> Vec<bool> {
 mod tests {
     use super::*;
     use crate::Severity;
-    use crate::learn_ai::voice_tells::default_tells;
+    use crate::voice_tells::default_tells;
     use std::path::PathBuf;
 
     fn rel() -> PathBuf {

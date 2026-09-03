@@ -2,7 +2,7 @@
 //!
 //! Loads `data/voice-tells.toml` — the data-driven phrase list `learn-ai/CLAUDE.md`'s "Voice
 //! and tone" bullet names — into a typed [`VoiceTell`] list. Same shape as
-//! [`crate::learn_ai::funnel`]'s `CtaVocabulary`: a `parse`/`load_default` pair backed by an
+//! [`crate::funnel`]'s `CtaVocabulary`: a `parse`/`load_default` pair backed by an
 //! `include_str!`-embedded default, plus a `parse`-only path for tests to prove the list is
 //! genuinely data-driven (an override list a test supplies works exactly like the shipped one).
 //!
@@ -61,7 +61,7 @@ pub fn load_default() -> Result<Vec<VoiceTell>, VoiceTellError> {
     parse(DEFAULT_VOICE_TELLS_TOML)
 }
 
-const DEFAULT_VOICE_TELLS_TOML: &str = include_str!("../../data/voice-tells.toml");
+const DEFAULT_VOICE_TELLS_TOML: &str = include_str!("../data/voice-tells.toml");
 
 /// The shipped voice-tells list, parsed once and cached. `expect` is safe here: this is our
 /// own compile-time-embedded file, not runtime input — a malformed shipped file is a build

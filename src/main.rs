@@ -161,6 +161,12 @@ enum Command {
     /// learn modules, reporting `W_LINT_UNTAGGED_CODE_BLOCK` / `E_LINT_DEAD_LOCAL_LINK` /
     /// `E_LINT_DEAD_ASSET`. A no-op when combined with --blog, since lint is already on there.
     /// Without either flag, behaviour is byte-identical to the pre-Phase-12 binary.
+    ///
+    /// Feature-gated behind `learn-ai` (off by default): the learn-ai content tree is the
+    /// operator's own business content tooling, extracted to `crates/mev-learn-ai` so a
+    /// default-feature build of `mev` carries no reference to it. With the feature off, this
+    /// subcommand does not exist in the CLI surface at all.
+    #[cfg(feature = "learn-ai")]
     Validate {
         /// Path to the content root. Defaults to ../learn-ai/content/learn, or, when --blog is
         /// given, to ../learn-ai/content/blog/published.
@@ -3038,6 +3044,7 @@ fn main() -> ExitCode {
     };
 
     match command {
+        #[cfg(feature = "learn-ai")]
         Command::Validate { path, blog, lint } => {
             // The positional's default is resolved here rather than in the derive so it can
             // depend on --blog: leaving the clap default off the blog case keeps the existing
