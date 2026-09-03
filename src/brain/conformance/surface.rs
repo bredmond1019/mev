@@ -245,6 +245,52 @@ fn is_allowlisted(literal: &str, allowlist: &[String]) -> bool {
     })
 }
 
+/// First octets this fleet's REAL private/loopback/CGN infra literals actually start
+/// with — RFC 1918 (`10.`, `172.`, `192.`), loopback (`127.`), and Tailscale/CGN NAT
+/// space (`100.`). Derived from the live corpus's MUST-STILL-FIRE evidence
+/// (`100.64.1.2`, `100.64.5.9`, `192.168.1.5`, `10.0.0.1`, `127.0.0.2`, `100.1.2.3`) —
+/// note `100.1.2.3` is kept even though its second octet sits outside the strict
+/// `100.64.0.0/10` CGN range, so this is a first-octet heuristic, not a full CIDR match.
+const PRIVATE_FIRST_OCTETS: [&str; 5] = ["10", "100", "127", "172", "192"];
+
+/// Whether `literal` is a version-number-shaped dotted quad rather than a real private
+/// IPv4 address, so rule 2 should not flag it as a leaked infra literal.
+///
+/// Derived from the live corpus (2026-09-03), not invented: `1.27.2.3` (a Python
+/// dependency version pin) and `15.8.1.060` (a zero-padded container image tag) must NOT
+/// fire, while every real address the existing fixtures pin — `100.64.1.2`, `100.64.5.9`,
+/// `192.168.1.5`, `10.0.0.1`, `127.0.0.2`, `100.1.2.3` — must still fire.
+///
+/// Two independent signals, either one enough to call it a version string:
+///  - a non-canonical octet: a segment longer than one digit that starts with `0`
+///    (`060`) is not a legal decimal IPv4 octet, so it reads as a padded version
+///    component instead;
+///  - a first octet outside [`PRIVATE_FIRST_OCTETS`] — version numbers commonly start
+///    with a small major version (`1.`, `2.`, `15.`, ...) that never collides with the
+///    handful of first octets this fleet's real private/loopback/CGN literals use.
+///
+/// Non-dotted-quad literals (a `*.ts.net` hostname's segments are not all digits) always
+/// return `false` here — this function must never suppress a Tailscale hostname finding.
+fn is_version_string(literal: &str) -> bool {
+    let octets: Vec<&str> = literal.split('.').collect();
+    if octets.len() != 4 {
+        return false;
+    }
+    if !octets
+        .iter()
+        .all(|o| !o.is_empty() && o.chars().all(|c| c.is_ascii_digit()))
+    {
+        return false; // not a dotted quad of digits at all — e.g. a ts.net hostname
+    }
+    if octets.iter().any(|o| o.len() > 1 && o.starts_with('0')) {
+        return true;
+    }
+    match octets.first() {
+        Some(first) => !PRIVATE_FIRST_OCTETS.contains(first),
+        None => false,
+    }
+}
+
 /// Evaluate rule 2 for a single tracked file's content.
 fn check_literals_in_file(
     repo: &str,
@@ -255,6 +301,7 @@ fn check_literals_in_file(
     find_literals(content)
         .into_iter()
         .filter(|m| !is_allowlisted(&m.text, allowlist))
+        .filter(|m| !is_version_string(&m.text))
         .map(|m| Finding {
             repo: repo.to_string(),
             file: file_rel.to_string(),
@@ -464,6 +511,38 @@ mod tests {
         let list = vec!["127.0.0.1".to_string()];
         assert!(is_allowlisted("127.0.0.1", &list));
         assert!(!is_allowlisted("127.0.0.2", &list));
+    }
+
+    #[test]
+    fn is_version_string_true_for_live_false_positive_evidence() {
+        // Live corpus, 2026-09-03: package/tool version pins and a zero-padded image
+        // tag must be recognized as version-shaped, not real IP literals.
+        assert!(is_version_string("1.27.2.3"));
+        assert!(is_version_string("15.8.1.060"));
+    }
+
+    #[test]
+    fn is_version_string_false_for_real_private_infra_addresses() {
+        // Every genuine address the existing fixtures pin must still be recognized as
+        // a real address (i.e. NOT a version string) so rule 2 keeps firing on it.
+        for addr in [
+            "100.64.1.2",
+            "100.64.5.9",
+            "192.168.1.5",
+            "10.0.0.1",
+            "127.0.0.2",
+            "100.1.2.3",
+        ] {
+            assert!(
+                !is_version_string(addr),
+                "{addr} must not be classified as a version string"
+            );
+        }
+    }
+
+    #[test]
+    fn is_version_string_never_suppresses_a_tsnet_hostname() {
+        assert!(!is_version_string("mini.tailnet-abc.ts.net"));
     }
 
     #[test]
