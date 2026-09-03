@@ -352,7 +352,17 @@ pub(crate) fn is_terminal_block_status(status: Option<&str>) -> bool {
 const FOCUS_LANES: [&str; 4] = ["now", "next", "blocked", "deferred"];
 
 /// Valid `status` values for `backlog[]` entries (HQ brain only).
-const VALID_BACKLOG_STATUSES: &[&str] = &["idea", "ready", "promoted"];
+///
+/// `"parked"` (D12, MV.ticket.demote-block-to-backlog) is a real block, moved
+/// here on purpose by `mev demote-block`, with its
+/// `planning/blocks/<ID>.json` record intact — distinct from `"idea"`
+/// structurally, not just by name: a `parked` entry always carries a
+/// `record` pointer in `Backlog::extra` ([`check_backlog_integrity`] rejects
+/// one that doesn't resolve to an existing file); an `idea` never does. This
+/// vocabulary is mev-local — `Backlog::status` is a plain `String` in
+/// okf-core, not a shared enum — so adding `"parked"` required no okf-core
+/// change (see `planning/decisions/D12-demote-block-backlog-record-pointer.md`).
+const VALID_BACKLOG_STATUSES: &[&str] = &["idea", "ready", "parked", "promoted"];
 
 /// Valid `kind` values for `carryover[]` entries (D72's four work kinds).
 const VALID_CARRYOVER_KINDS: &[&str] = &["defect", "deferred", "drift", "env"];
@@ -2588,8 +2598,16 @@ pub fn check_status_consistency(files: &[(StateSource, StateFile)]) -> Vec<Diagn
 ///    carries a `block` pointer (or is missing one) that does not resolve to an
 ///    existing node in `{backlog.repo}:tracks[]`.
 ///
-/// Backlog nodes with `status` other than `"promoted"` are not checked for
-/// promotion integrity (they have no `block` pointer by contract).
+/// 3. **`E_STATE_DANGLING_BACKLOG_RECORD`** — a backlog node whose `status` is
+///    `"parked"` (D12, `mev demote-block`) carries no `record` pointer in its
+///    `extra` map, or one that does not resolve to an existing
+///    `planning/blocks/<ID>.json` file under the node's own repo. A dangling
+///    pointer here is the exact loss `demote-block` exists to prevent, wearing
+///    a pointer's clothes.
+///
+/// Backlog nodes with `status` other than `"promoted"`/`"parked"` are not
+/// checked for promotion/park integrity (an `"idea"`/`"ready"` node has
+/// neither pointer by contract).
 pub fn check_backlog_integrity(
     files: &[(StateSource, StateFile)],
     graph: &StateGraph,
@@ -2650,6 +2668,46 @@ pub fn check_backlog_integrity(
                                 format!(
                                     "backlog node '{}' promoted to block '{block_id}' which does \
                                      not exist in any repo's tracks[]",
+                                    backlog_node.slug
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // --- 3. Parked node's record pointer must resolve on disk ---
+            if backlog_node.status == crate::brain::block_create::BACKLOG_STATUS_PARKED {
+                let record_rel = backlog_node
+                    .extra
+                    .get(crate::brain::block_create::BACKLOG_EXTRA_RECORD)
+                    .and_then(|v| v.as_str());
+                match record_rel {
+                    None => {
+                        diags.push(Diagnostic::error(
+                            path,
+                            "E_STATE_DANGLING_BACKLOG_RECORD",
+                            format!(
+                                "backlog node '{}' has status 'parked' but no 'record' pointer",
+                                backlog_node.slug
+                            ),
+                        ));
+                    }
+                    Some(record_rel) => {
+                        // `path` is `<repo_root>/planning/state.json`; the record
+                        // pointer is repo-relative, so resolve it against the
+                        // same repo root the backlog node itself lives in.
+                        let repo_root = path.parent().and_then(std::path::Path::parent);
+                        let resolves = repo_root
+                            .map(|root| root.join(record_rel).exists())
+                            .unwrap_or(false);
+                        if !resolves {
+                            diags.push(Diagnostic::error(
+                                path,
+                                "E_STATE_DANGLING_BACKLOG_RECORD",
+                                format!(
+                                    "backlog node '{}' has status 'parked' with record pointer \
+                                     '{record_rel}', which does not resolve to an existing file",
                                     backlog_node.slug
                                 ),
                             ));
@@ -8237,6 +8295,142 @@ mod tests {
             errs.is_empty(),
             "clean promotion (block exists in tracks[]) should produce no errors, \
              got: {diags:?}"
+        );
+    }
+
+    /// A repo-nested fixture (`<dir>/<repo>/planning/state.json`), matching
+    /// production's `abs_path` shape — unlike [`make_brain_with_backlog`]'s
+    /// flat `<dir>/<repo>-state.json`, this is required for the
+    /// [`BACKLOG_STATUS_PARKED`]-pointer check, which resolves the `record`
+    /// pointer against `abs_path`'s grandparent directory.
+    fn make_repo_with_backlog(
+        dir: &std::path::Path,
+        repo: &str,
+        backlog_nodes: Vec<Backlog>,
+    ) -> (StateSource, StateFile) {
+        let repo_root = dir.join(repo);
+        let abs_path = repo_root.join("planning").join("state.json");
+        std::fs::create_dir_all(abs_path.parent().unwrap()).unwrap();
+        let file = StateFile {
+            epics: Vec::new(),
+            repo: repo.to_string(),
+            kind: "project".to_string(),
+            updated: "2026-09-03".to_string(),
+            focus: Focus::default(),
+            tracks: vec![],
+            repos: vec![],
+            cross_repo: vec![],
+            tiers: vec![],
+            note: None,
+            backlog: backlog_nodes,
+            carryover: vec![],
+            ..Default::default()
+        };
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path,
+            expected_kind: "project",
+        };
+        (src, file)
+    }
+
+    fn parked_backlog_node(record_rel: Option<&str>) -> Backlog {
+        let mut extra = serde_json::Map::new();
+        if let Some(rel) = record_rel {
+            extra.insert(
+                crate::brain::block_create::BACKLOG_EXTRA_RECORD.to_string(),
+                serde_json::json!(rel),
+            );
+        }
+        Backlog {
+            slug: "MV.9.PARKED".to_string(),
+            title: "Parked block".to_string(),
+            repo: "mev".to_string(),
+            kind: "block".to_string(),
+            status: crate::brain::block_create::BACKLOG_STATUS_PARKED.to_string(),
+            depends_on: vec![],
+            block: None,
+            notes: None,
+            extra,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn check_backlog_integrity_parked_with_no_record_pointer_emits_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_repo_with_backlog(dir.path(), "mev", vec![parked_backlog_node(None)]);
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_backlog_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BACKLOG_RECORD")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "parked backlog node with no record pointer should emit \
+             E_STATE_DANGLING_BACKLOG_RECORD, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_backlog_integrity_parked_record_pointer_resolves_to_nothing_emits_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The pointer names a file that was never written to disk.
+        let pair = make_repo_with_backlog(
+            dir.path(),
+            "mev",
+            vec![parked_backlog_node(Some(
+                "planning/blocks/MV.9.PARKED.json",
+            ))],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_backlog_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BACKLOG_RECORD")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "parked backlog node with a dangling record pointer should emit \
+             E_STATE_DANGLING_BACKLOG_RECORD, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_backlog_integrity_parked_record_pointer_resolving_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (src, file) = make_repo_with_backlog(
+            dir.path(),
+            "mev",
+            vec![parked_backlog_node(Some(
+                "planning/blocks/MV.9.PARKED.json",
+            ))],
+        );
+        // Write the record the pointer names, under the same repo root the
+        // check resolves against (`abs_path`'s grandparent).
+        let repo_root = src.abs_path.parent().unwrap().parent().unwrap();
+        let record_path = repo_root.join("planning/blocks/MV.9.PARKED.json");
+        std::fs::create_dir_all(record_path.parent().unwrap()).unwrap();
+        std::fs::write(&record_path, "{}").unwrap();
+
+        let files = vec![(src, file)];
+        let graph = build_state_graph(&files);
+        let diags = check_backlog_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == crate::Severity::Error)
+            .collect();
+        assert!(
+            errs.is_empty(),
+            "a parked node whose record pointer resolves should produce no errors, got: {diags:?}"
         );
     }
 

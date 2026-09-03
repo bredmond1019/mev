@@ -798,3 +798,240 @@ fn create_in_one_repo_never_touches_the_other_repos_files() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// demote-block / promote-block — `mev::brain::block_create::{demote_block,
+// promote_block}`, the full driver assembly (config -> discover -> plan ->
+// apply -> chained emit), same seam this file already covers for
+// `mev::create_block`.
+// ---------------------------------------------------------------------------
+
+fn write_block_record(root: &Path, repo_slug: &str, id: &str) {
+    write_json(
+        root,
+        &format!("repos/{repo_slug}/planning/blocks/{id}.json"),
+        &serde_json::json!({
+            "id": id,
+            "repo": repo_slug,
+            "kind": "block",
+            "title": "Seed block",
+            "description": "A seed block used by demote-block coverage.",
+            "what": "Nothing, it is a fixture.",
+            "why": "To give demote-block something real to park.",
+            "sdlc_workflow": "task",
+            "model": "sonnet",
+            "phase": 1,
+            "files": {},
+            "out_of_scope": ["Everything else."],
+            "acceptance_criteria": ["It exists."],
+            "spec_dir": format!("planning/{id}/"),
+            "created": "2026-09-02",
+            "updated": "2026-09-02",
+        }),
+    );
+}
+
+#[test]
+fn demote_block_dry_run_writes_nothing() {
+    let dir = temp_dir("demote-dry-run");
+    write_corpus(&dir);
+    write_block_record(&dir, "alpha", "AL.1.A");
+
+    let report = mev::brain::block_create::demote_block(&dir, "alpha:AL.1.A", false, None)
+        .expect("dry-run should not error");
+    assert!(
+        errors_only(&report).is_empty(),
+        "{:#?}",
+        errors_only(&report)
+    );
+
+    let state = read_json(&dir, "repos/alpha/planning/state.json");
+    let ids: Vec<&str> = state["tracks"][0]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["AL.1.A"], "dry-run must not remove the block");
+    assert!(
+        state["backlog"].as_array().is_none_or(|a| a.is_empty()),
+        "dry-run must not append a backlog entry"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn demote_block_write_parks_the_block_and_leaves_the_record_untouched() {
+    let dir = temp_dir("demote-write");
+    write_corpus(&dir);
+    write_block_record(&dir, "alpha", "AL.1.A");
+    let record_before = fs::read(dir.join("repos/alpha/planning/blocks/AL.1.A.json")).unwrap();
+
+    let report = mev::brain::block_create::demote_block(&dir, "alpha:AL.1.A", true, None)
+        .expect("write should not error");
+    assert!(
+        errors_only(&report).is_empty(),
+        "{:#?}",
+        errors_only(&report)
+    );
+
+    let state = read_json(&dir, "repos/alpha/planning/state.json");
+    let ids: Vec<&str> = state["tracks"][0]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        !ids.contains(&"AL.1.A"),
+        "AL.1.A must be removed from tracks[]: {ids:?}"
+    );
+    let backlog = state["backlog"].as_array().expect("backlog[] present");
+    let entry = backlog
+        .iter()
+        .find(|b| b["slug"] == "AL.1.A")
+        .expect("a parked backlog entry for AL.1.A");
+    assert_eq!(entry["status"], "parked");
+    assert_eq!(entry["record"], "planning/blocks/AL.1.A.json");
+
+    // AC2: the record is byte-identical — demote-block never touches it.
+    let record_after = fs::read(dir.join("repos/alpha/planning/blocks/AL.1.A.json")).unwrap();
+    assert_eq!(
+        record_before, record_after,
+        "planning/blocks/AL.1.A.json must be byte-identical before/after a --write demote"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn demote_block_missing_record_is_refused_and_writes_nothing() {
+    let dir = temp_dir("demote-missing-record");
+    write_corpus(&dir);
+    // No write_block_record() call — AL.1.A has no record on disk.
+
+    let report = mev::brain::block_create::demote_block(&dir, "alpha:AL.1.A", true, None)
+        .expect("driver call itself should not error");
+    assert_eq!(
+        errors_only(&report)
+            .iter()
+            .map(|d| d.locator.as_str())
+            .collect::<Vec<_>>(),
+        vec!["E_DEMOTE_BLOCK_RECORD_MISSING"]
+    );
+
+    let state = read_json(&dir, "repos/alpha/planning/state.json");
+    let ids: Vec<&str> = state["tracks"][0]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["AL.1.A"],
+        "a refused demote must not remove the block"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn demote_then_promote_round_trips_via_the_full_driver() {
+    let dir = temp_dir("demote-promote-roundtrip");
+    write_corpus(&dir);
+    write_block_record(&dir, "alpha", "AL.1.A");
+
+    // Canonicalize the hand-written fixture through one StateFile round trip
+    // first, matching what `action_for` itself always writes (explicit
+    // `null`s for absent-but-not-skipped `TrackBlock` fields) — otherwise
+    // this comparison would fail on a difference in how the *fixture* was
+    // authored, not on anything demote/promote actually did.
+    let raw_before = fs::read_to_string(dir.join("repos/alpha/planning/state.json")).unwrap();
+    let canonical: mev::brain::state::StateFile =
+        serde_json::from_str(&raw_before).expect("fixture state.json parses");
+    let mut canonical_content = serde_json::to_string_pretty(&canonical).unwrap();
+    canonical_content.push('\n');
+    fs::write(
+        dir.join("repos/alpha/planning/state.json"),
+        &canonical_content,
+    )
+    .unwrap();
+
+    let original_state = read_json(&dir, "repos/alpha/planning/state.json");
+    let original_block = original_state["tracks"][0]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == "AL.1.A")
+        .cloned()
+        .expect("original AL.1.A row");
+
+    let demote_report = mev::brain::block_create::demote_block(&dir, "alpha:AL.1.A", true, None)
+        .expect("demote write should not error");
+    assert!(
+        errors_only(&demote_report).is_empty(),
+        "{:#?}",
+        errors_only(&demote_report)
+    );
+
+    let promote_report = mev::brain::block_create::promote_block(&dir, "alpha:AL.1.A", true, None)
+        .expect("promote write should not error");
+    assert!(
+        errors_only(&promote_report).is_empty(),
+        "{:#?}",
+        errors_only(&promote_report)
+    );
+
+    let restored_state = read_json(&dir, "repos/alpha/planning/state.json");
+    let restored_block = restored_state["tracks"][0]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == "AL.1.A")
+        .cloned()
+        .expect("restored AL.1.A row");
+    assert_eq!(
+        restored_block, original_block,
+        "demote-then-promote must restore the tracks[] row with no field lost"
+    );
+
+    let backlog_entry = restored_state["backlog"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["slug"] == "AL.1.A")
+        .cloned()
+        .expect("backlog entry retained, not deleted, after promotion");
+    assert_eq!(backlog_entry["status"], "promoted");
+    assert_eq!(backlog_entry["block"], "AL.1.A");
+    assert!(
+        backlog_entry.get("record").is_none(),
+        "a promoted entry must not still carry the parked record pointer: {backlog_entry:#?}"
+    );
+
+    // The record file was never touched through either half of the round trip.
+    assert!(exists(&dir, "repos/alpha/planning/blocks/AL.1.A.json"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn promote_block_not_parked_is_refused() {
+    let dir = temp_dir("promote-not-parked");
+    write_corpus(&dir);
+
+    let report = mev::brain::block_create::promote_block(&dir, "alpha:AL.1.A", true, None)
+        .expect("driver call itself should not error");
+    assert_eq!(
+        errors_only(&report)
+            .iter()
+            .map(|d| d.locator.as_str())
+            .collect::<Vec<_>>(),
+        vec!["E_BLOCK_NOT_FOUND"],
+        "AL.1.A was never demoted, so there is no backlog slug to promote"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -63,7 +63,7 @@ use serde_json::json;
 
 use crate::Diagnostic;
 use crate::brain::emit::{EmitAction, EmitPlan};
-use crate::brain::state::{BlockedBy, StateFile, StateSource, Track, TrackBlock};
+use crate::brain::state::{Backlog, BlockedBy, StateFile, StateSource, Track, TrackBlock};
 
 /// Legal `kind` values — which producer authored the record and how it is
 /// scheduled.
@@ -745,6 +745,517 @@ pub fn plan_create_block(
     plan
 }
 
+// ---------------------------------------------------------------------------
+// demote-block / promote-block — park a block into backlog[] and restore it
+// ---------------------------------------------------------------------------
+//
+// `create-block`'s inverse (MV.ticket.demote-block-to-backlog, Task 2). D12
+// settled the two open design choices this pair implements:
+// - Choice 1 (record pointer): a new field on the JSON, not an overload of
+//   `Backlog::block`. Carried through `Backlog::extra` (its
+//   `#[serde(flatten, default)]` capture) rather than a typed field on
+//   `okf-core::Backlog` — this task's `files[]` is mev-only, and `extra`
+//   already gives every older consumer the exact tolerance D12's
+//   Investigation verified a typed field would need `#[serde(default,
+//   skip_serializing_if)]` for. See
+//   `planning/decisions/D12-demote-block-backlog-record-pointer.md`.
+// - Choice 2 (status name): `"parked"` — [`BACKLOG_STATUS_PARKED`].
+
+/// New `VALID_BACKLOG_STATUSES` value (D12 choice 2): a real block, parked on
+/// purpose, with its `planning/blocks/<ID>.json` record intact. Distinct from
+/// `"idea"` structurally, not just by name: a `parked` entry always carries a
+/// [`BACKLOG_EXTRA_RECORD`] pointer; an `idea` never does.
+pub const BACKLOG_STATUS_PARKED: &str = "parked";
+
+/// Diagnostic code: `demote-block`'s target block has no record on disk — the
+/// record staying in place is the whole feature, so there would be nothing
+/// for the backlog pointer to point at.
+pub const E_DEMOTE_BLOCK_RECORD_MISSING: &str = "E_DEMOTE_BLOCK_RECORD_MISSING";
+
+/// Diagnostic code: `promote-block`'s target backlog slug is not
+/// `status: "parked"` — nothing to restore, or it was already restored.
+pub const E_PROMOTE_BLOCK_NOT_PARKED: &str = "E_PROMOTE_BLOCK_NOT_PARKED";
+
+/// Diagnostic code: a `parked` backlog entry carries no restorable
+/// `tracks[].blocks[]` snapshot — hand-edited or corrupt state.
+pub const E_PROMOTE_BLOCK_MISSING_SNAPSHOT: &str = "E_PROMOTE_BLOCK_MISSING_SNAPSHOT";
+
+/// Diagnostic code: `promote-block`'s target `id` already exists in the
+/// repo's `tracks[]` — refuse rather than overwrite.
+pub const E_PROMOTE_BLOCK_EXISTS: &str = "E_PROMOTE_BLOCK_EXISTS";
+
+/// `Backlog::extra` key: repo-relative path to the retained
+/// `planning/blocks/<ID>.json` record (D12 choice 1). Read by
+/// `state::check_backlog_integrity`'s dangling-record check.
+pub const BACKLOG_EXTRA_RECORD: &str = "record";
+/// `Backlog::extra` key: the full removed `TrackBlock`, serialized verbatim,
+/// so `promote-block` restores it with no field lost (AC4's round trip).
+const BACKLOG_EXTRA_PARKED_BLOCK: &str = "parked_block";
+/// `Backlog::extra` key: the title of the track the block was removed from,
+/// so `promote-block` re-inserts it under the same track.
+const BACKLOG_EXTRA_PARKED_TRACK: &str = "parked_track";
+
+/// Repo-relative record path for a bare block id — same shape as
+/// [`record_repo_path`], but taking an id directly since demote/promote key
+/// off `repo:id`, not a full [`CreateBlockPayload`].
+fn record_repo_path_for_id(id: &str) -> String {
+    format!("planning/blocks/{id}.json")
+}
+
+/// Split a `repo:id` key. Same shape as `blocks::split_key` (private there,
+/// three lines — duplicated rather than exposed cross-module).
+fn split_repo_id_key(key: &str) -> Option<(&str, &str)> {
+    let (repo, id) = key.split_once(':')?;
+    if repo.is_empty() || id.is_empty() {
+        return None;
+    }
+    Some((repo, id))
+}
+
+/// Plan `mev demote-block <repo:id>`: remove the `tracks[].blocks[]` row and
+/// append a `backlog[]` entry carrying the block id, a pointer to the
+/// retained record, and `status: "parked"`.
+///
+/// `planning/blocks/<id>.json` is never written — this function only checks
+/// it exists (to read `kind` and to have something for the pointer to name);
+/// no [`EmitAction`] this plans ever targets it. Losing that guarantee is
+/// exactly the regression the record's `out_of_scope` names.
+///
+/// Reuses `set-block-status`'s key-resolution refusals verbatim (same
+/// locator strings) rather than inventing new ones, per the task
+/// description:
+/// - `E_BLOCK_BAD_KEY` — `key` is not `repo:id`.
+/// - `E_BLOCK_NOT_FOUND` — no loaded file's `tracks[]` owns that block.
+/// - [`E_DEMOTE_BLOCK_RECORD_MISSING`] — the block resolves but its record
+///   file is not on disk.
+///
+/// Every diagnostic returns a plan with zero actions — nothing is ever
+/// partially written.
+pub fn plan_demote_block(key: &str, files: &[(StateSource, StateFile)], today: &str) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+    let here = Path::new(".");
+
+    let Some((repo_slug, block_id)) = split_repo_id_key(key) else {
+        plan.diagnostics.push(Diagnostic::error(
+            here,
+            "E_BLOCK_BAD_KEY",
+            format!(
+                "block key '{key}' is not in 'repo:id' form (e.g. 'mev:MV.10.A'); block ids are \
+                 only unique within a repo, so an unqualified id is ambiguous and is not guessed"
+            ),
+        ));
+        return plan;
+    };
+
+    let mut found: Option<(usize, usize, usize)> = None;
+    for (fi, (src, file)) in files.iter().enumerate() {
+        if src.repo_slug != repo_slug {
+            continue;
+        }
+        for (ti, track) in file.tracks.iter().enumerate() {
+            for (bi, block) in track.blocks.iter().enumerate() {
+                if block.id == block_id {
+                    found = Some((fi, ti, bi));
+                }
+            }
+        }
+    }
+    let Some((fi, ti, bi)) = found else {
+        plan.diagnostics.push(Diagnostic::error(
+            here,
+            "E_BLOCK_NOT_FOUND",
+            format!("block '{key}' not found in any loaded repo's tracks[]"),
+        ));
+        return plan;
+    };
+
+    let repo_root = files[fi]
+        .0
+        .abs_path
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let record_rel = record_repo_path_for_id(block_id);
+    let record_abs = repo_root.join(&record_rel);
+    if !record_abs.exists() {
+        plan.diagnostics.push(Diagnostic::error(
+            &record_rel,
+            E_DEMOTE_BLOCK_RECORD_MISSING,
+            format!(
+                "block '{key}' has no record at '{}' — demote-block parks a block whose record \
+                 survives on disk, so there would be nothing for the backlog pointer to name",
+                record_abs.display()
+            ),
+        ));
+        return plan;
+    }
+
+    // `kind` has no home on TrackBlock (block.schema.json's field; only the
+    // record carries it) — read it from the untouched record rather than
+    // guess. Existence was just checked, so a read/parse failure here is
+    // treated as "unknown" rather than re-diagnosed.
+    let kind = std::fs::read_to_string(&record_abs)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "block".to_string());
+
+    let mut work: Vec<(StateSource, StateFile)> = files.to_vec();
+    let removed_track_title = work[fi].1.tracks[ti].title.clone();
+    let removed_block = work[fi].1.tracks[ti].blocks.remove(bi);
+
+    let mut extra = serde_json::Map::new();
+    extra.insert(BACKLOG_EXTRA_RECORD.to_string(), json!(record_rel));
+    extra.insert(
+        BACKLOG_EXTRA_PARKED_BLOCK.to_string(),
+        serde_json::to_value(&removed_block).expect("TrackBlock always serializes"),
+    );
+    extra.insert(
+        BACKLOG_EXTRA_PARKED_TRACK.to_string(),
+        json!(removed_track_title),
+    );
+
+    let backlog_entry = Backlog {
+        slug: block_id.to_string(),
+        title: removed_block.title.clone(),
+        repo: repo_slug.to_string(),
+        kind,
+        status: BACKLOG_STATUS_PARKED.to_string(),
+        depends_on: removed_block.depends_on.clone(),
+        block: None,
+        notes: None,
+        origin: None,
+        created: Some(today.to_string()),
+        reviewed: None,
+        snoozed_until: None,
+        extra,
+    };
+    work[fi].1.backlog.push(backlog_entry);
+
+    let note = format!("demote block '{key}' into backlog[] (parked)");
+    if let Some(action) = crate::brain::epics::action_for(&work[fi].0, &work[fi].1, note) {
+        plan.actions.push(action);
+    }
+
+    plan
+}
+
+/// Plan `mev promote-block <repo:id>`: the inverse of [`plan_demote_block`].
+/// Restores the exact `tracks[].blocks[]` row a matching `parked` backlog
+/// entry carries in its snapshot, and marks that backlog entry
+/// `status: "promoted"` with `block` set to the same id — never deleting the
+/// backlog entry, matching how a normal promotion leaves its origin behind
+/// (see [`Backlog::block`]'s doc comment).
+///
+/// Diagnostics (each returns a plan with zero actions):
+/// - `E_BLOCK_BAD_KEY` — `key` is not `repo:id`.
+/// - `E_BLOCK_NOT_FOUND` — no loaded file's `backlog[]` carries that slug in
+///   that repo.
+/// - [`E_PROMOTE_BLOCK_NOT_PARKED`] — the slug exists but is not
+///   `status: "parked"` (nothing to restore, or already restored).
+/// - [`E_PROMOTE_BLOCK_EXISTS`] — a block with this id is already registered
+///   in the target repo's `tracks[]`.
+/// - [`E_PROMOTE_BLOCK_MISSING_SNAPSHOT`] — the entry is `parked` but carries
+///   no restorable snapshot, or the snapshot doesn't deserialize as a
+///   `TrackBlock` (hand-edited or corrupt).
+pub fn plan_promote_block(key: &str, files: &[(StateSource, StateFile)]) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+    let here = Path::new(".");
+
+    let Some((repo_slug, block_id)) = split_repo_id_key(key) else {
+        plan.diagnostics.push(Diagnostic::error(
+            here,
+            "E_BLOCK_BAD_KEY",
+            format!("block key '{key}' is not in 'repo:id' form (e.g. 'mev:MV.10.A')"),
+        ));
+        return plan;
+    };
+
+    let mut found: Option<(usize, usize)> = None;
+    for (fi, (src, file)) in files.iter().enumerate() {
+        if src.repo_slug != repo_slug {
+            continue;
+        }
+        for (bi, entry) in file.backlog.iter().enumerate() {
+            if entry.slug == block_id {
+                found = Some((fi, bi));
+            }
+        }
+    }
+    let Some((fi, bi)) = found else {
+        plan.diagnostics.push(Diagnostic::error(
+            here,
+            "E_BLOCK_NOT_FOUND",
+            format!("backlog slug '{key}' not found in any loaded repo's backlog[]"),
+        ));
+        return plan;
+    };
+
+    if files[fi].1.backlog[bi].status != BACKLOG_STATUS_PARKED {
+        plan.diagnostics.push(Diagnostic::error(
+            here,
+            E_PROMOTE_BLOCK_NOT_PARKED,
+            format!(
+                "backlog slug '{key}' has status '{}', not 'parked' — nothing to restore",
+                files[fi].1.backlog[bi].status
+            ),
+        ));
+        return plan;
+    }
+
+    let already_exists = files[fi]
+        .1
+        .tracks
+        .iter()
+        .any(|t| t.blocks.iter().any(|b| b.id == block_id));
+    if already_exists {
+        plan.diagnostics.push(Diagnostic::error(
+            here,
+            E_PROMOTE_BLOCK_EXISTS,
+            format!(
+                "block '{key}' already exists in repo '{repo_slug}''s tracks[]; refusing to \
+                 overwrite"
+            ),
+        ));
+        return plan;
+    }
+
+    let Some(snapshot) = files[fi].1.backlog[bi]
+        .extra
+        .get(BACKLOG_EXTRA_PARKED_BLOCK)
+    else {
+        plan.diagnostics.push(Diagnostic::error(
+            here,
+            E_PROMOTE_BLOCK_MISSING_SNAPSHOT,
+            format!(
+                "backlog slug '{key}' is 'parked' but carries no '{BACKLOG_EXTRA_PARKED_BLOCK}' \
+                 snapshot to restore"
+            ),
+        ));
+        return plan;
+    };
+    let Ok(restored_block) = serde_json::from_value::<TrackBlock>(snapshot.clone()) else {
+        plan.diagnostics.push(Diagnostic::error(
+            here,
+            E_PROMOTE_BLOCK_MISSING_SNAPSHOT,
+            format!(
+                "backlog slug '{key}''s '{BACKLOG_EXTRA_PARKED_BLOCK}' snapshot does not \
+                 deserialize as a track block"
+            ),
+        ));
+        return plan;
+    };
+    let track_title = files[fi].1.backlog[bi]
+        .extra
+        .get(BACKLOG_EXTRA_PARKED_TRACK)
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| "Tickets".to_string());
+
+    let mut work: Vec<(StateSource, StateFile)> = files.to_vec();
+    let track_index = match work[fi]
+        .1
+        .tracks
+        .iter()
+        .position(|t| t.title == track_title)
+    {
+        Some(idx) => idx,
+        None => {
+            work[fi].1.tracks.push(Track {
+                title: track_title.clone(),
+                blocks: Vec::new(),
+                extra: serde_json::Map::new(),
+            });
+            work[fi].1.tracks.len() - 1
+        }
+    };
+    work[fi].1.tracks[track_index].blocks.push(restored_block);
+
+    let entry = &mut work[fi].1.backlog[bi];
+    entry.status = "promoted".to_string();
+    entry.block = Some(block_id.to_string());
+    entry.extra.remove(BACKLOG_EXTRA_RECORD);
+    entry.extra.remove(BACKLOG_EXTRA_PARKED_BLOCK);
+    entry.extra.remove(BACKLOG_EXTRA_PARKED_TRACK);
+
+    let note = format!("promote parked backlog slug '{key}' back into tracks[]");
+    if let Some(action) = crate::brain::epics::action_for(&work[fi].0, &work[fi].1, note) {
+        plan.actions.push(action);
+    }
+
+    plan
+}
+
+/// Full driver for `mev demote-block <repo:id>`, same shape as
+/// [`crate::create_block`] / [`crate::set_block_status`]: resolve
+/// `brain.toml`, discover + load every `state.json`, refuse to write against
+/// an incomplete corpus, plan via [`plan_demote_block`], apply, and — on a
+/// successful `--write` — re-run `emit-state --write` so the boards agree
+/// with the demoted block in the same invocation.
+///
+/// Lives here rather than in `lib.rs` (unlike its siblings) — this task's
+/// scope is this module plus `main.rs`/`state.rs`; the driver shape is
+/// copied, not moved.
+pub fn demote_block(
+    root: &Path,
+    key: &str,
+    write: bool,
+    scope: Option<&crate::brain::config::ScopeDependencySet>,
+) -> anyhow::Result<crate::Report> {
+    use crate::brain::config::find_brain_config;
+    use crate::brain::emit::apply_plan;
+    use crate::brain::state::{StateLoadError, discover_state_files, load_state};
+
+    let mut report = crate::Report::default();
+
+    let config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    let (sources, discovery_diags) = discover_state_files(root, &config);
+    report.diagnostics.extend(discovery_diags);
+
+    let mut loaded: Vec<(StateSource, StateFile)> = Vec::new();
+    let mut load_failed = false;
+    for src in &sources {
+        match load_state(&src.abs_path) {
+            Ok(file) => loaded.push((src.clone(), file)),
+            Err(StateLoadError::Parse { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("state.json is not valid JSON or does not match the schema: {source}"),
+                ));
+            }
+            Err(StateLoadError::Io { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("could not read state.json: {source}"),
+                ));
+            }
+        }
+    }
+
+    if write && load_failed {
+        report.diagnostics.push(Diagnostic::error(
+            root,
+            "E_EMIT_INCOMPLETE_CORPUS",
+            "refusing to write: at least one state.json failed to load; the target block may be \
+             unresolvable and the chained emit-state would regenerate cross-repo views from a \
+             partial corpus"
+                .to_string(),
+        ));
+        return Ok(report);
+    }
+
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let plan = plan_demote_block(key, &loaded, &today);
+
+    let had_actions = !plan.actions.is_empty();
+    report.diagnostics.extend(apply_plan(&plan, write));
+
+    if write && had_actions && !report.is_failure() {
+        let emit = crate::emit_state(root, true, scope)?;
+        report.diagnostics.extend(emit.diagnostics);
+    }
+
+    Ok(report)
+}
+
+/// Full driver for `mev promote-block <repo:id>` — the restore path this
+/// task also owns (no promote verb existed before it). Same shape as
+/// [`demote_block`].
+pub fn promote_block(
+    root: &Path,
+    key: &str,
+    write: bool,
+    scope: Option<&crate::brain::config::ScopeDependencySet>,
+) -> anyhow::Result<crate::Report> {
+    use crate::brain::config::find_brain_config;
+    use crate::brain::emit::apply_plan;
+    use crate::brain::state::{StateLoadError, discover_state_files, load_state};
+
+    let mut report = crate::Report::default();
+
+    let config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    let (sources, discovery_diags) = discover_state_files(root, &config);
+    report.diagnostics.extend(discovery_diags);
+
+    let mut loaded: Vec<(StateSource, StateFile)> = Vec::new();
+    let mut load_failed = false;
+    for src in &sources {
+        match load_state(&src.abs_path) {
+            Ok(file) => loaded.push((src.clone(), file)),
+            Err(StateLoadError::Parse { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("state.json is not valid JSON or does not match the schema: {source}"),
+                ));
+            }
+            Err(StateLoadError::Io { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("could not read state.json: {source}"),
+                ));
+            }
+        }
+    }
+
+    if write && load_failed {
+        report.diagnostics.push(Diagnostic::error(
+            root,
+            "E_EMIT_INCOMPLETE_CORPUS",
+            "refusing to write: at least one state.json failed to load; the target backlog slug \
+             may be unresolvable and the chained emit-state would regenerate cross-repo views \
+             from a partial corpus"
+                .to_string(),
+        ));
+        return Ok(report);
+    }
+
+    let plan = plan_promote_block(key, &loaded);
+
+    let had_actions = !plan.actions.is_empty();
+    report.diagnostics.extend(apply_plan(&plan, write));
+
+    if write && had_actions && !report.is_failure() {
+        let emit = crate::emit_state(root, true, scope)?;
+        report.diagnostics.extend(emit.diagnostics);
+    }
+
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1303,5 +1814,236 @@ mod planning_tests {
         let plan = plan_create_block(&payload, &files, "2026-09-02");
         assert!(plan.actions.is_empty(), "{plan:?}");
         assert_eq!(codes(&plan), vec![E_BLOCK_CREATE_MISSING_EPICS]);
+    }
+
+    // -----------------------------------------------------------------
+    // demote-block / promote-block
+    // -----------------------------------------------------------------
+
+    /// Write a minimal legal `planning/blocks/<id>.json` record next to the
+    /// `dir/repo/planning/state.json` [`file_for`] writes — `plan_demote_block`
+    /// checks this exists (and reads its `kind`) before planning anything.
+    fn write_record(dir: &Path, repo: &str, id: &str, kind: &str) {
+        let path = dir
+            .join(repo)
+            .join("planning")
+            .join("blocks")
+            .join(format!("{id}.json"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": id,
+                "repo": repo,
+                "kind": kind,
+                "title": "A parked block",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn apply_action_and_reload(src: &StateSource, action: &EmitAction) -> (StateSource, StateFile) {
+        std::fs::write(&action.path, &action.new_content).unwrap();
+        let file: StateFile = serde_json::from_str(&action.new_content).unwrap();
+        (src.clone(), file)
+    }
+
+    #[test]
+    fn demote_block_removes_tracks_row_and_appends_parked_backlog_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(
+            dir.path(),
+            "mev",
+            &[("Phase 14", &[("MV.14.A", 140)])],
+        )];
+        write_record(dir.path(), "mev", "MV.14.A", "block");
+
+        let plan = plan_demote_block("mev:MV.14.A", &files, "2026-09-03");
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+        assert_eq!(plan.actions.len(), 1, "{plan:?}");
+
+        let state_file: StateFile = serde_json::from_str(&plan.actions[0].new_content).unwrap();
+        assert!(
+            state_file
+                .tracks
+                .iter()
+                .flat_map(|t| t.blocks.iter())
+                .all(|b| b.id != "MV.14.A"),
+            "tracks[] row must be gone: {state_file:?}"
+        );
+        let backlog_entry = state_file
+            .backlog
+            .iter()
+            .find(|b| b.slug == "MV.14.A")
+            .expect("a parked backlog entry");
+        assert_eq!(backlog_entry.status, BACKLOG_STATUS_PARKED);
+        assert_eq!(backlog_entry.repo, "mev");
+        assert_eq!(
+            backlog_entry
+                .extra
+                .get(BACKLOG_EXTRA_RECORD)
+                .and_then(|v| v.as_str()),
+            Some("planning/blocks/MV.14.A.json")
+        );
+    }
+
+    /// AC2: the record file on disk is byte-identical before and after a
+    /// (planned) demote — `plan_demote_block` never emits an action that
+    /// targets it, and never reads it beyond an existence + `kind` check.
+    #[test]
+    fn demote_block_never_touches_the_record_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(
+            dir.path(),
+            "mev",
+            &[("Phase 14", &[("MV.14.A", 140)])],
+        )];
+        write_record(dir.path(), "mev", "MV.14.A", "block");
+        let record_path = dir.path().join("mev/planning/blocks/MV.14.A.json");
+        let before = std::fs::read(&record_path).unwrap();
+
+        let plan = plan_demote_block("mev:MV.14.A", &files, "2026-09-03");
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+        assert!(
+            plan.actions.iter().all(|a| a.path != record_path),
+            "no action may target the record file: {plan:?}"
+        );
+
+        let after = std::fs::read(&record_path).unwrap();
+        assert_eq!(before, after, "record file must stay byte-identical");
+    }
+
+    #[test]
+    fn demote_block_without_a_record_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(
+            dir.path(),
+            "mev",
+            &[("Phase 14", &[("MV.14.A", 140)])],
+        )];
+        // No write_record() call — the record is missing.
+        let plan = plan_demote_block("mev:MV.14.A", &files, "2026-09-03");
+        assert!(plan.actions.is_empty(), "{plan:?}");
+        assert_eq!(codes(&plan), vec![E_DEMOTE_BLOCK_RECORD_MISSING]);
+    }
+
+    #[test]
+    fn demote_block_bad_key_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "mev", &[])];
+        let plan = plan_demote_block("no-colon-here", &files, "2026-09-03");
+        assert!(plan.actions.is_empty(), "{plan:?}");
+        assert_eq!(codes(&plan), vec!["E_BLOCK_BAD_KEY"]);
+    }
+
+    #[test]
+    fn demote_block_unknown_id_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "mev", &[])];
+        let plan = plan_demote_block("mev:MV.NOPE.X", &files, "2026-09-03");
+        assert!(plan.actions.is_empty(), "{plan:?}");
+        assert_eq!(codes(&plan), vec!["E_BLOCK_NOT_FOUND"]);
+    }
+
+    /// AC4: demote-then-promote round-trips with no field lost — the
+    /// restored `tracks[].blocks[]` row matches the original exactly.
+    #[test]
+    fn demote_then_promote_round_trips_the_original_tracks_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, original_file) =
+            file_for(dir.path(), "mev", &[("Phase 14", &[("MV.14.A", 140)])]);
+        write_record(dir.path(), "mev", "MV.14.A", "block");
+        let original_block = original_file.tracks[0].blocks[0].clone();
+        let files = vec![(src.clone(), original_file)];
+
+        // Demote.
+        let demote_plan = plan_demote_block("mev:MV.14.A", &files, "2026-09-03");
+        assert!(
+            demote_plan.diagnostics.is_empty(),
+            "{:?}",
+            demote_plan.diagnostics
+        );
+        assert_eq!(demote_plan.actions.len(), 1);
+        let after_demote = apply_action_and_reload(&src, &demote_plan.actions[0]);
+        assert!(
+            after_demote
+                .1
+                .tracks
+                .iter()
+                .flat_map(|t| t.blocks.iter())
+                .all(|b| b.id != "MV.14.A")
+        );
+
+        // Promote back.
+        let promote_files = vec![after_demote];
+        let promote_plan = plan_promote_block("mev:MV.14.A", &promote_files);
+        assert!(
+            promote_plan.diagnostics.is_empty(),
+            "{:?}",
+            promote_plan.diagnostics
+        );
+        assert_eq!(promote_plan.actions.len(), 1);
+        let restored_file: StateFile =
+            serde_json::from_str(&promote_plan.actions[0].new_content).unwrap();
+        let restored_block = restored_file
+            .tracks
+            .iter()
+            .flat_map(|t| t.blocks.iter())
+            .find(|b| b.id == "MV.14.A")
+            .expect("restored tracks[] row");
+        assert_eq!(
+            serde_json::to_value(restored_block).unwrap(),
+            serde_json::to_value(&original_block).unwrap(),
+            "restored tracks[] row must match the original exactly"
+        );
+
+        // The backlog entry is marked promoted, not deleted, and its
+        // temporary demote-only extras are gone.
+        let backlog_entry = restored_file
+            .backlog
+            .iter()
+            .find(|b| b.slug == "MV.14.A")
+            .expect("backlog entry retained after promotion");
+        assert_eq!(backlog_entry.status, "promoted");
+        assert_eq!(backlog_entry.block.as_deref(), Some("MV.14.A"));
+        assert!(backlog_entry.extra.get(BACKLOG_EXTRA_RECORD).is_none());
+        assert!(
+            backlog_entry
+                .extra
+                .get(BACKLOG_EXTRA_PARKED_BLOCK)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn promote_block_not_parked_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "mev", &[])];
+        // No backlog entry at all yet.
+        let plan = plan_promote_block("mev:MV.14.A", &files);
+        assert!(plan.actions.is_empty(), "{plan:?}");
+        assert_eq!(codes(&plan), vec!["E_BLOCK_NOT_FOUND"]);
+    }
+
+    #[test]
+    fn promote_block_planning_never_mutates_the_caller_slice() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, original_file) =
+            file_for(dir.path(), "mev", &[("Phase 14", &[("MV.14.A", 140)])]);
+        write_record(dir.path(), "mev", "MV.14.A", "block");
+        let files = vec![(src.clone(), original_file)];
+        let demote_plan = plan_demote_block("mev:MV.14.A", &files, "2026-09-03");
+        let after_demote = apply_action_and_reload(&src, &demote_plan.actions[0]);
+        let promote_files = vec![after_demote];
+        let backlog_len_before = promote_files[0].1.backlog.len();
+        let tracks_before = promote_files[0].1.tracks.clone();
+        let _ = plan_promote_block("mev:MV.14.A", &promote_files);
+        assert_eq!(promote_files[0].1.backlog.len(), backlog_len_before);
+        assert_eq!(
+            serde_json::to_value(&promote_files[0].1.tracks).unwrap(),
+            serde_json::to_value(&tracks_before).unwrap(),
+            "planning must not mutate the caller's corpus"
+        );
     }
 }

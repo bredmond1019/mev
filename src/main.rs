@@ -763,6 +763,81 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         lock_dir: Option<PathBuf>,
     },
+    /// Park an existing block into `backlog[]`: `create-block`'s inverse
+    /// (MV.ticket.demote-block-to-backlog). Removes the target's
+    /// `tracks[].blocks[]` row and appends a `backlog[]` entry carrying the
+    /// block id, `status: "parked"`, and a pointer to its retained record —
+    /// `planning/blocks/<ID>.json` is never touched, on disk or in memory
+    /// beyond an existence check.
+    ///
+    /// Same driver contract as `create-block`/`set-block-status`: dry-run by
+    /// default, `--write` to apply, plus `--scope`/`--agent`/`--lock-dir`,
+    /// and a `--write` that also re-runs `emit-state --write` so the boards
+    /// agree in the same invocation. See `mev::brain::block_create::demote_block`.
+    ///
+    /// Exit codes:
+    ///   0 — planned (dry-run) or applied
+    ///   1 — `E_BLOCK_BAD_KEY`, `E_BLOCK_NOT_FOUND`,
+    ///       `E_DEMOTE_BLOCK_RECORD_MISSING`, a write failure,
+    ///       `E_EMIT_UNKNOWN_SCOPE`, `E_EMIT_LOCK_HELD`, `E_QUIESCE_LEASE_HELD`,
+    ///       or a linked-worktree refusal
+    DemoteBlock {
+        /// Block key in `repo:id` form, e.g. `mev:MV.10.A`.
+        key: String,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Apply the edit. Without this the command prints what it would change.
+        #[arg(long)]
+        write: bool,
+        /// Limit the chained emit's regeneration to one repo's derived surfaces.
+        /// Same resolution as `create-block --scope`; an unknown or blank slug
+        /// exits with `E_EMIT_UNKNOWN_SCOPE`.
+        #[arg(long, value_name = "REPO")]
+        scope: Option<String>,
+        /// Calling agent's identity for the quiesce-lease self-exemption, consulted
+        /// only when `--write` mutates. See `emit-state --agent`.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override the fleet lock directory the quiesce-lease check consults.
+        /// See `emit-state --lock-dir`.
+        #[arg(long, value_name = "PATH")]
+        lock_dir: Option<PathBuf>,
+    },
+    /// Restore a `parked` `backlog[]` entry back into `tracks[].blocks[]`:
+    /// [`Command::DemoteBlock`]'s inverse. Re-inserts the exact
+    /// `tracks[].blocks[]` row `demote-block` removed (from the backlog
+    /// entry's own snapshot, so no field is lost) and marks the backlog entry
+    /// `status: "promoted"` with `block` set — the entry is never deleted.
+    ///
+    /// Same driver contract as `demote-block`.
+    ///
+    /// Exit codes:
+    ///   0 — planned (dry-run) or applied
+    ///   1 — `E_BLOCK_BAD_KEY`, `E_BLOCK_NOT_FOUND`, `E_PROMOTE_BLOCK_NOT_PARKED`,
+    ///       `E_PROMOTE_BLOCK_EXISTS`, `E_PROMOTE_BLOCK_MISSING_SNAPSHOT`, a write
+    ///       failure, `E_EMIT_UNKNOWN_SCOPE`, `E_EMIT_LOCK_HELD`,
+    ///       `E_QUIESCE_LEASE_HELD`, or a linked-worktree refusal
+    PromoteBlock {
+        /// Backlog slug in `repo:id` form, e.g. `mev:MV.10.A`.
+        key: String,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Apply the edit. Without this the command prints what it would change.
+        #[arg(long)]
+        write: bool,
+        /// Limit the chained emit's regeneration to one repo's derived surfaces.
+        #[arg(long, value_name = "REPO")]
+        scope: Option<String>,
+        /// Calling agent's identity for the quiesce-lease self-exemption, consulted
+        /// only when `--write` mutates. See `emit-state --agent`.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override the fleet lock directory the quiesce-lease check consults.
+        #[arg(long, value_name = "PATH")]
+        lock_dir: Option<PathBuf>,
+    },
     /// Close an operator gate fleet-wide: remove every `depends_on` `{type:"operator"}`
     /// entry carrying SLUG, across every loaded `state.json`.
     ///
@@ -3563,6 +3638,191 @@ fn main() -> ExitCode {
                 write,
                 cli.json,
                 mev::create_block(&root, &payload, write, scope_deps.as_ref()),
+            )
+        }
+        Command::DemoteBlock {
+            key,
+            path,
+            write,
+            scope,
+            agent,
+            lock_dir,
+        } => {
+            // Same worktree guard as create-block/set-block-status: a --write
+            // here chains into emit-state, which resolves every repo's paths
+            // from brain.toml rather than CWD.
+            if write && mev::brain::config::is_linked_worktree(&path) {
+                eprintln!(
+                    "error: refusing to write from inside a linked git worktree ({}) — demote-block chains into emit-state, which resolves derived-file paths from brain.toml, not CWD, so this would regenerate the MAIN checkout's files. Run from the main working tree instead.",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if write
+                && let Some(exit) = refuse_if_quiesced(
+                    &root,
+                    &path,
+                    agent.as_deref(),
+                    lock_dir.as_deref(),
+                    "demote-block",
+                )
+            {
+                return exit;
+            }
+            let _lock_guard = if write {
+                match mev::brain::lock::acquire_lock(&root, mev::brain::lock::DEFAULT_LOCK_TIMEOUT)
+                {
+                    Ok(guard) => Some(guard),
+                    Err(mev::brain::lock::LockError::Held {
+                        holder_pid,
+                        lock_path,
+                        waited_secs,
+                    }) => {
+                        eprintln!(
+                            "error [E_EMIT_LOCK_HELD] another write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
+                            lock_path.display()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                    Err(e) => {
+                        eprintln!("error [E_EMIT_LOCK_HELD] {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                None
+            };
+            let scope_deps = match &scope {
+                Some(slug) => {
+                    let config =
+                        match mev::brain::config::load_brain_config(&root.join("brain.toml")) {
+                            Ok(cfg) => cfg,
+                            Err(e) => {
+                                eprintln!("error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                    match config.scope_dependencies(slug) {
+                        Ok(deps) => Some(deps),
+                        Err(mev::brain::config::ScopeError::UnknownSlug { slug, valid_slugs }) => {
+                            eprintln!(
+                                "error [E_EMIT_UNKNOWN_SCOPE] unknown --scope slug '{slug}'; valid slugs: {}",
+                                valid_slugs.join(", ")
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                        Err(e) => {
+                            eprintln!("error [E_EMIT_UNKNOWN_SCOPE] {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+                None => None,
+            };
+            report_doc(
+                "demote-block",
+                &root,
+                write,
+                cli.json,
+                mev::brain::block_create::demote_block(&root, &key, write, scope_deps.as_ref()),
+            )
+        }
+        Command::PromoteBlock {
+            key,
+            path,
+            write,
+            scope,
+            agent,
+            lock_dir,
+        } => {
+            if write && mev::brain::config::is_linked_worktree(&path) {
+                eprintln!(
+                    "error: refusing to write from inside a linked git worktree ({}) — promote-block chains into emit-state, which resolves derived-file paths from brain.toml, not CWD, so this would regenerate the MAIN checkout's files. Run from the main working tree instead.",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if write
+                && let Some(exit) = refuse_if_quiesced(
+                    &root,
+                    &path,
+                    agent.as_deref(),
+                    lock_dir.as_deref(),
+                    "promote-block",
+                )
+            {
+                return exit;
+            }
+            let _lock_guard = if write {
+                match mev::brain::lock::acquire_lock(&root, mev::brain::lock::DEFAULT_LOCK_TIMEOUT)
+                {
+                    Ok(guard) => Some(guard),
+                    Err(mev::brain::lock::LockError::Held {
+                        holder_pid,
+                        lock_path,
+                        waited_secs,
+                    }) => {
+                        eprintln!(
+                            "error [E_EMIT_LOCK_HELD] another write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
+                            lock_path.display()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                    Err(e) => {
+                        eprintln!("error [E_EMIT_LOCK_HELD] {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                None
+            };
+            let scope_deps = match &scope {
+                Some(slug) => {
+                    let config =
+                        match mev::brain::config::load_brain_config(&root.join("brain.toml")) {
+                            Ok(cfg) => cfg,
+                            Err(e) => {
+                                eprintln!("error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                    match config.scope_dependencies(slug) {
+                        Ok(deps) => Some(deps),
+                        Err(mev::brain::config::ScopeError::UnknownSlug { slug, valid_slugs }) => {
+                            eprintln!(
+                                "error [E_EMIT_UNKNOWN_SCOPE] unknown --scope slug '{slug}'; valid slugs: {}",
+                                valid_slugs.join(", ")
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                        Err(e) => {
+                            eprintln!("error [E_EMIT_UNKNOWN_SCOPE] {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+                None => None,
+            };
+            report_doc(
+                "promote-block",
+                &root,
+                write,
+                cli.json,
+                mev::brain::block_create::promote_block(&root, &key, write, scope_deps.as_ref()),
             )
         }
         Command::CloseOperatorGate {
