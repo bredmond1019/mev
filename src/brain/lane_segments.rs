@@ -170,6 +170,26 @@ const E_LANE_RECORD_MALFORMED: &str = "E_LANE_RECORD_MALFORMED";
 /// whole fleet on day one).
 const W_LANE_DIR_NO_RECORD: &str = "W_LANE_DIR_NO_RECORD";
 
+/// Warning code on a diagnostic produced when a block a lane record names fails
+/// either registration clause — see [`lane_registration_diagnostics`]. "Registered" is
+/// two clauses (`MV.ticket.lane-file-registration-two-clauses`): a `tracks[].blocks[]`
+/// row in the owning repo's `state.json` (clause 1), AND a
+/// `planning/blocks/<id>.json` record on disk (clause 2). Which clause failed is
+/// named in the message text, never split into two separate codes — a caller filtering
+/// on this one locator sees every lane-registration problem regardless of which half
+/// broke.
+const W_LANE_BLOCK_UNREGISTERED: &str = "W_LANE_BLOCK_UNREGISTERED";
+
+/// Authored `status` values exempt from clause 2 (the on-disk block-record check) in
+/// [`lane_registration_diagnostics`]. **Deliberately scoped to exactly these four** —
+/// widening this list "to reduce noise" defeats the check: 758 of the fleet's
+/// `tracks[].blocks[]` entries have no block record, almost all pre-D65 and closed,
+/// and reporting those is exactly the 758-lines-of-noise failure mode the ticket
+/// scoped this check away from. Adding a status here silently drops findings for
+/// anything authored with it, so don't.
+const LANE_REGISTRATION_TERMINAL_STATUSES: &[&str] =
+    &["closed", "wontfix", "superseded", "archived"];
+
 /// Raw on-disk deserialize shape for one `lane-<name>.json` record, mirroring
 /// `base-template/.claude/workflows/lane.schema.json` field-for-field —
 /// `deny_unknown_fields` so an unrecognised key is a loud error rather than silently
@@ -831,6 +851,97 @@ pub fn unresolved_owner_diagnostics(lane_file: &LaneFile, index: &OwnerIndex) ->
 }
 
 // ---------------------------------------------------------------------------
+// Both registration clauses — MV.ticket.lane-file-registration-two-clauses Task 1
+// ---------------------------------------------------------------------------
+
+/// Emit a diagnostic for every block `lane_file` names that fails either registration
+/// clause: **clause 1**, the id resolves in the owning (authored) repo's `state.json`
+/// `tracks[].blocks[]`; **clause 2**, `planning/blocks/<id>.json` exists on disk in
+/// that repo. Each failing block gets exactly one diagnostic, naming the lane file,
+/// the block id, the repo, and which clause failed — never a merged "not registered".
+///
+/// **Clause 2 is only evaluated when clause 1 already passed.** A block absent from
+/// `tracks[]` entirely (clause 1 failure) has no authored `status` to test the
+/// terminal-status exemption against, and it is already the one finding worth
+/// reporting for that block — checking clause 2 too would double-report the same
+/// underlying problem under two headings. This also covers the "registered only in a
+/// derived container" case (e.g. `focus.next[]` but never `tracks[].blocks[]`,
+/// `base-template@9e6af3949`): `dependency_block_index` only ever reads
+/// `tracks[].blocks[]`, so such a block is indistinguishable here from one authored
+/// nowhere at all, and is reported as a clause-1 failure — correctly, since a
+/// registration that exists only in a derived container is not a registration.
+///
+/// Blocks whose authored `status` is one of [`LANE_REGISTRATION_TERMINAL_STATUSES`]
+/// are exempt from clause 2 — a closed/wontfix/superseded/archived block will never
+/// gain a record, so flagging it is noise, not a finding (see that constant's doc).
+///
+/// **Warning, never error** — per the block record's `out_of_scope`, promoting this to
+/// an error is a separate, deferred ticket.
+pub fn lane_registration_diagnostics(
+    lane_file: &LaneFile,
+    loaded: &[(StateSource, StateFile)],
+) -> Vec<Diagnostic> {
+    let block_index = dependency_block_index(loaded);
+
+    // repo slug -> repo root, derived from each loaded state.json's own absolute path
+    // (`<repo_root>/planning/state.json`) rather than re-deriving it from `brain.toml`
+    // — every repo whose blocks we could possibly resolve via `block_index` is, by
+    // construction, already present in `loaded`.
+    let mut repo_roots: HashMap<&str, PathBuf> = HashMap::new();
+    for (src, _) in loaded {
+        if let Some(repo_root) = src.abs_path.parent().and_then(Path::parent) {
+            repo_roots
+                .entry(src.repo_slug.as_str())
+                .or_insert_with(|| repo_root.to_path_buf());
+        }
+    }
+
+    let mut diags = Vec::new();
+    for block in &lane_file.blocks {
+        let key = format!("{}:{}", block.repo, block.id);
+        let Some(track_block) = block_index.get(&key) else {
+            diags.push(Diagnostic::warning(
+                &lane_file.path,
+                W_LANE_BLOCK_UNREGISTERED,
+                format!(
+                    "lane block '{}' (repo '{}') fails clause 1: no '{}' entry in {}'s \
+                     state.json tracks[].blocks[] — a registration in focus[] or any other \
+                     derived container does not count",
+                    block.id, block.repo, block.id, block.repo
+                ),
+            ));
+            continue;
+        };
+
+        let status = track_block.status.as_deref().unwrap_or("open");
+        if LANE_REGISTRATION_TERMINAL_STATUSES.contains(&status) {
+            continue;
+        }
+
+        let has_record = repo_roots
+            .get(block.repo.as_str())
+            .map(|root| {
+                root.join("planning/blocks")
+                    .join(format!("{}.json", block.id))
+                    .is_file()
+            })
+            .unwrap_or(false);
+        if !has_record {
+            diags.push(Diagnostic::warning(
+                &lane_file.path,
+                W_LANE_BLOCK_UNREGISTERED,
+                format!(
+                    "lane block '{}' (repo '{}', status '{status}') fails clause 2: no \
+                     planning/blocks/{}.json record on disk",
+                    block.id, block.repo, block.id
+                ),
+            ));
+        }
+    }
+    diags
+}
+
+// ---------------------------------------------------------------------------
 // Derived positions — MV.13.A Task 4, simplified by MV.17.A Task 2
 // ---------------------------------------------------------------------------
 
@@ -922,7 +1033,9 @@ struct LaneSegmentsArtifact {
 /// - [`discover_lane_files`]'s structural diagnostics (e.g. a slug claimed by both
 ///   roadmap layouts at once, or a record that failed to deserialize);
 /// - [`unresolved_owner_diagnostics`] for every block in every lane file, naming an
-///   authored `repo` the corpus does not know.
+///   authored `repo` the corpus does not know;
+/// - [`lane_registration_diagnostics`] for every block in every lane file, naming
+///   which of the two registration clauses failed (`MV.ticket.lane-file-registration-two-clauses`).
 ///
 /// No `EmitAction` is planned when zero lane files are discovered (an empty corpus, or
 /// `root` has no `planning/` at all) — nothing to derive, nothing to write.
@@ -945,6 +1058,8 @@ pub fn plan_lane_segments(
     for lf in &lane_files {
         plan.diagnostics
             .extend(unresolved_owner_diagnostics(lf, &owner_index));
+        plan.diagnostics
+            .extend(lane_registration_diagnostics(lf, loaded));
     }
 
     let (blocks, derive_diags) = derive_lane_positions(&lane_files, loaded);
@@ -2005,10 +2120,20 @@ mod tests {
     // plan_lane_segments
     // -----------------------------------------------------------------------
 
-    fn state_file_fixture(repo: &str, id: &str) -> (StateSource, StateFile) {
+    /// Builds a `(StateSource, StateFile)` fixture AND writes a matching
+    /// `planning/blocks/<id>.json` record on disk under `dir/<repo>/` — so a caller
+    /// asserting `plan.diagnostics.is_empty()` against
+    /// `MV.ticket.lane-file-registration-two-clauses`'s new
+    /// `lane_registration_diagnostics` check (wired into `plan_lane_segments`) gets
+    /// both clauses satisfied, not just clause 1. `abs_path` is placed inside `dir`
+    /// (rather than a bare relative path) because that new check derives each repo's
+    /// root from `abs_path.parent().parent()`.
+    fn state_file_fixture(dir: &Path, repo: &str, id: &str) -> (StateSource, StateFile) {
+        let state_path = dir.join(repo).join("planning/state.json");
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         let src = StateSource {
             repo_slug: repo.to_string(),
-            abs_path: PathBuf::from(format!("{repo}/planning/state.json")),
+            abs_path: state_path,
             expected_kind: "project",
         };
         let file: StateFile = serde_json::from_str(&format!(
@@ -2017,6 +2142,14 @@ mod tests {
             ]}}"#
         ))
         .unwrap();
+
+        let record_path = dir
+            .join(repo)
+            .join("planning/blocks")
+            .join(format!("{id}.json"));
+        std::fs::create_dir_all(record_path.parent().unwrap()).unwrap();
+        std::fs::write(&record_path, format!(r#"{{"id":"{id}"}}"#)).unwrap();
+
         (src, file)
     }
 
@@ -2036,8 +2169,8 @@ mod tests {
             ),
         );
         let loaded = vec![
-            state_file_fixture("mev", "MV.ticket.a"),
-            state_file_fixture("base-template", "BT.ticket.b"),
+            state_file_fixture(&dir, "mev", "MV.ticket.a"),
+            state_file_fixture(&dir, "base-template", "BT.ticket.b"),
         ];
 
         let plan = plan_lane_segments(&dir, &loaded);
@@ -2085,7 +2218,7 @@ mod tests {
             "planning/roadmaps/alpha/lane-substrate.json",
             r#"{"lane":"substrate","roadmap":"alpha","blocks":[{"id":"MV.ticket.a","origin_roadmap":"alpha","repo":"mev"}],"held_until":"BA.19.C","budget":{"heavy":true,"not_with":["other-repo"]},"exclusive_repos":["mev","base-template"]}"#,
         );
-        let loaded = vec![state_file_fixture("mev", "MV.ticket.a")];
+        let loaded = vec![state_file_fixture(&dir, "mev", "MV.ticket.a")];
 
         let plan = plan_lane_segments(&dir, &loaded);
         assert!(

@@ -19,7 +19,10 @@
 use std::path::{Path, PathBuf};
 
 use mev::brain::config::find_brain_root;
-use mev::brain::lane_segments::{discover_lane_files, segment_lane_blocks};
+use mev::brain::lane_segments::{
+    LaneBlockRef, LaneFile, discover_lane_files, lane_registration_diagnostics, segment_lane_blocks,
+};
+use mev::brain::state::{StateSource, load_state};
 
 #[test]
 fn close_the_loop_lane_substrate_segments_into_seven_contiguous_repo_runs() {
@@ -180,6 +183,259 @@ fn find_brain_root_fails_closed_outside_any_hq_checkout() {
         "find_brain_root must fail when no brain.toml exists anywhere up the tree \
          from a throwaway temp dir, got {result:?}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Both registration clauses — MV.ticket.lane-file-registration-two-clauses Task 1
+// ---------------------------------------------------------------------------
+//
+// A "lane registration" join fixture: one throwaway corpus root under which each
+// repo gets its own `<repo>/planning/state.json`, and (for the both-clauses-hold
+// case) a `<repo>/planning/blocks/<id>.json` record. `lane_registration_diagnostics`
+// derives each repo's root from its loaded `StateSource::abs_path` directly, so
+// writing a real `planning/state.json` on disk (rather than hand-building a
+// `StateFile` in memory) is what exercises that derivation honestly.
+
+/// Write `<dir>/<repo>/planning/state.json` carrying one track with the given raw
+/// `tracks[].blocks[]` JSON array, then load it back via [`load_state`] — mirroring
+/// how the real corpus loader produces a `(StateSource, StateFile)` pair, so
+/// `abs_path` is a genuine on-disk path `lane_registration_diagnostics` can walk
+/// `.parent().parent()` on.
+fn state_source_and_file(
+    dir: &Path,
+    repo: &str,
+    blocks_json: &str,
+) -> (StateSource, mev::brain::state::StateFile) {
+    let state_path = dir.join(repo).join("planning/state.json");
+    std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &state_path,
+        format!(
+            r#"{{"repo":"{repo}","kind":"project","updated":"2026-09-02","tracks":[
+                {{"title":"t","blocks":{blocks_json}}}
+            ]}}"#
+        ),
+    )
+    .unwrap();
+    let file = load_state(&state_path).expect("fixture state.json must load");
+    let src = StateSource {
+        repo_slug: repo.to_string(),
+        abs_path: state_path,
+        expected_kind: "project",
+    };
+    (src, file)
+}
+
+/// Write `<dir>/<repo>/planning/blocks/<id>.json` — the on-disk block record clause 2
+/// checks for. Content is irrelevant to the check (only existence matters); a minimal
+/// valid-looking JSON object is used so a future stricter check over this same fixture
+/// would not need rewriting.
+fn write_block_record(dir: &Path, repo: &str, id: &str) {
+    let path = dir
+        .join(repo)
+        .join("planning/blocks")
+        .join(format!("{id}.json"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, format!(r#"{{"id":"{id}"}}"#)).unwrap();
+}
+
+fn one_block_lane(path: &Path, id: &str, repo: &str) -> LaneFile {
+    LaneFile {
+        roadmap: "close-the-loop".to_string(),
+        lane: "substrate".to_string(),
+        path: path.to_path_buf(),
+        blocks: vec![LaneBlockRef {
+            id: id.to_string(),
+            line: 1,
+            origin_roadmap: Some("close-the-loop".to_string()),
+            repo: repo.to_string(),
+        }],
+        directives: None,
+    }
+}
+
+#[test]
+fn lane_registration_diagnostics_both_clauses_hold_reports_clean() {
+    // The positive control: a block present in tracks[] AND carrying an on-disk
+    // record must report nothing — an empty result must be distinguishable from a
+    // check that never ran, which is why every other case below pairs with this one.
+    let dir = mev::testsupport::unique_temp_dir("mev-lane-registration-both-clauses-hold");
+    let (src, file) = state_source_and_file(
+        &dir,
+        "repoA",
+        r#"[{"id":"A.1","title":"x","status":"open"}]"#,
+    );
+    write_block_record(&dir, "repoA", "A.1");
+    let loaded = vec![(src, file)];
+
+    let lane_file = one_block_lane(&dir.join("lane-substrate.json"), "A.1", "repoA");
+    let diags = lane_registration_diagnostics(&lane_file, &loaded);
+    assert!(
+        diags.is_empty(),
+        "both clauses hold: expected no diagnostics, got {diags:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lane_registration_diagnostics_row_only_fires_clause_2() {
+    // In tracks[], open, no on-disk block record.
+    let dir = mev::testsupport::unique_temp_dir("mev-lane-registration-row-only");
+    let (src, file) = state_source_and_file(
+        &dir,
+        "repoA",
+        r#"[{"id":"A.1","title":"x","status":"open"}]"#,
+    );
+    let loaded = vec![(src, file)];
+
+    let lane_file = one_block_lane(&dir.join("lane-substrate.json"), "A.1", "repoA");
+    let diags = lane_registration_diagnostics(&lane_file, &loaded);
+
+    assert_eq!(
+        diags.len(),
+        1,
+        "row-only: expected exactly one diagnostic, got {diags:?}"
+    );
+    assert_eq!(diags[0].severity, mev::Severity::Warning);
+    assert_eq!(diags[0].file, lane_file.path);
+    assert_eq!(diags[0].locator, "W_LANE_BLOCK_UNREGISTERED");
+    assert!(diags[0].message.contains("A.1"));
+    assert!(diags[0].message.contains("repoA"));
+    assert!(diags[0].message.contains("clause 2"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lane_registration_diagnostics_record_only_fires_clause_1() {
+    // A block record exists on disk, but the id is absent from tracks[].blocks[]
+    // entirely — including the derived-container case: registering a block ONLY in
+    // `focus.next[]` and never in `tracks[].blocks[]` is indistinguishable from this
+    // at the `dependency_block_index` layer, so this fixture also stands in for
+    // `base-template@9e6af3949`'s focus-only registration.
+    let dir = mev::testsupport::unique_temp_dir("mev-lane-registration-record-only");
+    let (src, file) = state_source_and_file(&dir, "repoA", r#"[]"#);
+    write_block_record(&dir, "repoA", "A.1");
+    let loaded = vec![(src, file)];
+
+    let lane_file = one_block_lane(&dir.join("lane-substrate.json"), "A.1", "repoA");
+    let diags = lane_registration_diagnostics(&lane_file, &loaded);
+
+    assert_eq!(
+        diags.len(),
+        1,
+        "record-only: expected exactly one diagnostic, got {diags:?}"
+    );
+    assert_eq!(diags[0].locator, "W_LANE_BLOCK_UNREGISTERED");
+    assert!(diags[0].message.contains("A.1"));
+    assert!(diags[0].message.contains("repoA"));
+    assert!(diags[0].message.contains("clause 1"));
+    assert!(diags[0].message.to_lowercase().contains("derived"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lane_registration_diagnostics_neither_clause_holds_fires_clause_1_only() {
+    // Absent from tracks[] AND no record on disk — clause 1 subsumes clause 2 here
+    // (see the function doc: clause 2 is only evaluated once clause 1 already
+    // passed), so exactly one diagnostic, not two.
+    let dir = mev::testsupport::unique_temp_dir("mev-lane-registration-neither");
+    let (src, file) = state_source_and_file(&dir, "repoA", r#"[]"#);
+    let loaded = vec![(src, file)];
+
+    let lane_file = one_block_lane(&dir.join("lane-substrate.json"), "GHOST.1", "repoA");
+    let diags = lane_registration_diagnostics(&lane_file, &loaded);
+
+    assert_eq!(
+        diags.len(),
+        1,
+        "neither clause holds: expected exactly one diagnostic, got {diags:?}"
+    );
+    assert!(diags[0].message.contains("clause 1"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lane_registration_diagnostics_terminal_statuses_are_exempt_from_clause_2() {
+    // Blocks with status closed/wontfix/superseded/archived, in tracks[], with no
+    // on-disk record — every one of the four must be exempt from clause 2 and report
+    // nothing, pinning `LANE_REGISTRATION_TERMINAL_STATUSES` exactly.
+    let dir = mev::testsupport::unique_temp_dir("mev-lane-registration-terminal-exempt");
+    let (src, file) = state_source_and_file(
+        &dir,
+        "repoA",
+        r#"[
+            {"id":"A.closed","title":"x","status":"closed"},
+            {"id":"A.wontfix","title":"x","status":"wontfix"},
+            {"id":"A.superseded","title":"x","status":"superseded"},
+            {"id":"A.archived","title":"x","status":"archived"}
+        ]"#,
+    );
+    let loaded = vec![(src, file)];
+
+    let lane_file = LaneFile {
+        roadmap: "close-the-loop".to_string(),
+        lane: "substrate".to_string(),
+        path: dir.join("lane-substrate.json"),
+        blocks: vec![
+            LaneBlockRef {
+                id: "A.closed".to_string(),
+                line: 1,
+                origin_roadmap: Some("close-the-loop".to_string()),
+                repo: "repoA".to_string(),
+            },
+            LaneBlockRef {
+                id: "A.wontfix".to_string(),
+                line: 2,
+                origin_roadmap: Some("close-the-loop".to_string()),
+                repo: "repoA".to_string(),
+            },
+            LaneBlockRef {
+                id: "A.superseded".to_string(),
+                line: 3,
+                origin_roadmap: Some("close-the-loop".to_string()),
+                repo: "repoA".to_string(),
+            },
+            LaneBlockRef {
+                id: "A.archived".to_string(),
+                line: 4,
+                origin_roadmap: Some("close-the-loop".to_string()),
+                repo: "repoA".to_string(),
+            },
+        ],
+        directives: None,
+    };
+    let diags = lane_registration_diagnostics(&lane_file, &loaded);
+    assert!(
+        diags.is_empty(),
+        "all four terminal statuses must be exempt from clause 2, got {diags:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lane_registration_diagnostics_all_are_warnings_never_errors() {
+    let dir = mev::testsupport::unique_temp_dir("mev-lane-registration-warning-severity");
+    let (src, file) = state_source_and_file(&dir, "repoA", r#"[]"#);
+    let loaded = vec![(src, file)];
+
+    let lane_file = one_block_lane(&dir.join("lane-substrate.json"), "GHOST.1", "repoA");
+    let diags = lane_registration_diagnostics(&lane_file, &loaded);
+    assert!(!diags.is_empty());
+    for d in &diags {
+        assert_eq!(
+            d.severity,
+            mev::Severity::Warning,
+            "lane registration diagnostics must never be errors (ships warning-first, \
+             per the block record's out_of_scope), got {d:?}"
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }
