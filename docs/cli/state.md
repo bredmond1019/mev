@@ -241,6 +241,12 @@ did not visit — rollups preserve every row it didn't touch. An unknown `--scop
 with `E_EMIT_UNKNOWN_SCOPE`, naming every valid slug, before any planner runs or any file is
 touched.
 
+This also holds for the three corpus-wide derived artifacts — `planning/lane-segments.json`, the
+lane frontier, and lane-segment availability — none of whose target paths are among the four
+surfaces above: a scoped `--write` now writes none of them rather than always regenerating them in
+full (`MV.ticket.emit-state-write-is-corpus-wide-and-unscoped`). Omit `--scope` (or run the
+periodic full reconciliation below) to regenerate these.
+
 **Operating guidance:** reach for `--scope <repo>` from a single sub-repo's own workflow commands
 (`/log-work`, `/start-block`, `/blocked`, …) where only that repo's state changed — it keeps the
 diff local and avoids cross-repo churn when several agents are working concurrently. Leave the
