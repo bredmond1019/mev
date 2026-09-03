@@ -483,7 +483,7 @@ fn is_valid_section_type(s: &str) -> bool {
 mod tests {
     use super::*;
     use crate::Severity;
-    use crate::learn_ai::crawl::{FileKind, Locale};
+    use crate::crawl::{FileKind, Locale};
     use std::path::PathBuf;
 
     fn temp_dir(suffix: &str) -> PathBuf {

@@ -7,9 +7,10 @@
 //!   a `cta` frontmatter value outside the accepted vocabulary, or a `cta: module` whose
 //!   `ctaTarget` is malformed or unresolvable on disk, is `E_FUNNEL_CTA_UNRESOLVED`. A post
 //!   with no `cta` key at all is the legitimate default and is clean.
-//! - [`check_utm`] — an `http(s)` link to `bastiel.com.br` / `bastielai.com` missing any of
-//!   `utm_source` / `utm_medium` / `utm_campaign` is `E_FUNNEL_MISSING_UTM`. `mailto:`
-//!   references are never URLs by this module's definition and are never flagged.
+//! - [`check_utm`] — an `http(s)` link to one of the configured funnel hosts (subdomains
+//!   included) missing any of `utm_source` / `utm_medium` / `utm_campaign` is
+//!   `E_FUNNEL_MISSING_UTM`. `mailto:` references are never URLs by this module's definition
+//!   and are never flagged, regardless of host.
 //! - [`check_cal_link`] — any `cal.com` URL in content is `E_FUNNEL_BARE_CAL_LINK`; the
 //!   booking CTA renders through a component, never a hand-written link.
 //! - [`check_analytics_attr`] — a raw `data-umami-*` attribute written directly into content
@@ -22,6 +23,13 @@
 //! (embedded at compile time via `include_str!`, same pattern as other data-driven checks in
 //! this crate) so the next variant is a one-line edit, not a release. See that file's header
 //! comment for why: the vocabulary already changed once mid-spec (2026-08-06, `LA.21.C`).
+//!
+//! The `check_utm` host list is likewise **not hardcoded** — it lives in
+//! `data/funnel-hosts.toml`, loaded through [`FunnelHosts`] the same way, so no operator's
+//! domain is a compiled-in literal in this module (`MV.ticket.
+//! extract-learn-ai-into-a-private-optional-crate` Task 6). A caller who wants to check a
+//! different site's links supplies its own host list via
+//! [`check_utm_with_hosts`]/[`FunnelHosts::parse`] instead of editing this file.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -75,7 +83,7 @@ impl CtaVocabulary {
     }
 }
 
-const DEFAULT_CTA_VOCABULARY_TOML: &str = include_str!("../../data/cta-vocabulary.toml");
+const DEFAULT_CTA_VOCABULARY_TOML: &str = include_str!("../data/cta-vocabulary.toml");
 
 /// The shipped vocabulary, parsed once and cached. `expect` is safe here: this is our own
 /// compile-time-embedded file, not runtime input — a malformed shipped file is a build defect
@@ -87,6 +95,77 @@ fn default_vocabulary() -> &'static CtaVocabulary {
     VOCAB.get_or_init(|| {
         CtaVocabulary::load_default()
             .expect("data/cta-vocabulary.toml (embedded at compile time) must be valid TOML")
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
+// FunnelHosts — the `check_utm` host list, data-driven (same rationale as `CtaVocabulary`
+// above): no operator's domain is a compiled-in Rust literal, so a caller running this crate
+// against a different site supplies its own list via `FunnelHosts::parse` rather than editing
+// source (`MV.ticket.extract-learn-ai-into-a-private-optional-crate` Task 6).
+// ---------------------------------------------------------------------------------------------
+
+/// The set of hosts [`check_utm`] flags for missing UTM parameters, loaded from a TOML data
+/// file rather than hardcoded — see this module's doc comment. A host matches when a link's
+/// host is exactly one of [`FunnelHosts`]'s entries, or a subdomain of one.
+#[derive(Debug, Clone)]
+pub struct FunnelHosts {
+    hosts: Vec<String>,
+}
+
+/// Typed error for a malformed hosts TOML file — never a panic on bad *input*. (The shipped
+/// default file is trusted at compile time; see [`FunnelHosts::load_default`].)
+#[derive(Debug, thiserror::Error)]
+pub enum FunnelHostsError {
+    #[error("malformed funnel hosts TOML: {0}")]
+    Toml(#[from] toml::de::Error),
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawFunnelHosts {
+    hosts: Vec<String>,
+}
+
+impl FunnelHosts {
+    /// Parse a host list from raw TOML text — the override path tests (and any future CLI
+    /// flag) use to prove the list is genuinely configuration, not compiled in.
+    pub fn parse(toml_source: &str) -> Result<Self, FunnelHostsError> {
+        let raw: RawFunnelHosts = toml::from_str(toml_source)?;
+        Ok(Self { hosts: raw.hosts })
+    }
+
+    /// Build a host list directly from an in-memory list of hosts, bypassing TOML — the form
+    /// most tests and callers reach for.
+    pub fn from_hosts(hosts: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            hosts: hosts.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Load the shipped default host list, embedded into the binary at compile time from
+    /// `data/funnel-hosts.toml`.
+    pub fn load_default() -> Result<Self, FunnelHostsError> {
+        Self::parse(DEFAULT_FUNNEL_HOSTS_TOML)
+    }
+
+    /// `true` when `host` exactly matches one of this list's entries, or is a subdomain of
+    /// one (e.g. `app.example.com` matches a configured `example.com`).
+    pub fn matches(&self, host: &str) -> bool {
+        self.hosts.iter().any(|configured| {
+            host == configured.as_str() || host.ends_with(&format!(".{configured}"))
+        })
+    }
+}
+
+const DEFAULT_FUNNEL_HOSTS_TOML: &str = include_str!("../data/funnel-hosts.toml");
+
+/// The shipped host list, parsed once and cached — same rationale as [`default_vocabulary`]:
+/// `expect` is safe because this is our own compile-time-embedded file, not runtime input.
+fn default_funnel_hosts() -> &'static FunnelHosts {
+    static HOSTS: OnceLock<FunnelHosts> = OnceLock::new();
+    HOSTS.get_or_init(|| {
+        FunnelHosts::load_default()
+            .expect("data/funnel-hosts.toml (embedded at compile time) must be valid TOML")
     })
 }
 
@@ -209,13 +288,26 @@ fn strip_numeric_prefix(stem: &str) -> &str {
 // check_utm / check_cal_link / check_analytics_attr — pure text scans, no network calls.
 // ---------------------------------------------------------------------------------------------
 
-/// Emit `E_FUNNEL_MISSING_UTM` for every `http(s)` link to `bastiel.com.br` / `bastielai.com`
-/// (including subdomains) missing any of `utm_source`, `utm_medium`, `utm_campaign`.
+/// Emit `E_FUNNEL_MISSING_UTM` for every `http(s)` link to a host in the shipped default
+/// funnel host list (including subdomains — see [`FunnelHosts`]) missing any of
+/// `utm_source`, `utm_medium`, `utm_campaign`.
 ///
 /// `mailto:` references are never matched — [`extract_urls`] only recognizes `http://` /
-/// `https://` prefixes, so a bare-domain match (which would fire on all 12 live
-/// `mailto:brandon@bastiel.com.br` references) is structurally impossible here.
+/// `https://` prefixes, so a bare-domain match against a `mailto:` reference is structurally
+/// impossible here, regardless of which hosts are configured.
+///
+/// Uses [`FunnelHosts::load_default`]. To check against a different host list (a different
+/// site, or a test proving the list is genuinely configurable), use
+/// [`check_utm_with_hosts`] instead.
 pub fn check_utm(rel: &Path, source: &str) -> Vec<Diagnostic> {
+    check_utm_with_hosts(rel, source, default_funnel_hosts())
+}
+
+/// Same as [`check_utm`] but against an explicit [`FunnelHosts`] list — the seam tests use to
+/// prove the host list is genuinely data-driven (a domain absent from the shipped default is
+/// still checked when it's in the supplied list, and no shipped domain is checked when it
+/// isn't).
+pub fn check_utm_with_hosts(rel: &Path, source: &str, hosts: &FunnelHosts) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
     for (idx, line) in source.lines().enumerate() {
         let line_no = idx + 1;
@@ -223,7 +315,7 @@ pub fn check_utm(rel: &Path, source: &str) -> Vec<Diagnostic> {
             let Some(host) = url_host(&url) else {
                 continue;
             };
-            if !is_bastiel_host(host) {
+            if !hosts.matches(host) {
                 continue;
             }
             let missing = missing_utm_params(&url);
@@ -232,7 +324,7 @@ pub fn check_utm(rel: &Path, source: &str) -> Vec<Diagnostic> {
                     rel.to_path_buf(),
                     "E_FUNNEL_MISSING_UTM",
                     format!(
-                        "bastiel link `{url}` at line {line_no} is missing UTM param(s): {}",
+                        "tracked link `{url}` at line {line_no} is missing UTM param(s): {}",
                         missing.join(", ")
                     ),
                 ));
@@ -334,14 +426,6 @@ fn url_host(url: &str) -> Option<&str> {
         .find(['/', ':', '?', '#'])
         .unwrap_or(after_scheme.len());
     Some(&after_scheme[..end])
-}
-
-/// `true` for `bastiel.com.br` / `bastielai.com` or any subdomain of either.
-fn is_bastiel_host(host: &str) -> bool {
-    host == "bastiel.com.br"
-        || host.ends_with(".bastiel.com.br")
-        || host == "bastielai.com"
-        || host.ends_with(".bastielai.com")
 }
 
 /// Return the names, among `utm_source`/`utm_medium`/`utm_campaign`, absent from `url`'s query
@@ -642,6 +726,52 @@ mod tests {
         let source = "See https://example.com/page?utm_source=x for more.";
         let diags = check_utm(&rel("post.mdx"), source);
         assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    // -----------------------------------------------------------------------------------
+    // check_utm_with_hosts — proves the host list is genuinely configuration, not compiled
+    // in (Task 6). A host list containing NEITHER shipped default domain still drives the
+    // checker correctly, and neither shipped default domain is checked once it's no longer
+    // in the supplied list — the only way to prove nothing is compiled in (a grep only shows
+    // a literal absent from the file it greps).
+    // -----------------------------------------------------------------------------------
+
+    #[test]
+    fn configured_host_list_with_neither_default_domain_still_flags_missing_utm() {
+        let hosts = FunnelHosts::from_hosts(["example.org", "widgets.test"]);
+        let source = "Visit https://example.org/en today.";
+        let diags = check_utm_with_hosts(&rel("post.mdx"), source, &hosts);
+        assert_eq!(locators(&diags), vec!["E_FUNNEL_MISSING_UTM"], "{diags:?}");
+    }
+
+    #[test]
+    fn configured_host_list_with_neither_default_domain_passes_a_fully_tagged_link_clean() {
+        let hosts = FunnelHosts::from_hosts(["example.org", "widgets.test"]);
+        let source = "Visit https://sub.widgets.test/en?utm_source=blog&utm_medium=post&utm_campaign=launch today.";
+        let diags = check_utm_with_hosts(&rel("post.mdx"), source, &hosts);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn shipped_default_domains_are_not_checked_once_absent_from_the_supplied_list() {
+        // The same bastiel.com.br link that `bastiel_url_with_no_utm_params_is_flagged`
+        // proves fires against the shipped default list must NOT fire once the caller
+        // supplies a list that omits it entirely — proving the domain isn't compiled in
+        // anywhere check_utm_with_hosts itself can reach.
+        let hosts = FunnelHosts::from_hosts(["example.org"]);
+        let source = "Visit https://bastiel.com.br/en today.";
+        let diags = check_utm_with_hosts(&rel("post.mdx"), source, &hosts);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn funnel_hosts_parse_round_trips_the_shipped_default_toml() {
+        // The shipped data/funnel-hosts.toml must itself parse and match the same domains
+        // check_utm's default path uses — pins FunnelHosts::load_default / parse together.
+        let parsed = FunnelHosts::load_default().expect("shipped funnel-hosts.toml must parse");
+        assert!(parsed.matches("bastiel.com.br"));
+        assert!(parsed.matches("app.bastielai.com"));
+        assert!(!parsed.matches("example.org"));
     }
 
     // -----------------------------------------------------------------------------------

@@ -3299,7 +3299,7 @@ pub struct CarryoverAudit {
     /// `carryover[]` entry. `reference[]` entries are structurally never clearable
     /// (no `clears_when`) and are excluded here by construction, not by a filter: a
     /// raw per-repo rate that counted them would punish reference-heavy repos for
-    /// behaving correctly (measured on the live corpus: `bastiel` 11%,
+    /// behaving correctly (measured on the live corpus: one content-heavy repo 11%,
     /// `okf-core` 0/14 — composition, not discipline).
     pub clearable_total: usize,
     /// `carryover[]` entries [`CarryoverReport`] assigned [`CarryoverLane::Cleared`].
@@ -3445,7 +3445,7 @@ pub fn audit_carryover(
 /// history by MV.16.B's one-time backfill (`reconstructed`). The two are kept apart
 /// deliberately: a reconstructed row carries `reason: unknown`-grade evidence and may
 /// include a relocation rather than a true disposal (at least one backfilled removal's
-/// commit subject is *"move bastiel-registration carryover to business"*), so blending
+/// commit subject is a *"move <repo>-registration carryover to business"*), so blending
 /// it into the observed count would inflate a figure a downstream post quotes verbatim.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ReasonSplit {

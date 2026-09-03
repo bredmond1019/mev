@@ -1,8 +1,28 @@
-//! Learn-AI consumer: crawl, classify, and validate the learn-agentic-ai.com content tree.
+//! `mev-learn-ai` — the operator's own business content tooling (learn-agentic-ai.com
+//! frontmatter/JSON validation, link checking, code-block linting, and the funnel host-list
+//! checker), extracted out of the public `mev` crate so the public binary and its source carry
+//! no reference to the operator's business.
+//!
+//! `publish = false`: this crate is never published to crates.io and is only ever pulled in via
+//! `mev`'s non-default `learn-ai` cargo feature.
+//!
+//! **Self-contained by necessity, not preference.** `mev` optionally depends on this crate
+//! (`mev-learn-ai = { path = ..., optional = true }`, pulled in by the `learn-ai` feature), so
+//! this crate cannot depend back on `mev` — Cargo does not allow a dependency cycle regardless
+//! of feature gating. The small pieces this crate needs from `mev`'s core (`Diagnostic`,
+//! `Severity`, `Report`, the `ContentValidator` trait, a couple of string helpers, and a
+//! collision-proof temp-dir helper for tests) are therefore mirrored here rather than imported.
+//! `mev`'s feature-gated bridge (`src/lib.rs`, `#[cfg(feature = "learn-ai")]`) converts this
+//! crate's `Report` into `mev`'s own on the way out, so the rest of `mev` — including its
+//! `--json` output — only ever sees one `Report` type.
 //!
 //! This module groups all learn-ai-specific code behind [`LearnAiValidator`], which implements
-//! the [`crate::validator::ContentValidator`] trait.  The generic `ContentValidator::run` driver
-//! provides the crawl → validate loop; this module only supplies `crawl` and `validate_item`.
+//! the [`ContentValidator`] trait.  The generic `ContentValidator::run` driver provides the
+//! crawl → validate loop; this crate only supplies `crawl` and `validate_item`.
+
+mod shared;
+pub mod testsupport;
+pub mod validator;
 
 pub mod blog;
 pub mod crawl;
@@ -20,15 +40,98 @@ pub mod voice;
 
 use std::path::Path;
 
-use crate::Diagnostic;
-use crate::Report;
-use crate::validator::ContentValidator;
 use crawl::{ContentFile, FileKind};
+
+pub use validator::ContentValidator;
+
+/// Severity of a single finding. Mirrors `mev::Severity` — see the crate doc comment for why
+/// this crate carries its own copy rather than importing `mev`'s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+/// A single validation finding. Every check produces `Diagnostic`s; only the reporter prints.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Diagnostic {
+    pub severity: Severity,
+    /// File the finding concerns, relative to the content root where possible.
+    pub file: std::path::PathBuf,
+    /// In-file locator (e.g. `metadata.title`, `sections[2].id`) or empty for whole-file findings.
+    pub locator: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Severity::Error => f.write_str("error"),
+            Severity::Warning => f.write_str("warning"),
+        }
+    }
+}
+
+impl Diagnostic {
+    pub fn error(
+        file: impl Into<std::path::PathBuf>,
+        locator: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            severity: Severity::Error,
+            file: file.into(),
+            locator: locator.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn warning(
+        file: impl Into<std::path::PathBuf>,
+        locator: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            severity: Severity::Warning,
+            file: file.into(),
+            locator: locator.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// Outcome of a validation run: the findings plus whether they constitute a failure.
+#[derive(Debug, Default)]
+pub struct Report {
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl Report {
+    pub fn error_count(&self) -> usize {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .count()
+    }
+
+    pub fn warning_count(&self) -> usize {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .count()
+    }
+
+    /// A run fails when any error-severity diagnostic is present.
+    pub fn is_failure(&self) -> bool {
+        self.error_count() > 0
+    }
+}
 
 /// The concrete [`ContentValidator`] for the learn-agentic-ai.com content tree.
 ///
 /// Instantiate and call `.run(root)` to walk `root`, classify every content file,
-/// and validate each one, collecting all diagnostics into a [`crate::Report`].
+/// and validate each one, collecting all diagnostics into a [`Report`].
 ///
 /// `lint` gates the shared content-lint passes ([`lint::lint_code_blocks`] /
 /// [`lint::lint_local_links`]) over `.mdx` module files. It defaults to `false` so
@@ -118,7 +221,6 @@ impl LearnAiValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::validator::ContentValidator;
     use crawl::{FileKind, Locale};
     use std::path::PathBuf;
 
@@ -138,7 +240,7 @@ mod tests {
     fn learn_ai_validator_crawl_returns_items_and_diags() {
         // Point at a temp dir with no content — the crawl should return an empty corpus
         // and no diagnostics (the root itself is not a "paths/" subtree).
-        let dir = crate::testsupport::unique_temp_dir("mev-learn-ai-crawl-test");
+        let dir = testsupport::unique_temp_dir("mev-learn-ai-crawl-test");
         std::fs::create_dir_all(&dir).unwrap();
 
         let v = LearnAiValidator::default();
@@ -172,12 +274,12 @@ mod tests {
             1,
             "expected exactly one read-failure diagnostic, got {diags:?}"
         );
-        assert_eq!(diags[0].severity, crate::Severity::Error);
+        assert_eq!(diags[0].severity, Severity::Error);
     }
 
     #[test]
     fn learn_ai_validator_run_on_empty_dir_returns_empty_report() {
-        let dir = crate::testsupport::unique_temp_dir("mev-learn-ai-run-test");
+        let dir = testsupport::unique_temp_dir("mev-learn-ai-run-test");
         std::fs::create_dir_all(&dir).unwrap();
 
         let report = LearnAiValidator::default().run(&dir);
@@ -206,7 +308,7 @@ mod tests {
 
     #[test]
     fn default_validator_emits_no_lint_diagnostics_on_module_mdx() {
-        let dir = crate::testsupport::unique_temp_dir("mev-learn-ai-lint-default-test");
+        let dir = testsupport::unique_temp_dir("mev-learn-ai-lint-default-test");
         let body = format!(
             "{VALID_FRONTMATTER}\n```\nno language tag here\n```\n\n[dead link](./nowhere.mdx)\n"
         );
@@ -232,7 +334,7 @@ mod tests {
 
     #[test]
     fn with_lint_true_emits_both_lint_diagnostics_on_module_mdx() {
-        let dir = crate::testsupport::unique_temp_dir("mev-learn-ai-lint-on-test");
+        let dir = testsupport::unique_temp_dir("mev-learn-ai-lint-on-test");
         let body = format!(
             "{VALID_FRONTMATTER}\n```\nno language tag here\n```\n\n[dead link](./nowhere.mdx)\n"
         );

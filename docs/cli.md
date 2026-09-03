@@ -75,10 +75,20 @@ command exists and is missing here, this table is wrong.
 
 | Command | What it does | Detail |
 |---|---|---|
-| `validate` | Validate the learn-ai content tree | [validate](cli/validate.md) |
+| `validate` | Validate the learn-ai content tree — **feature-gated, off by default** (see below) | [validate](cli/validate.md) |
 | `validate-brain` | Validate the whole Brain corpus for OKF compliance | [validate](cli/validate.md) |
 | `validate-state` | Validate a single `state.json` | [validate](cli/validate.md) |
 | `conformance` | Check facts kept in two places still agree | [validate](cli/validate.md) |
+
+**`validate` is behind the non-default `learn-ai` cargo feature.** It exercises the operator's own
+business content tooling (`crates/mev-learn-ai`), which is kept out of the public `mev` artifact.
+A default build (`cargo build --release`) has **no `validate` subcommand at all** — if you cannot
+find it, your install is not broken, you are looking at the default build. Build with the feature
+to get it:
+
+```bash
+cargo build --release --features learn-ai
+```
 
 `validate-state`'s diagnostic codes (including `W_STATE_SDLC_WORKFLOW_MISSING`, a warning for a
 block with no `sdlc_workflow` field — never blocking, paired asymmetrically with the error

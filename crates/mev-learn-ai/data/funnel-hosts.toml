@@ -1,0 +1,12 @@
+# Default funnel host list — the domains `check_utm` flags for a missing `utm_source` /
+# `utm_medium` / `utm_campaign` query parameter (MV.12.B, de-hardcoded MV.ticket.
+# extract-learn-ai-into-a-private-optional-crate Task 6).
+#
+# Not hardcoded in source (same pattern as `cta-vocabulary.toml`, one level up in this same
+# `data/` directory): a caller who runs this crate for a different site supplies their own
+# list via `FunnelHosts::parse` and `funnel::check_utm_with_hosts` rather than editing Rust.
+# See `funnel.rs`'s module doc comment and `FunnelHosts`.
+#
+# Each entry also matches its own subdomains (e.g. `www.bastiel.com.br`) — no need to list
+# `www.` variants separately.
+hosts = ["bastiel.com.br", "bastielai.com"]

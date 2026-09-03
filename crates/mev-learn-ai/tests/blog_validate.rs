@@ -2,13 +2,27 @@
 //!
 //! Covers all six diagnostic codes the block introduces, each with a passing and a failing
 //! case, plus:
-//! - a regression pin proving `mev::validate` (lint off) stays behaviourally unchanged even
+//! - a regression pin proving `validate` (this file's local helper over `mev_learn_ai::LearnAiValidator`) (lint off) stays behaviourally unchanged even
 //!   over a module that would trip the shared lint passes if they ran, and
 //! - a live-tree smoke test over the real learn-ai blog tree that skips cleanly when absent.
 
 use std::path::Path;
 
-use mev::{BlogValidator, ContentValidator, Locale, Severity};
+use mev_learn_ai::blog::BlogValidator;
+use mev_learn_ai::crawl::Locale;
+use mev_learn_ai::{ContentValidator, Diagnostic, LearnAiValidator, Report, Severity};
+
+fn validate_blog(root: &Path) -> Report {
+    BlogValidator::from_blog_root(root).run(root)
+}
+
+fn validate(root: &Path) -> Report {
+    LearnAiValidator::default().run(root)
+}
+
+fn validate_with_lint(root: &Path) -> Report {
+    LearnAiValidator::with_lint(true).run(root)
+}
 
 /// The blog fixture tree checked into `tests/fixtures/blog/`.
 fn blog_fixture_root() -> &'static Path {
@@ -20,7 +34,7 @@ fn learn_tree_fixture_root() -> &'static Path {
     Path::new("tests/fixtures/blog-learn-tree")
 }
 
-fn diags_for_file<'a>(diags: &'a [mev::Diagnostic], file: &str) -> Vec<&'a mev::Diagnostic> {
+fn diags_for_file<'a>(diags: &'a [Diagnostic], file: &str) -> Vec<&'a Diagnostic> {
     diags.iter().filter(|d| d.file == Path::new(file)).collect()
 }
 
@@ -30,7 +44,7 @@ fn diags_for_file<'a>(diags: &'a [mev::Diagnostic], file: &str) -> Vec<&'a mev::
 
 #[test]
 fn missing_title_reports_e_blog_missing_field() {
-    let report = mev::validate_blog(blog_fixture_root()).expect("validate_blog");
+    let report = validate_blog(blog_fixture_root());
     let hits = diags_for_file(&report.diagnostics, "missing-title.mdx");
     let missing = hits
         .iter()
@@ -43,7 +57,7 @@ fn missing_title_reports_e_blog_missing_field() {
 
 #[test]
 fn missing_date_reports_e_blog_missing_field() {
-    let report = mev::validate_blog(blog_fixture_root()).expect("validate_blog");
+    let report = validate_blog(blog_fixture_root());
     let hits = diags_for_file(&report.diagnostics, "missing-date.mdx");
     let missing = hits
         .iter()
@@ -55,7 +69,7 @@ fn missing_date_reports_e_blog_missing_field() {
 
 #[test]
 fn missing_excerpt_reports_e_blog_missing_field() {
-    let report = mev::validate_blog(blog_fixture_root()).expect("validate_blog");
+    let report = validate_blog(blog_fixture_root());
     let hits = diags_for_file(&report.diagnostics, "missing-excerpt.mdx");
     let missing = hits
         .iter()
@@ -67,7 +81,7 @@ fn missing_excerpt_reports_e_blog_missing_field() {
 
 #[test]
 fn complete_frontmatter_post_reports_no_missing_field() {
-    let report = mev::validate_blog(blog_fixture_root()).expect("validate_blog");
+    let report = validate_blog(blog_fixture_root());
     let hits = diags_for_file(&report.diagnostics, "clean.mdx");
     assert!(
         hits.iter().all(|d| d.locator != "E_BLOG_MISSING_FIELD"),
@@ -81,7 +95,7 @@ fn complete_frontmatter_post_reports_no_missing_field() {
 
 #[test]
 fn no_frontmatter_reports_malformed_frontmatter() {
-    let report = mev::validate_blog(blog_fixture_root()).expect("validate_blog");
+    let report = validate_blog(blog_fixture_root());
     let hits = diags_for_file(&report.diagnostics, "no-frontmatter.mdx");
     let malformed = hits
         .iter()
@@ -93,7 +107,7 @@ fn no_frontmatter_reports_malformed_frontmatter() {
 
 #[test]
 fn malformed_yaml_reports_malformed_frontmatter() {
-    let report = mev::validate_blog(blog_fixture_root()).expect("validate_blog");
+    let report = validate_blog(blog_fixture_root());
     let hits = diags_for_file(&report.diagnostics, "malformed-yaml.mdx");
     let malformed = hits
         .iter()
@@ -104,7 +118,7 @@ fn malformed_yaml_reports_malformed_frontmatter() {
 
 #[test]
 fn well_formed_frontmatter_post_reports_no_malformed_frontmatter() {
-    let report = mev::validate_blog(blog_fixture_root()).expect("validate_blog");
+    let report = validate_blog(blog_fixture_root());
     let hits = diags_for_file(&report.diagnostics, "clean.mdx");
     assert!(
         hits.iter()
@@ -119,7 +133,7 @@ fn well_formed_frontmatter_post_reports_no_malformed_frontmatter() {
 
 #[test]
 fn en_post_without_ptbr_counterpart_reports_parity_warning() {
-    let report = mev::validate_blog(blog_fixture_root()).expect("validate_blog");
+    let report = validate_blog(blog_fixture_root());
     let hits = diags_for_file(&report.diagnostics, "no-ptbr.mdx");
     let parity = hits
         .iter()
@@ -131,7 +145,7 @@ fn en_post_without_ptbr_counterpart_reports_parity_warning() {
 
 #[test]
 fn en_post_with_ptbr_counterpart_reports_no_parity_warning() {
-    let report = mev::validate_blog(blog_fixture_root()).expect("validate_blog");
+    let report = validate_blog(blog_fixture_root());
     let hits = diags_for_file(&report.diagnostics, "clean.mdx");
     assert!(
         hits.iter().all(|d| d.locator != "W_BLOG_PTBR_MISSING"),
@@ -145,7 +159,7 @@ fn en_post_with_ptbr_counterpart_reports_no_parity_warning() {
 
 #[test]
 fn untagged_fence_reports_lint_warning() {
-    let report = mev::validate_blog(blog_fixture_root()).expect("validate_blog");
+    let report = validate_blog(blog_fixture_root());
     let hits = diags_for_file(&report.diagnostics, "untagged-fence.mdx");
     let lint = hits
         .iter()
@@ -157,7 +171,7 @@ fn untagged_fence_reports_lint_warning() {
 
 #[test]
 fn tagged_fence_post_reports_no_untagged_code_block_warning() {
-    let report = mev::validate_blog(blog_fixture_root()).expect("validate_blog");
+    let report = validate_blog(blog_fixture_root());
     let hits = diags_for_file(&report.diagnostics, "clean.mdx");
     assert!(
         hits.iter()
@@ -172,7 +186,7 @@ fn tagged_fence_post_reports_no_untagged_code_block_warning() {
 
 #[test]
 fn dead_relative_link_reports_dead_local_link() {
-    let report = mev::validate_blog(blog_fixture_root()).expect("validate_blog");
+    let report = validate_blog(blog_fixture_root());
     let hits = diags_for_file(&report.diagnostics, "dead-links.mdx");
     let dead_link = hits
         .iter()
@@ -184,7 +198,7 @@ fn dead_relative_link_reports_dead_local_link() {
 
 #[test]
 fn dead_image_reference_reports_dead_asset() {
-    let report = mev::validate_blog(blog_fixture_root()).expect("validate_blog");
+    let report = validate_blog(blog_fixture_root());
     let hits = diags_for_file(&report.diagnostics, "dead-links.mdx");
     let dead_asset = hits
         .iter()
@@ -196,7 +210,7 @@ fn dead_image_reference_reports_dead_asset() {
 
 #[test]
 fn absolute_url_and_anchor_only_links_report_no_dead_link_diagnostics() {
-    let report = mev::validate_blog(blog_fixture_root()).expect("validate_blog");
+    let report = validate_blog(blog_fixture_root());
     let hits = diags_for_file(&report.diagnostics, "clean-links.mdx");
     assert!(
         hits.iter()
@@ -244,18 +258,18 @@ fn every_fixture_post_is_crawled_and_classified() {
 }
 
 // ---------------------------------------------------------------------------
-// Regression pin: `mev::validate` stays byte-identical (lint always off)
+// Regression pin: `validate` (this file's local helper over `mev_learn_ai::LearnAiValidator`) stays byte-identical (lint always off)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn validate_regression_pin_on_learn_tree_fixture() {
     // The fixture module carries an untagged fence and a dead relative link on purpose. If
-    // `mev::validate` ever started running the shared lint passes by default, this test would
+    // `validate` (this file's local helper over `mev_learn_ai::LearnAiValidator`) ever started running the shared lint passes by default, this test would
     // start failing — that is exactly the behaviour this pin exists to catch.
-    let report = mev::validate(learn_tree_fixture_root()).expect("validate");
+    let report = validate(learn_tree_fixture_root());
     assert!(
         report.diagnostics.is_empty(),
-        "mev::validate must stay lint-off and report nothing on a structurally-valid module, \
+        "validate() must stay lint-off and report nothing on a structurally-valid module, \
          got: {:?}",
         report.diagnostics
     );
@@ -263,8 +277,8 @@ fn validate_regression_pin_on_learn_tree_fixture() {
 
 #[test]
 fn validate_with_lint_reports_lint_diagnostics_where_validate_does_not() {
-    let plain = mev::validate(learn_tree_fixture_root()).expect("validate");
-    let linted = mev::validate_with_lint(learn_tree_fixture_root()).expect("validate_with_lint");
+    let plain = validate(learn_tree_fixture_root());
+    let linted = validate_with_lint(learn_tree_fixture_root());
 
     assert!(plain.diagnostics.is_empty(), "{:?}", plain.diagnostics);
     assert!(
@@ -291,7 +305,7 @@ fn validate_with_lint_reports_lint_diagnostics_where_validate_does_not() {
 
 #[test]
 fn validate_blog_does_not_panic_over_the_live_blog_tree() {
-    let live_root = Path::new("../../learn-ai/content/blog/published");
+    let live_root = Path::new("../../../../learn-ai/content/blog/published");
     if !live_root.exists() {
         eprintln!(
             "skipping: {} not present (fresh clone)",
@@ -300,7 +314,7 @@ fn validate_blog_does_not_panic_over_the_live_blog_tree() {
         return;
     }
 
-    let report = mev::validate_blog(live_root).expect("validate_blog must not panic or error");
+    let report = validate_blog(live_root);
     // No assertion on diagnostic content — the live tree's content is out of this test's
     // control. The point is that the crawl + validate pass over every real file without
     // panicking and returns a `Report`.
@@ -324,7 +338,7 @@ fn validate_blog_does_not_panic_over_the_live_blog_tree() {
 
 #[test]
 fn validate_blog_over_the_live_tree_reports_zero_dead_local_links() {
-    let live_root = Path::new("../../learn-ai/content/blog/published");
+    let live_root = Path::new("../../../../learn-ai/content/blog/published");
     if !live_root.exists() {
         eprintln!(
             "skipping: {} not present (fresh clone)",
@@ -333,8 +347,8 @@ fn validate_blog_over_the_live_tree_reports_zero_dead_local_links() {
         return;
     }
 
-    let report = mev::validate_blog(live_root).expect("validate_blog");
-    let dead_links: Vec<&mev::Diagnostic> = report
+    let report = validate_blog(live_root);
+    let dead_links: Vec<&Diagnostic> = report
         .diagnostics
         .iter()
         .filter(|d| d.locator == "E_LINT_DEAD_LOCAL_LINK")
@@ -347,7 +361,7 @@ fn validate_blog_over_the_live_tree_reports_zero_dead_local_links() {
 
 #[test]
 fn validate_with_lint_over_the_live_learn_tree_reports_zero_dead_local_links() {
-    let live_root = Path::new("../../learn-ai/content/learn");
+    let live_root = Path::new("../../../../learn-ai/content/learn");
     if !live_root.exists() {
         eprintln!(
             "skipping: {} not present (fresh clone)",
@@ -356,8 +370,8 @@ fn validate_with_lint_over_the_live_learn_tree_reports_zero_dead_local_links() {
         return;
     }
 
-    let report = mev::validate_with_lint(live_root).expect("validate_with_lint");
-    let dead_links: Vec<&mev::Diagnostic> = report
+    let report = validate_with_lint(live_root);
+    let dead_links: Vec<&Diagnostic> = report
         .diagnostics
         .iter()
         .filter(|d| d.locator == "E_LINT_DEAD_LOCAL_LINK")

@@ -7,7 +7,8 @@
 use std::fs;
 use std::path::Path;
 
-use mev::{FileKind, Locale, Severity, crawl};
+use mev::{FileKind, Locale, crawl};
+use mev_learn_ai::Severity;
 
 // ---------------------------------------------------------------------------
 // Helpers

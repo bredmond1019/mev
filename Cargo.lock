@@ -403,6 +403,7 @@ dependencies = [
  "chrono",
  "clap",
  "colored",
+ "mev-learn-ai",
  "okf-core",
  "regex",
  "serde",
@@ -410,6 +411,18 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "tempfile",
+ "thiserror",
+ "toml",
+ "walkdir",
+]
+
+[[package]]
+name = "mev-learn-ai"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
  "thiserror",
  "toml",
  "walkdir",
