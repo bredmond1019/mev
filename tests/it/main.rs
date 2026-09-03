@@ -20,7 +20,6 @@
 mod approve_reject;
 mod attention_queue;
 mod blocks_driver;
-mod blog_validate;
 mod brain_block_create;
 mod brain_block_graph;
 mod brain_block_records_fixtures;
@@ -55,6 +54,12 @@ mod brain_validate;
 mod build_stamp_cli;
 mod check_consumers_cli;
 mod close_operator_gate;
+// Learn-ai's file crawler (`mev::crawl`) is feature-gated (see src/lib.rs); this suite
+// exercises it directly and so only compiles/runs under the `learn-ai` feature. Left in
+// mev's own tests/it (not moved to crates/mev-learn-ai) since it predates and is outside
+// this block's declared scope (funnel/voice/blog/validate_cli_flags only) — feature-gating
+// here is the minimal fix for a default `cargo test` to compile at all.
+#[cfg(feature = "learn-ai")]
 mod crawl;
 mod doc_cli;
 mod doc_index_reconcile;
@@ -67,20 +72,30 @@ mod emit_state_scope;
 mod epic_lock;
 mod fleet_regression;
 mod force_operator_gate;
-mod funnel_conformance;
 mod graph_findings_cli;
 mod lane_segments_dependency_split;
 mod lane_segments_fleet;
 mod lanes_driver;
 mod master_plan_fixtures;
+// Learn-ai's struct/frontmatter validator (`mev::validate_file`) is feature-gated; see the
+// `crawl` mod comment above for why this stays here, gated, rather than moving.
+#[cfg(feature = "learn-ai")]
 mod meta;
 mod normalize_op_slugs;
 mod reference_container;
 mod set_block_status;
 mod sibling_rules;
+// Exercises `mev::validate()`, which is feature-gated; see the `crawl` mod comment above.
+#[cfg(feature = "learn-ai")]
 mod smoke;
 mod state_history;
 mod toolchain_freshness_write_banner;
+// Tests `mev`'s own `validate` subcommand CLI wiring (`--blog`/`--lint` flags, JSON envelope
+// label, exit codes) by driving the built binary — that subcommand exists only behind the
+// `learn-ai` feature (see src/main.rs), so this suite only compiles/runs under it. It stays a
+// module of mev's own tests/it binary rather than moving into crates/mev-learn-ai: it exercises
+// the mev *binary* (`CARGO_BIN_EXE_mev`), which is only available to a package's own integration
+// tests, not to a dependent crate's.
+#[cfg(feature = "learn-ai")]
 mod validate_cli_flags;
 mod validate_state_cli;
-mod voice_tripwire;

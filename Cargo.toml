@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
 members = [".", "crates/mev-learn-ai"]
+# Without this, `cargo test`/`cargo build` invoked at the workspace root (no `-p`) default to
+# just the root `mev` package (a mixed workspace/package manifest's default is itself, not every
+# member) — so mev-learn-ai's own moved test suites would silently never run under the plain
+# `cargo test` / `cargo test --features learn-ai` commands this repo's harness actually runs.
+default-members = [".", "crates/mev-learn-ai"]
 
 [package]
 name = "mev"

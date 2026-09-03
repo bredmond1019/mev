@@ -14,7 +14,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use mev::{FileKind, Locale, Severity, validate_file};
+use mev::{FileKind, Locale, validate_file};
+use mev_learn_ai::Severity;
 
 // ---------------------------------------------------------------------------
 // Test helpers
