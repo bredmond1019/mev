@@ -8,10 +8,41 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-09-01T00:30:00-03:00"
+timestamp: "2026-09-03T00:00:00-03:00"
 ---
 
 ## [run: 2026-09-03]
+
+### `MV.ticket.extract-learn-ai-into-a-private-optional-crate` CLOSED — `/sdlc-flow`, 8 of 8 tasks, PASS
+
+Extracted the operator's business-identity-bearing `learn_ai` module out of the public `mev` binary
+into a private, optional crate. `mev` is now a cargo workspace (`crates/mev-learn-ai/`, `publish =
+false`); all eight `src/learn_ai/*.rs` modules, their two data TOML files, the funnel/voice/blog test
+suites, and `tests/fixtures/funnel/` moved verbatim, gated from the default build behind a
+non-default `learn-ai` cargo feature — a default build has no `mod learn_ai;`, no `validate`
+subcommand, and no learn-ai re-exports at all. `is_bastiel_host` was replaced by a data-driven
+`FunnelHosts` type loaded from `crates/mev-learn-ai/data/funnel-hosts.toml` (mirroring the existing
+`CtaVocabulary` pattern), so no `bastiel`/`bastielai` domain literal remains in any `.rs` file;
+`check_utm_with_hosts` is the new explicit-override entry point, with 4 new tests proving a
+caller-supplied host list drives the checker correctly. `validate_cli_flags.rs` stayed in `mev`'s own
+`tests/it/` (feature-gated) rather than moving, since `CARGO_BIN_EXE_mev` only resolves for a
+package's own integration tests — a documented deviation from task 1's tentative "moves wholesale"
+call, not a loss (all 7 of its tests are still counted). Task 5 re-verified all 12 per-file test
+counts and all 13 fixture-file checksums against the merge-base baseline: byte-identical/count-
+identical, no silent loss. `docs/cli.md` now documents the feature gate. Final verdict: PASS, no
+findings; full validation suite (fmt, clippy, `cargo test --features learn-ai`, release build,
+consumer-compile gate) green. Next: `MV.15.A` or the next block off the priority board.
+
+```
+09c35b2 fix: review pass 1 for MV.ticket.extract-learn-ai-into-a-private-optional-crate
+c849ec2 feat: implement MV.ticket.extract-learn-ai-into-a-private-optional-crate-task7
+ca963dd feat: implement MV.ticket.extract-learn-ai-into-a-private-optional-crate-task6
+8d964e5 feat: implement MV.ticket.extract-learn-ai-into-a-private-optional-crate-task4
+7644953 feat: implement MV.ticket.extract-learn-ai-into-a-private-optional-crate-task3 (part 2)
+6bcc878 feat: implement MV.ticket.extract-learn-ai-into-a-private-optional-crate-task3
+8903769 feat: implement MV.ticket.extract-learn-ai-into-a-private-optional-crate-task2
+143d951 feat: implement MV.ticket.dispose-must-refuse-prose-predicates-task1
+```
 
 ### `MV.ticket.emit-state-write-is-corpus-wide-and-unscoped` CLOSED — `/sdlc-flow`, 5 of 5 tasks, PASS
 
