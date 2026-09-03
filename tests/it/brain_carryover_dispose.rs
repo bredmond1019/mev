@@ -90,10 +90,16 @@ heading = "{slug}"
     fs::write(root.join("brain.toml"), toml.as_bytes()).unwrap();
 }
 
-/// `alpha`'s state: a cleared block-ref entry, an actionable block-ref entry, and a
+/// `alpha`'s state: a cleared TYPED `block_closed` entry, an actionable block-ref entry, and a
 /// prose-only not-evaluable entry — mirroring `tests/brain_carryover.rs`'s fixture shape.
 /// Also carries an em dash and other non-ASCII in `text`, so a disposal run's untouched
 /// entries double as case (g)'s round-trip check.
+///
+/// `alpha-cleared`'s `clears_when` is a typed predicate rather than prose — deliberately, per
+/// `MV.ticket.dispose-must-refuse-prose-predicates` AC4: this fixture is this file's
+/// unchanged-behaviour proof that a typed `block_closed` predicate still disposes exactly as
+/// before that ticket landed. The prose-refusal cases live in their own fixtures/tests below
+/// (`prose_regression_state_value` / `*_prose_regression_*`).
 fn alpha_state_value() -> serde_json::Value {
     serde_json::json!({
         "repo": "alpha",
@@ -117,7 +123,7 @@ fn alpha_state_value() -> serde_json::Value {
                 "related": [
                     { "type": "block", "repo": "beta", "id": "BE.1.A" }
                 ],
-                "clears_when": "BE.1.A lands",
+                "clears_when": { "type": "block_closed", "repo": "beta", "id": "BE.1.A" },
                 "created": "2026-06-01"
             },
             {
@@ -660,6 +666,171 @@ fn write_failure_between_the_two_writes_leaves_no_orphaned_removal() {
         !alpha_archive_path.exists(),
         "archive file should be reverted to its prior (nonexistent) state, found: {}",
         alpha_archive_path.display()
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// `MV.ticket.dispose-must-refuse-prose-predicates` — Task 1
+// ---------------------------------------------------------------------------
+//
+// AC1: a Cleared-lane entry whose `clears_when` is a String (prose) is refused, not
+// disposed, even when every mined ref it produced is satisfied.
+// AC2/AC3: the two real incidents, reproduced verbatim, prove it end to end — through
+// discovery/load/evaluate/`compute_disposal_plan`/`run_dispose`, not just the plan
+// computation in isolation.
+
+/// AC2 — REGRESSION FIXTURE, bella, verbatim: prose reading
+/// `path scripts/check_scenes.sh exists; path scripts/vhs/scenes.toml exists` with BOTH
+/// files present on disk. Before this task this entry's two mined path refs were both
+/// satisfied and `--dispose` removed it; after, it must survive on disk untouched.
+#[test]
+fn dispose_refuses_the_bella_scenes_prose_regression_verbatim() {
+    let dir = temp_dir("bella-prose-regression");
+    write_brain_toml(&dir, &["bella"]);
+    write_json(
+        &dir,
+        "repos/bella/planning/state.json",
+        &serde_json::json!({
+            "repo": "bella",
+            "kind": "project",
+            "updated": "2026-09-02",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "tracks": [],
+            "carryover": [
+                {
+                    "slug": "rapid-keypresses-blank-the-render",
+                    "scope": { "repo": "bella" },
+                    "kind": "known_issue",
+                    "text": "PROSE, deliberately — no honest typed predicate exists.",
+                    "clears_when": "path scripts/check_scenes.sh exists; path scripts/vhs/scenes.toml exists",
+                    "created": "2026-06-01"
+                }
+            ]
+        }),
+    );
+    fs::create_dir_all(dir.join("repos/bella/scripts/vhs")).unwrap();
+    write_raw(&dir, "repos/bella/scripts/check_scenes.sh", "#!/bin/sh\n");
+    write_raw(&dir, "repos/bella/scripts/vhs/scenes.toml", "");
+
+    let (loaded, load_errors, report) = load_and_evaluate_for_dispose(&dir, false);
+    assert!(load_errors.is_empty(), "no repo should fail to load here");
+    assert_eq!(
+        report.cleared, 1,
+        "both mined paths exist, so this still lands in Cleared for reporting"
+    );
+
+    let plan = compute_disposal_plan(&report, &loaded, &load_errors, mev::COMMAND_EXEC_TIMEOUT);
+    assert!(
+        plan.candidates.is_empty(),
+        "the bella regression must never be disposed, got: {:#?}",
+        plan.candidates
+    );
+    assert_eq!(plan.refused.len(), 1);
+    assert_eq!(plan.refused[0].repo, "bella");
+    assert_eq!(plan.refused[0].slug, "rapid-keypresses-blank-the-render");
+
+    // Drive the actual write path too: the entry must survive untouched on disk, not
+    // merely be absent from the in-memory `plan.candidates`.
+    let dispose_report = run_dispose(&plan, &loaded, "2026-09-02", false);
+    assert!(
+        dispose_report.succeeded(),
+        "a run with nothing disposed is still a clean run: {:#?}",
+        dispose_report.failures
+    );
+    let state_path = dir.join("repos/bella/planning/state.json");
+    let new_state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    let slugs: Vec<&str> = new_state["carryover"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["slug"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        slugs,
+        vec!["rapid-keypresses-blank-the-render"],
+        "the entry must survive --dispose on disk"
+    );
+    assert!(
+        !dir.join("repos/bella/planning/carryover-archive.jsonl")
+            .exists(),
+        "nothing should have been archived"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// AC3 — REGRESSION FIXTURE, engine-rs: prose containing a block id whose status is
+/// closed. Before this task the mined block ref resolved satisfied and `--dispose`
+/// removed the entry; after, it must survive on disk untouched.
+#[test]
+fn dispose_refuses_the_engine_rs_closed_block_prose_regression() {
+    let dir = temp_dir("engine-rs-prose-regression");
+    write_brain_toml(&dir, &["engine-rs"]);
+    write_json(
+        &dir,
+        "repos/engine-rs/planning/state.json",
+        &serde_json::json!({
+            "repo": "engine-rs",
+            "kind": "project",
+            "updated": "2026-09-02",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "tracks": [
+                {
+                    "title": "Phase 1",
+                    "blocks": [
+                        {
+                            "id": "EN.14.C",
+                            "title": "engine leaves allow(dead_code) on helpers it later wires up",
+                            "status": "closed"
+                        }
+                    ]
+                }
+            ],
+            "carryover": [
+                {
+                    "slug": "engine-leaves-allow-dead-code-on-helpers-it-later-wires-up",
+                    "scope": { "repo": "engine-rs" },
+                    "kind": "known_issue",
+                    "text": "PROSE, deliberately — no honest typed predicate exists.",
+                    "clears_when": "no honest typed predicate exists; block EN.14.C closed",
+                    "created": "2026-06-01"
+                }
+            ]
+        }),
+    );
+
+    let (loaded, load_errors, report) = load_and_evaluate_for_dispose(&dir, false);
+    assert!(load_errors.is_empty(), "no repo should fail to load here");
+    assert_eq!(
+        report.cleared, 1,
+        "the mined block id resolves closed, so this still lands in Cleared for reporting"
+    );
+
+    let plan = compute_disposal_plan(&report, &loaded, &load_errors, mev::COMMAND_EXEC_TIMEOUT);
+    assert!(
+        plan.candidates.is_empty(),
+        "the engine-rs regression must never be disposed, got: {:#?}",
+        plan.candidates
+    );
+    assert_eq!(plan.refused.len(), 1);
+    assert_eq!(plan.refused[0].repo, "engine-rs");
+    assert_eq!(
+        plan.refused[0].slug,
+        "engine-leaves-allow-dead-code-on-helpers-it-later-wires-up"
+    );
+
+    let dispose_report = run_dispose(&plan, &loaded, "2026-09-02", false);
+    assert!(dispose_report.succeeded());
+    let state_path = dir.join("repos/engine-rs/planning/state.json");
+    let new_state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert_eq!(
+        new_state["carryover"].as_array().unwrap().len(),
+        1,
+        "the entry must survive --dispose on disk"
     );
 
     let _ = fs::remove_dir_all(&dir);

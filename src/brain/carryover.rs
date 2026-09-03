@@ -1762,12 +1762,37 @@ pub struct SkippedRepo {
     pub error: String,
 }
 
+/// One `Cleared`-lane entry `compute_disposal_plan` refused to dispose
+/// because its `clears_when` is free-form prose rather than a typed
+/// predicate — `MV.ticket.dispose-must-refuse-prose-predicates`.
+///
+/// A prose `clears_when` can still land in [`CarryoverLane::Cleared`] (the
+/// mined [`CarryoverRef`]s it produced were all satisfied) so `mev
+/// carryover`'s plain, non-`--dispose` report keeps surfacing it as cleared
+/// for a human to read — see the "Reporting is unchanged" note on
+/// [`compute_disposal_plan`]. What must never happen is an *automated*
+/// disposal driven by that mined data, so `--dispose` refuses the entry
+/// outright instead of silently skipping it (a silent skip would be
+/// indistinguishable from "nothing to dispose").
+#[derive(Debug, Clone)]
+pub struct RefusedDisposal {
+    /// Owning repo slug.
+    pub repo: String,
+    /// The refused entry's stable node key.
+    pub slug: String,
+    /// Human-readable refusal reason, naming the slug and stating that a
+    /// typed predicate is required to dispose it.
+    pub reason: String,
+}
+
 /// The read-only plan `mev carryover --dispose` computes before writing
-/// anything: which entries it would move (`candidates`) and which repos it
-/// could not evaluate at all (`skipped`).
+/// anything: which entries it would move (`candidates`), which `Cleared`
+/// entries it refuses to move because their `clears_when` is prose
+/// (`refused`), and which repos it could not evaluate at all (`skipped`).
 #[derive(Debug, Clone, Default)]
 pub struct DisposalPlan {
     pub candidates: Vec<DisposalCandidate>,
+    pub refused: Vec<RefusedDisposal>,
     pub skipped: Vec<SkippedRepo>,
 }
 
@@ -1805,6 +1830,21 @@ pub struct DisposalPlan {
 /// `lane == Cleared` in the first place — selecting on that lane alone is
 /// sufficient, and passing `--dispose` without `--allow-exec` naturally
 /// yields a report with no `Cleared` `CommandExitsZero` candidates at all.
+///
+/// **Guard (5) — a `Cleared` entry whose `clears_when` is prose is refused,
+/// never disposed** (`MV.ticket.dispose-must-refuse-prose-predicates`). The
+/// mined [`CarryoverRef`]s a prose predicate produces (`block_refs_from_prose`
+/// / `path_refs_from_prose`, upstream in `evaluate_carryover_with_dedup`)
+/// can still land the entry in `Cleared` for REPORTING — `mev carryover`
+/// without `--dispose` is unchanged by this guard, and keeps showing such an
+/// entry as cleared for a human to read. But this function checks the raw
+/// [`Carryover`] record's own `clears_when` variant directly (already loaded
+/// for step 2 above) and never treats a mined ref as license to dispose: a
+/// `Some(ClearsWhen::Prose(_))` entry is pushed to `refused` instead of
+/// `candidates`, with a reason naming the slug and stating that a typed
+/// predicate is required. This function calls no prose-mining function
+/// itself and extracts no path or block id from any string — it only
+/// pattern-matches the already-typed `ClearsWhen` enum.
 pub fn compute_disposal_plan(
     report: &CarryoverReport,
     files: &[(StateSource, StateFile)],
@@ -1812,6 +1852,7 @@ pub fn compute_disposal_plan(
     exec_timeout: std::time::Duration,
 ) -> DisposalPlan {
     let mut candidates = Vec::new();
+    let mut refused = Vec::new();
 
     for verdict in &report.entries {
         if verdict.lane != CarryoverLane::Cleared {
@@ -1825,6 +1866,22 @@ pub fn compute_disposal_plan(
         else {
             continue;
         };
+
+        // Guard (5): a prose `clears_when` never disposes, no matter how
+        // many mined refs it satisfied.
+        if matches!(entry.clears_when, Some(ClearsWhen::Prose(_))) {
+            refused.push(RefusedDisposal {
+                repo: verdict.repo.clone(),
+                slug: verdict.slug.clone(),
+                reason: format!(
+                    "'{}' clears via a free-form prose `clears_when` — a typed predicate \
+                     (block_closed / file_exists / file_contains / command_exits_zero) is \
+                     required to dispose it",
+                    verdict.slug
+                ),
+            });
+            continue;
+        }
 
         candidates.push(DisposalCandidate {
             repo: verdict.repo.clone(),
@@ -1844,6 +1901,7 @@ pub fn compute_disposal_plan(
 
     DisposalPlan {
         candidates,
+        refused,
         skipped,
     }
 }
@@ -9945,20 +10003,23 @@ mod tests {
 
     #[test]
     fn compute_disposal_plan_selects_only_cleared_entries_with_raw_record_and_evidence() {
+        // `cleared-one`'s `clears_when` is a TYPED `block_closed` predicate — not
+        // prose — so this is also AC4's unchanged-behaviour fixture for that form:
+        // a typed predicate must still dispose exactly as before Guard (5) landed.
         let files = vec![
             (
                 src("repo-a"),
                 state_file(
                     "repo-a",
                     vec![("MV.3.A", "closed")],
-                    vec![item(
+                    vec![predicate_item(
                         "cleared-one",
                         "deferred",
-                        Some("MV.3.A lands"),
-                        vec![],
-                        "2020-01-01",
-                        None,
-                        None,
+                        ClearsWhenPredicate::BlockClosed {
+                            repo: "repo-a".to_string(),
+                            id: "MV.3.A".to_string(),
+                            note: None,
+                        },
                     )],
                 ),
             ),
@@ -9967,14 +10028,14 @@ mod tests {
                 state_file(
                     "repo-b",
                     vec![("MV.9.A", "open")],
-                    vec![item(
+                    vec![predicate_item(
                         "still-actionable",
                         "deferred",
-                        Some("MV.9.A lands"),
-                        vec![],
-                        "2020-01-01",
-                        None,
-                        None,
+                        ClearsWhenPredicate::BlockClosed {
+                            repo: "repo-b".to_string(),
+                            id: "MV.9.A".to_string(),
+                            note: None,
+                        },
                     )],
                 ),
             ),
@@ -9996,6 +10057,7 @@ mod tests {
 
         let plan = compute_disposal_plan(&report, &files, &[], COMMAND_EXEC_TIMEOUT);
         assert_eq!(plan.candidates.len(), 1);
+        assert!(plan.refused.is_empty());
         assert!(plan.skipped.is_empty());
 
         let candidate = &plan.candidates[0];
@@ -10005,9 +10067,309 @@ mod tests {
         assert_eq!(candidate.entry.slug, "cleared-one");
         assert_eq!(
             candidate.entry.clears_when,
-            Some(ClearsWhen::Prose("MV.3.A lands".to_string()))
+            Some(ClearsWhen::Predicate(ClearsWhenPredicate::BlockClosed {
+                repo: "repo-a".to_string(),
+                id: "MV.3.A".to_string(),
+                note: None,
+            }))
         );
         assert_eq!(candidate.evidence, "block repo-a:MV.3.A closed");
+    }
+
+    /// AC1: a `Cleared`-lane entry whose `clears_when` is a `String` (prose) is
+    /// refused, not disposed — even though its mined refs are all satisfied and
+    /// it landed in `CarryoverLane::Cleared` for reporting purposes.
+    #[test]
+    fn compute_disposal_plan_refuses_a_prose_clears_when_even_when_fully_cleared() {
+        let files = vec![(
+            src("repo-a"),
+            state_file(
+                "repo-a",
+                vec![("MV.3.A", "closed")],
+                vec![item(
+                    "prose-cleared",
+                    "deferred",
+                    Some("MV.3.A lands"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        // Reporting is unchanged: the prose entry still lands in Cleared.
+        assert_eq!(report.cleared, 1);
+        assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
+
+        let plan = compute_disposal_plan(&report, &files, &[], COMMAND_EXEC_TIMEOUT);
+        assert!(
+            plan.candidates.is_empty(),
+            "a prose clears_when must never produce a disposal candidate, got: {:#?}",
+            plan.candidates
+        );
+        assert_eq!(plan.refused.len(), 1);
+        assert_eq!(plan.refused[0].repo, "repo-a");
+        assert_eq!(plan.refused[0].slug, "prose-cleared");
+        assert!(
+            plan.refused[0].reason.contains("prose-cleared"),
+            "refusal must name the slug, got: {}",
+            plan.refused[0].reason
+        );
+        assert!(
+            plan.refused[0].reason.to_lowercase().contains("typed"),
+            "refusal must state a typed predicate is required, got: {}",
+            plan.refused[0].reason
+        );
+    }
+
+    /// AC2 — REGRESSION FIXTURE, bella, verbatim: prose reading
+    /// `path scripts/check_scenes.sh exists; path scripts/vhs/scenes.toml exists`
+    /// with BOTH files present. Before this task, both mined path refs were
+    /// satisfied and the entry disposed; after, it must be refused.
+    #[test]
+    fn compute_disposal_plan_refuses_the_bella_scenes_prose_regression() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join("scripts/vhs")).unwrap();
+        std::fs::write(dir.join("scripts/check_scenes.sh"), "#!/bin/sh\n").unwrap();
+        std::fs::write(dir.join("scripts/vhs/scenes.toml"), "").unwrap();
+
+        let files = vec![(
+            src("bella"),
+            state_file(
+                "bella",
+                vec![],
+                vec![item(
+                    "rapid-keypresses-blank-the-render",
+                    "known_issue",
+                    Some(
+                        "path scripts/check_scenes.sh exists; path scripts/vhs/scenes.toml exists",
+                    ),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let mut repo_paths = HashMap::new();
+        repo_paths.insert("bella".to_string(), dir.to_path_buf());
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            dir,
+            &repo_paths,
+            "2026-09-02",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        assert_eq!(
+            report.cleared, 1,
+            "both mined paths exist, so this still lands in Cleared for reporting"
+        );
+
+        let plan = compute_disposal_plan(&report, &files, &[], COMMAND_EXEC_TIMEOUT);
+        assert!(
+            plan.candidates.is_empty(),
+            "the bella regression must not be disposed, got: {:#?}",
+            plan.candidates
+        );
+        assert_eq!(plan.refused.len(), 1);
+        assert_eq!(plan.refused[0].slug, "rapid-keypresses-blank-the-render");
+    }
+
+    /// AC3 — REGRESSION FIXTURE, engine-rs: prose containing a block id whose
+    /// status is closed. Before this task, the mined block ref was satisfied
+    /// and the entry disposed; after, it must be refused.
+    #[test]
+    fn compute_disposal_plan_refuses_the_engine_rs_closed_block_prose_regression() {
+        let files = vec![(
+            src("engine-rs"),
+            state_file(
+                "engine-rs",
+                vec![("EN.14.C", "closed")],
+                vec![item(
+                    "engine-leaves-allow-dead-code-on-helpers-it-later-wires-up",
+                    "known_issue",
+                    Some("no honest typed predicate exists; block EN.14.C closed"),
+                    vec![],
+                    "2020-01-01",
+                    None,
+                    None,
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-09-02",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        assert_eq!(
+            report.cleared, 1,
+            "the mined block id resolves closed, so this still lands in Cleared for reporting"
+        );
+
+        let plan = compute_disposal_plan(&report, &files, &[], COMMAND_EXEC_TIMEOUT);
+        assert!(
+            plan.candidates.is_empty(),
+            "the engine-rs regression must not be disposed, got: {:#?}",
+            plan.candidates
+        );
+        assert_eq!(plan.refused.len(), 1);
+        assert_eq!(
+            plan.refused[0].slug,
+            "engine-leaves-allow-dead-code-on-helpers-it-later-wires-up"
+        );
+    }
+
+    /// AC4: `file_exists` disposes exactly as before Guard (5).
+    #[test]
+    fn compute_disposal_plan_disposes_a_typed_file_exists_predicate_unchanged() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        std::fs::write(dir.join("marker.txt"), "").unwrap();
+
+        let files = vec![(
+            src("repo-a"),
+            state_file(
+                "repo-a",
+                vec![],
+                vec![predicate_item(
+                    "file-cleared",
+                    "deferred",
+                    ClearsWhenPredicate::FileExists {
+                        path: "marker.txt".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let mut repo_paths = HashMap::new();
+        repo_paths.insert("repo-a".to_string(), dir.to_path_buf());
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            dir,
+            &repo_paths,
+            "2026-08-03",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        assert_eq!(report.cleared, 1);
+
+        let plan = compute_disposal_plan(&report, &files, &[], COMMAND_EXEC_TIMEOUT);
+        assert_eq!(plan.candidates.len(), 1);
+        assert!(plan.refused.is_empty());
+        assert_eq!(plan.candidates[0].slug, "file-cleared");
+    }
+
+    /// AC4: `file_contains` disposes exactly as before Guard (5).
+    #[test]
+    fn compute_disposal_plan_disposes_a_typed_file_contains_predicate_unchanged() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        std::fs::write(dir.join("marker.txt"), "the-needle-is-here").unwrap();
+
+        let files = vec![(
+            src("repo-a"),
+            state_file(
+                "repo-a",
+                vec![],
+                vec![predicate_item(
+                    "contains-cleared",
+                    "deferred",
+                    ClearsWhenPredicate::FileContains {
+                        path: "marker.txt".to_string(),
+                        pattern: "the-needle-is-here".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let mut repo_paths = HashMap::new();
+        repo_paths.insert("repo-a".to_string(), dir.to_path_buf());
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            dir,
+            &repo_paths,
+            "2026-08-03",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        assert_eq!(report.cleared, 1);
+
+        let plan = compute_disposal_plan(&report, &files, &[], COMMAND_EXEC_TIMEOUT);
+        assert_eq!(plan.candidates.len(), 1);
+        assert!(plan.refused.is_empty());
+        assert_eq!(plan.candidates[0].slug, "contains-cleared");
+    }
+
+    /// AC4: `command_exits_zero` disposes exactly as before Guard (5), when
+    /// `--allow-exec` opted the sweep in.
+    #[test]
+    fn compute_disposal_plan_disposes_a_typed_command_exits_zero_predicate_unchanged() {
+        let files = vec![(
+            src("repo-a"),
+            state_file(
+                "repo-a",
+                vec![],
+                vec![predicate_item(
+                    "cmd-cleared",
+                    "deferred",
+                    ClearsWhenPredicate::CommandExitsZero {
+                        command: "true".to_string(),
+                        note: None,
+                    },
+                )],
+            ),
+        )];
+        let status = status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            std::env::temp_dir().as_path(),
+            &HashMap::new(),
+            "2026-08-03",
+            &thresholds(),
+            None,
+            true, // allow_exec: true
+            COMMAND_EXEC_TIMEOUT,
+        );
+        assert_eq!(report.cleared, 1);
+
+        let plan = compute_disposal_plan(&report, &files, &[], COMMAND_EXEC_TIMEOUT);
+        assert_eq!(plan.candidates.len(), 1);
+        assert!(plan.refused.is_empty());
+        assert_eq!(plan.candidates[0].slug, "cmd-cleared");
     }
 
     #[test]
@@ -10020,14 +10382,14 @@ mod tests {
             state_file(
                 "repo-a",
                 vec![("MV.3.A", "closed")],
-                vec![item(
+                vec![predicate_item(
                     "cleared-one",
                     "deferred",
-                    Some("MV.3.A lands"),
-                    vec![],
-                    "2020-01-01",
-                    None,
-                    None,
+                    ClearsWhenPredicate::BlockClosed {
+                        repo: "repo-a".to_string(),
+                        id: "MV.3.A".to_string(),
+                        note: None,
+                    },
                 )],
             ),
         )];
@@ -10109,6 +10471,79 @@ mod tests {
 
         let plan = compute_disposal_plan(&report, &files, &[], COMMAND_EXEC_TIMEOUT);
         assert!(plan.candidates.is_empty());
+    }
+
+    /// AC5, STRUCTURAL: no code path reachable from `compute_disposal_plan` — its
+    /// own body, plus `describe_clearing_evidence`, `run_dispose`, and
+    /// `dispose_repo`, which together make up the write-selecting half of the
+    /// dispose path — calls the prose-mining functions
+    /// (`block_refs_from_prose` / `path_refs_from_prose`) that extract a path or
+    /// block id out of a `String` `clears_when`.
+    ///
+    /// A positive control matters here: a search that finds nothing is only
+    /// evidence if it can find something. The same textual search, run over
+    /// `evaluate_carryover_with_dedup_and_widening` (the function that actually
+    /// mines prose — upstream of the dispose path, and where those refs are
+    /// still produced for `mev carryover`'s plain report), DOES find both
+    /// calls — proving the search itself works and the absence below is a
+    /// true negative, not a broken instrument.
+    #[test]
+    fn compute_disposal_plan_and_its_callees_never_call_the_prose_mining_functions() {
+        let source = include_str!("carryover.rs");
+
+        // Isolate each function's own source text: from its `pub fn <name>`
+        // (or `fn <name>` for the private write-path helpers) declaration to
+        // the next top-level (zero-indent) `fn` declaration.
+        fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+            let start = source
+                .find(signature)
+                .unwrap_or_else(|| panic!("could not find `{signature}` in carryover.rs"));
+            let rest = &source[start..];
+            // Skip past this function's own signature line before looking for
+            // the NEXT top-level fn, so we don't immediately match ourselves.
+            let after_sig = &rest[signature.len()..];
+            let next_fn_offset = after_sig
+                .match_indices("\npub fn ")
+                .chain(after_sig.match_indices("\nfn "))
+                .map(|(i, _)| i)
+                .min()
+                .unwrap_or(after_sig.len());
+            &rest[..signature.len() + next_fn_offset]
+        }
+
+        let dispose_path_functions = [
+            "pub fn compute_disposal_plan(",
+            "pub fn describe_clearing_evidence(",
+            "pub fn run_dispose(",
+            "pub fn dispose_repo(",
+        ];
+        for sig in dispose_path_functions {
+            let body = function_body(source, sig);
+            assert!(
+                !body.contains("block_refs_from_prose("),
+                "`{sig}` must never call block_refs_from_prose — it is on the dispose path"
+            );
+            assert!(
+                !body.contains("path_refs_from_prose("),
+                "`{sig}` must never call path_refs_from_prose — it is on the dispose path"
+            );
+        }
+
+        // Positive control: the same two substrings ARE present in the
+        // upstream evaluator, where prose mining legitimately still happens
+        // for reporting purposes (Guard (5)'s doc comment on
+        // `compute_disposal_plan`). If this failed, the search above would be
+        // proven broken rather than the dispose path proven clean.
+        let evaluator_body =
+            function_body(source, "pub fn evaluate_carryover_with_dedup_and_widening(");
+        assert!(
+            evaluator_body.contains("block_refs_from_prose("),
+            "positive control failed: the evaluator should still mine block refs from prose"
+        );
+        assert!(
+            evaluator_body.contains("path_refs_from_prose("),
+            "positive control failed: the evaluator should still mine path refs from prose"
+        );
     }
 
     #[test]
@@ -11079,6 +11514,7 @@ mod tests {
                     item("second", "deferred", None, vec![], "2020-01-02", None, None),
                 ),
             ],
+            refused: vec![],
             skipped: vec![],
         };
         let rendered = render_dispose_preamble(&plan);
@@ -11136,6 +11572,7 @@ mod tests {
                     None,
                 ),
             )],
+            refused: vec![],
             skipped: vec![SkippedRepo {
                 repo: "repo-broken".to_string(),
                 error: "invalid JSON".to_string(),
