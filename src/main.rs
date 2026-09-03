@@ -124,7 +124,7 @@ enum BlockGraphScopeArg {
 #[command(
     name = "mev",
     version,
-    about = "Validate Markdown/MDX content: learn-agentic-ai.com content and Bastion Brain OKF frontmatter"
+    about = "Validate Markdown/MDX content against pluggable schemas, including Bastion Brain OKF frontmatter"
 )]
 struct Cli {
     /// Emit machine-readable JSON envelope to stdout instead of a human summary.

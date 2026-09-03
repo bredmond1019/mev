@@ -1,5 +1,5 @@
-//! mev (`mev`) — parses, validates, and (later) compiles the
-//! MDX/Markdown content for learn-agentic-ai.com.
+//! mev (`mev`) — parses, validates, and (later) compiles MDX/Markdown
+//! content against a pluggable set of content schemas.
 //!
 //! Phase 0 lays the testable skeleton: a CLI surface and the `Diagnostic` type that every
 //! future check emits. Phase 1, Block B adds content-tree crawl + classification (see
@@ -179,7 +179,7 @@ pub fn validate(root: &std::path::Path) -> anyhow::Result<Report> {
     ))
 }
 
-/// Validate the learn-agentic-ai.com module tree with the shared content-lint passes
+/// Validate a content module tree with the shared content-lint passes
 /// (`mev_learn_ai::lint::lint_code_blocks` / `mev_learn_ai::lint::lint_local_links`) turned on.
 ///
 /// Phase 12, Block A: identical crawl and frontmatter/struct checks to [`validate`], plus
@@ -194,7 +194,7 @@ pub fn validate_with_lint(root: &std::path::Path) -> anyhow::Result<Report> {
     ))
 }
 
-/// Validate the learn-agentic-ai.com blog tree (EN + pt-BR) rooted at `root`.
+/// Validate a content blog tree (EN + pt-BR) rooted at `root`.
 ///
 /// Phase 12, Block A: delegates to [`BlogValidator`] via the [`ContentValidator`] trait's
 /// default `run` driver. Surfaces `E_BLOG_MALFORMED_FRONTMATTER`, `E_BLOG_MISSING_FIELD`,
