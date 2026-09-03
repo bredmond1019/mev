@@ -11,6 +11,42 @@ related: [status]
 timestamp: "2026-09-01T00:30:00-03:00"
 ---
 
+## [run: 2026-09-03]
+
+### `MV.ticket.emit-state-write-is-corpus-wide-and-unscoped` CLOSED — `/sdlc-flow`, 5 of 5 tasks, PASS
+
+Resumed the run that bailed at task 1 on a foreign lint gate (see prior entry) and drove it through
+to a clean PASS. Task 1 was already fully implemented and committed by the earlier attempt (the
+whole-tree scope-leak test in `tests/it/emit_state_scope.rs`, observed RED); this run verified it
+still holds and made no changes there. Task 2 fixed the scope leak itself: `plan_lane_segments`,
+`plan_frontier`, and `plan_availability` (steps 8/9/10 in `src/lib.rs`) now route through
+`filter_plan_by_scope` like every other planner, so a `--scope`d write narrows what these three
+fleet-wide derivers actually write, not only what the unscoped path emits — pinned by
+`unscoped_write_still_writes_lane_derived_artifacts`. Task 3 added
+`tests/it/emit_state_authored_roundtrip.rs`: Test A does a field-level (key-presence-aware) diff of
+`reference[]`/`carryover[]` across an unscoped `emit_state` and was observed RED — an authored
+`related: []` came back with the key dropped, not nulled, correcting an earlier "-> null" record
+against the real diff (`PRESENT ([]) -> ABSENT`); Test B is the control, a container-count/slug-set
+comparison in the shape of engine-rs's existing check, and it PASSES on the same unfixed source —
+demonstrating that check is structurally blind to this exact mutation. Task 4 fixed the mutation at
+its actual source in `okf-core`: `Reference::related` no longer drops an authored empty list on
+serialize, and a second, previously undiscovered instance of the same asymmetry —
+`Carryover::clears_when` gaining a phantom explicit `null` — was fixed alongside it; okf-core's own
+round-trip fixtures were updated to match the now-symmetric behavior. Task 5 ran the full validation
+suite (fmt, clippy, `cargo test`, release build, `cargo audit`, `check_consumers.sh`,
+`test_check_consumers.sh`, locked-lockfile check) clean, with `check_consumers.sh` confirming 2 of 2
+consumers (bastion, engine-rs) actually compiled against the working tree. Final review verdict:
+PASS, no findings. Next: `MV.ticket.lane-file-registration-two-clauses` or the next block off the
+priority board.
+
+```
+340aa6a docs: update docs for MV.ticket.emit-state-write-is-corpus-wide-and-unscoped
+ed96658 test: field-level authored round-trip test + container-count control, observed RED
+18a7647 feat: implement MV.ticket.emit-state-write-is-corpus-wide-and-unscoped-task2
+516138a chore: wrap up MV.ticket.emit-state-write-is-corpus-wide-and-unscoped
+df76a9f test: whole-tree scope-leak test for emit-state --scope, observed RED
+```
+
 ## [run: 2026-09-02]
 
 ### `MV.ticket.emit-state-write-is-corpus-wide-and-unscoped` BAILED — `/sdlc-flow`, task 1 of 5
