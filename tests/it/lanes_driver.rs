@@ -114,6 +114,15 @@ fn write_corpus(root: &Path) {
         }),
     );
 
+    // BE.1.A's on-disk block record — both registration clauses must hold
+    // (`MV.ticket.lane-file-registration-two-clauses` Task 2) for this fixture's
+    // live head to genuinely report `startable` rather than `held-unregistered`.
+    write_json(
+        root,
+        "repos/beta/planning/blocks/BE.1.A.json",
+        &serde_json::json!({ "id": "BE.1.A" }),
+    );
+
     // Ownership changes between AL.1.B and BE.1.A, so this is two segments, not one.
     write_json(
         root,

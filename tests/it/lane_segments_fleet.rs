@@ -18,6 +18,9 @@
 
 use std::path::{Path, PathBuf};
 
+use mev::brain::availability::{
+    SegmentAvailability, SegmentStatus, apply_unregistered_overrides, lane_registration_issues,
+};
 use mev::brain::config::find_brain_root;
 use mev::brain::lane_segments::{
     LaneBlockRef, LaneFile, discover_lane_files, lane_registration_diagnostics, segment_lane_blocks,
@@ -417,6 +420,93 @@ fn lane_registration_diagnostics_terminal_statuses_are_exempt_from_clause_2() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// mev lanes surfacing — MV.ticket.lane-file-registration-two-clauses Task 2
+// ---------------------------------------------------------------------------
+
+/// A synthetic `SegmentStatus` whose head is `<repo>:<id>`, matching the
+/// `"repo:id"` key [`SegmentStatus::head`] documents.
+fn head_status(repo: &str, id: &str, availability: SegmentAvailability) -> SegmentStatus {
+    SegmentStatus {
+        roadmap: "close-the-loop".to_string(),
+        lane: "substrate".to_string(),
+        segment: 0,
+        repo: repo.to_string(),
+        head: Some(format!("{repo}:{id}")),
+        availability,
+        reason: None,
+    }
+}
+
+#[test]
+fn availability_overrides_startable_with_held_unregistered_for_all_three_failing_cases() {
+    // The same four-case matrix `lane_registration_diagnostics` is tested against
+    // above, now run through `lane_registration_issues` +
+    // `apply_unregistered_overrides` — the path `mev lanes --json` actually takes
+    // (`MV.ticket.lane-file-registration-two-clauses` Task 2, record AC1).
+    let cases: &[(&str, &str, bool, bool)] = &[
+        // (fixture label, block id, register-in-tracks, write-on-disk-record)
+        ("both clauses hold", "A.1", true, true),
+        ("row-only (clause 2)", "A.2", true, false),
+        ("record-only (clause 1)", "A.3", false, true),
+        ("neither clause holds", "A.4", false, false),
+    ];
+
+    for (label, id, in_tracks, has_record) in cases {
+        let dir = mev::testsupport::unique_temp_dir(&format!(
+            "mev-availability-overrides-{}",
+            id.to_lowercase()
+        ));
+        let blocks_json = if *in_tracks {
+            format!(r#"[{{"id":"{id}","title":"x","status":"open"}}]"#)
+        } else {
+            "[]".to_string()
+        };
+        let (src, file) = state_source_and_file(&dir, "repoA", &blocks_json);
+        if *has_record {
+            write_block_record(&dir, "repoA", id);
+        }
+        let loaded = vec![(src, file)];
+        let lane_file = one_block_lane(&dir.join("lane-substrate.json"), id, "repoA");
+        let issues = lane_registration_issues(std::slice::from_ref(&lane_file), &loaded);
+
+        let mut statuses = vec![head_status("repoA", id, SegmentAvailability::Startable)];
+        apply_unregistered_overrides(&mut statuses, &issues);
+
+        let both_clauses_hold = *in_tracks && *has_record;
+        if both_clauses_hold {
+            assert_eq!(
+                statuses[0].availability,
+                SegmentAvailability::Startable,
+                "{label}: registered head must stay startable, the positive control \
+                 distinguishing an empty result from a check that never ran"
+            );
+            assert_eq!(
+                statuses[0].reason, None,
+                "{label}: startable carries no reason"
+            );
+        } else {
+            assert_eq!(
+                statuses[0].availability,
+                SegmentAvailability::HeldUnregistered,
+                "{label}: an unregistered head must not report startable"
+            );
+            let reason = statuses[0].reason.as_deref().unwrap_or_default();
+            assert!(
+                reason.contains(*id),
+                "{label}: reason must name the block, got {reason:?}"
+            );
+            let expected_clause = if *in_tracks { "clause 2" } else { "clause 1" };
+            assert!(
+                reason.contains(expected_clause),
+                "{label}: expected reason to name {expected_clause}, got {reason:?}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[test]

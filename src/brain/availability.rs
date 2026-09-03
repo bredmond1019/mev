@@ -43,8 +43,8 @@ use crate::brain::config::{RepoEntry, load_brain_config};
 use crate::brain::emit::{EmitAction, EmitPlan};
 use crate::brain::frontier::{Frontier, FrontierEntry, compute_frontier, ensure_untruncated};
 use crate::brain::lane_segments::{
-    DerivedBlockPosition, build_owner_index, derive_lane_positions, discover_lane_files,
-    unresolved_owner_diagnostics,
+    DerivedBlockPosition, LaneFile, build_owner_index, derive_lane_positions, discover_lane_files,
+    lane_registration_diagnostics, unresolved_owner_diagnostics,
 };
 use crate::brain::lock::pid_is_alive;
 use crate::brain::state::{
@@ -59,23 +59,64 @@ use crate::shared::extract_frontmatter;
 /// both an unmet block *and* a busy repo. **Exactly one state is reported per
 /// segment**, per this fixed, documented precedence (highest first):
 ///
-/// `Done` > `HeldBlock` > `HeldOperator` > `HeldRepoBusy` > `HeldSlot` > `Startable`.
+/// `Done` > `HeldUnregistered` > `HeldBlock` > `HeldOperator` > `HeldRepoBusy` >
+/// `HeldSlot` > `Startable`.
 ///
-/// Intrinsic reasons (the segment's own dependency graph: `Done`, `HeldBlock`,
-/// `HeldOperator`) outrank environmental ones (`HeldRepoBusy`, `HeldSlot`) because the
-/// intrinsic reason is the one an operator can act on — closing the blocking block or
-/// clearing the gate — and it does not change just because some unrelated lane exits
-/// and frees a repo or a concurrency slot. Environmental holds are true but transient;
-/// intrinsic holds are the actual next action.
+/// Intrinsic reasons (the segment's own dependency graph: `Done`, `HeldUnregistered`,
+/// `HeldBlock`, `HeldOperator`) outrank environmental ones (`HeldRepoBusy`,
+/// `HeldSlot`) because the intrinsic reason is the one an operator can act on —
+/// closing the blocking block or clearing the gate — and it does not change just
+/// because some unrelated lane exits and frees a repo or a concurrency slot.
+/// Environmental holds are true but transient; intrinsic holds are the actual next
+/// action.
 ///
 /// This task (`MV.13.C` Task 1) implements only the intrinsic tier: `Done`,
 /// `HeldBlock`, `HeldOperator`, `Startable`. `HeldRepoBusy` (Task 2) and `HeldSlot`
 /// (Task 3) are environmental and layered on top without disturbing this precedence.
+///
+/// ## `HeldUnregistered` (`MV.ticket.lane-file-registration-two-clauses` Task 2)
+///
+/// A segment's head can pass every intrinsic/environmental check above and still be
+/// unexecutable: neither clause of "registered" holds for it (see
+/// [`crate::brain::lane_segments::lane_registration_diagnostics`]) — its id is absent
+/// from the owning repo's `state.json` `tracks[].blocks[]` (clause 1), or it has no
+/// `planning/blocks/<id>.json` record on disk (clause 2). Before this task such a
+/// head fell through every check silently and reported `Startable`: the block graph
+/// has no entry to compute `unmet_blocks`/`unmet_gates` from, so `intrinsic_status`
+/// waved it through — precisely the failure mode `MV.ticket.lane-file-registration-two-clauses`
+/// exists to close.
+///
+/// **Ranked directly under `Done`, above every other state — including
+/// `HeldBlock`/`HeldOperator`.** Those two describe a real head being blocked by
+/// something else in the graph; `HeldUnregistered` describes the head itself not
+/// being a trustworthy graph citizen, so any `unmet_blocks`/`unmet_gates` computed
+/// for it cannot be relied on either. It ranks above the environmental tier for the
+/// same reason `HeldBlock`/`HeldOperator` do: it is not transient, and an operator
+/// cannot resolve it by waiting for some other lane to free a slot.
+///
+/// Deliberately a **new state**, not folded into an existing one's `reason` text: a
+/// consumer that checks `availability == Startable` to decide whether a lane can be
+/// worked must see this as *not* startable, not merely as a `Startable` segment with
+/// a suspicious-looking reason string attached.
+///
+/// Applied as a post-process override (see [`apply_unregistered_overrides`]) rather
+/// than threaded through [`intrinsic_status`]/[`resolve_status`]/
+/// [`resolve_status_with_slot`]: registration issues are computed once per
+/// `Vec<LaneFile>` (corpus-wide, not per `FrontierEntry`), and the override needs
+/// only the segment's already-resolved `head` key plus that one shared issue list —
+/// threading it as a fifth parameter through every tier-resolution function down to
+/// [`intrinsic_status`] would not change the answer, only the plumbing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SegmentAvailability {
     /// The segment has no frontier entry — every block in it is closed.
     Done,
+    /// The head fails a lane-registration clause (`MV.ticket.lane-file-registration-two-clauses`
+    /// Task 2): its id is absent from the owning repo's `state.json`
+    /// `tracks[].blocks[]`, or it has no `planning/blocks/<id>.json` record on disk.
+    /// Ranks directly under `Done` — see the module doc's `HeldUnregistered` section
+    /// for why it outranks `HeldBlock`/`HeldOperator`.
+    HeldUnregistered,
     /// The head's `unmet_blocks` is non-empty.
     HeldBlock,
     /// The head's `unmet_gates` is non-empty (and `unmet_blocks` is empty).
@@ -129,6 +170,68 @@ fn intrinsic_status(entry: &FrontierEntry) -> (SegmentAvailability, Option<Strin
         );
     }
     (SegmentAvailability::Startable, None)
+}
+
+// ---------------------------------------------------------------------------
+// held-unregistered — MV.ticket.lane-file-registration-two-clauses Task 2
+// ---------------------------------------------------------------------------
+
+/// Run [`lane_registration_diagnostics`] over every `lane_files` entry and flatten the
+/// results into one corpus-wide list — the shared evidence both
+/// [`apply_unregistered_overrides`] (the `HeldUnregistered` availability signal) and
+/// [`LaneAvailabilityArtifact::registration_issues`] (the raw per-lane, per-block
+/// listing `mev lanes --json` carries) are built from, computed once rather than
+/// twice.
+pub fn lane_registration_issues(
+    lane_files: &[LaneFile],
+    loaded: &[(StateSource, StateFile)],
+) -> Vec<Diagnostic> {
+    lane_files
+        .iter()
+        .flat_map(|lf| lane_registration_diagnostics(lf, loaded))
+        .collect()
+}
+
+/// If `head` (a [`SegmentStatus::head`] `"repo:id"` key) names a block
+/// [`lane_registration_issues`] flagged, return `HeldUnregistered` plus that
+/// diagnostic's message verbatim as the reason.
+///
+/// Matches on `issues`' fixed `"lane block '<id>' (repo '<repo>'"` message prefix —
+/// both the clause-1 and clause-2 messages [`lane_registration_diagnostics`] emits
+/// share it — rather than re-deriving the pass/fail decision a second, independent
+/// way; that function alone owns which clause failed and why.
+fn unregistered_status(head: &str, issues: &[Diagnostic]) -> Option<(SegmentAvailability, String)> {
+    let (repo, id) = head.split_once(':')?;
+    let needle = format!("lane block '{id}' (repo '{repo}'");
+    issues
+        .iter()
+        .find(|d| d.message.contains(&needle))
+        .map(|d| (SegmentAvailability::HeldUnregistered, d.message.clone()))
+}
+
+/// Overlay [`unregistered_status`] onto an already-resolved `Vec<SegmentStatus>`,
+/// per [`SegmentAvailability`]'s documented precedence: `HeldUnregistered` outranks
+/// every state except `Done`, so this only ever touches a status whose `availability`
+/// is not already `Done`, and it always wins over whatever was computed there
+/// (`HeldBlock`, `HeldOperator`, `HeldRepoBusy`, `HeldSlot`, or `Startable` alike) —
+/// see the module doc's `HeldUnregistered` section for why. A `Done` segment has no
+/// head (`status.head` is `None`), so this is skipped for it either way.
+pub fn apply_unregistered_overrides(statuses: &mut [SegmentStatus], issues: &[Diagnostic]) {
+    if issues.is_empty() {
+        return;
+    }
+    for status in statuses.iter_mut() {
+        if status.availability == SegmentAvailability::Done {
+            continue;
+        }
+        let Some(head) = status.head.as_deref() else {
+            continue;
+        };
+        if let Some((availability, reason)) = unregistered_status(head, issues) {
+            status.availability = availability;
+            status.reason = Some(reason);
+        }
+    }
 }
 
 /// One segment's identity — `(roadmap, lane, segment)` plus its owning `repo` — the
@@ -994,6 +1097,15 @@ pub struct LaneAvailabilityArtifact {
     /// zero live `HeldSlot` holds apart from one that could not check.
     pub degraded: bool,
     pub segments: Vec<LaneAvailabilityEntry>,
+    /// Every block a lane record names that fails either registration clause,
+    /// corpus-wide — [`lane_registration_issues`] run over every discovered lane
+    /// file, carried verbatim (`MV.ticket.lane-file-registration-two-clauses` Task
+    /// 2). Not scoped to segment heads: a block later in a chain that has not yet
+    /// become a head still shows up here, so a lane can see the problem before it
+    /// reaches that block, not only once it becomes the head that
+    /// `HeldUnregistered` (see [`SegmentAvailability`]) flags. Each [`Diagnostic`]'s
+    /// `message` names the lane file, the block, the repo, and which clause failed.
+    pub registration_issues: Vec<Diagnostic>,
 }
 
 /// Plan the [`LANE_AVAILABILITY_ARTIFACT`] write: derive lane positions and the
@@ -1061,9 +1173,12 @@ pub fn plan_availability(root: &Path, loaded: &[(StateSource, StateFile)]) -> Em
     plan.diagnostics.extend(live_run_diags);
 
     let all_segments = discover_segments(&lane_positions);
-    let (statuses, degraded) =
+    let (mut statuses, degraded) =
         segment_statuses_with_slots(&frontier, &live_runs, &config.repos, root, &all_segments);
     let leverage_by_segment = lane_leverage(&graph, &lane_positions, &frontier);
+
+    let registration_issues = lane_registration_issues(&lane_files, loaded);
+    apply_unregistered_overrides(&mut statuses, &registration_issues);
 
     let segments: Vec<LaneAvailabilityEntry> = statuses
         .into_iter()
@@ -1082,6 +1197,7 @@ pub fn plan_availability(root: &Path, loaded: &[(StateSource, StateFile)]) -> Em
     let artifact = LaneAvailabilityArtifact {
         derived_at: chrono::Local::now().to_rfc3339(),
         degraded,
+        registration_issues,
         segments,
     };
 
@@ -2026,10 +2142,27 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
-    fn availability_state_file_fixture(repo: &str, id: &str) -> (StateSource, StateFile) {
+    /// `abs_path` is a genuine on-disk path under `dir` (not a bare relative
+    /// string) so [`lane_registration_issues`]' walk up to the repo root
+    /// (`abs_path.parent().parent()`) resolves to a real `<dir>/<repo>` — required
+    /// since `MV.ticket.lane-file-registration-two-clauses` Task 2 wired that check
+    /// into [`plan_availability`] itself. This also writes a matching
+    /// `planning/blocks/<id>.json` record under that root, so a caller of this
+    /// fixture gets a genuinely *registered* (both clauses hold) block by default;
+    /// see [`plan_availability_writes_artifact_with_leverage_and_derived_at`], the
+    /// only caller, which relies on the resulting segment reporting `startable`.
+    fn availability_state_file_fixture(
+        dir: &Path,
+        repo: &str,
+        id: &str,
+    ) -> (StateSource, StateFile) {
+        let abs_path = dir.join(repo).join("planning/state.json");
+        std::fs::create_dir_all(abs_path.parent().unwrap()).unwrap();
+        std::fs::write(&abs_path, "{}").unwrap(); // load_state below reads from the string, not this file; a placeholder is enough to make the path genuine.
+        write_block_record(dir, repo, id);
         let src = StateSource {
             repo_slug: repo.to_string(),
-            abs_path: PathBuf::from(format!("{repo}/planning/state.json")),
+            abs_path,
             expected_kind: "project",
         };
         let file: StateFile = serde_json::from_str(&format!(
@@ -2049,7 +2182,7 @@ mod tests {
             "planning/roadmaps/alpha/lane-substrate.json",
             r#"{"lane":"substrate","roadmap":"alpha","blocks":[{"id":"MV.ticket.a","origin_roadmap":"alpha","repo":"mev"}]}"#,
         );
-        let loaded = vec![availability_state_file_fixture("mev", "MV.ticket.a")];
+        let loaded = vec![availability_state_file_fixture(&dir, "mev", "MV.ticket.a")];
 
         let plan = plan_availability(&dir, &loaded);
         assert!(
@@ -2106,6 +2239,7 @@ mod tests {
         let artifact = LaneAvailabilityArtifact {
             derived_at: "2026-08-17T00:00:00+00:00".to_string(),
             degraded: false,
+            registration_issues: Vec::new(),
             segments: vec![
                 LaneAvailabilityEntry {
                     status: SegmentStatus {
@@ -2155,6 +2289,7 @@ mod tests {
         let artifact = LaneAvailabilityArtifact {
             derived_at: "2026-08-17T00:00:00+00:00".to_string(),
             degraded: false,
+            registration_issues: Vec::new(),
             segments: vec![LaneAvailabilityEntry {
                 status: SegmentStatus {
                     roadmap: "alpha".to_string(),
@@ -2425,5 +2560,215 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // -----------------------------------------------------------------------
+    // held-unregistered — MV.ticket.lane-file-registration-two-clauses Task 2
+    // -----------------------------------------------------------------------
+
+    /// Write `<dir>/<repo>/planning/state.json` carrying one track with the given
+    /// raw `tracks[].blocks[]` JSON array, then load it back — mirrors
+    /// `tests/it/lane_segments_fleet.rs`'s identically-named helper, so
+    /// `lane_registration_diagnostics` (via [`lane_registration_issues`]) can walk
+    /// `abs_path.parent().parent()` on a genuine on-disk path.
+    fn state_source_and_file(
+        dir: &Path,
+        repo: &str,
+        blocks_json: &str,
+    ) -> (StateSource, StateFile) {
+        let state_path = dir.join(repo).join("planning/state.json");
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &state_path,
+            format!(
+                r#"{{"repo":"{repo}","kind":"project","updated":"2026-09-02","tracks":[
+                    {{"title":"t","blocks":{blocks_json}}}
+                ]}}"#
+            ),
+        )
+        .unwrap();
+        let file =
+            crate::brain::state::load_state(&state_path).expect("fixture state.json must load");
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: state_path,
+            expected_kind: "project",
+        };
+        (src, file)
+    }
+
+    /// Write `<dir>/<repo>/planning/blocks/<id>.json` — clause 2's on-disk record.
+    fn write_block_record(dir: &Path, repo: &str, id: &str) {
+        let path = dir
+            .join(repo)
+            .join("planning/blocks")
+            .join(format!("{id}.json"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!(r#"{{"id":"{id}"}}"#)).unwrap();
+    }
+
+    fn one_block_lane_file(path: &Path, id: &str, repo: &str) -> LaneFile {
+        LaneFile {
+            roadmap: "close-the-loop".to_string(),
+            lane: "substrate".to_string(),
+            path: path.to_path_buf(),
+            blocks: vec![crate::brain::lane_segments::LaneBlockRef {
+                id: id.to_string(),
+                line: 1,
+                origin_roadmap: Some("close-the-loop".to_string()),
+                repo: repo.to_string(),
+            }],
+            directives: None,
+        }
+    }
+
+    fn segment_status(repo: &str, id: &str, availability: SegmentAvailability) -> SegmentStatus {
+        SegmentStatus {
+            roadmap: "close-the-loop".to_string(),
+            lane: "substrate".to_string(),
+            segment: 0,
+            repo: repo.to_string(),
+            head: Some(format!("{repo}:{id}")),
+            availability,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn apply_unregistered_overrides_flags_a_startable_head_absent_from_tracks() {
+        // Clause 1: the block is not in tracks[] at all — the exact silent-pass bug
+        // this task closes (previously such a head fell through to Startable).
+        let dir = crate::testsupport::unique_temp_dir("mev-availability-unregistered-clause1");
+        let (src, file) = state_source_and_file(&dir, "repoA", r#"[]"#);
+        let loaded = vec![(src, file)];
+        let lane_file = one_block_lane_file(&dir.join("lane-substrate.json"), "GHOST.1", "repoA");
+        let issues = lane_registration_issues(std::slice::from_ref(&lane_file), &loaded);
+        assert_eq!(
+            issues.len(),
+            1,
+            "clause-1 fixture must produce exactly one issue"
+        );
+
+        let mut statuses = vec![segment_status(
+            "repoA",
+            "GHOST.1",
+            SegmentAvailability::Startable,
+        )];
+        apply_unregistered_overrides(&mut statuses, &issues);
+
+        assert_eq!(
+            statuses[0].availability,
+            SegmentAvailability::HeldUnregistered
+        );
+        assert!(statuses[0].reason.as_deref().unwrap().contains("clause 1"));
+        assert!(statuses[0].reason.as_deref().unwrap().contains("GHOST.1"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_unregistered_overrides_flags_a_held_block_head_missing_its_record() {
+        // Clause 2: registered in tracks[], open, but no on-disk record — and the
+        // head is ALREADY HeldBlock from an unrelated dependency. HeldUnregistered
+        // must still win, per the documented precedence (it outranks HeldBlock).
+        let dir = crate::testsupport::unique_temp_dir("mev-availability-unregistered-clause2");
+        let (src, file) = state_source_and_file(
+            &dir,
+            "repoA",
+            r#"[{"id":"A.1","title":"x","status":"open"}]"#,
+        );
+        let loaded = vec![(src, file)];
+        let lane_file = one_block_lane_file(&dir.join("lane-substrate.json"), "A.1", "repoA");
+        let issues = lane_registration_issues(std::slice::from_ref(&lane_file), &loaded);
+        assert_eq!(
+            issues.len(),
+            1,
+            "clause-2 fixture must produce exactly one issue"
+        );
+
+        let mut statuses = vec![SegmentStatus {
+            reason: Some("blocked by repoA:A.0".to_string()),
+            ..segment_status("repoA", "A.1", SegmentAvailability::HeldBlock)
+        }];
+        apply_unregistered_overrides(&mut statuses, &issues);
+
+        assert_eq!(
+            statuses[0].availability,
+            SegmentAvailability::HeldUnregistered
+        );
+        assert!(statuses[0].reason.as_deref().unwrap().contains("clause 2"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_unregistered_overrides_leaves_a_registered_head_untouched() {
+        // Positive control: both clauses hold, so nothing about the status changes —
+        // an empty override must be distinguishable from a check that never ran.
+        let dir = crate::testsupport::unique_temp_dir("mev-availability-unregistered-clean");
+        let (src, file) = state_source_and_file(
+            &dir,
+            "repoA",
+            r#"[{"id":"A.1","title":"x","status":"open"}]"#,
+        );
+        write_block_record(&dir, "repoA", "A.1");
+        let loaded = vec![(src, file)];
+        let lane_file = one_block_lane_file(&dir.join("lane-substrate.json"), "A.1", "repoA");
+        let issues = lane_registration_issues(std::slice::from_ref(&lane_file), &loaded);
+        assert!(
+            issues.is_empty(),
+            "both-clauses-hold fixture must produce no issues"
+        );
+
+        let mut statuses = vec![segment_status(
+            "repoA",
+            "A.1",
+            SegmentAvailability::Startable,
+        )];
+        apply_unregistered_overrides(&mut statuses, &issues);
+
+        assert_eq!(statuses[0].availability, SegmentAvailability::Startable);
+        assert_eq!(statuses[0].reason, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_unregistered_overrides_never_touches_a_done_segment() {
+        // A Done segment has no head — must be skipped even when the issue list is
+        // non-empty (it can never match: `unregistered_status` needs a `head`).
+        let mut statuses = vec![SegmentStatus {
+            head: None,
+            ..segment_status("repoA", "A.1", SegmentAvailability::Done)
+        }];
+        let issues = vec![Diagnostic::warning(
+            "lane-substrate.json",
+            "W_LANE_BLOCK_UNREGISTERED",
+            "lane block 'A.1' (repo 'repoA') fails clause 1: no 'A.1' entry",
+        )];
+        apply_unregistered_overrides(&mut statuses, &issues);
+        assert_eq!(statuses[0].availability, SegmentAvailability::Done);
+        assert_eq!(statuses[0].reason, None);
+    }
+
+    #[test]
+    fn lane_registration_issues_flattens_across_multiple_lane_files() {
+        let dir = crate::testsupport::unique_temp_dir("mev-availability-unregistered-multi-lane");
+        let (src, file) = state_source_and_file(&dir, "repoA", r#"[]"#);
+        let loaded = vec![(src, file)];
+        let lane_files = vec![
+            one_block_lane_file(&dir.join("lane-alpha.json"), "GHOST.1", "repoA"),
+            one_block_lane_file(&dir.join("lane-beta.json"), "GHOST.2", "repoA"),
+        ];
+        let issues = lane_registration_issues(&lane_files, &loaded);
+        assert_eq!(
+            issues.len(),
+            2,
+            "one issue per lane file's failing block, flattened corpus-wide"
+        );
+        assert!(issues.iter().any(|d| d.message.contains("GHOST.1")));
+        assert!(issues.iter().any(|d| d.message.contains("GHOST.2")));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

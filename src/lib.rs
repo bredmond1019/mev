@@ -2554,8 +2554,9 @@ pub fn lanes_brain(
     root: &std::path::Path,
 ) -> anyhow::Result<brain::availability::LaneAvailabilityArtifact> {
     use brain::availability::{
-        LaneAvailabilityArtifact, LaneAvailabilityEntry, SegmentKey, discover_live_runs,
-        discover_segments, lane_leverage, segment_statuses_with_slots,
+        LaneAvailabilityArtifact, LaneAvailabilityEntry, SegmentKey, apply_unregistered_overrides,
+        discover_live_runs, discover_segments, lane_leverage, lane_registration_issues,
+        segment_statuses_with_slots,
     };
     use brain::block_graph::{BlockGraphScope, build_block_graph_export};
     use brain::config::find_brain_config;
@@ -2594,9 +2595,12 @@ pub fn lanes_brain(
 
     let (live_runs, _live_run_diags) = discover_live_runs(root, &config.repos);
     let all_segments = discover_segments(&lane_positions);
-    let (statuses, degraded) =
+    let (mut statuses, degraded) =
         segment_statuses_with_slots(&frontier, &live_runs, &config.repos, root, &all_segments);
     let leverage_by_segment = lane_leverage(&graph, &lane_positions, &frontier);
+
+    let registration_issues = lane_registration_issues(&lane_files, &loaded);
+    apply_unregistered_overrides(&mut statuses, &registration_issues);
 
     let segments: Vec<LaneAvailabilityEntry> = statuses
         .into_iter()
@@ -2614,6 +2618,7 @@ pub fn lanes_brain(
     Ok(LaneAvailabilityArtifact {
         derived_at: chrono::Local::now().to_rfc3339(),
         degraded,
+        registration_issues,
         segments,
     })
 }
