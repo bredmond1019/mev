@@ -7,8 +7,11 @@
 //! values into the binary at compile time (`MEV_BUILD_GIT_SHA`, `MEV_BUILD_DIRTY`,
 //! `MEV_BUILD_SOURCE_DIR`); this check re-derives the live value now and compares.
 //!
-//! The verdict is a pure function of `(stamped_sha, live_sha, dirty, source_dir_exists)` —
-//! [`verdict`] — so it is unit-tested directly without shelling out to git.
+//! The verdict is a pure function of `(stamped_sha, live_sha, dirty, source_dir_exists,
+//! build_inputs)` — [`verdict`] — so it is unit-tested directly without shelling out to
+//! git. When the SHAs differ, a Drift is reported only if the build inputs actually
+//! changed between the two commits (or that comparison could not be made); a non-build
+//! difference — a docs edit, a `log.md` line, a harness sync — reports Pass instead.
 
 use std::path::Path;
 
@@ -18,15 +21,47 @@ const STAMPED_SHA: &str = env!("MEV_BUILD_GIT_SHA");
 const STAMPED_DIRTY: &str = env!("MEV_BUILD_DIRTY");
 const STAMPED_SOURCE_DIR: &str = env!("MEV_BUILD_SOURCE_DIR");
 
-/// The pure verdict function: given the compiled-in stamp and the live state of the
-/// source tree, decide pass / drift / not-evaluable. No I/O — callers gather the live
-/// values (via git or otherwise) and pass them in, which is what makes this directly
-/// unit-testable without shelling out to git in tests.
+/// Build input paths for this repo: anything that can change the compiled `mev` binary.
+/// `Cargo.lock` is included deliberately — a dependency bump changes the binary with no
+/// first-party source change. `crates/` matters as of the learn-ai extraction: a
+/// workspace member is a build input too.
+const BUILD_INPUT_PATHS: &[&str] = &[
+    "src/",
+    "crates/",
+    "tests/",
+    "build.rs",
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo/",
+];
+
+/// Whether the build inputs differ between two commits — the answer to "does the source
+/// change between `stamped_sha` and `live_sha` actually touch anything that affects the
+/// compiled binary?" `Unknown` is not optional and not cosmetic: it is what a caller
+/// reports when git cannot answer (e.g. the stamped SHA was rebased or garbage-collected
+/// away), and absence of a diff answer must never be read as "no difference" — callers
+/// treat `Unknown` the same as `Differ`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildInputComparison {
+    /// `git diff` between the two commits over the build input paths reported no change.
+    Same,
+    /// `git diff` between the two commits over the build input paths reported a change.
+    Differ,
+    /// The comparison could not be made at all (unresolvable SHA, git unavailable, etc).
+    Unknown,
+}
+
+/// The pure verdict function: given the compiled-in stamp, the live state of the source
+/// tree, and (when the SHAs differ) an already-computed answer to whether the build
+/// inputs actually changed between the two commits, decide pass / drift / not-evaluable.
+/// No I/O — callers gather the live values (via git or otherwise) and pass them in, which
+/// is what makes this directly unit-testable without shelling out to git in tests.
 fn verdict(
     stamped_sha: &str,
     live_sha: Option<&str>,
     dirty: &str,
     source_dir_exists: bool,
+    build_inputs: BuildInputComparison,
 ) -> (CheckStatus, Vec<String>, Option<String>) {
     if stamped_sha == "unknown" || dirty == "unknown" || !source_dir_exists {
         return (
@@ -62,14 +97,42 @@ fn verdict(
     }
 
     if stamped_sha != live_sha {
-        return (
-            CheckStatus::Drift,
-            vec![format!(
-                "the running binary was built from {stamped_sha} but the source is now at \
-                 {live_sha}; rebuild before any --write run"
-            )],
-            None,
-        );
+        match build_inputs {
+            BuildInputComparison::Same => {
+                return (
+                    CheckStatus::Pass,
+                    vec![format!(
+                        "the running binary was built from {stamped_sha} and the source is now \
+                         at {live_sha}, but nothing in that difference touches a build input \
+                         (src/, crates/, tests/, build.rs, Cargo.toml, Cargo.lock, .cargo/) — \
+                         the binary is still current"
+                    )],
+                    None,
+                );
+            }
+            BuildInputComparison::Differ => {
+                return (
+                    CheckStatus::Drift,
+                    vec![format!(
+                        "the running binary was built from {stamped_sha} but the source is now \
+                         at {live_sha}; rebuild before any --write run"
+                    )],
+                    None,
+                );
+            }
+            BuildInputComparison::Unknown => {
+                return (
+                    CheckStatus::Drift,
+                    vec![format!(
+                        "the running binary was built from {stamped_sha} but the source is now \
+                         at {live_sha}; rebuild before any --write run (build-input comparison \
+                         could not be made between these two commits, so this is treated as \
+                         drift)"
+                    )],
+                    None,
+                );
+            }
+        }
     }
 
     if dirty == "1" {
@@ -130,6 +193,32 @@ fn live_head(source_dir: &str) -> Option<String> {
     String::from_utf8(output.stdout)
         .ok()
         .map(|s| s.trim().to_string())
+}
+
+/// Ask git whether the build inputs (`BUILD_INPUT_PATHS`) differ between two commits in
+/// `source_dir`. Modelled on `live_head`: a thin, impure wrapper around a single git
+/// invocation, kept separate from the pure `verdict` so the decision logic stays
+/// unit-testable without shelling out.
+///
+/// Runs `git diff --quiet <from> <to> -- <build input paths>`. Exit 0 -> `Same`, exit 1
+/// -> `Differ`, anything else — including an unresolvable SHA, git being unavailable, or
+/// the process failing to spawn — -> `Unknown`. `Unknown` is never treated as `Same`; the
+/// caller (`verdict`) reports it as Drift.
+fn differ_build_inputs(source_dir: &str, from: &str, to: &str) -> BuildInputComparison {
+    let mut args: Vec<&str> = vec!["diff", "--quiet", from, to, "--"];
+    args.extend(BUILD_INPUT_PATHS.iter().copied());
+    let output = crate::shared::git_command()
+        .args(&args)
+        .current_dir(source_dir)
+        .output();
+    let Ok(output) = output else {
+        return BuildInputComparison::Unknown;
+    };
+    match output.status.code() {
+        Some(0) => BuildInputComparison::Same,
+        Some(1) => BuildInputComparison::Differ,
+        _ => BuildInputComparison::Unknown,
+    }
 }
 
 /// Other binaries in the fleet, beyond `mev` itself, that also run `--write` paths
@@ -221,8 +310,19 @@ fn writer_outcome(name: &str, stamped_sha: &str, dirty: &str, source_dir: &str) 
     } else {
         None
     };
-    let (status, findings, reason) =
-        verdict(stamped_sha, live_sha.as_deref(), dirty, source_dir_exists);
+    let build_inputs = match &live_sha {
+        Some(live) if live != stamped_sha && live != "unknown" && stamped_sha != "unknown" => {
+            differ_build_inputs(source_dir, stamped_sha, live)
+        }
+        _ => BuildInputComparison::Unknown,
+    };
+    let (status, findings, reason) = verdict(
+        stamped_sha,
+        live_sha.as_deref(),
+        dirty,
+        source_dir_exists,
+        build_inputs,
+    );
     WriterOutcome {
         name: name.to_string(),
         status,
@@ -356,42 +456,73 @@ mod tests {
 
     #[test]
     fn not_evaluable_when_stamped_sha_unknown() {
-        let (status, _findings, reason) = verdict("unknown", Some("abc123"), "0", true);
+        let (status, _findings, reason) = verdict(
+            "unknown",
+            Some("abc123"),
+            "0",
+            true,
+            BuildInputComparison::Unknown,
+        );
         assert_eq!(status, CheckStatus::NotEvaluable);
         assert!(reason.is_some());
     }
 
     #[test]
     fn not_evaluable_when_dirty_flag_unknown() {
-        let (status, _findings, reason) = verdict("abc123", Some("abc123"), "unknown", true);
+        let (status, _findings, reason) = verdict(
+            "abc123",
+            Some("abc123"),
+            "unknown",
+            true,
+            BuildInputComparison::Unknown,
+        );
         assert_eq!(status, CheckStatus::NotEvaluable);
         assert!(reason.is_some());
     }
 
     #[test]
     fn not_evaluable_when_source_dir_missing() {
-        let (status, _findings, reason) = verdict("abc123", Some("abc123"), "0", false);
+        let (status, _findings, reason) = verdict(
+            "abc123",
+            Some("abc123"),
+            "0",
+            false,
+            BuildInputComparison::Unknown,
+        );
         assert_eq!(status, CheckStatus::NotEvaluable);
         assert!(reason.is_some());
     }
 
     #[test]
     fn not_evaluable_when_live_sha_unavailable() {
-        let (status, _findings, reason) = verdict("abc123", None, "0", true);
+        let (status, _findings, reason) =
+            verdict("abc123", None, "0", true, BuildInputComparison::Unknown);
         assert_eq!(status, CheckStatus::NotEvaluable);
         assert!(reason.is_some());
     }
 
     #[test]
     fn not_evaluable_when_live_sha_literal_unknown() {
-        let (status, _findings, reason) = verdict("abc123", Some("unknown"), "0", true);
+        let (status, _findings, reason) = verdict(
+            "abc123",
+            Some("unknown"),
+            "0",
+            true,
+            BuildInputComparison::Unknown,
+        );
         assert_eq!(status, CheckStatus::NotEvaluable);
         assert!(reason.is_some());
     }
 
     #[test]
     fn drift_when_sha_differs() {
-        let (status, findings, reason) = verdict("abc123", Some("def456"), "0", true);
+        let (status, findings, reason) = verdict(
+            "abc123",
+            Some("def456"),
+            "0",
+            true,
+            BuildInputComparison::Differ,
+        );
         assert_eq!(status, CheckStatus::Drift);
         assert_eq!(findings.len(), 1);
         assert!(findings[0].contains("abc123"));
@@ -402,7 +533,13 @@ mod tests {
 
     #[test]
     fn drift_when_dirty_even_with_matching_sha() {
-        let (status, findings, reason) = verdict("abc123", Some("abc123"), "1", true);
+        let (status, findings, reason) = verdict(
+            "abc123",
+            Some("abc123"),
+            "1",
+            true,
+            BuildInputComparison::Unknown,
+        );
         assert_eq!(status, CheckStatus::Drift);
         assert_eq!(findings.len(), 1);
         assert!(findings[0].contains("uncommitted"));
@@ -411,14 +548,32 @@ mod tests {
 
     #[test]
     fn dirty_drift_message_distinct_from_stale_sha_drift_message() {
-        let (_status1, stale_findings, _) = verdict("abc123", Some("def456"), "0", true);
-        let (_status2, dirty_findings, _) = verdict("abc123", Some("abc123"), "1", true);
+        let (_status1, stale_findings, _) = verdict(
+            "abc123",
+            Some("def456"),
+            "0",
+            true,
+            BuildInputComparison::Differ,
+        );
+        let (_status2, dirty_findings, _) = verdict(
+            "abc123",
+            Some("abc123"),
+            "1",
+            true,
+            BuildInputComparison::Unknown,
+        );
         assert_ne!(stale_findings[0], dirty_findings[0]);
     }
 
     #[test]
     fn pass_when_sha_matches_and_clean() {
-        let (status, findings, reason) = verdict("abc123", Some("abc123"), "0", true);
+        let (status, findings, reason) = verdict(
+            "abc123",
+            Some("abc123"),
+            "0",
+            true,
+            BuildInputComparison::Unknown,
+        );
         assert_eq!(status, CheckStatus::Pass);
         assert!(findings.is_empty());
         assert!(reason.is_none());
