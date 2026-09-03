@@ -27,6 +27,11 @@ use okf_core::ClearsWhenPredicate;
 
 use crate::Diagnostic;
 use crate::brain::config::BrainConfig;
+use crate::brain::crawl::crawl_corpus;
+use crate::brain::graph::{
+    DanglingSuggestion, EdgeResolution, GraphArtifact, build_doc_id_index, build_graph,
+    dangling_suggestion, resolve_edge,
+};
 use crate::brain::lane_segments::{LaneFile, discover_lane_files};
 use crate::brain::state::{StateFile, StateSource, discover_state_files, load_state};
 
@@ -36,10 +41,11 @@ use crate::brain::state::{StateFile, StateSource, discover_state_files, load_sta
 
 /// Which deterministic detector produced a [`GraphFinding`].
 ///
-/// Two classes ship in this ticket. Adding a third means adding a variant here,
-/// a `tag()` arm, a counter field on [`GraphFindingsReport`], and — because
-/// `tag()` feeds [`finding_id`] — every existing `finding_id` stays stable
-/// (the tag strings of the existing variants must never change).
+/// Three classes ship across this module's tickets. Adding a fourth means
+/// adding a variant here, a `tag()` arm, a counter field on
+/// [`GraphFindingsReport`], and — because `tag()` feeds [`finding_id`] —
+/// every existing `finding_id` stays stable (the tag strings of the
+/// existing variants must never change).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DetectorClass {
@@ -49,6 +55,11 @@ pub enum DetectorClass {
     /// A path named as a script or generator in a command or spec resolves
     /// nowhere in the fleet.
     ReferencedPathAbsent,
+    /// An OKF `related:` edge whose target resolves to no node and no leaf
+    /// in the corpus (`E_GRAPH_DANGLING_RELATED` in `graph.rs::check_graph`,
+    /// filed here as an attributable, ageable finding instead of a
+    /// whole-corpus red gate — `MV.ticket.dangling-related-edge-detector`).
+    DanglingRelatedEdge,
 }
 
 impl DetectorClass {
@@ -61,6 +72,7 @@ impl DetectorClass {
         match self {
             DetectorClass::UnregisteredLaneBlock => "unregistered-lane-block",
             DetectorClass::ReferencedPathAbsent => "referenced-path-absent",
+            DetectorClass::DanglingRelatedEdge => "dangling-related-edge",
         }
     }
 }
@@ -185,6 +197,8 @@ pub struct GraphFindingsReport {
     pub unregistered_lane_block: usize,
     /// Count of [`DetectorClass::ReferencedPathAbsent`] findings.
     pub referenced_path_absent: usize,
+    /// Count of [`DetectorClass::DanglingRelatedEdge`] findings.
+    pub dangling_related_edge: usize,
     /// Every finding, in detection order.
     pub findings: Vec<GraphFinding>,
 }
@@ -203,6 +217,7 @@ impl GraphFindingsReport {
             match finding.detector {
                 DetectorClass::UnregisteredLaneBlock => report.unregistered_lane_block += 1,
                 DetectorClass::ReferencedPathAbsent => report.referenced_path_absent += 1,
+                DetectorClass::DanglingRelatedEdge => report.dangling_related_edge += 1,
             }
         }
         report.findings = findings;
@@ -781,6 +796,153 @@ pub fn detect_referenced_path_absent(
 }
 
 // ---------------------------------------------------------------------------
+// Detector 3: dangling-related-edge
+// ---------------------------------------------------------------------------
+
+/// Detector 3 — `dangling-related-edge`, over an already-built [`GraphArtifact`].
+/// Pure with respect to disk: callers build the artifact (see
+/// [`detect_dangling_related_edges`] for the disk-facing wrapper), which keeps
+/// this half unit-testable without a fixture corpus per case.
+///
+/// Reuses [`crate::brain::graph::resolve_edge`] and
+/// [`crate::brain::graph::dangling_suggestion`] — the EXACT same resolution
+/// `check_graph` performs to raise `E_GRAPH_DANGLING_RELATED` — rather than
+/// re-walking the corpus or re-implementing the suggestion logic, so this
+/// detector and the whole-corpus error can never disagree about which edges
+/// are dangling or what a shape's suggestion is. `check_graph` itself is
+/// untouched by this detector's existence: `graph.rs` only grew two new
+/// public helper functions the two callers now share.
+///
+/// Preserves the three shapes `check_graph`'s own message already
+/// distinguishes in its `— did you mean`/`— matches multiple scopes` suffix,
+/// because each has a different fix:
+/// - **(a)** an unqualified target resolving in exactly one other scope —
+///   [`DanglingSuggestion::Repoint`] — the suggested `scope:doc_id` repoint
+///   IS the fix;
+/// - **(b)** a target absent from the corpus entirely
+///   ([`DanglingSuggestion::None`]) — no repoint to suggest. An explicitly
+///   qualified `scope:doc_id` target that does not resolve lands here too,
+///   never in (a): `graph.rs` deliberately never second-guesses an authored
+///   prefix, and neither does this detector;
+/// - **(c)** a target matching multiple scopes
+///   ([`DanglingSuggestion::Ambiguous`]) — every candidate is named, the
+///   author must qualify explicitly.
+///
+/// `ephemeral_ids` matches `check_graph`'s own parameter: an edge resolving
+/// to a known ephemeral file (`W_GRAPH_RELATED_EPHEMERAL` territory) is
+/// expected, not drift, and is skipped here exactly as it is downgraded (not
+/// raised as `E_GRAPH_DANGLING_RELATED`) in `check_graph`. A resolved edge or
+/// one landing on a leaf target is likewise not this detector's concern —
+/// only `EdgeResolution::Dangling` (and not ephemeral) produces a finding.
+///
+/// `subject` is `{from}->{to_ref}` — both components come from authored
+/// frontmatter (the referring node's canonical id and the raw `related:`
+/// entry), so the same edge produces the same subject, and therefore the
+/// same [`finding_id`], regardless of which repo's `mev graph-findings` run
+/// detected it or which working directory it ran from.
+#[must_use]
+pub fn dangling_related_edge_findings(
+    artifact: &GraphArtifact,
+    ephemeral_ids: &HashSet<String>,
+) -> Vec<GraphFinding> {
+    let doc_id_index = build_doc_id_index(artifact);
+    let mut findings = Vec::new();
+
+    for edge in &artifact.graph.edges {
+        let referrer_node = artifact
+            .node_map
+            .get(edge.from.as_str())
+            .and_then(|&idx| artifact.graph.nodes.get(idx));
+        let referrer_scope = referrer_node.map(|n| n.scope.as_str()).unwrap_or("");
+        let referrer_rel: PathBuf = referrer_node.map(|n| n.rel.clone()).unwrap_or_default();
+
+        let EdgeResolution::Dangling { qualified } = resolve_edge(artifact, edge) else {
+            // Resolved or LeafTarget — not this detector's concern.
+            continue;
+        };
+        if ephemeral_ids.contains(&qualified) {
+            // W_GRAPH_RELATED_EPHEMERAL territory — expected, not drift.
+            continue;
+        }
+
+        let suggestion = dangling_suggestion(artifact, &edge.to_ref, referrer_scope, &doc_id_index);
+
+        let mut message = format!(
+            "{} has a related: edge to `{}` (resolved: `{qualified}`), which does not \
+             exist in the corpus",
+            referrer_rel.display(),
+            edge.to_ref,
+        );
+        match &suggestion {
+            DanglingSuggestion::None => {}
+            DanglingSuggestion::Repoint(id) => {
+                message.push_str(&format!(" — did you mean `{id}`?"));
+            }
+            DanglingSuggestion::Ambiguous(ids) => {
+                message.push_str(&format!(
+                    " — matches multiple scopes ({}); qualify explicitly",
+                    ids.join(", ")
+                ));
+            }
+        }
+
+        let subject = format!("{}->{}", edge.from, edge.to_ref);
+
+        // The fix here is editing the REFERRER's own `related:` list (either
+        // repointing to the suggested `scope:doc_id`, or removing the stale
+        // entry) — none of the four typed predicates directly express "this
+        // file no longer names that target", so this uses `CommandExitsZero`
+        // over a negated grep: satisfied once `edge.to_ref`'s literal text no
+        // longer appears in the referrer file, which is true under either
+        // fix. `referrer_rel` is brain-root-relative, matching the path shape
+        // `mev carryover`'s evaluator already resolves relative to a repo's
+        // root or the brain root for other detectors' predicates.
+        let clears_when = Some(ClearsWhenPredicate::CommandExitsZero {
+            command: format!(
+                "! grep -qF -- {:?} {:?}",
+                edge.to_ref,
+                referrer_rel.display().to_string(),
+            ),
+            note: Some(format!(
+                "clears when `{}` no longer names `{}` in its related: list -- either \
+                 repointed to the suggested scope:doc_id or the stale entry removed",
+                referrer_rel.display(),
+                edge.to_ref,
+            )),
+        });
+
+        findings.push(GraphFinding {
+            detector: DetectorClass::DanglingRelatedEdge,
+            repo: referrer_scope.to_string(),
+            subject: subject.clone(),
+            message,
+            finding_id: finding_id(DetectorClass::DanglingRelatedEdge, &subject),
+            clears_when,
+        });
+    }
+
+    findings
+}
+
+/// Disk-facing wrapper for [`dangling_related_edge_findings`]: crawls the
+/// corpus rooted at `root`, builds the graph, and reduces its edges through
+/// the pure detector above. This is what `mev graph-findings` calls
+/// alongside the other two detectors' wrappers.
+///
+/// `crawl_corpus`'s own diagnostics (a walk error, a file that failed to
+/// read) are surfaced verbatim, never swallowed — standing rule 11.
+#[must_use]
+pub fn detect_dangling_related_edges(
+    root: &Path,
+    config: &BrainConfig,
+) -> (Vec<GraphFinding>, Vec<Diagnostic>) {
+    let (corpus, crawl_diags) = crawl_corpus(root, config);
+    let artifact = build_graph(&corpus, config);
+    let findings = dangling_related_edge_findings(&artifact, &corpus.ephemeral_ids);
+    (findings, crawl_diags)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -880,6 +1042,10 @@ mod tests {
         assert_eq!(
             DetectorClass::ReferencedPathAbsent.tag(),
             "referenced-path-absent"
+        );
+        assert_eq!(
+            DetectorClass::DanglingRelatedEdge.tag(),
+            "dangling-related-edge"
         );
     }
 

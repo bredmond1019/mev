@@ -154,6 +154,83 @@ pub fn build_graph(corpus: &Corpus, _config: &BrainConfig) -> GraphArtifact {
 /// - `W_GRAPH_LEAF_TARGET` — a `related:` entry resolves to a real file with no `doc_id`.
 /// - `W_GRAPH_ISOLATED_NODE` — a node (has `doc_id`) has zero outbound `related:` edges.
 ///
+/// Suggestion shape for a dangling `related:` edge — mirrors exactly what
+/// `check_graph`'s own message-building appends after "does not exist in the
+/// corpus", exposed so a second caller (the `dangling-related-edge` detector
+/// in `graph_findings.rs`, `MV.ticket.dangling-related-edge-detector`) can
+/// compute the identical suggestion for the identical edge without
+/// re-walking the corpus or duplicating this logic — the two can then never
+/// disagree about which of the three shapes an edge falls into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DanglingSuggestion {
+    /// The target is explicitly qualified (`scope:doc_id` — never
+    /// second-guessed, even when another scope happens to own the bare
+    /// doc_id) or is unqualified with no other-scope candidate at all.
+    None,
+    /// An unqualified target resolving in exactly ONE other scope — the
+    /// carried `scope:doc_id` repoint IS the fix.
+    Repoint(String),
+    /// An unqualified target matching MORE THAN ONE other scope, in
+    /// resolution order — every candidate is carried; the author must
+    /// qualify explicitly.
+    Ambiguous(Vec<String>),
+}
+
+/// Build the `doc_id -> node indices` lookup [`check_graph`] (and
+/// [`dangling_suggestion`]) uses to find every scope owning a given bare
+/// `doc_id` in one hash lookup instead of scanning `artifact.graph.nodes`
+/// per edge. Exposed so a caller holding its own [`GraphArtifact`] can reuse
+/// the identical index rather than rebuilding an equivalent one.
+#[must_use]
+pub fn build_doc_id_index(artifact: &GraphArtifact) -> HashMap<&str, Vec<usize>> {
+    let mut doc_id_index: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (idx, node) in artifact.graph.nodes.iter().enumerate() {
+        doc_id_index
+            .entry(node.doc_id.as_str())
+            .or_default()
+            .push(idx);
+    }
+    doc_id_index
+}
+
+/// Compute the [`DanglingSuggestion`] for a dangling `to_ref`, exactly as
+/// `check_graph` computes it inline: an explicitly qualified target
+/// (contains `:`) never gets a suggestion — an authored prefix is an
+/// authored decision and is never second-guessed, the same "is this
+/// qualified" test `okf_core::resolve_edge` uses to decide whether to
+/// prefix the referrer's own scope. `referrer_scope` is excluded from the
+/// candidate set so a scope is never offered its own bare doc_id back as a
+/// "suggestion".
+///
+/// `doc_id_index` must come from [`build_doc_id_index`] over the SAME
+/// `artifact` — passed in rather than rebuilt here so a caller checking many
+/// edges (both `check_graph` and the `dangling-related-edge` detector) pays
+/// the index-build cost once, not per edge.
+#[must_use]
+pub fn dangling_suggestion(
+    artifact: &GraphArtifact,
+    to_ref: &str,
+    referrer_scope: &str,
+    doc_id_index: &HashMap<&str, Vec<usize>>,
+) -> DanglingSuggestion {
+    if to_ref.contains(':') {
+        return DanglingSuggestion::None;
+    }
+    let Some(idxs) = doc_id_index.get(to_ref) else {
+        return DanglingSuggestion::None;
+    };
+    let candidates: Vec<&Node> = idxs
+        .iter()
+        .map(|&i| &artifact.graph.nodes[i])
+        .filter(|n| n.scope != referrer_scope)
+        .collect();
+    match candidates.len() {
+        0 => DanglingSuggestion::None,
+        1 => DanglingSuggestion::Repoint(candidates[0].id.clone()),
+        _ => DanglingSuggestion::Ambiguous(candidates.iter().map(|n| n.id.clone()).collect()),
+    }
+}
+
 /// `ephemeral_ids` is `Corpus::ephemeral_ids` from the same crawl that produced `artifact`
 /// (via `build_graph`) — passed separately since it lives on `Corpus`, not `GraphArtifact`.
 pub fn check_graph(artifact: &GraphArtifact, ephemeral_ids: &HashSet<String>) -> Vec<Diagnostic> {
@@ -189,13 +266,7 @@ pub fn check_graph(artifact: &GraphArtifact, ephemeral_ids: &HashSet<String>) ->
     // hash lookup instead of scanning `artifact.graph.nodes` inside the edge loop below.
     // See ticket-unqualified-related-suggests-scope: the corpus is thousands of nodes and
     // this runs on every gate.
-    let mut doc_id_index: HashMap<&str, Vec<usize>> = HashMap::new();
-    for (idx, node) in artifact.graph.nodes.iter().enumerate() {
-        doc_id_index
-            .entry(node.doc_id.as_str())
-            .or_default()
-            .push(idx);
-    }
+    let doc_id_index = build_doc_id_index(artifact);
 
     // --- Edge resolution ---
     for edge in &artifact.graph.edges {
@@ -237,34 +308,17 @@ pub fn check_graph(artifact: &GraphArtifact, ephemeral_ids: &HashSet<String>) ->
                     edge.to_ref
                 );
 
-                // Only unqualified refs get a suggestion — an explicit `scope:doc_id`
-                // prefix is an authored decision and must never be second-guessed, even
-                // when another scope happens to own that bare doc_id. This is exactly
-                // the same "is this qualified" test okf-core's resolve_edge uses to
-                // decide whether to prefix the referrer's own scope.
-                if !edge.to_ref.contains(':') {
-                    let referrer_scope = referrer_node.map(|n| n.scope.as_str()).unwrap_or("");
-                    if let Some(idxs) = doc_id_index.get(edge.to_ref.as_str()) {
-                        let candidates: Vec<&Node> = idxs
-                            .iter()
-                            .map(|&i| &artifact.graph.nodes[i])
-                            .filter(|n| n.scope != referrer_scope)
-                            .collect();
-                        match candidates.len() {
-                            0 => {}
-                            1 => {
-                                message
-                                    .push_str(&format!(" — did you mean `{}`?", candidates[0].id));
-                            }
-                            _ => {
-                                let names: Vec<&str> =
-                                    candidates.iter().map(|n| n.id.as_str()).collect();
-                                message.push_str(&format!(
-                                    " — matches multiple scopes ({}); qualify explicitly",
-                                    names.join(", ")
-                                ));
-                            }
-                        }
+                let referrer_scope = referrer_node.map(|n| n.scope.as_str()).unwrap_or("");
+                match dangling_suggestion(artifact, &edge.to_ref, referrer_scope, &doc_id_index) {
+                    DanglingSuggestion::None => {}
+                    DanglingSuggestion::Repoint(id) => {
+                        message.push_str(&format!(" — did you mean `{id}`?"));
+                    }
+                    DanglingSuggestion::Ambiguous(ids) => {
+                        message.push_str(&format!(
+                            " — matches multiple scopes ({}); qualify explicitly",
+                            ids.join(", ")
+                        ));
                     }
                 }
 

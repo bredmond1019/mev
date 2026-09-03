@@ -357,3 +357,275 @@ heading = "Repo B"
     }
     assert_eq!(ids[0], ids[1], "the two repos must share one finding_id");
 }
+
+// ---------------------------------------------------------------------------
+// Detector 3: dangling-related-edge (MV.ticket.dangling-related-edge-detector)
+// ---------------------------------------------------------------------------
+//
+// A separate two-repo fixture family: `mev graph-findings` reuses the exact
+// resolution `bastion validate-brain --graph` (`check_graph`) performs, so
+// these fixtures build real OKF markdown under `docs/` (the corpus
+// membership rule) with `doc_id`/`related:` frontmatter rather than planting
+// lane/command files. Two `[[repos]]` entries ("acme", "widgets") are needed
+// to exercise the repoint (a) and ambiguous (c) shapes, which both require a
+// candidate owned by a scope OTHER than the referrer's own.
+
+fn write_two_repo_brain_toml(root: &Path) {
+    let toml = r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "acme"
+tier = "_root"
+repo_path = "acme"
+status_file = "planning/status.md"
+cache_doc = "docs/projects/acme.md"
+heading = "Acme"
+
+[[repos]]
+slug = "widgets"
+tier = "_root"
+repo_path = "widgets"
+status_file = "planning/status.md"
+cache_doc = "docs/projects/widgets.md"
+heading = "Widgets"
+"#;
+    write_file(root, "brain.toml", toml);
+}
+
+fn write_okf_doc(root: &Path, rel: &str, doc_id: &str, related: &[&str]) {
+    let related_yaml = if related.is_empty() {
+        String::new()
+    } else {
+        let items: String = related
+            .iter()
+            .map(|r| format!("  - \"{r}\"\n"))
+            .collect::<Vec<_>>()
+            .join("");
+        format!("related:\n{items}")
+    };
+    let content = format!(
+        "---\ntype: Reference\ntitle: {doc_id}\ndescription: fixture\ndoc_id: {doc_id}\n{related_yaml}---\n"
+    );
+    write_file(root, rel, &content);
+}
+
+#[test]
+fn dangling_related_edge_unqualified_single_candidate_carries_the_repoint() {
+    // Shape (a): acme's doc references bare `carryover-plan`, which resolves
+    // in exactly one OTHER scope (widgets) -- the suggested `scope:doc_id`
+    // repoint IS the fix.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    write_two_repo_brain_toml(root);
+    write_okf_doc(root, "acme/docs/a.md", "alpha", &["carryover-plan"]);
+    write_okf_doc(root, "widgets/docs/owner.md", "carryover-plan", &[]);
+
+    let output = run_mev(&["graph-findings", ".", "--json"], root);
+    assert!(!output.status.success(), "expected a finding to fire");
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json output must parse");
+    assert_eq!(value["dangling_related_edge"], 1, "report: {value}");
+
+    let findings = value["findings"].as_array().unwrap();
+    let row = findings
+        .iter()
+        .find(|f| f["detector"] == "dangling-related-edge")
+        .expect("expected a dangling-related-edge row");
+    assert_eq!(row["repo"], "acme");
+    let message = row["message"].as_str().unwrap();
+    assert!(
+        message.contains("did you mean `widgets:carryover-plan`?"),
+        "message must carry the repoint fix: {message}"
+    );
+}
+
+#[test]
+fn dangling_related_edge_absent_target_carries_no_repoint() {
+    // Shape (b): the target does not exist anywhere in the corpus -- no
+    // repoint to suggest.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    write_two_repo_brain_toml(root);
+    write_okf_doc(root, "acme/docs/a.md", "alpha", &["typo-nonexistent"]);
+
+    let output = run_mev(&["graph-findings", ".", "--json"], root);
+    assert!(!output.status.success(), "expected a finding to fire");
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json output must parse");
+    assert_eq!(value["dangling_related_edge"], 1, "report: {value}");
+
+    let findings = value["findings"].as_array().unwrap();
+    let row = findings
+        .iter()
+        .find(|f| f["detector"] == "dangling-related-edge")
+        .expect("expected a dangling-related-edge row");
+    let message = row["message"].as_str().unwrap();
+    assert!(
+        !message.contains("did you mean") && !message.contains("matches multiple scopes"),
+        "an absent target must carry no repoint: {message}"
+    );
+}
+
+#[test]
+fn dangling_related_edge_explicitly_qualified_unresolvable_target_is_shape_b_not_a() {
+    // An explicitly qualified `scope:doc_id` that does not resolve must land
+    // in shape (b) even though another scope happens to own the bare
+    // doc_id -- graph.rs never second-guesses an authored prefix, and
+    // neither does this detector.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    write_two_repo_brain_toml(root);
+    write_okf_doc(root, "acme/docs/a.md", "alpha", &["acme:nope"]);
+    write_okf_doc(root, "widgets/docs/owner.md", "nope", &[]);
+
+    let output = run_mev(&["graph-findings", ".", "--json"], root);
+    assert!(!output.status.success(), "expected a finding to fire");
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json output must parse");
+    assert_eq!(value["dangling_related_edge"], 1, "report: {value}");
+
+    let findings = value["findings"].as_array().unwrap();
+    let row = findings
+        .iter()
+        .find(|f| f["detector"] == "dangling-related-edge")
+        .expect("expected a dangling-related-edge row");
+    let message = row["message"].as_str().unwrap();
+    assert!(
+        !message.contains("did you mean") && !message.contains("matches multiple scopes"),
+        "an explicitly qualified, unresolvable target must never gain a suggestion: {message}"
+    );
+}
+
+#[test]
+fn dangling_related_edge_multiple_scopes_names_every_candidate() {
+    // Shape (c): the bare target matches candidates in BOTH other scopes.
+    // Three repos: acme (referrer), widgets and gadgets (both owning
+    // "shared-target").
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let toml = r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "acme"
+tier = "_root"
+repo_path = "acme"
+status_file = "planning/status.md"
+cache_doc = "docs/projects/acme.md"
+heading = "Acme"
+
+[[repos]]
+slug = "widgets"
+tier = "_root"
+repo_path = "widgets"
+status_file = "planning/status.md"
+cache_doc = "docs/projects/widgets.md"
+heading = "Widgets"
+
+[[repos]]
+slug = "gadgets"
+tier = "_root"
+repo_path = "gadgets"
+status_file = "planning/status.md"
+cache_doc = "docs/projects/gadgets.md"
+heading = "Gadgets"
+"#;
+    write_file(root, "brain.toml", toml);
+    write_okf_doc(root, "acme/docs/a.md", "alpha", &["shared-target"]);
+    write_okf_doc(root, "widgets/docs/owner.md", "shared-target", &[]);
+    write_okf_doc(root, "gadgets/docs/owner.md", "shared-target", &[]);
+
+    let output = run_mev(&["graph-findings", ".", "--json"], root);
+    assert!(!output.status.success(), "expected a finding to fire");
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json output must parse");
+    assert_eq!(value["dangling_related_edge"], 1, "report: {value}");
+
+    let findings = value["findings"].as_array().unwrap();
+    let row = findings
+        .iter()
+        .find(|f| f["detector"] == "dangling-related-edge")
+        .expect("expected a dangling-related-edge row");
+    let message = row["message"].as_str().unwrap();
+    assert!(
+        message.contains("matches multiple scopes")
+            && message.contains("widgets:shared-target")
+            && message.contains("gadgets:shared-target"),
+        "message must name every candidate: {message}"
+    );
+    assert!(
+        !message.contains("did you mean"),
+        "an ambiguous match must not phrase a single 'did you mean': {message}"
+    );
+}
+
+#[test]
+fn dangling_related_edge_clean_corpus_produces_zero_findings() {
+    // The positive control: every `related:` edge resolves, so an empty
+    // result is distinguishable from a detector that never ran.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    write_two_repo_brain_toml(root);
+    write_okf_doc(root, "acme/docs/a.md", "alpha", &["widgets:target"]);
+    write_okf_doc(root, "widgets/docs/owner.md", "target", &[]);
+
+    let output = run_mev(&["graph-findings", ".", "--json"], root);
+    assert!(
+        output.status.success(),
+        "expected exit 0 on a clean corpus; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json output must parse");
+    assert_eq!(value["total"], 0, "report: {value}");
+    assert_eq!(value["dangling_related_edge"], 0, "report: {value}");
+}
+
+#[test]
+fn dangling_related_edge_finding_id_is_stable_across_two_runs_from_different_working_dirs() {
+    // finding_id must be content-derived: two independent `mev graph-findings`
+    // invocations over byte-identical fixture corpora built in two different
+    // temp directories (standing in for "two different working directories")
+    // must agree on the same edge's finding_id.
+    let tmp_a = tempfile::tempdir().expect("tempdir");
+    let tmp_b = tempfile::tempdir().expect("tempdir");
+    for root in [tmp_a.path(), tmp_b.path()] {
+        write_two_repo_brain_toml(root);
+        write_okf_doc(root, "acme/docs/a.md", "alpha", &["typo-nonexistent"]);
+    }
+
+    let out_a = run_mev(&["graph-findings", ".", "--json"], tmp_a.path());
+    let out_b = run_mev(&["graph-findings", ".", "--json"], tmp_b.path());
+    assert!(!out_a.status.success());
+    assert!(!out_b.status.success());
+
+    let val_a: serde_json::Value = serde_json::from_slice(&out_a.stdout).unwrap();
+    let val_b: serde_json::Value = serde_json::from_slice(&out_b.stdout).unwrap();
+
+    let id_a = val_a["findings"][0]["finding_id"].as_str().unwrap();
+    let id_b = val_b["findings"][0]["finding_id"].as_str().unwrap();
+    assert_eq!(
+        id_a, id_b,
+        "the same edge must yield the same finding_id across two independent runs"
+    );
+
+    // And matches the library function directly, over the normalized subject
+    // this detector uses (`{from}->{to_ref}`).
+    assert_eq!(
+        id_a,
+        mev::finding_id(
+            mev::DetectorClass::DanglingRelatedEdge,
+            "acme:alpha->typo-nonexistent"
+        )
+    );
+}

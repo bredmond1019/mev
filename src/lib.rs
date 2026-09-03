@@ -35,7 +35,9 @@ pub use brain::emit::{
     plan_status_frontmatter, reconcile_status_scalars, render_block_graph_reconcile_failed,
     render_wave_table, splice_generated, wave_order, write_atomic,
 };
-pub use brain::graph::{Graph, build_graph, check_graph};
+pub use brain::graph::{
+    DanglingSuggestion, Graph, build_doc_id_index, build_graph, check_graph, dangling_suggestion,
+};
 pub use brain::graph_emit::{GraphExport, build_graph_export};
 pub use brain::graph_findings::{
     DetectorClass, GraphFinding, GraphFindingsReport, finding_id, normalize_referenced_path,
@@ -3116,13 +3118,19 @@ pub fn graph_findings_report(
     root: &std::path::Path,
 ) -> anyhow::Result<(brain::graph_findings::GraphFindingsReport, Vec<Diagnostic>)> {
     use brain::config::find_brain_config;
-    use brain::graph_findings::{detect_referenced_path_absent, detect_unregistered_lane_blocks};
+    use brain::graph_findings::{
+        detect_dangling_related_edges, detect_referenced_path_absent,
+        detect_unregistered_lane_blocks,
+    };
 
     let config = find_brain_config(root)
         .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
 
     let (mut findings, mut diagnostics) = detect_unregistered_lane_blocks(root, &config);
     let (more_findings, more_diags) = detect_referenced_path_absent(root, &config);
+    findings.extend(more_findings);
+    diagnostics.extend(more_diags);
+    let (more_findings, more_diags) = detect_dangling_related_edges(root, &config);
     findings.extend(more_findings);
     diagnostics.extend(more_diags);
 
