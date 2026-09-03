@@ -9,7 +9,7 @@
 //! → exit-code contract the CLI layer relies on.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Make a fresh uniquely-named temp dir for a test and return its path.
 fn temp_dir(suffix: &str) -> std::path::PathBuf {
@@ -456,4 +456,267 @@ fn differ_build_inputs_covers_same_differ_and_unknown() {
     );
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------------------
+// `surface-leak` (MV.19.A task 1) — five shown-failing fixtures, one per defect class this
+// block closes. Each drives the PUBLIC surface (`mev::brain::conformance::surface::{run,
+// evaluate_repo}`) rather than any helper task 2-5 has yet to write, so this task compiles
+// and fails rather than failing to build (D58 compilable boundaries). D68: every one of
+// these was run and OBSERVED RED before any fix landed — see task notes for the pasted
+// failure output.
+// ---------------------------------------------------------------------------------------
+
+/// Run `git` with the given args in `dir`, asserting success — mirrors `differ_run_git`
+/// above and `surface.rs`'s own `#[cfg(test)]` fixtures, which deliberately shell out to a
+/// real `git init` rather than mocking, because the whole subject of this check IS git's
+/// tracked set.
+fn surface_run_git(dir: &Path, args: &[&str]) {
+    let output = mev::testsupport::git_command()
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git must be on PATH for these tests");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed in {}: {}",
+        dir.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn surface_init_repo(dir: &Path) {
+    surface_run_git(dir, &["init", "-q"]);
+    surface_run_git(dir, &["config", "user.email", "test@example.com"]);
+    surface_run_git(dir, &["config", "user.name", "Test"]);
+}
+
+fn surface_commit_all(dir: &Path) {
+    surface_run_git(dir, &["add", "-A"]);
+    surface_run_git(dir, &["commit", "-q", "-m", "fixture"]);
+}
+
+/// Build one `[[repos]]` entry for surface-leak fixtures — mirrors the private
+/// `repo_entry` helper inside `surface.rs`'s own `#[cfg(test)]` module, duplicated here
+/// because that helper is not (and should not become) part of the public surface.
+fn surface_repo_entry(slug: &str, repo_path: &str, public: bool) -> mev::brain::config::RepoEntry {
+    mev::brain::config::RepoEntry {
+        slug: slug.to_string(),
+        tier: "core".to_string(),
+        repo_path: repo_path.to_string(),
+        status_file: String::new(),
+        cache_doc: String::new(),
+        heading: String::new(),
+        prefix: None,
+        public,
+    }
+}
+
+/// Class 1 — VERSION STRING: a tracked file containing `1.27.2.3` (13 live instances) and
+/// `15.8.1.060` (3 live instances, zero-padded final octet) must produce ZERO rule-2
+/// findings once `fn is_version_string` (task 2) lands. Today rule 2 has no such filter, so
+/// this fires and the test is RED.
+#[test]
+fn version_shaped_dotted_quads_do_not_fire_rule2() {
+    let dir = temp_dir("surface-version-string");
+    surface_init_repo(&dir);
+    write_file(
+        &dir,
+        "pyproject.toml",
+        "requires = \"1.27.2.3\"\nimage = \"registry/foo:15.8.1.060\"\n",
+    );
+    surface_commit_all(&dir);
+
+    let repo = surface_repo_entry("fixture", "", true);
+    let findings = mev::brain::conformance::surface::evaluate_repo(&dir, &repo, &[]).unwrap();
+    let rule2: Vec<_> = findings.iter().filter(|f| f.rule == "rule2").collect();
+    assert!(
+        rule2.is_empty(),
+        "version-shaped literals must not fire rule 2, got: {rule2:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Class 2 — SELF-FIXTURE: a tracked file listed in `[surface_allowlist] self_fixtures`
+/// (task 3) must produce zero rule-2 findings for its own literal, while an IDENTICAL
+/// literal in a file NOT listed still fires — the control half. Without the control, a
+/// stub that suppresses rule 2 everywhere would pass this test trivially.
+///
+/// Drives `surface::run` through a real `brain.toml` (loaded with
+/// `mev::brain::config::load_brain_config`) rather than naming a not-yet-written helper
+/// like `evaluate_repo_with_self_fixtures` — that would be a build error, not a red test
+/// (D58). Today `SurfaceAllowlist` has no `self_fixtures` field, so `[surface_allowlist]
+/// self_fixtures = [...]` in the TOML is silently ignored by serde as an unknown key (no
+/// `deny_unknown_fields`), the exemption never applies, and the self-fixture file's literal
+/// still fires rule 2 — RED. The control half (the unlisted file) already fires today,
+/// which is expected; the class is proven by the exempted half flipping to green once task
+/// 3 adds the field and wires the exemption.
+#[test]
+fn self_fixture_file_is_exempt_from_rule2_but_control_file_still_fires() {
+    let dir = temp_dir("surface-self-fixture");
+    surface_init_repo(&dir);
+    write_file(
+        &dir,
+        "src/brain/conformance/surface.rs",
+        "// positive-control fixture literal: 100.64.1.2\n",
+    );
+    write_file(
+        &dir,
+        "docs/unrelated.md",
+        "not a fixture, real leak: 100.64.1.2\n",
+    );
+    surface_commit_all(&dir);
+
+    // `self_fixtures` entries are shaped `<repo-slug>:<repo-relative-path>` (task 3).
+    let brain_toml_path = dir.join("test-brain.toml");
+    fs::write(
+        &brain_toml_path,
+        format!(
+            "[[repos]]\nslug = \"fixture\"\nrepo_path = \"{}\"\npublic = true\n\n\
+             [surface_allowlist]\nself_fixtures = [\"fixture:src/brain/conformance/surface.rs\"]\n",
+            dir.display()
+        ),
+    )
+    .unwrap();
+    let config = mev::brain::config::load_brain_config(&brain_toml_path).expect(
+        "test brain.toml must parse — an unknown [surface_allowlist] key must not be a hard error",
+    );
+    let ctx = mev::ConformanceCtx {
+        root: dir.clone(),
+        config,
+        files: Vec::new(),
+    };
+
+    let outcome = mev::brain::conformance::surface::run(&ctx);
+    let rule2: Vec<&String> = outcome
+        .findings
+        .iter()
+        .filter(|f| f.contains(" rule2:"))
+        .collect();
+
+    assert!(
+        !rule2
+            .iter()
+            .any(|f| f.contains("src/brain/conformance/surface.rs")),
+        "self-fixture file must not fire rule 2, got: {rule2:?}"
+    );
+    assert!(
+        rule2.iter().any(|f| f.contains("docs/unrelated.md")),
+        "control: an unlisted file with the identical literal must still fire, got: {rule2:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Class 3 — DIRECTORY LINK TARGET: a markdown link whose target is a tracked DIRECTORY
+/// PREFIX (some tracked file has it as a path prefix) must resolve and produce no rule-1
+/// finding; a link to a genuinely absent path in the same fixture must still fire (the
+/// control half, task 1's existing `climb_out_of_repo_root_link_fires`-style pattern).
+/// Today the tracked set is file-only, so `crates/engine-contract` (a directory, not a
+/// file) is absent from it and this fires — RED.
+#[test]
+fn directory_prefix_link_target_resolves_but_absent_path_still_fires() {
+    let dir = temp_dir("surface-dir-link");
+    surface_init_repo(&dir);
+    write_file(
+        &dir,
+        "README.md",
+        "see [engine-contract](crates/engine-contract) and [nope](crates/does-not-exist)\n",
+    );
+    write_file(&dir, "crates/engine-contract/Cargo.toml", "[package]\n");
+    surface_commit_all(&dir);
+
+    let repo = surface_repo_entry("fixture", "", true);
+    let findings = mev::brain::conformance::surface::evaluate_repo(&dir, &repo, &[]).unwrap();
+    let rule1: Vec<_> = findings.iter().filter(|f| f.rule == "rule1").collect();
+
+    assert!(
+        !rule1
+            .iter()
+            .any(|f| f.detail.contains("crates/engine-contract")),
+        "a tracked directory prefix must resolve, got: {rule1:?}"
+    );
+    assert!(
+        rule1
+            .iter()
+            .any(|f| f.detail.contains("crates/does-not-exist")),
+        "control: a genuinely absent path must still fire, got: {rule1:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Class 4 — EMPTY TRACKED SET: a `git init`-ed repo with NO commit must make the run
+/// report an error naming that repo, not `Pass`. Today `tracked_set` has no emptiness
+/// check, so `git ls-files` on an uncommitted repo succeeds with empty output, `Ok(empty
+/// set)` is returned, every rule passes having scanned zero bytes, and the overall status
+/// is `Pass` — RED (this constructs the fail-open state rather than asserting a message).
+#[test]
+fn uninitialized_uncommitted_repo_errors_naming_the_repo_not_pass() {
+    let dir = temp_dir("surface-empty-tracked-set");
+    surface_run_git(&dir, &["init", "-q"]);
+    // Deliberately no `git add` / `git commit` — an init-ed but uncommitted repo.
+
+    let repo = surface_repo_entry("uncommitted-repo", dir.to_str().unwrap(), true);
+    let config = mev::brain::config::BrainConfig {
+        repos: vec![repo],
+        ..Default::default()
+    };
+    let ctx = mev::ConformanceCtx {
+        root: PathBuf::from("."),
+        config,
+        files: Vec::new(),
+    };
+
+    let outcome = mev::brain::conformance::surface::run(&ctx);
+    assert_ne!(
+        outcome.status,
+        mev::CheckStatus::Pass,
+        "an uncommitted repo scanning zero bytes must never report Pass, got: {outcome:?}"
+    );
+    let reason = outcome.reason.as_deref().unwrap_or_default();
+    assert!(
+        reason.contains("uncommitted-repo"),
+        "the reason must name the offending repo, got: {reason:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Class 5 — ZERO PUBLIC REPOS: a `brain.toml` whose `[[repos]]` entries all omit `public`
+/// must return `NotEvaluable` with a reason naming that condition, not `Pass`. Today
+/// `run()` returns `Pass` with `reason: None` when `public_repos.is_empty()` — RED (this
+/// constructs the config rather than asserting on prose).
+#[test]
+fn zero_public_repos_is_not_evaluable_with_a_reason_not_a_silent_pass() {
+    let mut config = mev::brain::config::BrainConfig::default();
+    // Every entry omits `public` (defaults false, fail-closed per config.rs) — none are
+    // public, so nothing is walked.
+    config.repos = vec![
+        mev::brain::config::RepoEntry {
+            slug: "private-one".to_string(),
+            ..Default::default()
+        },
+        mev::brain::config::RepoEntry {
+            slug: "private-two".to_string(),
+            ..Default::default()
+        },
+    ];
+    let ctx = mev::ConformanceCtx {
+        root: PathBuf::from("."),
+        config,
+        files: Vec::new(),
+    };
+
+    let outcome = mev::brain::conformance::surface::run(&ctx);
+    assert_eq!(
+        outcome.status,
+        mev::CheckStatus::NotEvaluable,
+        "a run with no public repos must be NotEvaluable, not Pass, got: {outcome:?}"
+    );
+    assert!(
+        outcome.reason.is_some(),
+        "NotEvaluable must carry a reason naming the zero-public-repos condition"
+    );
 }
