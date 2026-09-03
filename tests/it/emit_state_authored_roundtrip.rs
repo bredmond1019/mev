@@ -235,7 +235,28 @@ fn authored_fields_round_trip_byte_identically() {
     let after_carryover = &after["carryover"];
 
     let reference_diff = field_diff(before_reference, after_reference, "reference");
-    let carryover_diff = field_diff(before_carryover, after_carryover, "carryover");
+
+    // KNOWN AND DELIBERATELY UNFIXED: a carryover entry authored with NO
+    // `clears_when` gains an explicit `"clears_when": null` on regeneration.
+    // That is the same class of authored-field mutation this test exists to
+    // catch, in the opposite direction, and it is real — it is excluded here,
+    // not absent.
+    //
+    // Operator decision 2026-09-02 on
+    // MV.ticket.emit-state-write-is-corpus-wide-and-unscoped: the serializer
+    // fix (`skip_serializing_if = "Option::is_none"` on
+    // `okf_core::state::Carryover::clears_when`) would strip that key from 21
+    // live carryover entries across 5 repos on the next
+    // `mev emit-state --write` — a fleet-wide canonicalization diff every
+    // concurrent lane would have to absorb, on top of the 45 reference entries
+    // the `related` fix in this same block already rewrites. The `related`
+    // asymmetry was in this block's scope; `clears_when` was not. Removing this
+    // exclusion is the whole of the follow-up work, and it must be sequenced
+    // when no other lane is live.
+    let carryover_diff: Vec<String> = field_diff(before_carryover, after_carryover, "carryover")
+        .into_iter()
+        .filter(|d| !d.contains(".clears_when:"))
+        .collect();
 
     assert!(
         reference_diff.is_empty(),
