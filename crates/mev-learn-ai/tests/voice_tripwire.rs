@@ -1,24 +1,26 @@
 //! Integration tests for the voice tripwire (Phase 12, Block C, Task 4).
 //!
-//! Covers each seeded phrase and each exemption end-to-end through
-//! `mev::validate_blog` (not the pure `check_voice` function — that's `src/learn_ai/voice.rs`'s
+//! Covers each seeded phrase and each exemption end-to-end through this file's local
+//! `validate_blog` helper (not the pure `check_voice` function — that's `src/voice.rs`'s
 //! job), using fixtures under `tests/fixtures/voice/`, plus a live-corpus test that doubles as
 //! the operator report the block's acceptance criterion asks for.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use mev::Severity;
+use mev_learn_ai::blog::BlogValidator;
+use mev_learn_ai::{ContentValidator, Diagnostic, Report, Severity};
+
+fn validate_blog(root: &Path) -> Report {
+    BlogValidator::from_blog_root(root).run(root)
+}
 
 /// The voice fixture tree checked into `tests/fixtures/voice/`.
 fn voice_fixture_root() -> &'static Path {
     Path::new("tests/fixtures/voice")
 }
 
-fn voice_tell_diags_for_file<'a>(
-    diags: &'a [mev::Diagnostic],
-    file: &str,
-) -> Vec<&'a mev::Diagnostic> {
+fn voice_tell_diags_for_file<'a>(diags: &'a [Diagnostic], file: &str) -> Vec<&'a Diagnostic> {
     diags
         .iter()
         .filter(|d| d.file == Path::new(file) && d.locator == "W_VOICE_TELL")
@@ -31,7 +33,7 @@ fn voice_tell_diags_for_file<'a>(
 
 #[test]
 fn seeded_production_ready_fires_through_blog_validator() {
-    let report = mev::validate_blog(voice_fixture_root()).expect("validate_blog");
+    let report = validate_blog(voice_fixture_root());
     let hits = voice_tell_diags_for_file(&report.diagnostics, "seeded-production-ready.mdx");
     assert_eq!(hits.len(), 1, "{:?}", report.diagnostics);
     assert_eq!(hits[0].severity, Severity::Warning);
@@ -40,7 +42,7 @@ fn seeded_production_ready_fires_through_blog_validator() {
 
 #[test]
 fn seeded_game_changing_fires_through_blog_validator() {
-    let report = mev::validate_blog(voice_fixture_root()).expect("validate_blog");
+    let report = validate_blog(voice_fixture_root());
     let hits = voice_tell_diags_for_file(&report.diagnostics, "seeded-game-changing.mdx");
     assert_eq!(hits.len(), 1, "{:?}", report.diagnostics);
     assert_eq!(hits[0].severity, Severity::Warning);
@@ -49,7 +51,7 @@ fn seeded_game_changing_fires_through_blog_validator() {
 
 #[test]
 fn seeded_actually_bites_you_fires_through_blog_validator() {
-    let report = mev::validate_blog(voice_fixture_root()).expect("validate_blog");
+    let report = validate_blog(voice_fixture_root());
     let hits = voice_tell_diags_for_file(&report.diagnostics, "seeded-actually-bites-you.mdx");
     assert_eq!(hits.len(), 1, "{:?}", report.diagnostics);
     assert_eq!(hits[0].severity, Severity::Warning);
@@ -62,35 +64,35 @@ fn seeded_actually_bites_you_fires_through_blog_validator() {
 
 #[test]
 fn phrase_in_fenced_code_block_is_exempt_end_to_end() {
-    let report = mev::validate_blog(voice_fixture_root()).expect("validate_blog");
+    let report = validate_blog(voice_fixture_root());
     let hits = voice_tell_diags_for_file(&report.diagnostics, "exempt-fenced-code.mdx");
     assert!(hits.is_empty(), "{hits:?}");
 }
 
 #[test]
 fn phrase_in_inline_code_span_is_exempt_end_to_end() {
-    let report = mev::validate_blog(voice_fixture_root()).expect("validate_blog");
+    let report = validate_blog(voice_fixture_root());
     let hits = voice_tell_diags_for_file(&report.diagnostics, "exempt-inline-code.mdx");
     assert!(hits.is_empty(), "{hits:?}");
 }
 
 #[test]
 fn phrase_in_blockquote_is_exempt_end_to_end() {
-    let report = mev::validate_blog(voice_fixture_root()).expect("validate_blog");
+    let report = validate_blog(voice_fixture_root());
     let hits = voice_tell_diags_for_file(&report.diagnostics, "exempt-blockquote.mdx");
     assert!(hits.is_empty(), "{hits:?}");
 }
 
 #[test]
 fn phrase_in_frontmatter_is_exempt_end_to_end() {
-    let report = mev::validate_blog(voice_fixture_root()).expect("validate_blog");
+    let report = validate_blog(voice_fixture_root());
     let hits = voice_tell_diags_for_file(&report.diagnostics, "exempt-frontmatter.mdx");
     assert!(hits.is_empty(), "{hits:?}");
 }
 
 #[test]
 fn clean_post_reports_no_voice_tells() {
-    let report = mev::validate_blog(voice_fixture_root()).expect("validate_blog");
+    let report = validate_blog(voice_fixture_root());
     let hits = voice_tell_diags_for_file(&report.diagnostics, "clean.mdx");
     assert!(hits.is_empty(), "{hits:?}");
 }
@@ -102,8 +104,8 @@ fn clean_post_reports_no_voice_tells() {
 
 #[test]
 fn voice_fixture_tree_produces_only_warnings_and_is_not_a_failure() {
-    let report = mev::validate_blog(voice_fixture_root()).expect("validate_blog");
-    let voice_tells: Vec<&mev::Diagnostic> = report
+    let report = validate_blog(voice_fixture_root());
+    let voice_tells: Vec<&Diagnostic> = report
         .diagnostics
         .iter()
         .filter(|d| d.locator == "W_VOICE_TELL")
@@ -129,7 +131,7 @@ const LIVE_CORPUS_VOICE_TELL_CEILING: usize = 50;
 
 #[test]
 fn live_corpus_voice_tells_are_warning_only_and_bounded() {
-    let live_root = Path::new("../../learn-ai/content/blog/published");
+    let live_root = Path::new("../../../../learn-ai/content/blog/published");
     if !live_root.exists() {
         eprintln!(
             "skipping: {} not present (fresh clone)",
@@ -140,9 +142,9 @@ fn live_corpus_voice_tells_are_warning_only_and_bounded() {
 
     // (a) the run does not panic — `expect` here turns any panic-worthy state into a normal
     // test failure with a message, but the crawl + validate itself must not panic.
-    let report = mev::validate_blog(live_root).expect("validate_blog must not panic or error");
+    let report = validate_blog(live_root);
 
-    let voice_tells: Vec<&mev::Diagnostic> = report
+    let voice_tells: Vec<&Diagnostic> = report
         .diagnostics
         .iter()
         .filter(|d| d.locator == "W_VOICE_TELL")
