@@ -499,7 +499,24 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     let (sources, discovery_diags) = discover_state_files(root, &config);
     report.diagnostics.extend(discovery_diags);
 
-    // 2. Load each discovered file; emit E_STATE_MALFORMED_JSON for parse failures.
+    // 2. Load each discovered file; emit E_STATE_MALFORMED_JSON for parse
+    // failures. MV.ticket.a-parse-error-is-buried-by-its-own-cascade task 2:
+    // this loop's `report.diagnostics.push` calls for a parse failure run
+    // (and complete) BEFORE step 4 below ever calls
+    // `report.diagnostics.extend(graph_diags)`, and `report.diagnostics` is a
+    // plain `Vec` with no reordering between here and the reporting boundary
+    // (`print_diagnostic` in `main.rs` iterates it in insertion order, and
+    // `JsonReport` does not resort it either). So a repo's own
+    // E_STATE_MALFORMED_JSON already precedes every derived diagnostic —
+    // including any E_STATE_UNKNOWN_REPO a SIBLING repo's edge fires against
+    // a genuinely-nonexistent repo — with no sort needed. Confirmed by
+    // `entry_point_tests::parse_error_prints_before_a_genuine_derived_diagnostic`
+    // in this file, which mixes a parse failure with an unrelated derived
+    // diagnostic to prove the ordering holds even when more than one
+    // diagnostic type is present (the task-1 fixture in `brain::state`
+    // covers the zero-cascade case, which is a single-diagnostic report and
+    // so cannot distinguish "ordered correctly" from "nothing else to
+    // order").
     let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
     for src in &sources {
         match load_state(&src.abs_path) {
@@ -3339,6 +3356,167 @@ impl JsonReport {
 #[cfg(test)]
 mod entry_point_tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // MV.ticket.a-parse-error-is-buried-by-its-own-cascade — task 2. Task 1's
+    // fixture (`brain::state::cascade_fixture_*`) proves the cascade is gone
+    // for a report that ends up with exactly ONE diagnostic. This fixture is
+    // deliberately different: repo alpha carries TWO edges — one naming the
+    // malformed repo (must NOT fire E_STATE_UNKNOWN_REPO) and one naming a
+    // repo that was never discovered at all (must STILL fire
+    // E_STATE_UNKNOWN_REPO, per the ticket's fail-open control). That mixes a
+    // parse failure with a genuine derived diagnostic in the same report, so
+    // "the parse error sorts first" is actually exercised rather than
+    // trivially true because there is nothing else in the report to be out
+    // of order with.
+    // -----------------------------------------------------------------------
+
+    fn parse_order_fixture_brain_toml(root: &std::path::Path) {
+        let toml = r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "alpha"
+tier = "primary"
+repo_path = "repos/alpha"
+status_file = "repos/alpha/planning/status.md"
+cache_doc = "docs/projects/alpha.md"
+heading = "alpha"
+
+[[repos]]
+slug = "beta"
+tier = "primary"
+repo_path = "repos/beta"
+status_file = "repos/beta/planning/status.md"
+cache_doc = "docs/projects/beta.md"
+heading = "beta"
+"#;
+        std::fs::write(root.join("brain.toml"), toml).expect("write fixture brain.toml");
+    }
+
+    #[test]
+    fn parse_error_prints_before_a_genuine_derived_diagnostic() {
+        let dir = testsupport::unique_temp_dir("mev-parse-order-fixture-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        parse_order_fixture_brain_toml(&dir);
+
+        let hq_path = dir.join("planning/state.json");
+        std::fs::create_dir_all(hq_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &hq_path,
+            r#"{
+  "repo": "hq",
+  "kind": "brain",
+  "updated": "2026-09-03",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "repos": [
+    { "repo": "alpha", "now": [], "next": [], "blocked": [] },
+    { "repo": "beta", "now": [], "next": [], "blocked": [] }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        // Repo alpha: well-formed, with one edge naming the malformed repo
+        // (beta — must not cascade) and one naming a repo that is not in
+        // brain.toml at all (never discovered — must still fire
+        // E_STATE_UNKNOWN_REPO).
+        let alpha_path = dir.join("repos/alpha/planning/state.json");
+        std::fs::create_dir_all(alpha_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &alpha_path,
+            r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-09-03",
+  "focus": { "now": [], "next": [], "blocked": [{ "id": "AL.1.A", "title": "Blocked on beta and ghost" }] },
+  "tracks": [{
+    "title": "P1",
+    "blocks": [{
+      "id": "AL.1.A",
+      "title": "Blocked on beta and ghost",
+      "sdlc_workflow": "task",
+      "depends_on": [
+        { "type": "block", "repo": "beta", "id": "BE.1.A" },
+        { "type": "block", "repo": "ghost-repo", "id": "GH.1.X" }
+      ]
+    }]
+  }]
+}"#,
+        )
+        .unwrap();
+
+        // Repo beta: one field malformed (trailing comma) relative to an
+        // otherwise-valid file.
+        let beta_path = dir.join("repos/beta/planning/state.json");
+        std::fs::create_dir_all(beta_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &beta_path,
+            r#"{
+  "repo": "beta",
+  "kind": "project",
+  "updated": "2026-09-03",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [{
+    "title": "P1",
+    "blocks": [{ "id": "BE.1.A", "title": "The target block" }]
+  }],
+}"#,
+        )
+        .unwrap();
+
+        let report = validate_brain_state(&dir).expect("validate_brain_state should not error");
+
+        // Before/after counts, recorded from this actual run rather than
+        // quoted from the pattern-analysis figures: with beta malformed and
+        // one genuinely-unknown edge present, the run below produces exactly
+        // two errors (the parse error plus the one honest E_STATE_UNKNOWN_REPO
+        // for ghost-repo) — not the ~400:1 cascade the ticket describes,
+        // because check_state_graph no longer treats a discovered-but-broken
+        // repo as unknown.
+        let error_locators: Vec<&str> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| d.locator.as_str())
+            .collect();
+        assert_eq!(
+            error_locators,
+            vec!["E_STATE_MALFORMED_JSON", "E_STATE_UNKNOWN_REPO"],
+            "expected exactly the parse error (first) then the one genuine unknown-repo \
+             error for ghost-repo, with beta's edge producing neither cascade code: {error_locators:?}"
+        );
+
+        let first = report
+            .diagnostics
+            .first()
+            .expect("a malformed corpus must produce at least one diagnostic");
+        assert_eq!(
+            first.locator, "E_STATE_MALFORMED_JSON",
+            "the parse error must print before the derived E_STATE_UNKNOWN_REPO diagnostic, \
+             even though the derived one is legitimate: {:?}",
+            report.diagnostics
+        );
+        assert!(
+            first.file.ends_with("repos/beta/planning/state.json"),
+            "the parse error must name beta's own file: {:?}",
+            first.file
+        );
+
+        // Exit code (via `report.is_failure()`, what `main.rs` maps to
+        // `ExitCode::FAILURE`) for an unparseable state.json is pinned here,
+        // unchanged by this ticket's fix.
+        assert!(
+            report.is_failure(),
+            "an unparseable state.json must still fail the run (exit code unchanged)"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     #[cfg(feature = "learn-ai")]
