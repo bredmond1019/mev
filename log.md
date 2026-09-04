@@ -8,8 +8,45 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-09-03T00:00:00-03:00"
+timestamp: "2026-09-04T05:31:55-03:00"
 ---
+
+## [run: 2026-09-04]
+
+### Two lanes, seven blocks: surface-leak made trustworthy and five gate-honesty defects closed
+
+- **What:** Drove the `scanner` lane (`clean-slate-sandbox`) and the `integrity` lane
+  (`runs-that-can-be-believed`) to completion — seven blocks, all `closed`, all four corpus gates at
+  0 errors. `MV.19.A` cut `surface-leak`'s rule-2 findings 46 -> 21 (every survivor a real private
+  address) and closed its two fail-open shapes, so it can gate an irreversible publish. `mev backlog`
+  now exists — the read-only sweep `backlog[]` never had. `create-block` carries `origin` through to
+  both the record and the state row, and refuses a malformed one instead of dropping it. `superseded`
+  became an authored terminal status, with 5 of 6 phantom blocks backfilled with resolving
+  successors. A parse error no longer buries itself under ~400 sibling errors. A consumer-gate waiver
+  can finally apply to a broken consumer, and one with no live lane is refused. Two write-time
+  warnings make an undying carryover visible at authoring time.
+- **Why:** The roadmap is named for the problem — the run's own artifacts were lying. Gates that
+  could not fail, checks that reported success having scanned nothing, a rule 60% of whose findings
+  were noise (12 of them its own test fixtures). Every one of these blocks converts a silent or
+  dishonest signal into one worth reading.
+- **Refs:** [`orchestration-run/runs-that-can-be-believed/review.md`](planning/orchestration-run/runs-that-can-be-believed/review.md)
+  (nine executed recipes) ·
+  [`orchestration-run/clean-slate-sandbox/review.md`](planning/orchestration-run/clean-slate-sandbox/review.md)
+  (seven) · 16 capability rows across the two `verification-ledger.json` files, every one `untested`
+  with a named production call site.
+
+### Method findings worth more than the blocks
+
+- **What:** Banned a terminal `files: []` task and a standalone D68 red task after three
+  work-assertion bails (`mev:runs-that-can-be-believed:D33`) — five consecutive clean runs followed.
+  Filed seven carryovers, including three fail-opens in the quiesce, `toolchain-freshness` not
+  following path dependencies, and a block record that exists on disk but was never committed —
+  a shape every filesystem-reading tool in the fleet is blind to.
+- **Why:** Four of this session's own instrument errors produced clean, confident, wrong answers:
+  a probe run against a stale installed binary, a corpus glob under-scoped by a whole tier, three of
+  six line citations that had already drifted onto doc comments, and two build stamps reconciled by
+  eye. Each was caught by arithmetic or by a peer re-running it — not by care.
+- **Refs:** `planning/state.json` `carryover[]` · `planning/handoff.md`
 
 ## [run: 2026-09-03]
 
