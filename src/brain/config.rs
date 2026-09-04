@@ -465,6 +465,19 @@ pub struct SurfaceAllowlist {
     /// exactly.
     #[serde(default)]
     pub literals: Vec<String>,
+    /// FILE-scoped exemption from rule 2 (private infra literal) only —
+    /// never rule 1. Each entry is shaped `<repo-slug>:<repo-relative-path>`
+    /// and names a file whose literals are the check's own positive-control
+    /// fixtures, not real leaks (`surface.rs`'s `#[cfg(test)]` block).
+    ///
+    /// Deliberately file-scoped rather than folded into `literals`: adding a
+    /// fixture address like `100.64.1.2` to `literals` would suppress that
+    /// address in EVERY public repo, turning a false-positive fix into a
+    /// fail-open hole in the same check this exists to make trustworthy. An
+    /// absent key exempts nothing — additive, so older/fixture `brain.toml`s
+    /// still parse and behave unchanged.
+    #[serde(default)]
+    pub self_fixtures: Vec<String>,
 }
 
 /// Top-level `brain.toml` config.
@@ -875,6 +888,29 @@ literals = ["192.0.2.", "198.51.100.1", "127.0.0.1"]
         assert_eq!(
             cfg.surface_allowlist.literals,
             vec!["192.0.2.", "198.51.100.1", "127.0.0.1"]
+        );
+    }
+
+    #[test]
+    fn surface_allowlist_self_fixtures_empty_when_absent() {
+        let cfg = load_brain_config(&fixture_path()).expect("should parse fixture");
+        assert!(
+            cfg.surface_allowlist.self_fixtures.is_empty(),
+            "an absent [surface_allowlist] self_fixtures key must yield an empty list, so \
+             older/fixture brain.toml files still parse and exempt nothing"
+        );
+    }
+
+    #[test]
+    fn surface_allowlist_self_fixtures_round_trips_entries() {
+        let toml = r#"
+[surface_allowlist]
+self_fixtures = ["mev:src/brain/conformance/surface.rs"]
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(
+            cfg.surface_allowlist.self_fixtures,
+            vec!["mev:src/brain/conformance/surface.rs"]
         );
     }
 

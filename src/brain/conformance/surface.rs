@@ -232,6 +232,16 @@ fn find_literals(content: &str) -> Vec<LiteralMatch> {
     out
 }
 
+/// Whether `repo_slug:file_rel` is exempted from rule 2 (private infra literal) as a
+/// self-fixture entry shaped `<repo-slug>:<repo-relative-path>` in
+/// `[surface_allowlist] self_fixtures`. FILE-scoped, not literal-scoped — this exempts a
+/// whole file's rule-2 findings, never rule 1, and never any OTHER file's identical
+/// literal (that is the control half of task 1's self-fixture fixture).
+fn is_self_fixture(repo_slug: &str, file_rel: &str, self_fixtures: &[String]) -> bool {
+    let key = format!("{repo_slug}:{file_rel}");
+    self_fixtures.iter().any(|entry| entry == &key)
+}
+
 /// Whether `literal` is covered by an entry in `allowlist`: an entry ending in `.`
 /// matches as a prefix (so `192.0.2.` covers the whole block); otherwise the match is
 /// exact.
@@ -361,6 +371,7 @@ pub fn run(ctx: &ConformanceCtx) -> CheckOutcome {
     }
 
     let allowlist = &ctx.config.surface_allowlist.literals;
+    let self_fixtures = &ctx.config.surface_allowlist.self_fixtures;
     let mut all_findings: Vec<Finding> = Vec::new();
     let mut reasons: Vec<String> = Vec::new();
     let mut status = CheckStatus::Pass;
@@ -368,6 +379,16 @@ pub fn run(ctx: &ConformanceCtx) -> CheckOutcome {
     for repo in &public_repos {
         match evaluate_repo(&ctx.root, repo, allowlist) {
             Ok(findings) => {
+                // Self-fixture exemption is applied here, not inside `evaluate_repo`/
+                // `check_literals_in_file`: it is FILE-scoped (rule 2 only, never rule
+                // 1), so it filters the already-produced findings rather than changing
+                // what literals get flagged in the first place.
+                let findings: Vec<Finding> = findings
+                    .into_iter()
+                    .filter(|f| {
+                        !(f.rule == "rule2" && is_self_fixture(&f.repo, &f.file, self_fixtures))
+                    })
+                    .collect();
                 if !findings.is_empty() {
                     status = CheckStatus::Drift;
                     all_findings.extend(findings);
@@ -511,6 +532,33 @@ mod tests {
         let list = vec!["127.0.0.1".to_string()];
         assert!(is_allowlisted("127.0.0.1", &list));
         assert!(!is_allowlisted("127.0.0.2", &list));
+    }
+
+    #[test]
+    fn is_self_fixture_matches_repo_and_path_exactly() {
+        let list = vec!["mev:src/brain/conformance/surface.rs".to_string()];
+        assert!(is_self_fixture(
+            "mev",
+            "src/brain/conformance/surface.rs",
+            &list
+        ));
+        // Different repo, same path — not exempt.
+        assert!(!is_self_fixture(
+            "bastion",
+            "src/brain/conformance/surface.rs",
+            &list
+        ));
+        // Same repo, different path — not exempt.
+        assert!(!is_self_fixture("mev", "docs/unrelated.md", &list));
+    }
+
+    #[test]
+    fn is_self_fixture_empty_list_exempts_nothing() {
+        assert!(!is_self_fixture(
+            "mev",
+            "src/brain/conformance/surface.rs",
+            &[]
+        ));
     }
 
     #[test]
