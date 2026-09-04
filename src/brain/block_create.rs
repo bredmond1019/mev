@@ -63,7 +63,7 @@ use serde_json::json;
 
 use crate::Diagnostic;
 use crate::brain::emit::{EmitAction, EmitPlan};
-use crate::brain::state::{Backlog, BlockedBy, StateFile, StateSource, Track, TrackBlock};
+use crate::brain::state::{Backlog, BlockedBy, Origin, StateFile, StateSource, Track, TrackBlock};
 
 /// Legal `kind` values — which producer authored the record and how it is
 /// scheduled.
@@ -77,6 +77,12 @@ pub const VALID_SDLC_WORKFLOWS: &[&str] = &["none", "patch", "task", "run", "flo
 /// here, and the two sets are mutually invalid (see module docs).
 pub const VALID_MODELS: &[&str] = &["sonnet", "gemini-pro", "gemini-flash", "either"];
 
+/// Legal `origin.type` values — block.schema.json's `origin` oneOf
+/// vocabulary. Only `mechanism` is reachable through `mev create-block`
+/// today (see this ticket's `out_of_scope`); the other three are validated
+/// here anyway because the schema itself allows them.
+pub const VALID_ORIGIN_KINDS: &[&str] = &["backlog", "carryover", "capture", "mechanism"];
+
 /// Diagnostic code: `kind` is outside [`VALID_KINDS`].
 pub const E_BLOCK_CREATE_KIND_ENUM: &str = "E_BLOCK_CREATE_KIND_ENUM";
 /// Diagnostic code: `sdlc_workflow` is outside [`VALID_SDLC_WORKFLOWS`].
@@ -87,6 +93,11 @@ pub const E_BLOCK_CREATE_MODEL_ENUM: &str = "E_BLOCK_CREATE_MODEL_ENUM";
 pub const E_BLOCK_CREATE_MISSING_EPICS: &str = "E_BLOCK_CREATE_MISSING_EPICS";
 /// Diagnostic code: a required prose/string field is empty.
 pub const E_BLOCK_CREATE_EMPTY_FIELD: &str = "E_BLOCK_CREATE_EMPTY_FIELD";
+/// Diagnostic code: `origin` is present but does not match block.schema.json's
+/// `origin` oneOf — an out-of-vocabulary `type`, a missing/empty `slug`, or
+/// an extra key. Refused with this named diagnostic, never dropped or
+/// defaulted to null.
+pub const E_BLOCK_CREATE_MALFORMED_ORIGIN: &str = "E_BLOCK_CREATE_MALFORMED_ORIGIN";
 /// Diagnostic code: `kind: "block"` with no `phase` — schema's conditional
 /// `allOf` requires `phase` for that kind.
 pub const E_BLOCK_CREATE_BLOCK_NEEDS_PHASE: &str = "E_BLOCK_CREATE_BLOCK_NEEDS_PHASE";
@@ -188,6 +199,19 @@ pub struct CreateBlockPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_rationale: Option<String>,
 
+    /// Provenance pointer — `{type, slug}` per block.schema.json's `origin`
+    /// oneOf (`type` in `backlog`/`carryover`/`capture`/`mechanism`, `slug`
+    /// the originating node's key). Kept as a raw [`serde_json::Value`]
+    /// here, deliberately never a typed `Option<Origin>` — okf-core's
+    /// [`Origin`] carries no `deny_unknown_fields`, so a typed field would
+    /// let an extra key inside `origin` round-trip through deserialization
+    /// and vanish silently, the exact drop this field exists to close. The
+    /// raw value is validated by [`parse_origin`] in [`validate_payload`],
+    /// which refuses an out-of-vocabulary `type`, a missing/empty `slug`,
+    /// or any extra key with a named diagnostic — never a fallback to null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<serde_json::Value>,
+
     #[serde(default)]
     pub files: BlockFiles,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -250,6 +274,54 @@ fn virtual_record_path(payload: &CreateBlockPayload) -> PathBuf {
 /// Does **not** check cross-corpus concerns (an existing id, a dangling
 /// `depends_on` target, wave allocation) — those need the loaded corpus and
 /// belong to a later task's planner, not this pure payload check.
+/// Parse and validate a raw JSON `origin` value against block.schema.json's
+/// `origin` oneOf — an object carrying exactly `type` (one of
+/// [`VALID_ORIGIN_KINDS`]) and `slug` (a non-empty string), no other keys
+/// (`additionalProperties: false`). Returns a human-readable reason on
+/// failure; never falls back to a default or partial value.
+fn parse_origin(value: &serde_json::Value) -> Result<Origin, String> {
+    let Some(obj) = value.as_object() else {
+        return Err(format!("origin must be a JSON object, got {value}"));
+    };
+
+    let known_keys = ["type", "slug"];
+    let extra: Vec<&str> = obj
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !known_keys.contains(k))
+        .collect();
+    if !extra.is_empty() {
+        return Err(format!(
+            "origin carries unknown key(s) {} — block.schema.json's origin allows only 'type' \
+             and 'slug' (additionalProperties: false)",
+            extra.join(", ")
+        ));
+    }
+
+    let Some(kind) = obj.get("type").and_then(|v| v.as_str()) else {
+        return Err("origin.type is missing or not a string".to_string());
+    };
+    if !VALID_ORIGIN_KINDS.contains(&kind) {
+        return Err(format!(
+            "origin.type '{kind}' is not legal; must be one of {}",
+            VALID_ORIGIN_KINDS.join(", ")
+        ));
+    }
+
+    let slug = match obj.get("slug") {
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => s.clone(),
+        Some(serde_json::Value::String(_)) => {
+            return Err("origin.slug is empty".to_string());
+        }
+        _ => return Err("origin.slug is missing or not a string".to_string()),
+    };
+
+    Ok(Origin {
+        kind: kind.to_string(),
+        slug,
+    })
+}
+
 pub fn validate_payload(payload: &CreateBlockPayload) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
     let path = virtual_record_path(payload);
@@ -343,6 +415,19 @@ pub fn validate_payload(payload: &CreateBlockPayload) -> Vec<Diagnostic> {
             E_BLOCK_CREATE_EMPTY_ACCEPTANCE_CRITERIA,
             "payload 'acceptance_criteria' is empty; block.schema.json requires at least one entry"
                 .to_string(),
+        ));
+    }
+
+    // --- origin: optional, but a present value must match block.schema.json's
+    //     origin oneOf exactly — refused with a named diagnostic, never
+    //     silently dropped or defaulted to null.
+    if let Some(origin) = &payload.origin
+        && let Err(reason) = parse_origin(origin)
+    {
+        diags.push(Diagnostic::error(
+            &path,
+            E_BLOCK_CREATE_MALFORMED_ORIGIN,
+            format!("payload 'origin' is malformed: {reason}"),
         ));
     }
 
@@ -549,6 +634,17 @@ pub fn build_block_record(
             serde_json::Value::Array(depends_on_for_record(&payload.depends_on)),
         );
     }
+    // Only when present, and only the parsed canonical shape — a present but
+    // malformed origin is refused by `validate_payload` before this ever
+    // runs (see `plan_create_block` step 1), so `parse_origin` is infallible
+    // here in practice; `if let Ok` rather than `.expect` keeps this
+    // function itself pure of that precondition.
+    if let Some(origin) = payload.origin.as_ref().and_then(|v| parse_origin(v).ok()) {
+        map.insert(
+            "origin".to_string(),
+            json!({"type": origin.kind, "slug": origin.slug}),
+        );
+    }
     if !payload.carryover_context.is_empty() {
         map.insert(
             "carryover_context".to_string(),
@@ -587,6 +683,7 @@ fn build_track_block(payload: &CreateBlockPayload, wave: i64, created: &str) -> 
         model: Some(payload.model.clone()),
         epics: payload.epics.clone(),
         created: Some(created.to_string()),
+        origin: payload.origin.as_ref().and_then(|v| parse_origin(v).ok()),
         ..TrackBlock::default()
     }
 }
@@ -1276,6 +1373,7 @@ mod tests {
             phase: Some(99),
             initiative: None,
             workflow_rationale: None,
+            origin: None,
             files: BlockFiles::default(),
             interfaces: Vec::new(),
             out_of_scope: vec!["Everything else.".to_string()],
@@ -1566,6 +1664,7 @@ mod planning_tests {
             phase: Some(99),
             initiative: None,
             workflow_rationale: None,
+            origin: None,
             files: BlockFiles::default(),
             interfaces: Vec::new(),
             out_of_scope: vec!["Everything else.".to_string()],
@@ -2207,6 +2306,35 @@ mod planning_tests {
             row.get("origin"),
             Some(&serde_json::Value::Null),
             "no-origin payload must write origin: null on the state.json row, got {row:?}"
+        );
+    }
+
+    /// Test 4 (task 1 addendum): an origin object carrying a well-formed
+    /// `type`/`slug` PLUS an extra key must also be refused, not silently
+    /// stripped to `{type, slug}` and written anyway — `additionalProperties:
+    /// false` in block.schema.json's `origin` oneOf. Distinct from test 2
+    /// (an out-of-vocabulary `type`): this shape would otherwise sail
+    /// through a typed `Option<Origin>` deserialization untouched, because
+    /// okf-core's `Origin` carries no `deny_unknown_fields` — the raw
+    /// `serde_json::Value` payload field exists specifically to keep this
+    /// key visible long enough to refuse it.
+    #[test]
+    fn origin_with_an_extra_key_is_refused_not_silently_stripped() {
+        let with_extra = json!({
+            "type": "mechanism",
+            "slug": "gates-that-cannot-fail",
+            "notes": "should not be here"
+        });
+        let payload = payload_with_origin(Some(with_extra));
+        let (plan, _row, _record) = plan_and_extract(&payload);
+        assert!(
+            !plan.diagnostics.is_empty(),
+            "expected a named diagnostic refusing the extra key, got none (plan: {plan:?})"
+        );
+        assert!(
+            plan.actions.is_empty(),
+            "an origin with an extra key must yield a zero-action plan, not a stripped write \
+             (plan: {plan:?})"
         );
     }
 }
