@@ -144,13 +144,36 @@ fn lexical_normalize(path: &str) -> Option<Vec<String>> {
     Some(stack)
 }
 
+/// Every directory PREFIX implied by `tracked`, a repo's tracked-file set — e.g. the
+/// file `crates/engine-contract/Cargo.toml` contributes both `crates` and
+/// `crates/engine-contract`. Built once per repo from the same `git ls-files` output
+/// that produced `tracked`; never touches the filesystem, so a locally-resolvable but
+/// UNTRACKED directory (the D46 `planning/` vault symlink is the canonical example)
+/// never appears here — only a directory some TRACKED FILE actually sits under does.
+fn tracked_dir_prefixes(tracked: &HashSet<String>) -> HashSet<String> {
+    let mut dirs = HashSet::new();
+    for path in tracked {
+        let mut parts: Vec<&str> = path.split('/').collect();
+        parts.pop(); // drop the filename itself
+        while !parts.is_empty() {
+            dirs.insert(parts.join("/"));
+            parts.pop();
+        }
+    }
+    dirs
+}
+
 /// Evaluate rule 1 for a single tracked markdown file's content against `tracked`, the
-/// repo's full tracked set. `file_rel` is the file's own repo-relative path (`/`-joined).
+/// repo's full tracked set, and `tracked_dirs`, every directory prefix implied by it. A
+/// link target that names a tracked directory (not just a tracked file) resolves too —
+/// see `tracked_dir_prefixes` for why this stays filesystem-free.
+/// `file_rel` is the file's own repo-relative path (`/`-joined).
 fn check_links_in_file(
     repo: &str,
     file_rel: &str,
     content: &str,
     tracked: &HashSet<String>,
+    tracked_dirs: &HashSet<String>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     let file_dir: Vec<&str> = {
@@ -184,7 +207,7 @@ fn check_links_in_file(
             }),
             Some(segments) => {
                 let normalized = segments.join("/");
-                if !tracked.contains(&normalized) {
+                if !tracked.contains(&normalized) && !tracked_dirs.contains(&normalized) {
                     findings.push(Finding {
                         repo: repo.to_string(),
                         file: file_rel.to_string(),
@@ -336,6 +359,7 @@ pub fn evaluate_repo(
     };
 
     let tracked = tracked_set(&repo_dir)?;
+    let tracked_dirs = tracked_dir_prefixes(&tracked);
     let mut findings = Vec::new();
 
     for rel in &tracked {
@@ -346,7 +370,13 @@ pub fn evaluate_repo(
         };
 
         if rel.ends_with(".md") || rel.ends_with(".mdx") {
-            findings.extend(check_links_in_file(&repo.slug, rel, &content, &tracked));
+            findings.extend(check_links_in_file(
+                &repo.slug,
+                rel,
+                &content,
+                &tracked,
+                &tracked_dirs,
+            ));
         }
         findings.extend(check_literals_in_file(&repo.slug, rel, &content, allowlist));
     }
@@ -518,6 +548,24 @@ mod tests {
     #[test]
     fn lexical_normalize_climb_out_is_none() {
         assert_eq!(lexical_normalize("../../etc/passwd"), None);
+    }
+
+    #[test]
+    fn tracked_dir_prefixes_includes_every_ancestor_dir_only() {
+        let tracked: HashSet<String> = ["crates/engine-contract/Cargo.toml".to_string()]
+            .into_iter()
+            .collect();
+        let dirs = tracked_dir_prefixes(&tracked);
+        assert!(dirs.contains("crates"));
+        assert!(dirs.contains("crates/engine-contract"));
+        // The file itself is not a directory prefix, and nothing untracked appears.
+        assert!(!dirs.contains("crates/engine-contract/Cargo.toml"));
+        assert_eq!(dirs.len(), 2);
+    }
+
+    #[test]
+    fn tracked_dir_prefixes_of_empty_set_is_empty() {
+        assert!(tracked_dir_prefixes(&HashSet::new()).is_empty());
     }
 
     #[test]
