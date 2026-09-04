@@ -81,11 +81,24 @@
 //!   `file_contains` predicate's pattern is regex-shaped (`NotEvaluableReason::PatternNotLiteral`);
 //!   the evaluator is literal-substring only, so the predicate can never fire.
 //!   Warning severity only.
+//! - `W_BACKLOG_ALREADY_SATISFIED` — a `backlog[]` `clears_when` predicate
+//!   evaluates satisfied (the `mev backlog` sweep's `Cleared` lane) while the
+//!   idea is still present and un-disposed. Mirrors
+//!   `W_STATE_CARRYOVER_ALREADY_SATISFIED`. Warning severity only.
+//! - `W_BACKLOG_PROSE_ONLY_PREDICATE` — a `backlog[]` `clears_when`/`ready_when`
+//!   is free prose rather than one of the four typed predicates, so no sweep
+//!   can evaluate it. Mirrors `W_CARRYOVER_PROSE_CLEARS_WHEN`. Warning
+//!   severity only.
+//! - `W_BACKLOG_BROKEN_PREDICATE` — a `backlog[]` typed predicate that can
+//!   never resolve: a `block_closed` naming a block in no repo's `tracks[]`,
+//!   or a `file_exists`/`file_contains` path that resolves outside the
+//!   corpus. Warning severity only.
+//! - `W_BACKLOG_UNDATED` — a `backlog[]` entry with no `created` date,
+//!   invisible to the Aging lane's age filter. Warning severity only.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
-#[cfg(test)]
 use std::path::PathBuf;
 
 use crate::Diagnostic;
@@ -839,6 +852,255 @@ pub fn check_carryover_broken_predicate(
                 }
             }
             _ => {}
+        }
+    }
+    diags
+}
+
+// ---------------------------------------------------------------------------
+// backlog[] write-time diagnostics — MV.ticket.backlog-sweep-verb, Task 2
+// ---------------------------------------------------------------------------
+//
+// Four warnings mirroring the carryover ones above BY NAME, so the vocabulary
+// stays one thing across the two containers:
+//   - W_BACKLOG_ALREADY_SATISFIED   (mirrors W_STATE_CARRYOVER_ALREADY_SATISFIED)
+//   - W_BACKLOG_PROSE_ONLY_PREDICATE (mirrors W_CARRYOVER_PROSE_CLEARS_WHEN)
+//   - W_BACKLOG_BROKEN_PREDICATE     (mirrors W_STATE_CARRYOVER_BROKEN_PREDICATE_*)
+//   - W_BACKLOG_UNDATED              (no carryover sibling — carryover entries
+//     always require `created` at schema level; backlog's is optional)
+//
+// All four are Warning severity and MUST stay Warning — `Report::is_failure`
+// only counts `Error`, and the fields are brand new (nothing authors either
+// predicate on the live corpus yet, per Task 1's re-derived pool), so these
+// exist purely as guards against the first bad authoring, not as a cleanup
+// pass over an existing mess. Registered under the observed-red contract
+// (base-template:BT.ticket.gates-must-be-observed-red).
+
+/// `W_BACKLOG_ALREADY_SATISFIED` — a `backlog[]` `clears_when` that evaluates
+/// satisfied (the sweep's [`crate::brain::backlog::BacklogLane::Cleared`]
+/// lane) while the entry is still present and un-disposed.
+///
+/// Mirrors [`check_carryover_already_satisfied`] exactly, pointed at the
+/// second container: an already-satisfied `clears_when` on a live entry is
+/// an author error — either the idea was already dead when filed, or it is
+/// predicated on the wrong observable. Never author a typed `clears_when`
+/// that is already satisfied; it retires the entry on the first `mev
+/// backlog` sweep while the idea is still live.
+pub fn check_backlog_already_satisfied(
+    src: &StateSource,
+    file: &StateFile,
+    report: &crate::brain::backlog::BacklogReport,
+) -> Vec<Diagnostic> {
+    use crate::brain::backlog::BacklogLane;
+
+    let mut diags = Vec::new();
+    let path = &src.abs_path;
+
+    for item in &file.backlog {
+        if item.clears_when.is_none() {
+            continue;
+        }
+        let Some(verdict) = report
+            .entries
+            .iter()
+            .find(|v| v.repo == src.repo_slug && v.slug == item.slug)
+        else {
+            continue;
+        };
+        if verdict.lane != BacklogLane::Cleared {
+            continue;
+        }
+
+        let predicate = item
+            .clears_when
+            .as_ref()
+            .and_then(clears_when_display)
+            .unwrap_or_default();
+
+        diags.push(Diagnostic::warning(
+            path,
+            "W_BACKLOG_ALREADY_SATISFIED",
+            format!(
+                "backlog idea '{}' clears_when is ALREADY satisfied ({predicate}) while the \
+                 entry is still present — this is NOT the sweep's healthy CLEARED lane: an idea \
+                 that is live and already satisfied is either (a) already resolved, so it \
+                 should not have been filed, or (b) predicated on the wrong observable. \
+                 Re-predicate it — do not delete it.",
+                item.slug
+            ),
+        ));
+    }
+    diags
+}
+
+/// `W_BACKLOG_PROSE_ONLY_PREDICATE` — a `backlog[]` `clears_when` or
+/// `ready_when` that is free prose rather than one of the four typed
+/// predicates. No sweep can evaluate prose, so the entry can never resolve
+/// itself — it only ages until a human rereads it.
+///
+/// Unlike carryover's sibling warning (`W_CARRYOVER_PROSE_CLEARS_WHEN`),
+/// this does NOT fire on an absent field: `clears_when`/`ready_when` are
+/// both genuinely optional on a backlog idea (an idea with neither is simply
+/// evaluated by age — the `Aging`/`NotEvaluable` lanes already speak to
+/// that), whereas carryover's `clears_when` is expected on every entry.
+pub fn check_backlog_prose_predicate(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let path = &src.abs_path;
+
+    for item in &file.backlog {
+        for (field_name, field) in [
+            ("clears_when", &item.clears_when),
+            ("ready_when", &item.ready_when),
+        ] {
+            if let Some(ClearsWhen::Prose(_)) = field {
+                diags.push(Diagnostic::warning(
+                    path,
+                    "W_BACKLOG_PROSE_ONLY_PREDICATE",
+                    format!(
+                        "backlog idea '{}' has a prose-only {field_name}, which no sweep can \
+                         evaluate; author one of the four typed predicates (file_contains / \
+                         block_closed / file_exists / command_exits_zero) so the entry can \
+                         resolve itself",
+                        item.slug
+                    ),
+                ));
+            }
+        }
+    }
+    diags
+}
+
+/// Lexically resolve `base.join(path)`, collapsing `.`/`..` components
+/// WITHOUT touching the filesystem (the target need not exist — a
+/// `file_exists`/`clears_when` predicate is routinely authored before its
+/// target is created, which must never itself be "broken").
+fn lexical_join(base: &Path, path: &str) -> PathBuf {
+    let mut out = base.to_path_buf();
+    for component in Path::new(path).components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Whether `path` (as authored on a `file_exists`/`file_contains`
+/// predicate), resolved lexically against both `brain_root` and the owning
+/// repo's root, escapes the corpus entirely — i.e. even after collapsing
+/// every `..`, the result is not rooted under `brain_root`. A relative path
+/// that simply does not exist YET is not broken; a path that resolves
+/// outside the corpus root can never exist inside it and is.
+fn backlog_path_escapes_corpus(
+    path: &str,
+    brain_root: &Path,
+    repo_paths: &HashMap<String, PathBuf>,
+    owning_repo: &str,
+) -> bool {
+    let brain_root = lexical_join(brain_root, "");
+    let via_root = lexical_join(&brain_root, path);
+    if via_root.starts_with(&brain_root) {
+        return false;
+    }
+    if let Some(repo_root) = repo_paths.get(owning_repo) {
+        let repo_root = lexical_join(repo_root, "");
+        let via_repo = lexical_join(&repo_root, path);
+        if via_repo.starts_with(&brain_root) {
+            return false;
+        }
+    }
+    true
+}
+
+/// `W_BACKLOG_BROKEN_PREDICATE` — a `backlog[]` typed predicate the
+/// evaluator can already prove can never resolve, distinct from one that is
+/// merely unsatisfied today:
+///
+/// - a `block_closed` naming a block absent from every repo's `tracks[]`
+///   (`status_map` has no `"{repo}:{id}"` entry at all — not "not yet
+///   closed", but "does not exist"), or
+/// - a `file_exists`/`file_contains` whose `path`, resolved lexically
+///   against the corpus, escapes it (see [`backlog_path_escapes_corpus`]).
+///
+/// A block that exists but is not yet closed, or a path that simply does
+/// not exist yet, is healthy `Unsatisfied`/`Waiting` — neither fires this.
+pub fn check_backlog_broken_predicate(
+    src: &StateSource,
+    file: &StateFile,
+    status_map: &HashMap<String, Option<String>>,
+    brain_root: &Path,
+    repo_paths: &HashMap<String, PathBuf>,
+) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let path = &src.abs_path;
+
+    for item in &file.backlog {
+        for field in [&item.clears_when, &item.ready_when] {
+            let Some(ClearsWhen::Predicate(predicate)) = field else {
+                continue;
+            };
+            match predicate {
+                ClearsWhenPredicate::BlockClosed { repo, id, .. } => {
+                    let key = format!("{repo}:{id}");
+                    if !status_map.contains_key(&key) {
+                        diags.push(Diagnostic::warning(
+                            path,
+                            "W_BACKLOG_BROKEN_PREDICATE",
+                            format!(
+                                "backlog idea '{}' clears_when/ready_when names block \
+                                 '{repo}:{id}', which is in no repo's tracks[] — this \
+                                 predicate can never resolve; the id likely moved, was \
+                                 renamed, or was mistyped",
+                                item.slug
+                            ),
+                        ));
+                    }
+                }
+                ClearsWhenPredicate::FileExists { path: fpath, .. }
+                | ClearsWhenPredicate::FileContains { path: fpath, .. } => {
+                    if backlog_path_escapes_corpus(fpath, brain_root, repo_paths, &src.repo_slug) {
+                        diags.push(Diagnostic::warning(
+                            path,
+                            "W_BACKLOG_BROKEN_PREDICATE",
+                            format!(
+                                "backlog idea '{}' clears_when/ready_when names path \
+                                 '{fpath}', which resolves outside the corpus — this \
+                                 predicate can never fire; repoint it at a path under the \
+                                 brain root or the owning repo",
+                                item.slug
+                            ),
+                        ));
+                    }
+                }
+                ClearsWhenPredicate::CommandExitsZero { .. } => {}
+            }
+        }
+    }
+    diags
+}
+
+/// `W_BACKLOG_UNDATED` — a `backlog[]` entry with no `created` date, which
+/// is invisible to the `Aging` lane's age filter
+/// ([`crate::brain::backlog::evaluate_backlog`] / `backlog_stale_age`
+/// silently skip it rather than mis-dating it).
+pub fn check_backlog_undated(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let path = &src.abs_path;
+
+    for item in &file.backlog {
+        if item.created.is_none() {
+            diags.push(Diagnostic::warning(
+                path,
+                "W_BACKLOG_UNDATED",
+                format!(
+                    "backlog idea '{}' has no `created` date — it is invisible to the Aging \
+                     lane's age filter; add `created` (YYYY-MM-DD)",
+                    item.slug
+                ),
+            ));
         }
     }
     diags
@@ -12531,6 +12793,242 @@ fn cascade_fixture_malformed_beta_does_not_cascade_and_parse_error_prints_first(
 }
 
 // --- check_field_policy tests ---
+
+#[cfg(test)]
+mod backlog_diagnostics_tests {
+    use super::*;
+
+    fn make_source(path: &std::path::Path, kind: &'static str) -> StateSource {
+        StateSource {
+            repo_slug: "test".to_string(),
+            abs_path: path.to_path_buf(),
+            expected_kind: kind,
+        }
+    }
+
+    fn parse_file(json: &str) -> StateFile {
+        serde_json::from_str(json).expect("fixture must parse")
+    }
+
+    fn day(s: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    // -----------------------------------------------------------------------
+    // W_BACKLOG_* write-time diagnostics — MV.ticket.backlog-sweep-verb, Task 2
+    // -----------------------------------------------------------------------
+
+    fn backlog_evaluate_one(
+        src: &StateSource,
+        file: &StateFile,
+        brain_root: &std::path::Path,
+        status_map: &HashMap<String, Option<String>>,
+        today: chrono::NaiveDate,
+    ) -> crate::brain::backlog::BacklogReport {
+        let files = vec![(src.clone(), file.clone())];
+        let repo_paths: HashMap<String, std::path::PathBuf> =
+            HashMap::from([(src.repo_slug.clone(), brain_root.to_path_buf())]);
+        let cfg = crate::brain::config::AttentionThresholds::default();
+        crate::brain::backlog::evaluate_backlog(
+            &files,
+            status_map,
+            brain_root,
+            &repo_paths,
+            today,
+            &cfg,
+            None,
+            false,
+            std::time::Duration::from_secs(1),
+        )
+    }
+
+    #[test]
+    fn w_backlog_already_satisfied_fires_on_a_satisfied_live_clears_when() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "brain");
+        let file = parse_file(
+            r#"{"repo":"hq","kind":"brain","updated":"2026-09-03",
+                "backlog":[{"slug":"dead-idea","title":"t","repo":"mev","type":"chore",
+                            "status":"idea","created":"2026-09-01",
+                            "clears_when":{"type":"block_closed","repo":"mev","id":"MV.1.A"}}]}"#,
+        );
+        let mut status_map = HashMap::new();
+        status_map.insert("mev:MV.1.A".to_string(), Some("closed".to_string()));
+        let report = backlog_evaluate_one(&src, &file, dir.path(), &status_map, day("2026-09-03"));
+
+        let d = check_backlog_already_satisfied(&src, &file, &report);
+        assert_eq!(d.len(), 1, "got: {d:?}");
+        assert_eq!(d[0].locator, "W_BACKLOG_ALREADY_SATISFIED");
+        assert_eq!(d[0].severity, crate::Severity::Warning);
+    }
+
+    #[test]
+    fn w_backlog_already_satisfied_is_silent_on_an_unsatisfied_clears_when() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "brain");
+        let file = parse_file(
+            r#"{"repo":"hq","kind":"brain","updated":"2026-09-03",
+                "backlog":[{"slug":"live-idea","title":"t","repo":"mev","type":"chore",
+                            "status":"idea","created":"2026-09-01",
+                            "clears_when":{"type":"block_closed","repo":"mev","id":"MV.1.A"}}]}"#,
+        );
+        let status_map: HashMap<String, Option<String>> = HashMap::new(); // MV.1.A absent -> not closed
+        let report = backlog_evaluate_one(&src, &file, dir.path(), &status_map, day("2026-09-03"));
+
+        let d = check_backlog_already_satisfied(&src, &file, &report);
+        assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn w_backlog_prose_only_predicate_fires_on_prose_clears_when_and_ready_when() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "brain");
+        let file = parse_file(
+            r#"{"repo":"hq","kind":"brain","updated":"2026-09-03",
+                "backlog":[{"slug":"prose-idea","title":"t","repo":"mev","type":"chore",
+                            "status":"idea","created":"2026-09-01",
+                            "clears_when":"someday when it feels right",
+                            "ready_when":"once the dust settles"}]}"#,
+        );
+
+        let d = check_backlog_prose_predicate(&src, &file);
+        assert_eq!(d.len(), 2, "got: {d:?}");
+        assert!(
+            d.iter()
+                .all(|w| w.locator == "W_BACKLOG_PROSE_ONLY_PREDICATE")
+        );
+        assert!(d.iter().all(|w| w.severity == crate::Severity::Warning));
+    }
+
+    #[test]
+    fn w_backlog_prose_only_predicate_is_silent_on_a_typed_predicate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "brain");
+        let file = parse_file(
+            r#"{"repo":"hq","kind":"brain","updated":"2026-09-03",
+                "backlog":[{"slug":"typed-idea","title":"t","repo":"mev","type":"chore",
+                            "status":"idea","created":"2026-09-01",
+                            "clears_when":{"type":"block_closed","repo":"mev","id":"MV.1.A"}}]}"#,
+        );
+
+        let d = check_backlog_prose_predicate(&src, &file);
+        assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn w_backlog_broken_predicate_fires_on_a_block_closed_naming_no_known_block() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "brain");
+        let file = parse_file(
+            r#"{"repo":"hq","kind":"brain","updated":"2026-09-03",
+                "backlog":[{"slug":"ghost-block-idea","title":"t","repo":"mev","type":"chore",
+                            "status":"idea","created":"2026-09-01",
+                            "clears_when":{"type":"block_closed","repo":"mev","id":"MV.99.Z"}}]}"#,
+        );
+        let status_map: HashMap<String, Option<String>> = HashMap::new(); // MV.99.Z unknown
+        let repo_paths: HashMap<String, std::path::PathBuf> = HashMap::new();
+
+        let d = check_backlog_broken_predicate(&src, &file, &status_map, dir.path(), &repo_paths);
+        assert_eq!(d.len(), 1, "got: {d:?}");
+        assert_eq!(d[0].locator, "W_BACKLOG_BROKEN_PREDICATE");
+        assert_eq!(d[0].severity, crate::Severity::Warning);
+    }
+
+    #[test]
+    fn w_backlog_broken_predicate_is_silent_on_a_known_but_unclosed_block() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "brain");
+        let file = parse_file(
+            r#"{"repo":"hq","kind":"brain","updated":"2026-09-03",
+                "backlog":[{"slug":"real-block-idea","title":"t","repo":"mev","type":"chore",
+                            "status":"idea","created":"2026-09-01",
+                            "clears_when":{"type":"block_closed","repo":"mev","id":"MV.1.A"}}]}"#,
+        );
+        let mut status_map = HashMap::new();
+        status_map.insert("mev:MV.1.A".to_string(), Some("open".to_string()));
+        let repo_paths: HashMap<String, std::path::PathBuf> = HashMap::new();
+
+        let d = check_backlog_broken_predicate(&src, &file, &status_map, dir.path(), &repo_paths);
+        assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn w_backlog_broken_predicate_fires_on_a_file_exists_path_escaping_the_corpus() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "brain");
+        let file = parse_file(
+            r#"{"repo":"hq","kind":"brain","updated":"2026-09-03",
+                "backlog":[{"slug":"escaping-idea","title":"t","repo":"mev","type":"chore",
+                            "status":"idea","created":"2026-09-01",
+                            "clears_when":{"type":"file_exists","path":"../../../etc/passwd"}}]}"#,
+        );
+        let status_map: HashMap<String, Option<String>> = HashMap::new();
+        let repo_paths: HashMap<String, std::path::PathBuf> = HashMap::new();
+
+        let d = check_backlog_broken_predicate(&src, &file, &status_map, dir.path(), &repo_paths);
+        assert_eq!(d.len(), 1, "got: {d:?}");
+        assert_eq!(d[0].locator, "W_BACKLOG_BROKEN_PREDICATE");
+    }
+
+    #[test]
+    fn w_backlog_broken_predicate_is_silent_on_a_file_exists_path_inside_the_corpus() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "brain");
+        let file = parse_file(
+            r#"{"repo":"hq","kind":"brain","updated":"2026-09-03",
+                "backlog":[{"slug":"local-idea","title":"t","repo":"mev","type":"chore",
+                            "status":"idea","created":"2026-09-01",
+                            "clears_when":{"type":"file_exists","path":"docs/not-yet-written.md"}}]}"#,
+        );
+        let status_map: HashMap<String, Option<String>> = HashMap::new();
+        let repo_paths: HashMap<String, std::path::PathBuf> = HashMap::new();
+
+        // The target does not exist on disk yet — that is healthy Unsatisfied,
+        // not broken, so this must stay silent.
+        let d = check_backlog_broken_predicate(&src, &file, &status_map, dir.path(), &repo_paths);
+        assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn w_backlog_undated_fires_on_an_entry_with_no_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "brain");
+        let file = parse_file(
+            r#"{"repo":"hq","kind":"brain","updated":"2026-09-03",
+                "backlog":[{"slug":"undated-idea","title":"t","repo":"mev","type":"chore",
+                            "status":"idea"}]}"#,
+        );
+
+        let d = check_backlog_undated(&src, &file);
+        assert_eq!(d.len(), 1, "got: {d:?}");
+        assert_eq!(d[0].locator, "W_BACKLOG_UNDATED");
+        assert_eq!(d[0].severity, crate::Severity::Warning);
+    }
+
+    #[test]
+    fn w_backlog_undated_is_silent_on_a_dated_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "brain");
+        let file = parse_file(
+            r#"{"repo":"hq","kind":"brain","updated":"2026-09-03",
+                "backlog":[{"slug":"dated-idea","title":"t","repo":"mev","type":"chore",
+                            "status":"idea","created":"2026-09-01"}]}"#,
+        );
+
+        let d = check_backlog_undated(&src, &file);
+        assert!(d.is_empty(), "got: {d:?}");
+    }
+}
 
 #[cfg(test)]
 mod check_field_policy_tests {

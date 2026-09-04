@@ -471,12 +471,14 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     use brain::config::find_brain_config;
     use brain::distill::check_distill_staleness;
     use brain::state::{
-        StateLoadError, build_state_graph, check_backlog_integrity, check_backlog_staleness,
-        check_carryover_already_satisfied, check_carryover_broken_predicate,
-        check_carryover_staleness, check_epics, check_field_policy, check_finding_id_orphan,
-        check_focus_drift, check_op_slug_stutter, check_operator_staleness, check_rollup,
-        check_schema, check_state_graph, check_status_consistency, check_superseded_by_integrity,
-        detect_cycles, discover_state_files, load_state,
+        StateLoadError, build_state_graph, check_backlog_already_satisfied,
+        check_backlog_broken_predicate, check_backlog_integrity, check_backlog_prose_predicate,
+        check_backlog_staleness, check_backlog_undated, check_carryover_already_satisfied,
+        check_carryover_broken_predicate, check_carryover_staleness, check_epics,
+        check_field_policy, check_finding_id_orphan, check_focus_drift, check_op_slug_stutter,
+        check_operator_staleness, check_rollup, check_schema, check_state_graph,
+        check_status_consistency, check_superseded_by_integrity, detect_cycles,
+        discover_state_files, load_state,
     };
     use std::collections::HashMap;
 
@@ -654,6 +656,20 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
         false,
         brain::carryover::COMMAND_EXEC_TIMEOUT,
     );
+    // `allow_exec: false` for the same reason as the carryover sweep above — a
+    // validator that runs on every `validate-brain --state` invocation must never
+    // execute a corpus-authored `command_exits_zero` command.
+    let backlog_report = brain::backlog::evaluate_backlog(
+        &loaded,
+        &status_map,
+        root,
+        &repo_paths,
+        today,
+        &config.attention,
+        None,
+        false,
+        brain::carryover::COMMAND_EXEC_TIMEOUT,
+    );
     for (src, file) in &loaded {
         report.diagnostics.extend(check_carryover_staleness(
             src,
@@ -677,6 +693,20 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
         report
             .diagnostics
             .extend(check_backlog_staleness(src, file, today, &config.attention));
+        report
+            .diagnostics
+            .extend(check_backlog_already_satisfied(src, file, &backlog_report));
+        report
+            .diagnostics
+            .extend(check_backlog_prose_predicate(src, file));
+        report.diagnostics.extend(check_backlog_broken_predicate(
+            src,
+            file,
+            &status_map,
+            root,
+            &repo_paths,
+        ));
+        report.diagnostics.extend(check_backlog_undated(src, file));
         report.diagnostics.extend(check_operator_staleness(
             src,
             file,
