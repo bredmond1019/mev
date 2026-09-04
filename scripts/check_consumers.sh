@@ -118,19 +118,54 @@ lookup_waiver() {
 # resolves this checkout's own Cargo.toml. MEV_CHECK_CONSUMERS_CMD, when
 # set, replaces the command entirely (eval'd as a shell command string) —
 # the fixture suite's only hook for substituting a canned JSON emitter.
+#
+# `mev check-consumers --json` itself exits FAILURE whenever any
+# consumer is `broken` (src/main.rs's CheckConsumers arm), even though it
+# still prints the full JSON array to stdout first. So a non-zero exit
+# here is NOT by itself "the tool could not run" — it is frequently "the
+# tool ran fine and is reporting a broken consumer", which is exactly the
+# case a waiver exists to adjudicate. Capture stdout and the exit code
+# SEPARATELY and let main() decide what a non-zero exit means; do not
+# abort here.
 # ---------------------------------------------------------------------------
 default_check_consumers_cmd() {
     printf '%s' 'cargo run --release --quiet -- check-consumers --json'
 }
 
+# Sets INVOKE_CMD (the resolved command string), INVOKE_OUT (its stdout,
+# verbatim) and INVOKE_RC (its exit code) — never aborts. main() is the
+# only place that decides whether a given (INVOKE_OUT, INVOKE_RC) pair is
+# adjudicable.
+INVOKE_CMD=""
+INVOKE_OUT=""
+INVOKE_RC=0
 invoke_check_consumers() {
-    local cmd="${MEV_CHECK_CONSUMERS_CMD:-$(default_check_consumers_cmd)}"
-    local out
-    if ! out="$(cd "$REPO_ROOT" && eval "$cmd")"; then
-        echo "check_consumers: check-consumers invocation failed: $cmd" >&2
-        exit 1
-    fi
-    printf '%s' "$out"
+    INVOKE_CMD="${MEV_CHECK_CONSUMERS_CMD:-$(default_check_consumers_cmd)}"
+    # Capture $? directly, not via `if ! VAR=$(...); then`: under `!`,
+    # $? inside the then-branch is the NEGATED status (0 whenever the
+    # command actually failed), which silently threw away the real exit
+    # code here. `set +e` around the plain assignment is what keeps a
+    # non-zero exit from tripping `set -e` while still leaving $? as the
+    # command's own status right after it runs.
+    set +e
+    INVOKE_OUT="$(cd "$REPO_ROOT" && eval "$INVOKE_CMD")"
+    INVOKE_RC=$?
+    set -e
+}
+
+# True (0) iff $1, trimmed, looks like a top-level JSON array — starts
+# with `[` and ends with `]`. This is deliberately shallow (no full
+# parse): it only needs to tell "the tool printed something adjudicable"
+# from "the tool printed nothing, or printed an error message that isn't
+# JSON at all" — split_json_objects already handles the real parsing of
+# a string that passes this check.
+looks_like_json_array() {
+    local trimmed
+    trimmed="$(trim "$1")"
+    case "$trimmed" in
+        \[*\]) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -224,8 +259,30 @@ json_field_reason() {
 main() {
     parse_waivers
 
-    local raw
-    raw="$(invoke_check_consumers)"
+    invoke_check_consumers
+    local raw="$INVOKE_OUT"
+    local invoke_rc="$INVOKE_RC"
+
+    # Adjudicate BEFORE aborting: a non-zero exit alongside parseable
+    # JSON means "the tool ran and is reporting a broken consumer" — the
+    # normal case a waiver exists for — not "the tool could not run".
+    # Reserve the abort for output that genuinely cannot be adjudicated,
+    # and give the two ways that happens distinguishable messages and
+    # exit codes rather than collapsing them into one:
+    #   - exit 2: the tool is unrunnable (command not found / not
+    #     executable — bash's own 127 / 126) — genuinely unadjudicable.
+    #   - exit 3: the tool ran (some other non-zero exit) but produced no
+    #     parseable JSON — a transient failure (e.g. a flaky compile),
+    #     distinct from both a real break and an unrunnable tool.
+    if [ "$invoke_rc" -ne 0 ] && ! looks_like_json_array "$raw"; then
+        if [ "$invoke_rc" -eq 126 ] || [ "$invoke_rc" -eq 127 ]; then
+            echo "check_consumers: check-consumers tool is unrunnable (exit $invoke_rc): $INVOKE_CMD" >&2
+            exit 2
+        else
+            echo "check_consumers: check-consumers invocation failed without parseable output (transient failure, exit $invoke_rc): $INVOKE_CMD" >&2
+            exit 3
+        fi
+    fi
 
     local objects
     objects="$(split_json_objects "$raw")"

@@ -170,6 +170,35 @@ run_gate_default() {
     RC=$?
 }
 
+# run_gate_failing <fixture-json-path> -- runs the wrapper with an
+# invocation that prints the fixture JSON to stdout AND THEN exits 1 —
+# reproducing `mev check-consumers --json`'s real behaviour when a
+# consumer is broken (src/main.rs: it prints the JSON, then returns
+# ExitCode::FAILURE). Sets OUT/RC.
+run_gate_failing() {
+    OUT="$(PATH="$TEST_PATH" MEV_CHECK_CONSUMERS_CMD="sh -c \"cat '$1'; exit 1\"" "$GATE_DIR/check_consumers.sh" 2>&1)"
+    RC=$?
+}
+
+# run_gate_unrunnable -- runs the wrapper pointed at a command that does
+# not exist at all, so `eval` itself fails with bash's own
+# command-not-found (127) before the "tool" ever produces any output.
+# Sets OUT/RC.
+run_gate_unrunnable() {
+    OUT="$(PATH="$TEST_PATH" MEV_CHECK_CONSUMERS_CMD="/no/such/path/mev-check-consumers-does-not-exist-$$" "$GATE_DIR/check_consumers.sh" 2>&1)"
+    RC=$?
+}
+
+# run_gate_transient -- runs the wrapper pointed at a command that DOES
+# run (unlike run_gate_unrunnable) but exits non-zero while printing
+# something that is not parseable JSON — a stand-in for a flaky/transient
+# cargo failure (the false-red case observed live, cleared by a clean
+# re-run). Sets OUT/RC.
+run_gate_transient() {
+    OUT="$(PATH="$TEST_PATH" MEV_CHECK_CONSUMERS_CMD="sh -c 'echo error: could not compile mev crate transient failure >&2; exit 1'" "$GATE_DIR/check_consumers.sh" 2>&1)"
+    RC=$?
+}
+
 # ---------------------------------------------------------------------------
 # Case: default invocation (no MEV_CHECK_CONSUMERS_CMD) — proves the
 # wrapper runs mev from SOURCE via `cargo run`, never a `mev` on PATH.
@@ -340,6 +369,79 @@ check "coverage: one broken -> exit code STAYS non-zero" \
     "$( [ "$RC" -ne 0 ] && echo 0 || echo 1 )"
 check "coverage: one broken -> 'verified 1 of 2 consumers (bastion: broken)'" \
     "$(printf '%s' "$OUT" | grep -qF 'check_consumers: verified 1 of 2 consumers (bastion: broken)' && echo 0 || echo 1)"
+
+# ---------------------------------------------------------------------------
+# MV.ticket.consumer-gate-waiver-can-never-apply-to-a-broken-consumer,
+# task 1: adjudicate before aborting; distinguish the three abort
+# conditions; still report the verified-consumer count on a clean run.
+# All five cases from the block record live here (task 2 owns the
+# live-lease requirement, case 2 below, and stays red until it lands —
+# see the note on that case).
+# ---------------------------------------------------------------------------
+
+# --- case 1: the impossible case. A consumer is `broken`, has a waiver
+# row, AND the tool's own invocation exits non-zero (exactly what real
+# `mev check-consumers --json` does when a consumer is broken — it still
+# prints the JSON first). Before this task, invoke_check_consumers
+# aborted on that non-zero exit and discarded the JSON before main() ever
+# saw it, so a waiver could never reach a broken+waived consumer. This
+# was OBSERVED RED before the fix landed (recorded 2026-09-03): the gate
+# exited non-zero on this exact fixture with the generic "invocation
+# failed" message instead of honouring the waiver.
+reset_fixtures
+set_waiver_file 'bastion | OP.fix-bastion | bastion known broken pending OP.fix-bastion'
+run_gate_failing "$FIX/one_broken.json"
+check "case 1 (impossible case): broken+waived, tool invocation itself exits non-zero -> exit 0, waiver named" \
+    "$( [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'waived by OP.fix-bastion' && echo 0 || echo 1 )"
+
+# --- case 2: same shape as case 1, but the waived repo holds NO live
+# lane/lease. Task 2 (not this one) adds the live-lease requirement — a
+# waiver with no owning repo lease behind it must be refused. This task
+# has no lease concept at all yet, so today the fixture above is simply
+# honoured (same outcome as case 1) regardless of any lease. This
+# assertion therefore pins TASK 1's actual, current behaviour; task 2
+# TIGHTENS it to require the lease — observing THIS SAME assertion go red
+# against task-1-final code before implementing the lease check, then
+# green ("task 1 case 2 goes red to green" per task 2's own acceptance
+# criteria). This is deliberate, not an oversight: a task whose only
+# content is an intentionally-failing assertion cannot satisfy this
+# engine's work assertion (see the task-1 description's D68 note), so the
+# red observation for case 2 happens inside task 2, not here.
+reset_fixtures
+set_waiver_file 'bastion | OP.fix-bastion | bastion known broken pending OP.fix-bastion'
+run_gate_failing "$FIX/one_broken.json"
+check "case 2 (task 1 baseline; task 2 tightens this to require a live lease): broken+waived, no lease concept yet -> exit 0, waiver honoured" \
+    "$( [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'waived by OP.fix-bastion' && echo 0 || echo 1 )"
+
+# --- case 3: the tool is genuinely unrunnable (command not found) ->
+# its own message and exit code, distinct from both a broken consumer
+# and a transient failure.
+reset_fixtures
+run_gate_unrunnable
+check "case 3: unrunnable tool -> exit 2, message says 'unrunnable', not 'transient'" \
+    "$( [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -qi 'unrunnable' \
+        && ! printf '%s' "$OUT" | grep -qi 'transient' && echo 0 || echo 1 )"
+
+# --- case 4: a transient failure — the tool DID run (unlike case 3) but
+# exited non-zero with no parseable JSON on stdout. Distinguishable from
+# case 3 by BOTH message and exit code, not merely by eyeballing output.
+reset_fixtures
+run_gate_transient
+check "case 4: transient invocation failure -> exit 3, message says 'transient', not 'unrunnable'" \
+    "$( [ "$RC" -eq 3 ] && printf '%s' "$OUT" | grep -qi 'transient' \
+        && ! printf '%s' "$OUT" | grep -qi 'unrunnable' && echo 0 || echo 1 )"
+check "cases 3 and 4 use DIFFERENT exit codes" \
+    "$( [ 2 -ne 3 ] && echo 0 || echo 1 )"
+
+# --- case 5: a clean run (all consumers pass) still reports HOW MANY
+# consumers were verified — an empty/never-ran check must be
+# distinguishable from a real, positive verification. This is the same
+# coverage-line machinery pinned above; restated here as case 5 per the
+# block record so all five cases are visibly present in one suite.
+reset_fixtures
+run_gate "$FIX/all_pass.json"
+check "case 5: clean run -> exit 0 AND reports 'verified 2 of 2 consumers'" \
+    "$( [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -qF 'check_consumers: verified 2 of 2 consumers' && echo 0 || echo 1 )"
 
 # ---------------------------------------------------------------------------
 # Syntax sanity, in-suite (also asserted externally by task validation).
