@@ -183,6 +183,10 @@ mod tests {
                     reviewed: None,
                     snoozed_until: None,
                     extra: serde_json::Map::new(),
+                    // See the note at block_create.rs's Backlog literal: spread so an
+                    // upstream field addition is non-breaking, which is what okf-core's
+                    // Default derive exists for.
+                    ..Default::default()
                 })
                 .collect(),
             carryover: Vec::new(),

@@ -1027,6 +1027,12 @@ pub fn plan_demote_block(key: &str, files: &[(StateSource, StateFile)], today: &
         reviewed: None,
         snoozed_until: None,
         extra,
+        // okf-core's Backlog gained `clears_when`/`ready_when`
+        // (OK.ticket.backlog-lifecycle-predicates, b06f1f0). That struct derives
+        // Default precisely so a field addition is non-breaking for consumers that
+        // spread it; this site did not, and broke. Spreading now, so the NEXT field
+        // addition upstream does not break it again.
+        ..Default::default()
     };
     work[fi].1.backlog.push(backlog_entry);
 
