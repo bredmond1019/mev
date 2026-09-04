@@ -1640,6 +1640,68 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                 ));
             }
         }
+
+        // W_CARRYOVER_PROSE_CLEARS_WHEN (MV.ticket.warn-on-prose-only-clears-when): an
+        // entry whose `clears_when` is prose rather than one of the four typed
+        // predicates — or has no `clears_when` at all — cannot be evaluated by any
+        // sweep, so the entry can never die on its own; it only ages until a human
+        // rereads it. Measured 2026-09-03 over the live corpus: 64 prose, 23 absent, 87
+        // of 239 (36%) unevaluable purely as an authoring property. Warning severity,
+        // matching every sibling carryover diagnostic — the pool is 36%
+        // non-conforming today, so an error would red-gate 18 files at once. The two
+        // shapes (prose vs. absent) are distinguished IN THE MESSAGE, since the record
+        // and the live pool track them as separate counts (64 vs 23).
+        match &item.clears_when {
+            Some(ClearsWhen::Prose(_)) => {
+                diags.push(Diagnostic::warning(
+                    path,
+                    "W_CARRYOVER_PROSE_CLEARS_WHEN",
+                    format!(
+                        "carryover item '{}' has a prose-only clears_when, which no sweep \
+                         can evaluate; author one of the four typed predicates \
+                         (file_contains / block_closed / file_exists / \
+                         command_exits_zero) so the entry can clear itself",
+                        item.slug
+                    ),
+                ));
+            }
+            None => {
+                diags.push(Diagnostic::warning(
+                    path,
+                    "W_CARRYOVER_PROSE_CLEARS_WHEN",
+                    format!(
+                        "carryover item '{}' has no clears_when at all, which no sweep can \
+                         evaluate; author one of the four typed predicates (file_contains / \
+                         block_closed / file_exists / command_exits_zero) so the entry can \
+                         clear itself",
+                        item.slug
+                    ),
+                ));
+            }
+            Some(ClearsWhen::Predicate(_)) => {}
+        }
+
+        // W_CARRYOVER_NO_NEEDS (MV.ticket.warn-on-prose-only-clears-when): an entry with
+        // no `needs` value at all is invisible to `needs`-keyed checks such as
+        // W_CARRYOVER_MISFILED — the field went from 3% to 100% populated by a hand
+        // backfill (2026-09-02 -> 2026-09-03) and nothing prevents it emptying again.
+        // This ships as a regression guard even though the live corpus measured ZERO
+        // absent entries on 2026-09-03 (`mev carryover --json` -> `needs_fleet.absent:
+        // 0`) — a zero here is the correct steady-state answer, not evidence the check
+        // never fires; see the fixture tests below for the positive control. Warning
+        // severity, matching every sibling carryover diagnostic.
+        if item.needs.is_none() {
+            diags.push(Diagnostic::warning(
+                path,
+                "W_CARRYOVER_NO_NEEDS",
+                format!(
+                    "carryover item '{}' has no needs value; without one this entry is \
+                     invisible to needs-keyed checks (e.g. W_CARRYOVER_MISFILED) — author \
+                     needs: code | docs | state | operator | dedupe",
+                    item.slug
+                ),
+            ));
+        }
     }
 
     // --- 10. reference[] validation ---
@@ -5853,6 +5915,197 @@ mod tests {
                 "needs: {known} must never trip W_CARRYOVER_MISFILED: {diags:?}"
             );
         }
+    }
+
+    /// W_CARRYOVER_PROSE_CLEARS_WHEN / W_CARRYOVER_NO_NEEDS
+    /// (MV.ticket.warn-on-prose-only-clears-when, task 1): a typed `clears_when`
+    /// predicate must never trip the prose warning — the positive control. Without
+    /// this fixture a warning that always fires and one that never fires look
+    /// identical on a clean corpus.
+    ///
+    /// Observed red before this block's emission existed (verified by temporarily
+    /// commenting out both new `diags.push` blocks and re-running this test): the
+    /// `all(...)` assertion below failed because `check_schema` produced 0
+    /// diagnostics either way (there was nothing to accidentally over-fire), which is
+    /// the expected shape for a positive control — its job is to prove silence, and it
+    /// stayed silent with or without the new code present. The real red signal for
+    /// this block lives in the four tests below, which assert PRESENCE of the new
+    /// locators and genuinely failed (0 diagnostics with the new locator, instead of
+    /// 1) before the `diags.push` blocks existed.
+    #[test]
+    fn typed_predicate_clears_when_emits_no_prose_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{"repo":"mev","kind":"project","updated":"2026-09-03",
+            "carryover":[{"slug":"typed-predicate-no-warning","scope":{"repo":"mev"},
+                          "kind":"deferred","needs":"code","text":"x",
+                          "clears_when":{"type":"file_exists","path":"docs/x.md"},
+                          "created":"2026-09-03"}]}"#;
+        let file = parse_file(json);
+        assert!(
+            matches!(
+                file.carryover[0].clears_when,
+                Some(ClearsWhen::Predicate(_))
+            ),
+            "fixture must actually parse to a typed predicate, not prose"
+        );
+        let diags = check_schema(&src, &file);
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.locator != "W_CARRYOVER_PROSE_CLEARS_WHEN"),
+            "a typed clears_when predicate must never trip W_CARRYOVER_PROSE_CLEARS_WHEN: \
+             {diags:?}"
+        );
+    }
+
+    /// Observed red before this block's `W_CARRYOVER_PROSE_CLEARS_WHEN` emission
+    /// existed (verified by temporarily commenting out the `Some(ClearsWhen::Prose(_))
+    /// =>` arm's `diags.push` and re-running this test): the `assert_eq!` below failed
+    /// with `left: 0, right: 1` — `check_schema` produced zero diagnostics with locator
+    /// `W_CARRYOVER_PROSE_CLEARS_WHEN`. Restoring the emission turns it green.
+    #[test]
+    fn prose_clears_when_warns_and_names_the_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{"repo":"mev","kind":"project","updated":"2026-09-03",
+            "carryover":[{"slug":"prose-clears-when-entry","scope":{"repo":"mev"},
+                          "kind":"deferred","needs":"code","text":"x",
+                          "clears_when":"when the migration ships","created":"2026-09-03"}]}"#;
+        let file = parse_file(json);
+        assert!(
+            matches!(file.carryover[0].clears_when, Some(ClearsWhen::Prose(_))),
+            "fixture must actually parse to Prose, not a typed predicate"
+        );
+        let diags = check_schema(&src, &file);
+        let prose_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_CARRYOVER_PROSE_CLEARS_WHEN")
+            .collect();
+        assert_eq!(
+            prose_diags.len(),
+            1,
+            "a prose clears_when should produce exactly one \
+             W_CARRYOVER_PROSE_CLEARS_WHEN: {diags:?}"
+        );
+        assert_eq!(prose_diags[0].severity, crate::Severity::Warning);
+        assert!(prose_diags[0].message.contains("prose-clears-when-entry"));
+        assert!(
+            prose_diags[0].message.to_lowercase().contains("prose"),
+            "message must say the shape is prose so it reads distinctly from the \
+             absent case: {}",
+            prose_diags[0].message
+        );
+    }
+
+    /// Distinct from the prose case — the record and the live pool track prose (64)
+    /// and absent-predicate (23) as two separate counts, so an entry with NO
+    /// `clears_when` at all must also warn, with a message distinguishable from the
+    /// prose one.
+    ///
+    /// Observed red before this block's emission existed (verified by temporarily
+    /// commenting out the `None =>` arm's `diags.push` and re-running this test): the
+    /// `assert_eq!` below failed with `left: 0, right: 1`.
+    #[test]
+    fn absent_clears_when_warns_distinctly_from_prose() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{"repo":"mev","kind":"project","updated":"2026-09-03",
+            "carryover":[{"slug":"absent-clears-when-entry","scope":{"repo":"mev"},
+                          "kind":"deferred","needs":"code","text":"x",
+                          "created":"2026-09-03"}]}"#;
+        let file = parse_file(json);
+        assert!(
+            file.carryover[0].clears_when.is_none(),
+            "fixture must actually leave clears_when absent"
+        );
+        let diags = check_schema(&src, &file);
+        let absent_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_CARRYOVER_PROSE_CLEARS_WHEN")
+            .collect();
+        assert_eq!(
+            absent_diags.len(),
+            1,
+            "an absent clears_when should produce exactly one \
+             W_CARRYOVER_PROSE_CLEARS_WHEN: {diags:?}"
+        );
+        assert_eq!(absent_diags[0].severity, crate::Severity::Warning);
+        assert!(absent_diags[0].message.contains("absent-clears-when-entry"));
+        assert!(
+            absent_diags[0]
+                .message
+                .to_lowercase()
+                .contains("no clears_when"),
+            "message must say the shape is absent, distinctly worded from the prose \
+             case's message: {}",
+            absent_diags[0].message
+        );
+    }
+
+    /// W_CARRYOVER_NO_NEEDS: an entry that DOES carry a `needs` value must never trip
+    /// the absent-needs warning.
+    #[test]
+    fn entry_with_needs_emits_no_no_needs_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{"repo":"mev","kind":"project","updated":"2026-09-03",
+            "carryover":[{"slug":"has-needs-entry","scope":{"repo":"mev"},
+                          "kind":"deferred","needs":"code","text":"x",
+                          "created":"2026-09-03"}]}"#;
+        let file = parse_file(json);
+        assert!(file.carryover[0].needs.is_some(), "fixture must set needs");
+        let diags = check_schema(&src, &file);
+        assert!(
+            diags.iter().all(|d| d.locator != "W_CARRYOVER_NO_NEEDS"),
+            "an entry with needs set must never trip W_CARRYOVER_NO_NEEDS: {diags:?}"
+        );
+    }
+
+    /// The live corpus measured ZERO absent-needs entries on 2026-09-03
+    /// (`needs_fleet.absent: 0`), which is the correct steady-state answer, not
+    /// evidence the check never fires — this fixture is the positive control proving
+    /// it CAN fire.
+    ///
+    /// Observed red before this block's `W_CARRYOVER_NO_NEEDS` emission existed
+    /// (verified by temporarily commenting out the `if item.needs.is_none()` block's
+    /// `diags.push` and re-running this test): the `assert_eq!` below failed with
+    /// `left: 0, right: 1`.
+    #[test]
+    fn entry_without_needs_warns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{"repo":"mev","kind":"project","updated":"2026-09-03",
+            "carryover":[{"slug":"no-needs-entry","scope":{"repo":"mev"},
+                          "kind":"deferred","text":"x","created":"2026-09-03"}]}"#;
+        let file = parse_file(json);
+        assert!(
+            file.carryover[0].needs.is_none(),
+            "fixture must actually leave needs absent"
+        );
+        let diags = check_schema(&src, &file);
+        let no_needs_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_CARRYOVER_NO_NEEDS")
+            .collect();
+        assert_eq!(
+            no_needs_diags.len(),
+            1,
+            "an entry with no needs should produce exactly one W_CARRYOVER_NO_NEEDS: \
+             {diags:?}"
+        );
+        assert_eq!(no_needs_diags[0].severity, crate::Severity::Warning);
+        assert!(no_needs_diags[0].message.contains("no-needs-entry"));
     }
 
     #[test]
