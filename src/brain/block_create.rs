@@ -2046,4 +2046,167 @@ mod planning_tests {
             "planning must not mutate the caller's corpus"
         );
     }
+
+    // -----------------------------------------------------------------
+    // origin — MV.ticket.create-block-drops-the-origin-field, task 1
+    //
+    // `CreateBlockPayload` (as of this task) declares no `origin` field, so
+    // an `"origin"` key present in `--from <file>` JSON is silently ignored
+    // by serde (no `deny_unknown_fields`) — exactly the drop this ticket
+    // exists to fix. These three fixtures build the payload from a raw JSON
+    // string (as `payload_deserializes_from_minimal_json` does above) so an
+    // `origin` key can be present in the input even though the struct has
+    // nowhere to put it yet.
+    // -----------------------------------------------------------------
+
+    /// A minimal, legal `kind: "chore"` payload JSON string targeting repo
+    /// `"mev"`, as an owned `serde_json::Value` object map so a test can
+    /// splice in an `"origin"` key before deserializing.
+    fn legal_payload_json() -> serde_json::Map<String, serde_json::Value> {
+        let raw = r#"{
+            "id": "MV.99.ORIGIN",
+            "repo": "mev",
+            "kind": "chore",
+            "title": "Origin fixture",
+            "description": "A payload used only to exercise origin handling.",
+            "what": "Nothing much.",
+            "why": "To prove origin round-trips (or doesn't, yet).",
+            "sdlc_workflow": "none",
+            "model": "either",
+            "out_of_scope": ["Everything else."],
+            "acceptance_criteria": ["It parses."],
+            "epics": ["test-epic"]
+        }"#;
+        match serde_json::from_str(raw).expect("fixture JSON is valid") {
+            serde_json::Value::Object(map) => map,
+            other => panic!("expected a JSON object, got {other:?}"),
+        }
+    }
+
+    /// Deserialize a `CreateBlockPayload` from [`legal_payload_json`] with
+    /// `origin` set to `value` (pass `None` to omit the key entirely).
+    fn payload_with_origin(value: Option<serde_json::Value>) -> CreateBlockPayload {
+        let mut map = legal_payload_json();
+        match value {
+            Some(v) => {
+                map.insert("origin".to_string(), v);
+            }
+            None => {
+                map.remove("origin");
+            }
+        }
+        serde_json::from_value(serde_json::Value::Object(map))
+            .expect("payload should deserialize regardless of an unknown 'origin' key")
+    }
+
+    /// Plan-and-extract helper: run `plan_create_block` against a fresh
+    /// single-repo corpus and return `(state.json row for payload.id, block
+    /// record)` as parsed JSON, per the action ordering `plan_create_block`
+    /// documents (state.json first, block record second).
+    fn plan_and_extract(
+        payload: &CreateBlockPayload,
+    ) -> (
+        EmitPlan,
+        Option<serde_json::Value>,
+        Option<serde_json::Value>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "mev", &[])];
+        let plan = plan_create_block(payload, &files, "2026-09-03");
+        if plan.actions.len() < 2 {
+            return (plan, None, None);
+        }
+        let state_json: serde_json::Value =
+            serde_json::from_str(&plan.actions[0].new_content).expect("state.json parses");
+        let row = state_json["tracks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|t| t["blocks"].as_array().into_iter().flatten())
+            .find(|b| b["id"] == json!(payload.id))
+            .cloned();
+        let record: serde_json::Value =
+            serde_json::from_str(&plan.actions[1].new_content).expect("block record parses");
+        (plan, row, Some(record))
+    }
+
+    /// Test 1 (D68 — observed RED before task 2): a payload carrying a
+    /// valid `{"type": "mechanism", "slug": ...}` origin must produce a
+    /// block record AND a `tracks[].blocks[]` row whose `origin` equals it.
+    /// Today `CreateBlockPayload` has no `origin` field, so the key is
+    /// silently dropped at deserialization and both artifacts come back
+    /// without it — this test is expected to fail on both assertions.
+    #[test]
+    fn valid_mechanism_origin_round_trips_into_record_and_row() {
+        let expected = json!({"type": "mechanism", "slug": "gates-that-cannot-fail"});
+        let payload = payload_with_origin(Some(expected.clone()));
+        let (plan, row, record) = plan_and_extract(&payload);
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+
+        let record = record.expect("block record action present");
+        assert_eq!(
+            record.get("origin"),
+            Some(&expected),
+            "block record must carry the origin object, got {record:?}"
+        );
+
+        let row = row.expect("tracks[].blocks[] row present");
+        assert_eq!(
+            row.get("origin"),
+            Some(&expected),
+            "state.json row must carry the origin object, got {row:?}"
+        );
+    }
+
+    /// Test 2 (D68 — observed RED before task 2): a malformed origin (here,
+    /// an out-of-vocabulary `type`) must be REFUSED with a named diagnostic
+    /// and a zero-action plan — never silently dropped to null. Today the
+    /// payload has no `origin` field at all, so nothing ever inspects it:
+    /// the plan proceeds with its normal two actions and zero diagnostics,
+    /// which is the exact silent-drop shape this ticket exists to close.
+    #[test]
+    fn malformed_origin_is_refused_not_silently_dropped() {
+        let malformed = json!({"type": "not-a-real-kind", "slug": "whatever"});
+        let payload = payload_with_origin(Some(malformed));
+        let (plan, _row, _record) = plan_and_extract(&payload);
+        assert!(
+            !plan.diagnostics.is_empty(),
+            "expected a named diagnostic refusing the malformed origin, got none (plan: {plan:?})"
+        );
+        assert!(
+            plan.actions.is_empty(),
+            "a malformed origin must yield a zero-action plan, not a partial write (plan: {plan:?})"
+        );
+    }
+
+    /// Test 3 (D68 — the positive control, NOT symmetric): a payload with
+    /// no `origin` at all must write a block record that OMITS the key
+    /// entirely, and a `tracks[].blocks[]` row that carries `origin: null`.
+    /// Measured 2026-09-03 this is partially green today by accident: the
+    /// record already omits the key (`build_block_record` never inserts
+    /// `origin`), but okf-core's `TrackBlock::origin` has no
+    /// `skip_serializing_if`, so the row assertion is *also* green today —
+    /// both halves currently pass with no origin-aware code at all. Kept as
+    /// two separate assertions per the task: the moment task 2 wires
+    /// `origin` through, only an implementation that keeps the no-origin
+    /// case key-absent-on-the-record can keep this green.
+    #[test]
+    fn no_origin_is_key_absent_on_record_and_null_on_row() {
+        let payload = payload_with_origin(None);
+        let (plan, row, record) = plan_and_extract(&payload);
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+
+        let record = record.expect("block record action present");
+        assert!(
+            record.get("origin").is_none(),
+            "no-origin payload must OMIT the origin key from the block record, got {record:?}"
+        );
+
+        let row = row.expect("tracks[].blocks[] row present");
+        assert_eq!(
+            row.get("origin"),
+            Some(&serde_json::Value::Null),
+            "no-origin payload must write origin: null on the state.json row, got {row:?}"
+        );
+    }
 }
