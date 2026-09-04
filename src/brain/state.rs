@@ -27,6 +27,11 @@
 //! - `E_STATE_DANGLING_BLOCKED_BY` — a cross-repo dependency block doesn't exist.
 //! - `E_STATE_UNKNOWN_REPO` — a `blocked_by` / `cross_repo` entry names unknown repo.
 //! - `E_STATE_DANGLING_CROSS_REPO` — a brain `cross_repo[]` endpoint doesn't resolve.
+//! - `E_STATE_DANGLING_SUPERSEDED_BY` — a `superseded` block's `superseded_by`
+//!   {repo, id} pointer (authored in `TrackBlock::extra`, D13) is missing or
+//!   does not resolve to a registered block.
+//! - `E_STATE_SUPERSEDED_BY_WRONG_STATUS` — a `superseded_by` pointer is present
+//!   on a block whose status is not `"superseded"`.
 //! - `W_STATE_ROLLUP_DRIFT` — brain `repos[]` headline drifted from child `focus`.
 //! - `W_STATE_FOCUS_DRIFT` — a leaf file's `focus` snapshot has drifted from the tracks[] derivation.
 //! - `W_STATE_FILE_MISSING` — a registered repo has no `planning/state.json`.
@@ -2732,6 +2737,116 @@ pub fn check_backlog_integrity(
                             ));
                         }
                     }
+                }
+            }
+        }
+    }
+
+    diags
+}
+
+// ---------------------------------------------------------------------------
+// superseded_by integrity check (Task 2, MV.ticket.superseded-block-status)
+// ---------------------------------------------------------------------------
+
+/// Validate the `superseded_by` successor pointer on `tracks[].blocks[]` entries.
+///
+/// `superseded_by` is deliberately **not** a typed `TrackBlock` field — it is
+/// authored as a `{repo, id}` object inside `TrackBlock::extra`, exactly like
+/// `demote-block`'s `record` pointer (see
+/// `planning/decisions/D13-demote-block-record-pointer-lands-in-extra.md`):
+/// `extra` has no `deny_unknown_fields`, so the key round-trips through
+/// deserialize -> serialize with no okf-core change and no cross-repo wait.
+/// This function is the referential-integrity check that pointer needs, in
+/// the same shape as [`check_backlog_integrity`]'s parked-record check.
+///
+/// **Severity: error, both directions.** This mirrors the block record's own
+/// acceptance criteria, not merely this task's "pick and justify" framing:
+/// authoring `status: "superseded"` with a missing or dangling
+/// `superseded_by`, or authoring `superseded_by` on a block whose status is
+/// *not* `"superseded"`, is reported as `E_STATE_DANGLING_SUPERSEDED_BY` /
+/// `E_STATE_SUPERSEDED_BY_WRONG_STATUS` respectively — never a silent warning.
+/// A `superseded` status without a resolvable successor is *worse* than the
+/// phantom-block problem this status exists to fix: a phantom is at least
+/// visibly absent from the graph, while an unpointed `superseded` block reads
+/// as intentionally resolved when nothing about where the work went is
+/// actually recorded. Task 3's backfill is written to respect this: a block
+/// whose successor cannot be determined from prose is left unbackfilled
+/// rather than authored with a guessed or missing pointer, so this error
+/// should never actually fire against the real corpus once task 3 lands.
+///
+/// Two checks:
+///
+/// 1. **`E_STATE_DANGLING_SUPERSEDED_BY`** — a block with `status: "superseded"`
+///    has no `superseded_by` in `extra`, or one whose `{repo, id}` does not
+///    resolve to a block registered in any loaded repo's `tracks[]`.
+/// 2. **`E_STATE_SUPERSEDED_BY_WRONG_STATUS`** — a block carries a
+///    `superseded_by` in `extra` but its `status` is not `"superseded"`; the
+///    pointer is only meaningful alongside the status it explains.
+pub fn check_superseded_by_integrity(
+    files: &[(StateSource, StateFile)],
+    graph: &StateGraph,
+) -> Vec<Diagnostic> {
+    use std::collections::HashSet;
+
+    let node_set: HashSet<&str> = graph.nodes.iter().map(|n| n.key.as_str()).collect();
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    for (src, file) in files {
+        let path = &src.abs_path;
+
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let superseded_by = block.extra.get("superseded_by");
+                let is_superseded = block.status.as_deref() == Some("superseded");
+
+                if is_superseded {
+                    let resolved = superseded_by.and_then(|v| {
+                        let repo = v.get("repo")?.as_str()?;
+                        let id = v.get("id")?.as_str()?;
+                        if repo.trim().is_empty() || id.trim().is_empty() {
+                            return None;
+                        }
+                        Some(format!("{repo}:{id}"))
+                    });
+
+                    match resolved {
+                        None => {
+                            diags.push(Diagnostic::error(
+                                path,
+                                "E_STATE_DANGLING_SUPERSEDED_BY",
+                                format!(
+                                    "track block '{}' has status 'superseded' but no \
+                                     resolvable 'superseded_by' {{repo, id}} pointer in extra",
+                                    block.id
+                                ),
+                            ));
+                        }
+                        Some(dep_key) if !node_set.contains(dep_key.as_str()) => {
+                            diags.push(Diagnostic::error(
+                                path,
+                                "E_STATE_DANGLING_SUPERSEDED_BY",
+                                format!(
+                                    "track block '{}' has 'superseded_by' pointing at '{dep_key}', \
+                                     which does not resolve to any registered block",
+                                    block.id
+                                ),
+                            ));
+                        }
+                        Some(_) => {}
+                    }
+                } else if superseded_by.is_some() {
+                    diags.push(Diagnostic::error(
+                        path,
+                        "E_STATE_SUPERSEDED_BY_WRONG_STATUS",
+                        format!(
+                            "track block '{}' has a 'superseded_by' pointer but status '{}' \
+                             (expected status 'superseded')",
+                            block.id,
+                            block.status.as_deref().unwrap_or("<none>")
+                        ),
+                    ));
                 }
             }
         }
@@ -7938,6 +8053,191 @@ mod tests {
                 .iter()
                 .any(|d| d.locator == "E_STATE_SCHEMA_BAD_STATUS"),
             "authored \"superseded\" must not raise E_STATE_SCHEMA_BAD_STATUS, got: {diags:?}"
+        );
+    }
+
+    /// Build a single-repo fixture pair with one `tracks[].blocks[]` entry,
+    /// carrying an arbitrary `extra` map (for `superseded_by` fixtures) —
+    /// `make_ready_pair` has no `extra` hook, so this constructs the
+    /// `TrackBlock` directly instead of extending that helper's tuple shape.
+    fn make_pair_with_extra(
+        dir: &std::path::Path,
+        repo: &str,
+        id: &str,
+        status: Option<&str>,
+        extra: serde_json::Map<String, serde_json::Value>,
+    ) -> (StateSource, StateFile) {
+        let block = TrackBlock {
+            id: id.to_string(),
+            title: id.to_string(),
+            status: status.map(|s| s.to_string()),
+            extra,
+            ..Default::default()
+        };
+        let path = dir.join(format!("{repo}-state.json"));
+        let file = StateFile {
+            repo: repo.to_string(),
+            kind: "project".to_string(),
+            updated: "2026-06-30".to_string(),
+            focus: Focus::default(),
+            tracks: vec![Track {
+                title: "Phase 1".to_string(),
+                blocks: vec![block],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path: path,
+            expected_kind: "project",
+        };
+        (src, file)
+    }
+
+    fn superseded_by_extra(repo: &str, id: &str) -> serde_json::Map<String, serde_json::Value> {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "superseded_by".to_string(),
+            serde_json::json!({"repo": repo, "id": id}),
+        );
+        extra
+    }
+
+    #[test]
+    fn check_superseded_by_integrity_missing_pointer_emits_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_pair_with_extra(
+            dir.path(),
+            "alpha",
+            "AL.1.A",
+            Some("superseded"),
+            serde_json::Map::new(),
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_superseded_by_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_SUPERSEDED_BY")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "superseded block with no superseded_by should emit \
+             E_STATE_DANGLING_SUPERSEDED_BY, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_superseded_by_integrity_dangling_pointer_emits_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Points at a block that is never registered.
+        let pair = make_pair_with_extra(
+            dir.path(),
+            "alpha",
+            "AL.1.A",
+            Some("superseded"),
+            superseded_by_extra("alpha", "AL.9.NOPE"),
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_superseded_by_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_SUPERSEDED_BY")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "superseded block with a dangling superseded_by should emit \
+             E_STATE_DANGLING_SUPERSEDED_BY, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_superseded_by_integrity_resolving_pointer_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let successor = make_pair_with_extra(
+            dir.path(),
+            "alpha",
+            "AL.1.B",
+            Some("open"),
+            serde_json::Map::new(),
+        );
+        // Two blocks in the same repo file: the superseded one and its
+        // successor. Reuse make_ready_pair's multi-block shape by hand-
+        // assembling two TrackBlocks in one file.
+        let mut file = successor.1.clone();
+        file.tracks[0].blocks.insert(
+            0,
+            TrackBlock {
+                id: "AL.1.A".to_string(),
+                title: "AL.1.A".to_string(),
+                status: Some("superseded".to_string()),
+                extra: superseded_by_extra("alpha", "AL.1.B"),
+                ..Default::default()
+            },
+        );
+        let files = vec![(successor.0, file)];
+        let graph = build_state_graph(&files);
+        let diags = check_superseded_by_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == crate::Severity::Error)
+            .collect();
+        assert!(
+            errs.is_empty(),
+            "a superseded block whose superseded_by resolves should produce no errors, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_superseded_by_integrity_pointer_on_wrong_status_emits_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // superseded_by present but status is "open", not "superseded".
+        let pair = make_pair_with_extra(
+            dir.path(),
+            "alpha",
+            "AL.1.A",
+            Some("open"),
+            superseded_by_extra("alpha", "AL.1.B"),
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_superseded_by_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_SUPERSEDED_BY_WRONG_STATUS")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "superseded_by on a non-superseded block should emit \
+             E_STATE_SUPERSEDED_BY_WRONG_STATUS, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_superseded_by_integrity_ordinary_block_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_pair_with_extra(
+            dir.path(),
+            "alpha",
+            "AL.1.A",
+            Some("open"),
+            serde_json::Map::new(),
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_superseded_by_integrity(&files, &graph);
+        assert!(
+            diags.is_empty(),
+            "an ordinary block with no superseded_by should produce no diagnostics, got: {diags:?}"
         );
     }
 

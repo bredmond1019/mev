@@ -472,8 +472,8 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
         check_carryover_already_satisfied, check_carryover_broken_predicate,
         check_carryover_staleness, check_epics, check_field_policy, check_finding_id_orphan,
         check_focus_drift, check_op_slug_stutter, check_operator_staleness, check_rollup,
-        check_schema, check_state_graph, check_status_consistency, detect_cycles,
-        discover_state_files, load_state,
+        check_schema, check_state_graph, check_status_consistency, check_superseded_by_integrity,
+        detect_cycles, discover_state_files, load_state,
     };
     use std::collections::HashMap;
 
@@ -546,6 +546,14 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
     // 7. Backlog-node integrity — dangling deps and orphan promoted nodes.
     let backlog_diags = check_backlog_integrity(&loaded, &graph);
     report.diagnostics.extend(backlog_diags);
+
+    // 7a. superseded_by integrity (Task 2, MV.ticket.superseded-block-status) —
+    //     a `superseded` block's successor pointer (authored via
+    //     TrackBlock::extra, D13 precedent) must resolve, and the pointer
+    //     must not appear on a block whose status isn't "superseded".
+    report
+        .diagnostics
+        .extend(check_superseded_by_integrity(&loaded, &graph));
 
     // 7b. Epic registry + membership — cross-file, so it runs once over the
     //     whole corpus rather than per-file like check_field_policy.
