@@ -1121,6 +1121,65 @@ enum Command {
         command: DocCommand,
     },
     /// Fleet-wide, read-only sweep of every discovered `planning/state.json`'s
+    /// `backlog[]` array (`MV.ticket.backlog-sweep-verb`).
+    ///
+    /// Mirrors `mev carryover`'s flags exactly (`--repo`, `--json`, `--allow-exec`)
+    /// plus `--lane` to restrict the printed rows to one lane, pointed at a second
+    /// container. `backlog[]`'s `clears_when`/`ready_when` are typed fields directly
+    /// on the node (no prose extraction), evaluated with the same four predicate
+    /// kinds carryover uses: `block_closed`, `file_exists`, `file_contains`, and
+    /// `command_exits_zero` (never executed unless `--allow-exec` is passed).
+    ///
+    /// Five lanes:
+    ///   CLEARED        — `clears_when` is a satisfied predicate; the idea is dead.
+    ///                     Read as "predicate satisfied — verify before acting", not
+    ///                     as a verdict.
+    ///   READY          — `ready_when` is a satisfied predicate; promote it.
+    ///   WAITING        — `ready_when` is evaluable but not yet satisfied.
+    ///   AGING          — no predicate resolves to anything evaluable, and the node
+    ///                     is older than `brain.toml`'s `[attention] backlog_days`.
+    ///   NOT-EVALUABLE  — a prose predicate, an unresolved `command_exits_zero`
+    ///                     without `--allow-exec`, or a predicate-free node that has
+    ///                     not yet aged.
+    ///
+    /// Read-only by construction: there is no disposal or mutation mode anywhere in
+    /// this verb, deliberately — `mev carryover --dispose` destroyed 12 live entries
+    /// on 2026-09-02; never bulk-act on a CLEARED lane without inspecting it entry by
+    /// entry first.
+    ///
+    /// Exit codes:
+    ///   0 — sweep completed, regardless of how many entries land in any lane
+    ///   1 — brain.toml not found/unreadable, an unknown --repo slug, or a
+    ///       serialization error under --json
+    Backlog {
+        /// Path to search from when locating brain.toml (walks up to find it).
+        /// Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Restrict the sweep to one repo's backlog[] entries.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Restrict the PRINTED rows to one lane (`cleared`/`ready`/`waiting`/
+        /// `aging`/`not-evaluable`). The totals in the header still describe the
+        /// whole (repo-filtered) sweep, not just the printed lane.
+        #[arg(long)]
+        lane: Option<String>,
+        /// Emit the BacklogReport as compact JSON instead of a human summary.
+        #[arg(long)]
+        json: bool,
+        /// Opt in to executing `command_exits_zero` predicates. Off by default —
+        /// without this flag, every `command_exits_zero` entry reports
+        /// NotEvaluable (reason: execution-not-allowed) rather than running the
+        /// command, regardless of what it would have exited.
+        #[arg(long)]
+        allow_exec: bool,
+        /// Wall-clock bound, in seconds, the in-process watchdog enforces on a
+        /// `command_exits_zero` predicate's child process. Ignored without
+        /// `--allow-exec`.
+        #[arg(long, default_value_t = 2)]
+        exec_timeout: u64,
+    },
+    /// Fleet-wide, read-only sweep of every discovered `planning/state.json`'s
     /// `carryover[]` array (`MV.ticket.carryover-sweep-command`).
     ///
     /// `--repo <SLUG>` restricts the sweep to one repo's entries; `--grep <PATTERN>`
@@ -2624,6 +2683,61 @@ fn excluded_clause(excluded: usize, include_cross_repo: bool) -> String {
 ///   spec's stale snapshot, but the behavioural claims this task exists to
 ///   pin — excluded by default, included by `--include-cross-repo`, never
 ///   widened to another named repo — all hold.
+///
+/// Human-readable, lane-grouped summary for `mev backlog`'s default
+/// (non-`--json`) output. `lane_filter`, when set, restricts the printed
+/// rows to one lane — the header totals still describe the whole
+/// (repo-filtered) sweep.
+fn print_backlog_report(
+    report: &mev::BacklogReport,
+    repo_filter: Option<&str>,
+    lane_filter: Option<&str>,
+) {
+    let scope = match repo_filter {
+        Some(slug) => format!(" (repo: {slug})"),
+        None => String::new(),
+    };
+    println!(
+        "backlog sweep{scope}: {} total — cleared={} ready={} waiting={} aging={} not-evaluable={}",
+        report.total,
+        report.cleared,
+        report.ready,
+        report.waiting,
+        report.aging,
+        report.not_evaluable
+    );
+    if report.total == 0 {
+        return;
+    }
+
+    let lanes = [
+        (mev::BacklogLane::Cleared, "CLEARED"),
+        (mev::BacklogLane::Ready, "READY"),
+        (mev::BacklogLane::Waiting, "WAITING"),
+        (mev::BacklogLane::Aging, "AGING"),
+        (mev::BacklogLane::NotEvaluable, "NOT-EVALUABLE"),
+    ];
+    for (lane, label) in lanes {
+        if let Some(filter) = lane_filter
+            && !filter.eq_ignore_ascii_case(label.replace('-', "").as_str())
+            && !filter.eq_ignore_ascii_case(label)
+        {
+            continue;
+        }
+        let entries: Vec<&mev::BacklogVerdict> =
+            report.entries.iter().filter(|e| e.lane == lane).collect();
+        if entries.is_empty() {
+            continue;
+        }
+        println!("\n{label} ({}):", entries.len());
+        for e in entries {
+            let age = e.age_days.map(|d| format!(" ({d}d)")).unwrap_or_default();
+            let reason = e.reason.map(|r| format!(" [{r:?}]")).unwrap_or_default();
+            println!("  {}:{} — {}{age}{reason}", e.repo, e.slug, e.title);
+        }
+    }
+}
+
 fn print_carryover_report(
     report: &mev::CarryoverReport,
     grep_pattern: Option<&str>,
@@ -4559,6 +4673,43 @@ fn main() -> ExitCode {
                 }
             },
         },
+        Command::Backlog {
+            path,
+            repo,
+            lane,
+            json,
+            allow_exec,
+            exec_timeout,
+        } => {
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let exec_timeout = std::time::Duration::from_secs(exec_timeout);
+            let report = match mev::backlog_sweep(&root, repo.as_deref(), allow_exec, exec_timeout)
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if json || cli.json {
+                match serde_json::to_string(&report) {
+                    Ok(s) => println!("{s}"),
+                    Err(e) => {
+                        eprintln!("error: failed to serialize backlog report: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                print_backlog_report(&report, repo.as_deref(), lane.as_deref());
+            }
+            ExitCode::SUCCESS
+        }
         Command::Carryover {
             path,
             repo,
@@ -4938,5 +5089,69 @@ mod excluded_clause_tests {
     fn renders_zero_in_both_modes() {
         assert!(excluded_clause(0, false).starts_with("0 cross-repo/tier entries"));
         assert!(excluded_clause(0, true).starts_with("0 tier-scoped entries"));
+    }
+}
+
+/// Flag-parity check between `mev backlog` and `mev carryover`
+/// (`MV.ticket.backlog-sweep-verb` task 1, acceptance criterion 4): flag
+/// names must match exactly where the two subcommands mean the same thing,
+/// asserted here rather than left to review.
+#[cfg(test)]
+mod backlog_carryover_flag_parity_tests {
+    use clap::CommandFactory;
+
+    /// Long flag names shared by `mev backlog` and `mev carryover` — every
+    /// name in this list must be a real long flag on BOTH subcommands.
+    /// `--repo`, `--json` and `--allow-exec` are common by direct 1:1
+    /// intent; `--exec-timeout` is common only because `--allow-exec`
+    /// exists on both.
+    const SHARED_FLAGS: &[&str] = &["repo", "json", "allow-exec", "exec-timeout"];
+
+    fn long_flag_names(cmd: &clap::Command) -> std::collections::BTreeSet<String> {
+        cmd.get_arguments()
+            .filter_map(|a| a.get_long().map(|s| s.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn shared_flags_are_named_identically_on_both_subcommands() {
+        let app = super::Cli::command();
+        let backlog = app
+            .find_subcommand("backlog")
+            .expect("mev backlog subcommand must exist");
+        let carryover = app
+            .find_subcommand("carryover")
+            .expect("mev carryover subcommand must exist");
+
+        let backlog_flags = long_flag_names(backlog);
+        let carryover_flags = long_flag_names(carryover);
+
+        for flag in SHARED_FLAGS {
+            assert!(
+                backlog_flags.contains(*flag),
+                "mev backlog is missing --{flag}, present on mev carryover"
+            );
+            assert!(
+                carryover_flags.contains(*flag),
+                "mev carryover is missing --{flag}, present on mev backlog"
+            );
+        }
+    }
+
+    /// `mev backlog` must never grow a disposal/mutation flag — read-only by
+    /// construction (see the module doc on `Command::Backlog`).
+    #[test]
+    fn backlog_has_no_disposal_or_mutation_flags() {
+        let app = super::Cli::command();
+        let backlog = app
+            .find_subcommand("backlog")
+            .expect("mev backlog subcommand must exist");
+        let backlog_flags = long_flag_names(backlog);
+        for forbidden in ["dispose", "dry-run", "backfill", "write"] {
+            assert!(
+                !backlog_flags.contains(forbidden),
+                "mev backlog must stay read-only; found forbidden flag --{forbidden}"
+            );
+        }
     }
 }

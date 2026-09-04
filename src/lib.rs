@@ -13,6 +13,9 @@ pub mod testsupport;
 pub mod theme;
 mod validator;
 pub use brain::BrainValidator;
+pub use brain::backlog::{
+    BacklogLane, BacklogNotEvaluableReason, BacklogReport, BacklogVerdict, evaluate_backlog,
+};
 pub use brain::block_graph::{
     BlockGraphEdge, BlockGraphExport, BlockGraphNode, BlockGraphScope, BlockGraphScopeEcho,
     BlockLane, build_block_graph_export,
@@ -3094,6 +3097,86 @@ fn load_and_evaluate_carryover_corpus(
         )
     })?;
     Ok((loaded, report))
+}
+
+/// Fleet-wide, read-only `backlog[]` sweep driver — the `mev backlog` entry point.
+///
+/// Mirrors [`load_and_evaluate_carryover_corpus`]'s discovery+load walk (repo
+/// resolution, `planning/state.json` discovery, per-file load with individual
+/// failures skipped, the `"{repo}:{id}"` → authored-status map, and the repo
+/// slug → repo root map for path predicates), then delegates lane assignment
+/// to [`brain::backlog::evaluate_backlog`]. Never writes anything — a pure
+/// read + report, same as [`carryover_sweep`]. `allow_exec` is passed
+/// straight through as the opt-in gate for `command_exits_zero` predicates,
+/// off by default; `exec_timeout` bounds such a command's child process.
+pub fn backlog_sweep(
+    root: &std::path::Path,
+    repo_filter: Option<&str>,
+    allow_exec: bool,
+    exec_timeout: std::time::Duration,
+) -> anyhow::Result<brain::backlog::BacklogReport> {
+    use brain::config::find_brain_config;
+    use brain::state::{discover_state_files, load_state};
+
+    let config = find_brain_config(root)
+        .map_err(|e| anyhow::anyhow!("brain.toml not found or unreadable: {e}"))?;
+
+    let (sources, _discovery_diags) = discover_state_files(root, &config);
+
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    for src in &sources {
+        if let Ok(file) = load_state(&src.abs_path) {
+            loaded.push((src.clone(), file));
+        }
+    }
+
+    if let Some(slug) = repo_filter
+        && !sources.iter().any(|s| s.repo_slug == slug)
+    {
+        let mut valid_slugs: Vec<&str> = sources.iter().map(|s| s.repo_slug.as_str()).collect();
+        valid_slugs.sort_unstable();
+        valid_slugs.dedup();
+        return Err(anyhow::anyhow!(
+            "unknown --repo slug '{slug}'; valid slugs: {}",
+            valid_slugs.join(", ")
+        ));
+    }
+
+    let mut status_map: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    for (src, file) in &loaded {
+        for track in &file.tracks {
+            for block in &track.blocks {
+                let key = format!("{}:{}", src.repo_slug, block.id);
+                status_map.insert(key, block.status.clone());
+            }
+        }
+    }
+
+    let mut repo_paths: std::collections::HashMap<String, PathBuf> =
+        std::collections::HashMap::new();
+    for repo in &config.repos {
+        let repo_root = if repo.repo_path == "." || repo.repo_path.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(&repo.repo_path)
+        };
+        repo_paths.insert(repo.slug.clone(), repo_root);
+    }
+
+    let today = chrono::Local::now().date_naive();
+    let report = brain::backlog::evaluate_backlog(
+        &loaded,
+        &status_map,
+        root,
+        &repo_paths,
+        today,
+        &config.attention,
+        repo_filter,
+        allow_exec,
+        exec_timeout,
+    );
+    Ok(report)
 }
 
 /// Fleet-wide `carryover[]`/`reference[]` census — the `mev carryover --audit` entry
