@@ -321,28 +321,47 @@ const VALID_STATUSES: &[&str] = &["open", "in_progress", "blocked", "deferred", 
 /// `wontfix` block is not blocked, exactly as if the target were `closed` — but it is
 /// **counted separately from `closed` everywhere `closed` is counted**, so progress
 /// metrics (e.g. epic `N/M closed` lines) do not inflate. It is distinct from
-/// `"deferred"`, which is a park (non-terminal, resumable); `wontfix` never resumes —
-/// supersede the block instead. See [`is_terminal_block_status`].
+/// `"deferred"`, which is a park (non-terminal, resumable); `wontfix` never resumes and
+/// means the work will never happen at all. See [`is_terminal_block_status`].
+///
+/// `"superseded"` is also authored: a deliberate human decision that this block's work
+/// moved to a different block (tracked via a `superseded_by` successor pointer,
+/// authored through `TrackBlock::extra` — see D13), rather than that the work will
+/// never happen (`wontfix`) or is merely parked (`deferred`). Like `wontfix` it is
+/// **terminal for readiness purposes** and **counted separately from `closed` and
+/// `wontfix` everywhere they are counted**, so progress metrics do not inflate and a
+/// dependent is not permanently blocked on a block whose work only moved elsewhere.
+/// This is the distinction the `wontfix` doc line above is pointing at: use `wontfix`
+/// when the work is abandoned, `superseded` when it moved.
 ///
 /// `pub(crate)` so [`crate::brain::blocks::plan_set_block_status`] validates authored
 /// input against exactly this list rather than a copy that could drift — and, crucially,
 /// not against [`VALID_STATUSES`], which admits the derived-only `"blocked"`.
-pub(crate) const VALID_TRACK_BLOCK_STATUSES: &[&str] =
-    &["open", "in_progress", "deferred", "closed", "wontfix"];
+pub(crate) const VALID_TRACK_BLOCK_STATUSES: &[&str] = &[
+    "open",
+    "in_progress",
+    "deferred",
+    "closed",
+    "wontfix",
+    "superseded",
+];
 
-/// True for the two authored statuses that satisfy a `{type:"block"}` dependency —
-/// `"closed"` and `"wontfix"`. Both are terminal: nothing further will ever happen to
-/// the block, so anything gated on it may proceed. `"deferred"` is deliberately absent
-/// — it is a park, not a resolution, and an `open` block depending on a deferred one
-/// must still report blocked (see [`derive_focus`]'s doc comment on deferral not
-/// propagating).
+/// True for the three authored statuses that satisfy a `{type:"block"}` dependency —
+/// `"closed"`, `"wontfix"` and `"superseded"`. All three are terminal: nothing further
+/// will ever happen to the block under its own identity, so anything gated on it may
+/// proceed. `"deferred"` is deliberately absent — it is a park, not a resolution, and
+/// an `open` block depending on a deferred one must still report blocked (see
+/// [`derive_focus`]'s doc comment on deferral not propagating).
 ///
 /// Single owner of "does this dependency target count as satisfied" — [`ready_order`],
 /// [`derive_focus`], and [`check_status_consistency`] all call this instead of
-/// re-deriving the closed-or-wontfix test inline, so they cannot drift apart on what
-/// `wontfix` means for a dependent block.
+/// re-deriving the closed-or-wontfix-or-superseded test inline, so they cannot drift
+/// apart on what `wontfix`/`superseded` mean for a dependent block.
 pub(crate) fn is_terminal_block_status(status: Option<&str>) -> bool {
-    matches!(status, Some("closed") | Some("wontfix"))
+    matches!(
+        status,
+        Some("closed") | Some("wontfix") | Some("superseded")
+    )
 }
 
 /// The focus lanes, in the order they are reported in diagnostics and boards.
@@ -3346,6 +3365,15 @@ pub fn derive_focus(
                     if let Some(gate) = gate {
                         carryover_gates.insert(block.id.clone(), vec![gate.clone()]);
                     }
+                }
+                "wontfix" | "superseded" => {
+                    // Terminal, like `closed` — no derived lane. `wontfix` and
+                    // `superseded` are both resolutions (not a park like
+                    // `deferred`), so a block in either state never appears in
+                    // `now`/`next`/`blocked`/`deferred`; `is_terminal_block_status`
+                    // already lets dependents proceed. Named explicitly (rather
+                    // than folded into the `_` arm below) precisely because the
+                    // comment on that arm demands it.
                 }
                 // `closed` and `blocked` (invalid authored, caught by
                 // `E_STATE_AUTHORED_BLOCKED`) are skipped — they have no derived
@@ -7572,6 +7600,69 @@ mod tests {
     }
 
     #[test]
+    fn derive_focus_open_block_depending_on_superseded_is_not_blocked() {
+        // Assertions 3 and 5. Mirror of
+        // derive_focus_open_block_depending_on_wontfix_is_not_blocked: superseded
+        // IS terminal for readiness — the dependent must derive as ready (next),
+        // never blocked, exactly as if the target were closed/wontfix. This is
+        // assertion 3: a block depending on a superseded block is not in the
+        // derived `blocked` lane, i.e. superseding a block does not permanently
+        // block everything behind it.
+        //
+        // This is also assertion 5, the silent-vanish control the code's own
+        // comment demands: derive_focus's status match now carries an explicit
+        // "superseded" arm rather than relying on the `_ => {}` catch-all. The
+        // superseded block itself gets no derived lane (same as closed/wontfix —
+        // it belongs to none of now/next/blocked/deferred), so this test asserts
+        // it does not silently show up in any of them, and that its dependent
+        // does not silently vanish out of `next` either.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[
+                ("AL.1.A", Some("superseded"), None, vec![]),
+                (
+                    "AL.1.B",
+                    Some("open"),
+                    None,
+                    vec![BlockedBy::Block(BlockDep {
+                        repo: "alpha".to_string(),
+                        id: "AL.1.A".to_string(),
+                        what: None,
+                    })],
+                ),
+            ],
+        );
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let (src, file) = &files[0];
+
+        let d = derive_focus(src, file, &graph, &files, None);
+
+        assert!(
+            d.now.is_empty(),
+            "a superseded block must not appear in now: {:?}",
+            d.now
+        );
+        assert!(
+            d.deferred.is_empty(),
+            "superseded is not deferred: {:?}",
+            d.deferred
+        );
+        assert!(
+            d.blocked.is_empty(),
+            "dependent must not be blocked on a superseded dep: {:?}",
+            d.blocked
+        );
+        assert_eq!(
+            d.next,
+            vec!["AL.1.B"],
+            "dependent must derive as ready (not vanish) once its only dep is superseded"
+        );
+    }
+
+    #[test]
     fn ready_order_deferred_block_excluded() {
         // Regression pin. `ready_order`'s gate is `status != "open"`, so a
         // deferred block is excluded for free — but that is load-bearing, not
@@ -7768,9 +7859,10 @@ mod tests {
     }
 
     #[test]
-    fn is_terminal_block_status_accepts_closed_and_wontfix_only() {
+    fn is_terminal_block_status_accepts_closed_wontfix_and_superseded_only() {
         assert!(is_terminal_block_status(Some("closed")));
         assert!(is_terminal_block_status(Some("wontfix")));
+        assert!(is_terminal_block_status(Some("superseded")));
         assert!(!is_terminal_block_status(Some("open")));
         assert!(!is_terminal_block_status(Some("in_progress")));
         assert!(
@@ -7783,6 +7875,70 @@ mod tests {
     #[test]
     fn wontfix_is_an_authorable_track_block_status() {
         assert!(VALID_TRACK_BLOCK_STATUSES.contains(&"wontfix"));
+    }
+
+    #[test]
+    fn superseded_by_round_trips_through_track_block_extra() {
+        // Assertion 6. `superseded_by` is deliberately NOT a typed field on
+        // TrackBlock (D13 precedent — see task 2/D13) — it should round-trip
+        // through TrackBlock::extra's #[serde(flatten)] catch-all exactly like
+        // any other unmodeled key. Observed RED before this block existed only
+        // in the sense that superseded_by was never authored anywhere; the
+        // round-trip mechanism itself is pre-existing (extra has no
+        // deny_unknown_fields), so this pins the mechanism this block relies on.
+        let json = serde_json::json!({
+            "id": "AL.1.A",
+            "title": "moved elsewhere",
+            "status": "superseded",
+            "superseded_by": {"repo": "alpha", "id": "AL.1.B"}
+        });
+        let block: TrackBlock =
+            serde_json::from_value(json.clone()).expect("TrackBlock should deserialize");
+        assert_eq!(
+            block.extra.get("superseded_by"),
+            Some(&serde_json::json!({"repo": "alpha", "id": "AL.1.B"})),
+            "superseded_by must survive into TrackBlock::extra, got: {:?}",
+            block.extra
+        );
+
+        let reserialized = serde_json::to_value(&block).expect("TrackBlock should serialize");
+        assert_eq!(
+            reserialized.get("superseded_by"),
+            json.get("superseded_by"),
+            "superseded_by must round-trip byte-for-byte through extra"
+        );
+    }
+
+    #[test]
+    fn superseded_is_an_authorable_track_block_status() {
+        // Assertion 1: VALID_TRACK_BLOCK_STATUSES accepts "superseded", and an
+        // authored superseded status does not raise E_STATE_SCHEMA_BAD_STATUS —
+        // exercised end-to-end (not just the const) by the validator test below.
+        assert!(VALID_TRACK_BLOCK_STATUSES.contains(&"superseded"));
+    }
+
+    #[test]
+    fn check_schema_accepts_authored_superseded() {
+        // Assertion 1 (end-to-end): a block authored with status "superseded"
+        // must not raise E_STATE_SCHEMA_BAD_STATUS. Observed RED before this
+        // block's implementation: VALID_TRACK_BLOCK_STATUSES did not contain
+        // "superseded", so check_schema raised exactly that diagnostic for
+        // this fixture.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_ready_pair(
+            dir.path(),
+            "alpha",
+            &[("AL.1.A", Some("superseded"), None, vec![])],
+        );
+        let files = vec![pair];
+        let (src, file) = &files[0];
+        let diags = check_schema(src, file);
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.locator == "E_STATE_SCHEMA_BAD_STATUS"),
+            "authored \"superseded\" must not raise E_STATE_SCHEMA_BAD_STATUS, got: {diags:?}"
+        );
     }
 
     #[test]

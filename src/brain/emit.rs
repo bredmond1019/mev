@@ -1182,12 +1182,20 @@ pub struct EpicProgress {
     /// silently absorbs it. Folding `wontfix` into `closed` would inflate the
     /// `N/M closed` progress line with work that was declared abandoned, not done.
     pub wontfix: usize,
+    /// Members with authored `status == "superseded"`.
+    ///
+    /// Terminal like `closed`/`wontfix` for readiness — a dependent is not
+    /// blocked on a `superseded` member — but tallied in its own field so
+    /// neither `closed` nor `open` (the `_ =>` catch-all's target) ever
+    /// silently absorbs it. Folding `superseded` into `open` would inflate
+    /// every epic rollup's open count with work that already moved elsewhere.
+    pub superseded: usize,
 }
 
 impl EpicProgress {
     /// Every member block, in any state.
     pub fn total(&self) -> usize {
-        self.closed + self.in_progress + self.open + self.deferred + self.wontfix
+        self.closed + self.in_progress + self.open + self.deferred + self.wontfix + self.superseded
     }
 
     /// Is this epic's remaining work entirely parked?
@@ -1214,6 +1222,7 @@ pub fn epic_progress(members: &[(String, &TrackBlock)]) -> EpicProgress {
         open: 0,
         deferred: 0,
         wontfix: 0,
+        superseded: 0,
     };
     for (_, block) in members {
         match block.status.as_deref() {
@@ -1221,6 +1230,7 @@ pub fn epic_progress(members: &[(String, &TrackBlock)]) -> EpicProgress {
             Some("in_progress") => p.in_progress += 1,
             Some("deferred") => p.deferred += 1,
             Some("wontfix") => p.wontfix += 1,
+            Some("superseded") => p.superseded += 1,
             _ => p.open += 1,
         }
     }
@@ -1404,6 +1414,12 @@ fn render_epic_progress_line(p: &EpicProgress) -> String {
     // existed.
     if p.wontfix > 0 {
         line.push_str(&format!(" · {} wontfix", p.wontfix));
+    }
+    // Same never-fold rule as `deferred`/`wontfix`: omitted when zero so
+    // epics with no superseded members render byte-identical to before this
+    // field existed.
+    if p.superseded > 0 {
+        line.push_str(&format!(" · {} superseded", p.superseded));
     }
     line
 }
@@ -3887,5 +3903,74 @@ mod apply_plan_history_tests {
 
         let after = std::fs::read_to_string(&target).unwrap();
         assert_eq!(after, "new content", "the write itself must still proceed");
+    }
+}
+
+#[cfg(test)]
+mod epic_progress_superseded_tests {
+    use super::*;
+
+    fn block_with_status(id: &str, status: &str) -> TrackBlock {
+        TrackBlock {
+            id: id.to_string(),
+            title: id.to_string(),
+            status: Some(status.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn epic_progress_counts_superseded_in_its_own_field_not_open() {
+        // Assertion 4. Before the "superseded" match arm existed, this fixture
+        // fell through `_ => p.open += 1`, so `open` read 1 instead of 0 —
+        // observed RED for exactly that reason. A superseded member must be
+        // tallied in EpicProgress::superseded and NOT move the open count.
+        let a = block_with_status("AL.1.A", "superseded");
+        let b = block_with_status("AL.1.B", "closed");
+        let members: Vec<(String, &TrackBlock)> =
+            vec![("alpha".to_string(), &a), ("alpha".to_string(), &b)];
+
+        let p = epic_progress(&members);
+
+        assert_eq!(
+            p.superseded, 1,
+            "the superseded member must be counted in its own field"
+        );
+        assert_eq!(
+            p.open, 0,
+            "a superseded member must NOT be folded into open, got open={}",
+            p.open
+        );
+        assert_eq!(p.closed, 1);
+        assert_eq!(p.total(), 2);
+    }
+
+    #[test]
+    fn render_epic_progress_line_reports_superseded_when_present() {
+        let a = block_with_status("AL.1.A", "superseded");
+        let members: Vec<(String, &TrackBlock)> = vec![("alpha".to_string(), &a)];
+        let p = epic_progress(&members);
+
+        let line = render_epic_progress_line(&p);
+        assert!(
+            line.contains("1 superseded"),
+            "expected the progress line to name the superseded member, got: {line}"
+        );
+    }
+
+    #[test]
+    fn render_epic_progress_line_omits_superseded_clause_when_zero() {
+        // Same never-fold rule as `deferred`/`wontfix`: epics with no
+        // superseded members render byte-identical to before this field
+        // existed.
+        let a = block_with_status("AL.1.A", "closed");
+        let members: Vec<(String, &TrackBlock)> = vec![("alpha".to_string(), &a)];
+        let p = epic_progress(&members);
+
+        let line = render_epic_progress_line(&p);
+        assert!(
+            !line.contains("superseded"),
+            "expected no superseded clause when zero, got: {line}"
+        );
     }
 }
