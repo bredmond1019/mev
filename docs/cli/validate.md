@@ -538,7 +538,7 @@ mev conformance ~/Dev/agentic-portfolio
 | `toolchain-freshness` | The running `mev` binary's compiled-in build stamp (`MEV_BUILD_GIT_SHA`, `MEV_BUILD_DIRTY`, `MEV_BUILD_SOURCE_DIR` — stamped into the binary by `build.rs` via `cargo:rustc-env` at compile time) | `git rev-parse HEAD` run in `MEV_BUILD_SOURCE_DIR` right now | A different live SHA than the stamped one ("the running binary is behind its source; rebuild"), or the same SHA but the build was dirty (a distinct drift message) |
 | `sibling-rule-coverage` | The declared `SIBLING_RULES` table (`src/brain/conformance/sibling.rs`) — each rule's name + members | Source-text analysis of every `.rs` file under `<MEV_BUILD_SOURCE_DIR>/src` and `/tests` | Any of four findings on any rule: a member function that no longer routes through its `shared_helper`, re-inlines a `forbidden` predicate, has gone missing outright, or has lost its `covering_test`'s coverage of every member — see below |
 | `contract-freshness` | Each `[[contracts]]` entry's **canonical** doc version, extracted from `brain.toml`'s registry (`src/brain/conformance/contracts.rs`) | Each registered **consumer's** pinned copy — a markdown version line, or a named Dart constant such as `kServeApiPin` | A consumer whose pin does not **exactly equal** its canonical. Equality only, never version ordering: synapse and engine-rs are forked lineages that collide on the number 1.8.0 with different content, so "one minor ahead" would state something false. An unreadable file, an unparseable version line, or an unknown `format` reports `not-evaluable` for that edge — never `pass` |
-| `surface-leak` | The files **git actually tracks** in each `[[repos]]` entry marked `public = true` | Two rules over those files: (1) a relative markdown link whose resolved target is not tracked in the same repo, (2) a dotted-quad IPv4 or `*.ts.net` hostname, minus `brain.toml`'s `[surface_allowlist]` | A link that resolves locally but 404s on GitHub (the `planning/` vault symlink and climb-out-of-repo cases), or a private infrastructure address in a file the public can read. `public` is **fail-closed**: a repo whose entry omits the flag is treated as private and never scanned |
+| `surface-leak` | The files **git actually tracks** in each `[[repos]]` entry marked `public = true` | Two rules over those files: (1) a relative markdown link whose resolved target is not tracked in the same repo, (2) a dotted-quad IPv4 or `*.ts.net` hostname, minus `brain.toml`'s `[surface_allowlist]` | A link that resolves locally but 404s on GitHub (the `planning/` vault symlink and climb-out-of-repo cases), or a private infrastructure address in a file the public can read. `public` is **fail-closed**: a repo whose entry omits the flag is treated as private and never scanned. **Its outcome semantics are documented separately below** — read that section before wiring this check into any publish gate |
 
 #### `sibling-rule-coverage` — a rule taught to one function must be taught to its sibling
 
@@ -614,6 +614,56 @@ logic all iterate `SIBLING_RULES` generically.
 
 ```bash
 mev conformance --check sibling-rule-coverage
+```
+
+#### `surface-leak` — outcome semantics HQ's build pins
+
+`surface-leak` is HQ's `build-v2.sh`'s **last gate before an irreversible eight-repo publish**.
+Once that push goes out, it cannot be un-pushed, so the question this section answers is: for
+each status `surface-leak` can report, is it actually safe to let the publish proceed? The short
+answer is **only `pass`** — everything below explains why, because the other two statuses look
+close enough to safe that a caller has gotten this wrong before.
+
+**`not-evaluable` is not a pass.** It means the check could not finish scanning what it was asked
+to scan — it is silent about whether a leak exists, not a clean bill of health. The general
+exit-code rule elsewhere on this page (`0` for either `pass` or `not-evaluable`) is correct for
+`mev conformance`'s own exit code, but a **caller gating a publish on this one check must treat
+`not-evaluable` as a stop, the same as `drift`**, and read the `reason` before deciding anything
+else. Two conditions produce it here:
+
+- **An empty tracked set is an error, not a pass.** `surface-leak` walks `git ls-files` inside
+  each public repo. If a repo directory is `git init`-ed but has never had a commit — exactly the
+  state a freshly built V2 tree starts in — `git ls-files` returns nothing, and reading that as
+  "nothing tracked, so nothing to flag" would report a clean scan of zero bytes. `surface-leak`
+  refuses that reading: an empty tracked set fails loud, naming the repo, and the check reports
+  `not-evaluable` for the run rather than `pass`.
+- **No `[[repos]]` entry is `public = true`.** `public` is fail-closed — an entry that omits the
+  key is treated as private and never scanned (`config.rs`). A `brain.toml` where nothing is
+  marked public today would, on the old behavior, scan zero repos and report a silent `pass`. It
+  now reports `not-evaluable` with a reason stating that condition explicitly — no run is ever a
+  quiet green because there was nothing to check.
+
+**`[surface_allowlist] self_fixtures` is file-scoped, and only exempts rule 2.** An entry is
+shaped `<repo-slug>:<repo-relative-path>` and exempts every rule-2 (private-infra-literal)
+finding in that one file — the positive-control fixtures inside `surface.rs`'s own
+`#[cfg(test)]` block are the reason this exists: they are literals written on purpose to prove
+rule 2 fires, and without the exemption the check would flag its own tests. The exemption is
+**never** literal-scoped (an identical literal in a different, non-listed file still fires) and
+**never** applies to rule 1 (a dangling link target in a self-fixtures file still fires) — it
+turns off exactly one rule for exactly one named file.
+
+**Version-shaped dotted quads are excluded from rule 2.** Rule 2 flags a dotted-quad literal that
+looks like a private IPv4 address. A version pin or an image tag can also be four dot-separated
+numbers, and two live examples on this fleet were false positives before this exclusion existed:
+`1.27.2.3` (a Python dependency version pin) and `15.8.1.060` (a zero-padded container image
+tag — the leading zero in `060` is not a legal IPv4 octet, which is one of the two signals that
+mark a literal as version-shaped rather than an address). The exclusion never suppresses a real
+private/loopback/CGN-NAT address (first octets `10`, `100`, `127`, `172`, `192`), and it never
+suppresses a `*.ts.net` Tailscale hostname finding — hostnames are not dotted-quad numbers to
+begin with, so this exclusion cannot touch them.
+
+```bash
+mev conformance --check surface-leak
 ```
 
 #### Pass / drift / not-evaluable

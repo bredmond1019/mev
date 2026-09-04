@@ -13,6 +13,39 @@ timestamp: "2026-09-03T00:00:00-03:00"
 
 ## [run: 2026-09-03]
 
+### `MV.19.A` BLOCKED — `/sdlc-flow`, tasks 1-6 of 7 PASS, task 7 BAILED
+
+Implemented all five surface-leak false-positive/fail-open fixes in `src/brain/conformance/surface.rs`
+across tasks 1-6: task 1 added five shown-failing integration fixtures (one per defect class) driving
+only the existing public `surface::run`/`evaluate_repo` surface; task 2 added `fn is_version_string`
+(first-octet + leading-zero dotted-quad heuristic) and applied it in rule 2's filter chain; task 3
+added a `[surface_allowlist].self_fixtures` config entry (`<repo>:<path>` scoped) so mev's own
+conformance-test fixtures are exempted without weakening the check elsewhere, and registered mev's
+own file in the HQ-root `brain.toml`; task 4 made rule 1 accept a tracked directory PREFIX (derived
+filesystem-free from `git ls-files`, so the D46 `planning/` vault symlink still cannot qualify) as a
+resolved link target, not only tracked files; task 5 made `tracked_set` error on an empty tracked set
+and `run` return `NotEvaluable` (with a reason) instead of `Pass` when no `[[repos]]` entry is public,
+updating two pre-existing unit tests whose assertions depended on the old `Pass` behaviour; task 6
+documented all of this in `docs/cli/validate.md` as the outcome-semantics contract HQ's build-v2.sh
+pins. Task 7 (validation-only, files: []) reported in its own summary that every AC was re-verified
+live (rule-2 findings 46 -> 21, all real; harness gates green; both consumer checks passing) and that
+the `surface-leak-rule2-false-positive-rate` carryover now reports CLEARED — but the terminal
+work-assertion write step failed identically on both attempts (`WORK_ASSERTION_NOT_CONFIRMED`,
+`workAssertionPassed` never recorded true), with no progress between the two, so the run BAILED rather
+than retrying a third time. The block stays open; the state.json block status was NOT flipped this run.
+Next: a human should review the work-assertion write path for task 7's terminal step (the underlying
+validation work itself appears already complete and green per the task's own report) before re-running
+or hand-closing `MV.19.A`.
+
+```
+b215f49 feat: implement MV.19.A-task6
+f38ad31 feat: implement MV.19.A-task5
+57534d8 feat: implement MV.19.A-task4
+6206fda feat: implement MV.19.A-task3
+9de4e30 feat: implement MV.19.A-task2
+0e8486b test: five shown-failing surface-leak fixtures (MV.19.A task 1)
+```
+
 ### `MV.ticket.extract-learn-ai-into-a-private-optional-crate` CLOSED — `/sdlc-flow`, 8 of 8 tasks, PASS
 
 Extracted the operator's business-identity-bearing `learn_ai` module out of the public `mev` binary

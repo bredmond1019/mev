@@ -80,7 +80,22 @@ fn tracked_set(repo_dir: &Path) -> TrackedSetResult {
             repo_dir.display()
         )
     })?;
-    Ok(text.lines().map(|s| s.to_string()).collect())
+    let set: HashSet<String> = text.lines().map(|s| s.to_string()).collect();
+    // An empty tracked set almost never means "this repo genuinely tracks nothing" — it
+    // means `git ls-files` was asked in a repo with no commits yet (`git init`-ed but
+    // never committed), which is exactly the state a freshly built V2 tree starts in.
+    // Reading it as "nothing tracked, so every rule trivially passes" is the fail-open
+    // shape this check exists to close: it would report Pass having scanned zero bytes.
+    // Fail loud instead, naming the repo, so the caller routes it to `NotEvaluable`
+    // rather than treating silence as a clean scan.
+    if set.is_empty() {
+        return Err(format!(
+            "git ls-files in {} returned no tracked files — repo is uncommitted or empty; \
+             refusing to report a scan of zero files as a pass",
+            repo_dir.display()
+        ));
+    }
+    Ok(set)
 }
 
 /// One `[text](target)` markdown link match: the raw target string and the 1-indexed
@@ -144,13 +159,36 @@ fn lexical_normalize(path: &str) -> Option<Vec<String>> {
     Some(stack)
 }
 
+/// Every directory PREFIX implied by `tracked`, a repo's tracked-file set — e.g. the
+/// file `crates/engine-contract/Cargo.toml` contributes both `crates` and
+/// `crates/engine-contract`. Built once per repo from the same `git ls-files` output
+/// that produced `tracked`; never touches the filesystem, so a locally-resolvable but
+/// UNTRACKED directory (the D46 `planning/` vault symlink is the canonical example)
+/// never appears here — only a directory some TRACKED FILE actually sits under does.
+fn tracked_dir_prefixes(tracked: &HashSet<String>) -> HashSet<String> {
+    let mut dirs = HashSet::new();
+    for path in tracked {
+        let mut parts: Vec<&str> = path.split('/').collect();
+        parts.pop(); // drop the filename itself
+        while !parts.is_empty() {
+            dirs.insert(parts.join("/"));
+            parts.pop();
+        }
+    }
+    dirs
+}
+
 /// Evaluate rule 1 for a single tracked markdown file's content against `tracked`, the
-/// repo's full tracked set. `file_rel` is the file's own repo-relative path (`/`-joined).
+/// repo's full tracked set, and `tracked_dirs`, every directory prefix implied by it. A
+/// link target that names a tracked directory (not just a tracked file) resolves too —
+/// see `tracked_dir_prefixes` for why this stays filesystem-free.
+/// `file_rel` is the file's own repo-relative path (`/`-joined).
 fn check_links_in_file(
     repo: &str,
     file_rel: &str,
     content: &str,
     tracked: &HashSet<String>,
+    tracked_dirs: &HashSet<String>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     let file_dir: Vec<&str> = {
@@ -184,7 +222,7 @@ fn check_links_in_file(
             }),
             Some(segments) => {
                 let normalized = segments.join("/");
-                if !tracked.contains(&normalized) {
+                if !tracked.contains(&normalized) && !tracked_dirs.contains(&normalized) {
                     findings.push(Finding {
                         repo: repo.to_string(),
                         file: file_rel.to_string(),
@@ -232,6 +270,16 @@ fn find_literals(content: &str) -> Vec<LiteralMatch> {
     out
 }
 
+/// Whether `repo_slug:file_rel` is exempted from rule 2 (private infra literal) as a
+/// self-fixture entry shaped `<repo-slug>:<repo-relative-path>` in
+/// `[surface_allowlist] self_fixtures`. FILE-scoped, not literal-scoped — this exempts a
+/// whole file's rule-2 findings, never rule 1, and never any OTHER file's identical
+/// literal (that is the control half of task 1's self-fixture fixture).
+fn is_self_fixture(repo_slug: &str, file_rel: &str, self_fixtures: &[String]) -> bool {
+    let key = format!("{repo_slug}:{file_rel}");
+    self_fixtures.iter().any(|entry| entry == &key)
+}
+
 /// Whether `literal` is covered by an entry in `allowlist`: an entry ending in `.`
 /// matches as a prefix (so `192.0.2.` covers the whole block); otherwise the match is
 /// exact.
@@ -245,6 +293,52 @@ fn is_allowlisted(literal: &str, allowlist: &[String]) -> bool {
     })
 }
 
+/// First octets this fleet's REAL private/loopback/CGN infra literals actually start
+/// with — RFC 1918 (`10.`, `172.`, `192.`), loopback (`127.`), and Tailscale/CGN NAT
+/// space (`100.`). Derived from the live corpus's MUST-STILL-FIRE evidence
+/// (`100.64.1.2`, `100.64.5.9`, `192.168.1.5`, `10.0.0.1`, `127.0.0.2`, `100.1.2.3`) —
+/// note `100.1.2.3` is kept even though its second octet sits outside the strict
+/// `100.64.0.0/10` CGN range, so this is a first-octet heuristic, not a full CIDR match.
+const PRIVATE_FIRST_OCTETS: [&str; 5] = ["10", "100", "127", "172", "192"];
+
+/// Whether `literal` is a version-number-shaped dotted quad rather than a real private
+/// IPv4 address, so rule 2 should not flag it as a leaked infra literal.
+///
+/// Derived from the live corpus (2026-09-03), not invented: `1.27.2.3` (a Python
+/// dependency version pin) and `15.8.1.060` (a zero-padded container image tag) must NOT
+/// fire, while every real address the existing fixtures pin — `100.64.1.2`, `100.64.5.9`,
+/// `192.168.1.5`, `10.0.0.1`, `127.0.0.2`, `100.1.2.3` — must still fire.
+///
+/// Two independent signals, either one enough to call it a version string:
+///  - a non-canonical octet: a segment longer than one digit that starts with `0`
+///    (`060`) is not a legal decimal IPv4 octet, so it reads as a padded version
+///    component instead;
+///  - a first octet outside [`PRIVATE_FIRST_OCTETS`] — version numbers commonly start
+///    with a small major version (`1.`, `2.`, `15.`, ...) that never collides with the
+///    handful of first octets this fleet's real private/loopback/CGN literals use.
+///
+/// Non-dotted-quad literals (a `*.ts.net` hostname's segments are not all digits) always
+/// return `false` here — this function must never suppress a Tailscale hostname finding.
+fn is_version_string(literal: &str) -> bool {
+    let octets: Vec<&str> = literal.split('.').collect();
+    if octets.len() != 4 {
+        return false;
+    }
+    if !octets
+        .iter()
+        .all(|o| !o.is_empty() && o.chars().all(|c| c.is_ascii_digit()))
+    {
+        return false; // not a dotted quad of digits at all — e.g. a ts.net hostname
+    }
+    if octets.iter().any(|o| o.len() > 1 && o.starts_with('0')) {
+        return true;
+    }
+    match octets.first() {
+        Some(first) => !PRIVATE_FIRST_OCTETS.contains(first),
+        None => false,
+    }
+}
+
 /// Evaluate rule 2 for a single tracked file's content.
 fn check_literals_in_file(
     repo: &str,
@@ -255,6 +349,7 @@ fn check_literals_in_file(
     find_literals(content)
         .into_iter()
         .filter(|m| !is_allowlisted(&m.text, allowlist))
+        .filter(|m| !is_version_string(&m.text))
         .map(|m| Finding {
             repo: repo.to_string(),
             file: file_rel.to_string(),
@@ -279,6 +374,7 @@ pub fn evaluate_repo(
     };
 
     let tracked = tracked_set(&repo_dir)?;
+    let tracked_dirs = tracked_dir_prefixes(&tracked);
     let mut findings = Vec::new();
 
     for rel in &tracked {
@@ -289,7 +385,13 @@ pub fn evaluate_repo(
         };
 
         if rel.ends_with(".md") || rel.ends_with(".mdx") {
-            findings.extend(check_links_in_file(&repo.slug, rel, &content, &tracked));
+            findings.extend(check_links_in_file(
+                &repo.slug,
+                rel,
+                &content,
+                &tracked,
+                &tracked_dirs,
+            ));
         }
         findings.extend(check_literals_in_file(&repo.slug, rel, &content, allowlist));
     }
@@ -304,16 +406,27 @@ pub fn run(ctx: &ConformanceCtx) -> CheckOutcome {
     let public_repos: Vec<&RepoEntry> = ctx.config.repos.iter().filter(|r| r.public).collect();
 
     if public_repos.is_empty() {
+        // `public` is FAIL-CLOSED to `false` when a `[[repos]]` entry omits the key
+        // (config.rs:445), so a brain.toml that simply never marks anything public
+        // reports a clean, silent Pass here today — the second fail-open shape this
+        // block exists to close. Nothing was scanned, so this is not a pass; it is a
+        // condition the caller must be told about explicitly, via the same
+        // `NotEvaluable` status `evaluate_repo` errors already route through below —
+        // reusing that existing status/reason plumbing rather than adding a new one.
         return CheckOutcome {
-            status: CheckStatus::Pass,
+            status: CheckStatus::NotEvaluable,
             left: None,
             right: None,
             findings: Vec::new(),
-            reason: None,
+            reason: Some(
+                "no [[repos]] entry in brain.toml is marked public = true, so nothing was scanned"
+                    .to_string(),
+            ),
         };
     }
 
     let allowlist = &ctx.config.surface_allowlist.literals;
+    let self_fixtures = &ctx.config.surface_allowlist.self_fixtures;
     let mut all_findings: Vec<Finding> = Vec::new();
     let mut reasons: Vec<String> = Vec::new();
     let mut status = CheckStatus::Pass;
@@ -321,6 +434,16 @@ pub fn run(ctx: &ConformanceCtx) -> CheckOutcome {
     for repo in &public_repos {
         match evaluate_repo(&ctx.root, repo, allowlist) {
             Ok(findings) => {
+                // Self-fixture exemption is applied here, not inside `evaluate_repo`/
+                // `check_literals_in_file`: it is FILE-scoped (rule 2 only, never rule
+                // 1), so it filters the already-produced findings rather than changing
+                // what literals get flagged in the first place.
+                let findings: Vec<Finding> = findings
+                    .into_iter()
+                    .filter(|f| {
+                        !(f.rule == "rule2" && is_self_fixture(&f.repo, &f.file, self_fixtures))
+                    })
+                    .collect();
                 if !findings.is_empty() {
                     status = CheckStatus::Drift;
                     all_findings.extend(findings);
@@ -453,6 +576,24 @@ mod tests {
     }
 
     #[test]
+    fn tracked_dir_prefixes_includes_every_ancestor_dir_only() {
+        let tracked: HashSet<String> = ["crates/engine-contract/Cargo.toml".to_string()]
+            .into_iter()
+            .collect();
+        let dirs = tracked_dir_prefixes(&tracked);
+        assert!(dirs.contains("crates"));
+        assert!(dirs.contains("crates/engine-contract"));
+        // The file itself is not a directory prefix, and nothing untracked appears.
+        assert!(!dirs.contains("crates/engine-contract/Cargo.toml"));
+        assert_eq!(dirs.len(), 2);
+    }
+
+    #[test]
+    fn tracked_dir_prefixes_of_empty_set_is_empty() {
+        assert!(tracked_dir_prefixes(&HashSet::new()).is_empty());
+    }
+
+    #[test]
     fn is_allowlisted_prefix_match() {
         let list = vec!["192.0.2.".to_string()];
         assert!(is_allowlisted("192.0.2.55", &list));
@@ -464,6 +605,65 @@ mod tests {
         let list = vec!["127.0.0.1".to_string()];
         assert!(is_allowlisted("127.0.0.1", &list));
         assert!(!is_allowlisted("127.0.0.2", &list));
+    }
+
+    #[test]
+    fn is_self_fixture_matches_repo_and_path_exactly() {
+        let list = vec!["mev:src/brain/conformance/surface.rs".to_string()];
+        assert!(is_self_fixture(
+            "mev",
+            "src/brain/conformance/surface.rs",
+            &list
+        ));
+        // Different repo, same path — not exempt.
+        assert!(!is_self_fixture(
+            "bastion",
+            "src/brain/conformance/surface.rs",
+            &list
+        ));
+        // Same repo, different path — not exempt.
+        assert!(!is_self_fixture("mev", "docs/unrelated.md", &list));
+    }
+
+    #[test]
+    fn is_self_fixture_empty_list_exempts_nothing() {
+        assert!(!is_self_fixture(
+            "mev",
+            "src/brain/conformance/surface.rs",
+            &[]
+        ));
+    }
+
+    #[test]
+    fn is_version_string_true_for_live_false_positive_evidence() {
+        // Live corpus, 2026-09-03: package/tool version pins and a zero-padded image
+        // tag must be recognized as version-shaped, not real IP literals.
+        assert!(is_version_string("1.27.2.3"));
+        assert!(is_version_string("15.8.1.060"));
+    }
+
+    #[test]
+    fn is_version_string_false_for_real_private_infra_addresses() {
+        // Every genuine address the existing fixtures pin must still be recognized as
+        // a real address (i.e. NOT a version string) so rule 2 keeps firing on it.
+        for addr in [
+            "100.64.1.2",
+            "100.64.5.9",
+            "192.168.1.5",
+            "10.0.0.1",
+            "127.0.0.2",
+            "100.1.2.3",
+        ] {
+            assert!(
+                !is_version_string(addr),
+                "{addr} must not be classified as a version string"
+            );
+        }
+    }
+
+    #[test]
+    fn is_version_string_never_suppresses_a_tsnet_hostname() {
+        assert!(!is_version_string("mini.tailnet-abc.ts.net"));
     }
 
     #[test]
@@ -547,8 +747,13 @@ mod tests {
             files: Vec::new(),
         };
         let outcome = run(&ctx);
-        assert_eq!(outcome.status, CheckStatus::Pass);
+        // A private repo is never walked, so with no public repos at all this hits the
+        // same zero-public-repos NotEvaluable path as `no_public_repos_is_pass` — a
+        // fixture set of entries that are ALL non-public is indistinguishable from an
+        // empty repos list from this check's point of view.
+        assert_eq!(outcome.status, CheckStatus::NotEvaluable);
         assert!(outcome.findings.is_empty());
+        assert!(outcome.reason.is_some());
     }
 
     #[test]
@@ -618,14 +823,17 @@ mod tests {
     }
 
     #[test]
-    fn no_public_repos_is_pass() {
+    fn no_public_repos_is_not_evaluable() {
+        // No `[[repos]]` entries at all — a run that scans nothing must never report a
+        // silent Pass; it must say why, via NotEvaluable.
         let ctx = ConformanceCtx {
             root: PathBuf::from("."),
             config: crate::brain::config::BrainConfig::default(),
             files: Vec::new(),
         };
         let outcome = run(&ctx);
-        assert_eq!(outcome.status, CheckStatus::Pass);
+        assert_eq!(outcome.status, CheckStatus::NotEvaluable);
+        assert!(outcome.reason.is_some());
     }
 
     /// Positive control for rule 2 (MV.ticket.surface-leak-check task 4, acceptance
