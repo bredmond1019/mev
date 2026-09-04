@@ -465,6 +465,101 @@ print('FLIPPED:' + bid)
 }
 // <</shared:renderStateFlipScript>>
 
+// <<shared:renderStatusWriteScript>>
+// The D64-style validate-then-commit mutation for planning/status.md's authored body content --
+// a direct sibling of renderStateFlipScript above, for the analogous corpus write
+// (BT.ticket.bookkeep-writes-invalid-status-frontmatter). Captures the pre-write bytes, mutates
+// in memory, runs `mev validate-brain --sync` (one flag, never combined with another) BEFORE and
+// AFTER the write, and rolls back byte-exactly on any NET-NEW diagnostic -- the same delta-
+// attribution rule renderStateFlipScript and hooks/pre-push stage 1 already implement under D64.
+// Two write defects this script structurally cannot reintroduce: it NEVER touches any line at or
+// before the closing `---` fence (the YAML frontmatter block, including `timestamp` -- derived by
+// `mev emit-state --write` later in this same stage, never hand-written here), and its own new
+// body line is always inserted strictly AFTER that closing fence, never the opening one (the
+// EN.ticket.term-core-real-tmux-option-reads break). Shared for the same reason as
+// renderStateFlipScript -- executable Python performing a validated write both engines need
+// identically. `indent` exists only because the two prompts nest it at different depths.
+function renderStatusWriteScript({ runRoot, indent }) {
+  return `${indent}cd ${runRoot} && python3 -c "
+import subprocess, sys, shutil
+
+path = 'planning/status.md'
+recent_work_line = sys.argv[1]
+last_updated_date = sys.argv[2]
+
+with open(path, 'rb') as fh:
+    pre_bytes = fh.read()
+
+text = pre_bytes.decode('utf-8')
+lines = text.splitlines()
+
+fence_idx = [i for i, l in enumerate(lines) if l.strip() == '---']
+# A frontmatter block exists only when the OPENING fence is line 1 (write-okf-markdown). Without
+# anchoring on that, a body horizontal-rule pair reads as frontmatter and every guard below is
+# computed from the wrong offset -- skipping real body lines and inserting after the wrong fence.
+closing_fence = fence_idx[1] if (len(fence_idx) >= 2 and fence_idx[0] == 0) else -1
+
+# Never touch the YAML frontmatter block (every line at or before the closing fence) -- 'timestamp'
+# in there is derived by mev emit-state, not this stage's to write.
+for i in range(closing_fence + 1, len(lines)):
+    if lines[i].startswith('**Last updated:**'):
+        lines[i] = '**Last updated:** ' + last_updated_date
+        break
+
+# recent_work_line already carries the CALLER's own append-vs-replace decision baked in (the
+# caller passes the exact line text whether it is a brand-new line or a replacement for an
+# existing one it identified by reading the file first) -- this script only decides WHERE a
+# genuinely new line lands, never whether to dedupe one naming this spec.
+insert_at = None
+for i in range(closing_fence + 1, len(lines)):
+    if lines[i].strip().startswith('## Current focus'):
+        insert_at = i + 1
+        break
+if insert_at is None:
+    insert_at = closing_fence + 1 if closing_fence != -1 else len(lines)
+
+lines.insert(insert_at, recent_work_line)
+
+new_text = chr(10).join(lines)
+if text.endswith(chr(10)):
+    new_text += chr(10)
+
+mev_available = shutil.which('mev') is not None
+
+def diagnostics():
+    r = subprocess.run(['mev', 'validate-brain', '--sync'], capture_output=True, text=True)
+    out = (r.stdout + r.stderr).splitlines()
+    return set(l for l in out if l.strip().startswith('[E_') or l.strip().startswith('[W_'))
+
+if not mev_available:
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write(new_text)
+    print('STATUS_WRITE:unvalidated')
+    print('UNVALIDATED: mev not on PATH -- schema check skipped, write landed with only line-level parsing')
+    sys.exit(0)
+
+baseline = diagnostics()
+
+with open(path, 'w', encoding='utf-8') as fh:
+    fh.write(new_text)
+
+after = diagnostics()
+net_new = after - baseline
+
+if net_new:
+    with open(path, 'wb') as fh:
+        fh.write(pre_bytes)
+    print('STATUS_REJECTED:written')
+    for line in sorted(net_new):
+        print('NET_NEW: ' + line)
+    sys.exit(1)
+
+outcome = 'written'
+print('STATUS_WRITE:' + outcome)
+" "<RECENT_WORK_LINE>" "<LAST_UPDATED_DATE>"`
+}
+// <</shared:renderStatusWriteScript>>
+
 // <<shared:renderTriagePrompt>>
 // The failure-triage prompt: classify a failure RETRYABLE vs MAJOR so the pipeline either makes a
 // bounded fix or bails to a human now. Shared because the two engines' copies were IDENTICAL apart
@@ -959,6 +1054,8 @@ const WRAPUP_SCHEMA = {
   required: ['statusUpdated', 'devlogUpdated'],
   properties: {
     statusUpdated: { type: 'boolean' },
+    statusWriteValidated: { type: 'boolean', description: 'true if mev validate-brain --sync gated the planning/status.md mutation (before/after diff, net-new only); false when mev was not on PATH and the write landed with only line-level parsing (a degrade, not a pass)' },
+    statusWriteRejected: { type: 'boolean', description: 'true if the planning/status.md mutation introduced net-new corpus errors and was rolled back byte-exact; status.md on disk is unchanged from before this step ran' },
     devlogUpdated: { type: 'boolean' },
     nextFocus:     { type: 'string' },
     amendments:    { type: 'array', items: { type: 'string' }, description: 'D18 dated amendment-log lines appended to the spec (empty if none)' },
@@ -3074,22 +3171,62 @@ Target:
    cd ${worktreePath} && head -40 log.md
    cd ${worktreePath} && ${GIT} log --oneline -20
 
-2. Update planning/status.md (Edit tool, surgical). "Current focus" is APPEND-ONLY narrative — never
-   delete or rewrite any existing line under it; a prior block's narrative must survive this edit
-   VERBATIM. The one exception: if an existing line already refers to THIS spec ("${blockId}") by name
-   (e.g. from an earlier partial run), you may replace only that one line — never the whole section —
-   with the update below.
+2. Before editing planning/status.md, load the \`write-okf-markdown\` skill — this step edits an
+   EXISTING file's YAML frontmatter, and the skill carries the frontmatter-must-start-at-line-1 rule
+   and the insert-point trap (a row inserted after the OPENING \`---\` instead of the CLOSING one
+   destroys the block, per E_SYNC_WATERMARK_MALFORMED). HQ standing rule 6 and base-template standing
+   rule 11 both require this before writing or editing any \`.md\`; this stage is one of the fleet's
+   two highest-volume \`.md\` writers.
+   "Current focus" is APPEND-ONLY narrative — never delete or rewrite any existing line under it; a
+   prior block's narrative must survive this edit VERBATIM. The one exception: if an existing line
+   already refers to THIS spec ("${blockId}") by name (e.g. from an earlier partial run), delete
+   ONLY that one line now (Edit tool) — never the whole section — so the scripted write below lands
+   its replacement as a clean single line rather than a duplicate.
+   Compose the ONE new Current-focus line as plain text (do not write it into the file yet):
    ${bailed
-     ? `- This run BAILED. Keep the spec status "In progress" (or "Blocked" if appropriate). Add ONE
-       new line under "Current focus" (or replace this spec's own prior line, per the exception
-       above): "${blockId} — BLOCKED: ${bailReason}" — do not touch any other existing line.`
-     : `- ${selectedTasks ? `Tasks ${taskList.join(', ')} of "${blockId}" are done.` : `Full spec "${blockId}" is done.`} ${selectedTasks ? 'If tasks remain, keep status "In progress" and add a new line under Current focus pointing at the next task; if this was the last, flip to "Done".' : 'Flip its Status to "Done".'} Add ONE new line under "Current focus" recording this outcome (or replace this spec's own prior line, per the exception above) — do not touch any other existing line.`}
-   - Update "Last updated" — run: date +%Y-%m-%d
+     ? `- This run BAILED. The spec status stays "In progress" (or "Blocked" if appropriate). The line:
+       "${blockId} — BLOCKED: ${bailReason}".`
+     : `- ${selectedTasks ? `Tasks ${taskList.join(', ')} of "${blockId}" are done.` : `Full spec "${blockId}" is done.`} ${selectedTasks ? 'If tasks remain, the spec status stays "In progress" and the line should point at the next task; if this was the last, the spec is done.' : 'The spec is done.'} The line records this outcome.`}
+   Then run \`date +%Y-%m-%d\` to get today's date.
+
+   VALIDATE-THEN-COMMIT CONTRACT — the write must not stand unless \`mev validate-brain --sync\`
+   accepts it. Run ONE scripted mutation (never the Edit tool for this part) that captures the
+   pre-write bytes, mutates in memory, runs \`mev validate-brain --sync\` (one flag, never combined
+   with another flag) BEFORE and AFTER the write, and rejects — byte-exact rollback — any write that
+   introduces diagnostic lines NOT present in the BEFORE baseline. A pre-existing corpus error (e.g.
+   a sibling lane's unrelated breakage) must never block this write — NET-NEW only, the same delta-
+   attribution rule step 2b below and the push gate use under D64. Substitute the Current-focus line
+   for <RECENT_WORK_LINE> and today's date for <LAST_UPDATED_DATE> (keep both as the script's sole
+   argv, each quoted):
+${renderStatusWriteScript({ runRoot: worktreePath, indent: '   ' })}
+   This script structurally cannot reintroduce either of the two frontmatter write defects: it never
+   touches any line at or before the closing \`---\` fence (so \`timestamp\`, an RFC3339 value derived
+   by \`mev emit-state --write\` later in this same stage — step 2c below — is never hand-written
+   here, which is what keeps it from going out of step with the HQ cache doc's \`synced_from\`,
+   E_SYNC_DRIFT), and its own new body line always lands strictly AFTER that closing fence, never the
+   opening one (the historical EN.ticket.term-core-real-tmux-option-reads break). Read the script's
+   own stdout AND exit code — do not infer success yourself:
+     - "STATUS_WRITE:written" (exit 0) → mev validated the write and found no net-new diagnostics.
+       Set statusUpdated=true and statusWriteValidated=true. If this outcome flips the spec to
+       "Done" (per the branch above), also flip the Progress Table's Status cell for "${blockId}" now
+       (Edit tool — a plain body table-cell edit, safe once the risky part above has already landed
+       and validated).
+     - "STATUS_WRITE:unvalidated" (exit 0) → mev is not installed; the write landed unchecked
+       (line-level parsing only, matching how the harness degrades other absent tooling). Set
+       statusUpdated=true, statusWriteValidated=false, and copy the UNVALIDATED line verbatim into
+       notes — this is a DEGRADE, not a silent pass. Still flip the Progress Table cell as above when
+       applicable.
+     - "STATUS_REJECTED:written" (exit 1) → the write introduced net-new corpus errors and was rolled
+       back; planning/status.md on disk is now byte-identical to its content before this step ran. Set
+       statusUpdated=false, statusWriteRejected=true, and copy every "NET_NEW:" line verbatim into
+       notes — this MUST be reported, never silently swallowed. Do NOT touch the Progress Table cell
+       this run; the block stays open (see step 2b) until a clean write lands on a later run.
 
 2b. Flip the block's AUTHORED status in planning/state.json (skip this entire step silently if the
-    repo has no planning/state.json). state.json is the authoritative block graph — leaving it stale
-    poisons every derived surface, because \`mev emit-state\` reads this field and NEVER infers
-    completion from status.md.
+    repo has no planning/state.json, OR if step 2's write was STATUS_REJECTED — never flip state.json
+    to closed while status.md itself failed to record the close). state.json is the authoritative
+    block graph — leaving it stale poisons every derived surface, because \`mev emit-state\` reads
+    this field and NEVER infers completion from status.md.
     ${bailed
       ? `- This run BAILED — do NOT flip anything. Set blockStatusFlipped to "".`
       : selectedTasks
@@ -3144,7 +3281,7 @@ ${renderStateFlipScript({ runRoot: worktreePath, indent: '        ' })}
     rollups, /attention boards, wave tables) need resyncing every time, not only on a full close.
     ${useWorktree
       ? `- Do NOT run \`mev emit-state --write\` here: this is a linked git worktree, where emit-state refuses to run. The authored edits are committed on the branch below (step 5); the derived surfaces regenerate on the base branch when this branch merges (/clean-worktree or /close-out --merge-branch run emit-state after integration). Set emitStateRan=false.`
-      : `- This run is IN PLACE on branch ${branchName} (in the main repo tree, not an isolated worktree) — emit-state is safe to run right here on the branch, the same way \`git commit\` already lands right here: cd ${worktreePath} && mev emit-state --write . If \`mev\` or brain.toml is absent (standalone repo), skip it silently and set emitStateRan=false; else emitStateRan=true. Do NOT hand-reimplement focus/rollup derivation. (This is separate from the --auto-merge path's own emit-state call in step 5 below, which re-derives again on ${prBase} after the PR merges — that call is unaffected and still runs unconditionally there.)`}
+      : `- This run is IN PLACE on branch ${branchName} (in the main repo tree, not an isolated worktree) — emit-state is safe to run right here on the branch, the same way \`git commit\` already lands right here: cd ${worktreePath} && mev emit-state --write${renderAgentFlag()} . If \`mev\` or brain.toml is absent (standalone repo), skip it silently and set emitStateRan=false; else emitStateRan=true. Do NOT hand-reimplement focus/rollup derivation. (This is separate from the --auto-merge path's own emit-state call in step 5 below, which re-derives again on ${prBase} after the PR merges — that call is unaffected and still runs unconditionally there.)`}
 
 2d. OPTIONAL post-emit commit hook. ${postEmitCommitCommand
       ? `planning/harness.json declares postEmitCommitCommand — run it ONLY when step 2c set emitStateRan=true
@@ -3210,13 +3347,17 @@ EOF
 )"
    cd ${worktreePath} && ${GIT} log --oneline -1`}
 ${renderWrapupStateWriteRecipe(wrapupStatePayload)}
-Return via StructuredOutput: statusUpdated, devlogUpdated, nextFocus, amendments[], commitHash,
+Return via StructuredOutput: statusUpdated, statusWriteValidated, statusWriteRejected (step 2),
+devlogUpdated, nextFocus, amendments[], commitHash,
 blockStatusFlipped (the state.json block id closed in step 2b, or "" — including when the write was
 rejected by validation), stateWriteValidated, stateWriteRejected (step 2b), emitStateRan (step 2c),
 postEmitHookRan, postEmitHookFailed (step 2d),
 stateWritten (true only if you performed the additional state write above), notes.
 `, withModel({ label: 'wrap-up', schema: WRAPUP_SCHEMA, phase: 'Wrap-up' }, MODEL.wrapup))
 
+if (wrapupResult?.statusWriteRejected) {
+  log(`status.md: write REJECTED — net-new corpus error(s) from mev validate-brain --sync; rolled back byte-exact. ${wrapupResult?.notes || ''}`)
+}
 if (wrapupResult?.stateWriteRejected) {
   log(`state.json: write REJECTED — net-new schema error(s) from mev validate-brain --state; rolled back byte-exact, block NOT closed this run. ${wrapupResult?.notes || ''}`)
 } else if (wrapupResult?.blockStatusFlipped) {
@@ -3429,7 +3570,7 @@ ${useWorktree ? `
    ${GIT} branch --list ${branchName}
 `}
 5. Regenerate derived surfaces on ${prBase} (you are now on ${prBase} in the main tree — emit-state is safe here):
-   mev emit-state --write
+   mev emit-state --write${renderAgentFlag()}
    This re-derives the one-way surfaces (focus, rollups, cache synced_from watermarks, tier tables,
    the HQ Operating Board, master-plan wave tables) from the authored state.json block-status flip the
    merge just landed. If \`mev\` or brain.toml is absent (a standalone repo), skip it silently and set
@@ -3489,3 +3630,80 @@ return {
   worklogFile,
   tokens: tokensBlock,
 }
+
+// <<shared:renderAgentFlag>>
+// Renders the `--agent <id>` argument for a `mev emit-state --write` invocation so a lane that
+// holds its own exclusive lease is exempt from mev's `refuse_if_quiesced` (BT.ticket.engines-
+// must-pass-agent-to-mev). Returns '' (empty string) when no identity resolves — an
+// unconditional flag would change every non-lane, standalone-repo run of these engines across
+// 18+ downstream repos with no brain.toml at all. Every failure path (missing brain.toml, no
+// lock dir, no lease file, unreadable/malformed lease JSON) falls through to '' rather than
+// throwing — this function must never be the reason an emit-state call does not run.
+//
+// Resolution order:
+//   1. FLEET_LANE_AGENT env var, if set and non-empty.
+//   2. Else the `agent` field of <lock_dir>/leases/lease-<repo>.json, where <repo> is the
+//      brain.toml [[repos]] slug whose repo_path resolves to (or is an ancestor of) cwd, and
+//      <lock_dir> uses the SAME precedence scripts/check_lane_agents.py's find_lock_dir()
+//      already uses: FLEET_LOCK_DIR env var, else a brain.toml found by walking up from cwd,
+//      joined with .fleet-locks. No new precedence is introduced.
+//   3. Else no identity resolves and '' is returned.
+function renderAgentFlag() {
+  try {
+    const envAgent = process.env.FLEET_LANE_AGENT
+    if (envAgent && envAgent.trim()) return ` --agent ${envAgent.trim()}`
+
+    const fs = require('fs')
+    const path = require('path')
+
+    function findBrainRoot(start) {
+      let dir = start
+      while (true) {
+        if (fs.existsSync(path.join(dir, 'brain.toml'))) return dir
+        const parent = path.dirname(dir)
+        if (parent === dir) return null
+        dir = parent
+      }
+    }
+
+    let lockDir = null
+    let brainRoot = null
+    if (process.env.FLEET_LOCK_DIR && process.env.FLEET_LOCK_DIR.trim()) {
+      lockDir = process.env.FLEET_LOCK_DIR.trim()
+      brainRoot = findBrainRoot(process.cwd())
+    } else {
+      brainRoot = findBrainRoot(process.cwd())
+      if (brainRoot) lockDir = path.join(brainRoot, '.fleet-locks')
+    }
+    if (!lockDir || !brainRoot) return ''
+
+    // Minimal [[repos]] table reader: brain.toml's array-of-tables entries are flat
+    // `key = "value"` lines, never nested or multi-line — a regex split is sufficient and
+    // avoids pulling in a TOML dependency this inlined, dependency-free block cannot have.
+    const tomlText = fs.readFileSync(path.join(brainRoot, 'brain.toml'), 'utf8')
+    const repoBlocks = tomlText.split(/^\[\[repos\]\]\s*$/m).slice(1)
+    const here = path.resolve(process.cwd())
+    let bestSlug = null
+    let bestDepth = -1
+    for (const block of repoBlocks) {
+      const slugMatch = block.match(/^\s*slug\s*=\s*"([^"]*)"/m)
+      const pathMatch = block.match(/^\s*repo_path\s*=\s*"([^"]*)"/m)
+      if (!slugMatch || !pathMatch) continue
+      const repoAbs = path.resolve(brainRoot, pathMatch[1])
+      if (here !== repoAbs && !here.startsWith(repoAbs + path.sep)) continue
+      const depth = repoAbs.split(path.sep).length
+      if (depth > bestDepth) { bestDepth = depth; bestSlug = slugMatch[1] }
+    }
+    if (!bestSlug) return ''
+
+    const leasePath = path.join(lockDir, 'leases', `lease-${bestSlug}.json`)
+    if (!fs.existsSync(leasePath)) return ''
+    const lease = JSON.parse(fs.readFileSync(leasePath, 'utf8'))
+    const agent = lease && lease.agent
+    if (agent && String(agent).trim()) return ` --agent ${String(agent).trim()}`
+    return ''
+  } catch (e) {
+    return ''
+  }
+}
+// <</shared:renderAgentFlag>>

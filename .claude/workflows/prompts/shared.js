@@ -436,6 +436,101 @@ print('FLIPPED:' + bid)
 }
 // <</shared:renderStateFlipScript>>
 
+// <<shared:renderStatusWriteScript>>
+// The D64-style validate-then-commit mutation for planning/status.md's authored body content --
+// a direct sibling of renderStateFlipScript above, for the analogous corpus write
+// (BT.ticket.bookkeep-writes-invalid-status-frontmatter). Captures the pre-write bytes, mutates
+// in memory, runs `mev validate-brain --sync` (one flag, never combined with another) BEFORE and
+// AFTER the write, and rolls back byte-exactly on any NET-NEW diagnostic -- the same delta-
+// attribution rule renderStateFlipScript and hooks/pre-push stage 1 already implement under D64.
+// Two write defects this script structurally cannot reintroduce: it NEVER touches any line at or
+// before the closing `---` fence (the YAML frontmatter block, including `timestamp` -- derived by
+// `mev emit-state --write` later in this same stage, never hand-written here), and its own new
+// body line is always inserted strictly AFTER that closing fence, never the opening one (the
+// EN.ticket.term-core-real-tmux-option-reads break). Shared for the same reason as
+// renderStateFlipScript -- executable Python performing a validated write both engines need
+// identically. `indent` exists only because the two prompts nest it at different depths.
+function renderStatusWriteScript({ runRoot, indent }) {
+  return `${indent}cd ${runRoot} && python3 -c "
+import subprocess, sys, shutil
+
+path = 'planning/status.md'
+recent_work_line = sys.argv[1]
+last_updated_date = sys.argv[2]
+
+with open(path, 'rb') as fh:
+    pre_bytes = fh.read()
+
+text = pre_bytes.decode('utf-8')
+lines = text.splitlines()
+
+fence_idx = [i for i, l in enumerate(lines) if l.strip() == '---']
+# A frontmatter block exists only when the OPENING fence is line 1 (write-okf-markdown). Without
+# anchoring on that, a body horizontal-rule pair reads as frontmatter and every guard below is
+# computed from the wrong offset -- skipping real body lines and inserting after the wrong fence.
+closing_fence = fence_idx[1] if (len(fence_idx) >= 2 and fence_idx[0] == 0) else -1
+
+# Never touch the YAML frontmatter block (every line at or before the closing fence) -- 'timestamp'
+# in there is derived by mev emit-state, not this stage's to write.
+for i in range(closing_fence + 1, len(lines)):
+    if lines[i].startswith('**Last updated:**'):
+        lines[i] = '**Last updated:** ' + last_updated_date
+        break
+
+# recent_work_line already carries the CALLER's own append-vs-replace decision baked in (the
+# caller passes the exact line text whether it is a brand-new line or a replacement for an
+# existing one it identified by reading the file first) -- this script only decides WHERE a
+# genuinely new line lands, never whether to dedupe one naming this spec.
+insert_at = None
+for i in range(closing_fence + 1, len(lines)):
+    if lines[i].strip().startswith('## Current focus'):
+        insert_at = i + 1
+        break
+if insert_at is None:
+    insert_at = closing_fence + 1 if closing_fence != -1 else len(lines)
+
+lines.insert(insert_at, recent_work_line)
+
+new_text = chr(10).join(lines)
+if text.endswith(chr(10)):
+    new_text += chr(10)
+
+mev_available = shutil.which('mev') is not None
+
+def diagnostics():
+    r = subprocess.run(['mev', 'validate-brain', '--sync'], capture_output=True, text=True)
+    out = (r.stdout + r.stderr).splitlines()
+    return set(l for l in out if l.strip().startswith('[E_') or l.strip().startswith('[W_'))
+
+if not mev_available:
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write(new_text)
+    print('STATUS_WRITE:unvalidated')
+    print('UNVALIDATED: mev not on PATH -- schema check skipped, write landed with only line-level parsing')
+    sys.exit(0)
+
+baseline = diagnostics()
+
+with open(path, 'w', encoding='utf-8') as fh:
+    fh.write(new_text)
+
+after = diagnostics()
+net_new = after - baseline
+
+if net_new:
+    with open(path, 'wb') as fh:
+        fh.write(pre_bytes)
+    print('STATUS_REJECTED:written')
+    for line in sorted(net_new):
+        print('NET_NEW: ' + line)
+    sys.exit(1)
+
+outcome = 'written'
+print('STATUS_WRITE:' + outcome)
+" "<RECENT_WORK_LINE>" "<LAST_UPDATED_DATE>"`
+}
+// <</shared:renderStatusWriteScript>>
+
 // <<shared:renderTriagePrompt>>
 // The failure-triage prompt: classify a failure RETRYABLE vs MAJOR so the pipeline either makes a
 // bounded fix or bails to a human now. Shared because the two engines' copies were IDENTICAL apart
@@ -658,4 +753,81 @@ Return via StructuredOutput:${extraReturnFields}
   notes: one-line status${vault.vaulted ? ' — mention explicitly whether a vault commit (step 7b) happened and, if so, its outcome' : ''}`
 }
 // <</shared:renderImplementPrompt>>
+
+// <<shared:renderAgentFlag>>
+// Renders the `--agent <id>` argument for a `mev emit-state --write` invocation so a lane that
+// holds its own exclusive lease is exempt from mev's `refuse_if_quiesced` (BT.ticket.engines-
+// must-pass-agent-to-mev). Returns '' (empty string) when no identity resolves — an
+// unconditional flag would change every non-lane, standalone-repo run of these engines across
+// 18+ downstream repos with no brain.toml at all. Every failure path (missing brain.toml, no
+// lock dir, no lease file, unreadable/malformed lease JSON) falls through to '' rather than
+// throwing — this function must never be the reason an emit-state call does not run.
+//
+// Resolution order:
+//   1. FLEET_LANE_AGENT env var, if set and non-empty.
+//   2. Else the `agent` field of <lock_dir>/leases/lease-<repo>.json, where <repo> is the
+//      brain.toml [[repos]] slug whose repo_path resolves to (or is an ancestor of) cwd, and
+//      <lock_dir> uses the SAME precedence scripts/check_lane_agents.py's find_lock_dir()
+//      already uses: FLEET_LOCK_DIR env var, else a brain.toml found by walking up from cwd,
+//      joined with .fleet-locks. No new precedence is introduced.
+//   3. Else no identity resolves and '' is returned.
+function renderAgentFlag() {
+  try {
+    const envAgent = process.env.FLEET_LANE_AGENT
+    if (envAgent && envAgent.trim()) return ` --agent ${envAgent.trim()}`
+
+    const fs = require('fs')
+    const path = require('path')
+
+    function findBrainRoot(start) {
+      let dir = start
+      while (true) {
+        if (fs.existsSync(path.join(dir, 'brain.toml'))) return dir
+        const parent = path.dirname(dir)
+        if (parent === dir) return null
+        dir = parent
+      }
+    }
+
+    let lockDir = null
+    let brainRoot = null
+    if (process.env.FLEET_LOCK_DIR && process.env.FLEET_LOCK_DIR.trim()) {
+      lockDir = process.env.FLEET_LOCK_DIR.trim()
+      brainRoot = findBrainRoot(process.cwd())
+    } else {
+      brainRoot = findBrainRoot(process.cwd())
+      if (brainRoot) lockDir = path.join(brainRoot, '.fleet-locks')
+    }
+    if (!lockDir || !brainRoot) return ''
+
+    // Minimal [[repos]] table reader: brain.toml's array-of-tables entries are flat
+    // `key = "value"` lines, never nested or multi-line — a regex split is sufficient and
+    // avoids pulling in a TOML dependency this inlined, dependency-free block cannot have.
+    const tomlText = fs.readFileSync(path.join(brainRoot, 'brain.toml'), 'utf8')
+    const repoBlocks = tomlText.split(/^\[\[repos\]\]\s*$/m).slice(1)
+    const here = path.resolve(process.cwd())
+    let bestSlug = null
+    let bestDepth = -1
+    for (const block of repoBlocks) {
+      const slugMatch = block.match(/^\s*slug\s*=\s*"([^"]*)"/m)
+      const pathMatch = block.match(/^\s*repo_path\s*=\s*"([^"]*)"/m)
+      if (!slugMatch || !pathMatch) continue
+      const repoAbs = path.resolve(brainRoot, pathMatch[1])
+      if (here !== repoAbs && !here.startsWith(repoAbs + path.sep)) continue
+      const depth = repoAbs.split(path.sep).length
+      if (depth > bestDepth) { bestDepth = depth; bestSlug = slugMatch[1] }
+    }
+    if (!bestSlug) return ''
+
+    const leasePath = path.join(lockDir, 'leases', `lease-${bestSlug}.json`)
+    if (!fs.existsSync(leasePath)) return ''
+    const lease = JSON.parse(fs.readFileSync(leasePath, 'utf8'))
+    const agent = lease && lease.agent
+    if (agent && String(agent).trim()) return ` --agent ${String(agent).trim()}`
+    return ''
+  } catch (e) {
+    return ''
+  }
+}
+// <</shared:renderAgentFlag>>
 
