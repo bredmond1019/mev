@@ -20,5 +20,5 @@ line each and links into these pages. This file is just the directory listing.
 | [validate.md](validate.md) | `validate` · `validate-brain` · `validate-state` · `conformance` |
 | [state.md](state.md) | `emit-state` · `state-history` · `set-block-status` · `create-block` · `manifest` |
 | [epics.md](epics.md) | `defer-epic` · `resume-epic` · `complete-epic` · `sync-epics` · `close-operator-gate` · `approve` · `reject` · `normalize-op-slugs` |
-| [carryover.md](carryover.md) | `carryover` · `graph-findings` · `attention-queue` |
+| [carryover.md](carryover.md) | `carryover` · `backlog` · `graph-findings` · `attention-queue` |
 | [lanes.md](lanes.md) | `frontier` · `lanes` · `emit-block-graph` · `emit-graph` · `generate-graph` · `check-consumers` · `doc` |

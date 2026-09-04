@@ -1,12 +1,12 @@
 ---
 type: Reference
-title: mev CLI — carryover and attention commands
-description: The commands that sweep the fleet's open findings, detect new ones mechanically, and deliver the ones needing a human.
+title: mev CLI — carryover, backlog and attention commands
+description: The commands that sweep the fleet's open findings and queued ideas, detect new findings mechanically, and deliver the ones needing a human.
 doc_id: cli-carryover
 layer: [factory]
 project: mev
 status: active
-keywords: [carryover, attention, findings, triage, disposal]
+keywords: [carryover, backlog, attention, findings, triage, disposal]
 related: [cli-reference, carryover-contract, brain-toml-config]
 ---
 
@@ -22,8 +22,14 @@ a deferred follow-on, a drifted document, a transient environment caveat. It liv
 `planning/state.json` under `carryover[]`, and it carries a `clears_when` predicate saying what
 would make it stop being true.
 
-These commands answer three questions: **what is still open** (`carryover`), **what should be open
-but nobody filed** (`graph-findings`), and **what needs a human right now** (`attention-queue`).
+A **backlog entry** is the other half of the same problem: an idea that is queued rather than found.
+It lives in the same `planning/state.json`, under `backlog[]`, and since
+`okf-core:OK.ticket.backlog-lifecycle-predicates` it carries the same two kinds of predicate —
+`clears_when` (the idea is dead) and `ready_when` (it is worth doing now).
+
+These commands answer four questions: **what is still open** (`carryover`), **what is queued and
+what became of it** (`backlog`), **what should be open but nobody filed** (`graph-findings`), and
+**what needs a human right now** (`attention-queue`).
 
 | Command | Answers |
 |---|---|
@@ -49,6 +55,11 @@ mev carryover --grep lockfile
 # Entries whose predicate has resolved -> archive them (a MOVE, never a delete)
 mev carryover --dispose --dry-run
 mev carryover --dispose
+
+# The same sweep over queued IDEAS rather than findings. Read-only; it has no --dispose.
+mev backlog
+mev backlog --repo mev
+mev backlog --lane ready          # only the rows worth promoting
 ```
 
 **A `--repo`-filtered sweep is never the whole picture.** Entries scoped `cross_repo: true` or to a
@@ -777,6 +788,45 @@ derived fact into a permanent, hand-editable one — `tests/brain_carryover_enfo
 the fixture corpus after every derive to assert this never happens.
 
 ---
+
+### `backlog [--repo <slug>] [--lane <lane>] [--json] [--allow-exec] [path]`
+
+The read-only sweep `backlog[]` never had. It mirrors [`carryover`](#commands) deliberately — same
+flags, same four predicate kinds, same lane vocabulary — pointed at the second container, so there
+is one idiom to learn rather than two.
+
+**It cannot write anything.** There is no `--dispose` and no mutation mode anywhere in the verb,
+by construction. `mev carryover --dispose` destroyed 12 live entries on 2026-09-02 by mining
+free-prose predicates and evaluating them as if typed; this verb was specified without a disposal
+mode for that reason.
+
+Unlike `carryover`'s, `backlog[]`'s `clears_when` / `ready_when` are **typed fields on the node** —
+no prose extraction — evaluated with the same four kinds: `block_closed`, `file_exists`,
+`file_contains`, and `command_exits_zero`, which is **never executed** unless `--allow-exec` is
+passed.
+
+| Lane | Means |
+|---|---|
+| `CLEARED` | `clears_when` is satisfied — the idea is dead. **Read this as "predicate satisfied — verify before acting", not as a verdict.** |
+| `READY` | `ready_when` is satisfied — promote it. |
+| `WAITING` | `ready_when` is evaluable but not yet satisfied. |
+| `AGING` | Nothing evaluable, and the entry is older than `brain.toml`'s `[attention] backlog_days`. |
+| `NOT-EVALUABLE` | A prose predicate, a `command_exits_zero` without `--allow-exec`, or a predicate-free entry too young to age. |
+
+| Flag | Effect |
+|---|---|
+| `--repo <slug>` | Restrict the sweep to one repo's entries. |
+| `--lane <lane>` | Restrict the **printed rows** to one lane. The header totals still describe the whole sweep — a filtered view is not a smaller corpus. |
+| `--json` | Emit the `BacklogReport` as compact JSON. |
+| `--allow-exec` | Opt in to running `command_exits_zero` predicates. Without it they report `NOT-EVALUABLE` and are **provably not run**. |
+
+Exit codes: **0** whenever the sweep completes, however the entries land; **1** only if `brain.toml`
+is missing or unreadable, `--repo` names an unknown slug, or `--json` fails to serialize.
+
+**Every lane reading zero except `AGING` and `NOT-EVALUABLE` is the expected result today**, and is
+not a broken sweep. Nothing authors the two predicates yet — neither `/backlog-ticket` nor
+`/capture` sets them — so no entry can be `CLEARED`, `READY` or `WAITING`. A row in one of those
+lanes on an early run is a finding worth reading, not a success.
 
 ### `graph-findings [--json] [--write] [path]`
 
