@@ -219,6 +219,7 @@ fn legal_block_payload(id: &str, phase: i64) -> CreateBlockPayload {
         notes: None,
         forward_looking: false,
         epics: vec!["test-epic".to_string()],
+        origin: None,
     }
 }
 

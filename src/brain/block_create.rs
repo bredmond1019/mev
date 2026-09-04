@@ -2337,4 +2337,55 @@ mod planning_tests {
              (plan: {plan:?})"
         );
     }
+
+    /// Task 2, AC 1: a record written by the new code path (`build_block_record`
+    /// with a valid mechanism origin) must validate against `block.schema.json`
+    /// BY RUNNING THE VALIDATOR (`base-template/scripts/check_block_records.py`),
+    /// not by inspection. This shells out to the real script against a disposable
+    /// `<tmp>/blocks/<id>.json` produced by the production function under test —
+    /// no hand-written fixture.
+    ///
+    /// Skips (rather than failing) when `python3` isn't on `PATH`, so this stays
+    /// hermetic on a runner without Python; every dev/CI box in this fleet has it.
+    #[test]
+    fn record_with_origin_passes_check_block_records_py() {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let script = manifest_dir.join("scripts").join("check_block_records.py");
+        assert!(
+            script.is_file(),
+            "expected the validator at {}",
+            script.display()
+        );
+
+        let expected = json!({"type": "mechanism", "slug": "gates-that-cannot-fail"});
+        let payload = payload_with_origin(Some(expected));
+        let record = build_block_record(&payload, "2026-09-03", "2026-09-03");
+
+        let dir = tempfile::tempdir().unwrap();
+        let blocks_dir = dir.path().join("blocks");
+        std::fs::create_dir_all(&blocks_dir).unwrap();
+        let record_path = blocks_dir.join(format!("{}.json", payload.id));
+        std::fs::write(&record_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
+
+        let output = match std::process::Command::new("python3")
+            .arg(&script)
+            .arg("--planning")
+            .arg(dir.path())
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("skipping: python3 not runnable ({e})");
+                return;
+            }
+        };
+
+        assert!(
+            output.status.success(),
+            "check_block_records.py failed against a record written by build_block_record:\n\
+             record: {record_path:?}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
 }
