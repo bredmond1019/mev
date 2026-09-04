@@ -2274,6 +2274,7 @@ pub fn check_epics(config: &BrainConfig, files: &[(StateSource, StateFile)]) -> 
 pub fn check_state_graph(
     graph: &StateGraph,
     files: &[(StateSource, StateFile)],
+    discovered: &[StateSource],
 ) -> Vec<Diagnostic> {
     use std::collections::{HashMap, HashSet};
 
@@ -2281,8 +2282,21 @@ pub fn check_state_graph(
 
     // --- Build lookup structures ---
 
-    // All repo slugs that have a loaded state.json.
-    let known_repos: HashSet<&str> = files.iter().map(|(s, _)| s.repo_slug.as_str()).collect();
+    // Every repo slug DISCOVERED on disk, whether or not its state.json went on
+    // to parse successfully. An edge naming a repo outside this set targets a
+    // repo that genuinely does not exist anywhere — the only case that should
+    // still fire `E_STATE_UNKNOWN_REPO`.
+    let known_repos: HashSet<&str> = discovered.iter().map(|s| s.repo_slug.as_str()).collect();
+
+    // Repo slugs whose state.json was discovered AND successfully parsed
+    // (i.e. present in `files`). A repo in `known_repos` but NOT in
+    // `loaded_repos` was discovered but failed to parse — "known but
+    // unavailable". Its own findings were already suppressed at load time
+    // (it never entered `files`/`loaded`), and its absence from `node_set`
+    // below is equally unfounded, so an edge naming it must raise NEITHER
+    // `E_STATE_UNKNOWN_REPO` (it is not unknown) NOR a dangling-target error
+    // (its tracks[] were never read, not proven empty).
+    let loaded_repos: HashSet<&str> = files.iter().map(|(s, _)| s.repo_slug.as_str()).collect();
 
     // Count occurrences of each "repo:id" key so we can detect duplicates.
     let mut node_counts: HashMap<&str, usize> = HashMap::new();
@@ -2355,6 +2369,12 @@ pub fn check_state_graph(
                         "E_STATE_UNKNOWN_REPO",
                         format!("blocked_by references unknown repo '{to_repo}'"),
                     ));
+                } else if !loaded_repos.contains(to_repo) {
+                    // Discovered but failed to parse: known-but-unavailable.
+                    // Neither "unknown repo" nor "dangling target" is an
+                    // honest claim about a repo whose tracks[] were never
+                    // read — see the E_STATE_MALFORMED_JSON diagnostic on
+                    // that repo's own file instead.
                 } else if !node_set.contains(edge.to_ref.as_str()) {
                     diags.push(Diagnostic::error(
                         path,
@@ -2377,6 +2397,8 @@ pub fn check_state_graph(
                         "E_STATE_UNKNOWN_REPO",
                         format!("cross_repo 'from' references unknown repo '{from_repo}'"),
                     ));
+                } else if !loaded_repos.contains(from_repo) {
+                    // Known-but-unavailable — see the BlockedBy arm above.
                 } else if !node_set.contains(edge.from.as_str()) {
                     diags.push(Diagnostic::error(
                         path,
@@ -2398,6 +2420,8 @@ pub fn check_state_graph(
                         "E_STATE_UNKNOWN_REPO",
                         format!("cross_repo 'to' references unknown repo '{to_repo}'"),
                     ));
+                } else if !loaded_repos.contains(to_repo) {
+                    // Known-but-unavailable — see the BlockedBy arm above.
                 } else if !node_set.contains(edge.to_ref.as_str()) {
                     diags.push(Diagnostic::error(
                         path,
@@ -6097,6 +6121,14 @@ mod tests {
     // Task 3 — build_state_graph / check_state_graph tests
     // -----------------------------------------------------------------------
 
+    /// Existing (pre-MV.ticket.a-parse-error-is-buried-by-its-own-cascade) tests
+    /// only ever have LOADED files — none of them exercise a repo that was
+    /// discovered but failed to parse. For those call sites the discovered set
+    /// is simply the loaded set's own sources, so behavior is unchanged.
+    fn test_discovered(files: &[(StateSource, StateFile)]) -> Vec<StateSource> {
+        files.iter().map(|(s, _)| s.clone()).collect()
+    }
+
     /// Build a minimal (source, file) pair for use in graph tests.
     fn make_pair(
         dir: &std::path::Path,
@@ -6203,7 +6235,7 @@ mod tests {
         );
         assert_eq!(graph.edges.len(), 0, "expected 0 edges for clean fixture");
 
-        let diags = check_state_graph(&graph, &files);
+        let diags = check_state_graph(&graph, &files, &test_discovered(&files));
         let errors: Vec<_> = diags
             .iter()
             .filter(|d| d.severity == crate::Severity::Error)
@@ -6248,7 +6280,7 @@ mod tests {
 
         let files = vec![pair_a, pair_b];
         let graph = build_state_graph(&files);
-        let diags = check_state_graph(&graph, &files);
+        let diags = check_state_graph(&graph, &files, &test_discovered(&files));
 
         let dangling: Vec<_> = diags
             .iter()
@@ -6290,7 +6322,7 @@ mod tests {
         let files = vec![pair];
 
         let graph = build_state_graph(&files);
-        let diags = check_state_graph(&graph, &files);
+        let diags = check_state_graph(&graph, &files, &test_discovered(&files));
 
         let unknown: Vec<_> = diags
             .iter()
@@ -6330,7 +6362,7 @@ mod tests {
         // Two nodes with the same key
         assert_eq!(graph.nodes.len(), 2, "builder emits both duplicate nodes");
 
-        let diags = check_state_graph(&graph, &files);
+        let diags = check_state_graph(&graph, &files, &test_discovered(&files));
 
         let dup: Vec<_> = diags
             .iter()
@@ -6363,7 +6395,7 @@ mod tests {
         let files = vec![pair];
 
         let graph = build_state_graph(&files);
-        let diags = check_state_graph(&graph, &files);
+        let diags = check_state_graph(&graph, &files, &test_discovered(&files));
 
         let dangling_focus: Vec<_> = diags
             .iter()
@@ -6401,7 +6433,7 @@ mod tests {
         let files = vec![pair_a, pair_brain];
 
         let graph = build_state_graph(&files);
-        let diags = check_state_graph(&graph, &files);
+        let diags = check_state_graph(&graph, &files, &test_discovered(&files));
 
         let dangling_cross: Vec<_> = diags
             .iter()
@@ -6411,6 +6443,165 @@ mod tests {
             dangling_cross.len(),
             1,
             "expected exactly one E_STATE_DANGLING_CROSS_REPO for ghost 'to' endpoint, got: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // MV.ticket.a-parse-error-is-buried-by-its-own-cascade, task 1 — a repo that
+    // was DISCOVERED but failed to parse must be "known but unavailable", not
+    // "unknown". These fixtures reproduce the reported ~400:1 ratio at unit
+    // scale: repo A (loaded) carries a blocked_by AND a cross_repo edge naming
+    // repo B; B is present in `discovered` (it was found on disk) but absent
+    // from `files` (it never parsed). Observed RED before the fix (`known_repos`
+    // built from `files` alone, per the ticket's original code): every one of
+    // these edges fired `E_STATE_UNKNOWN_REPO`, and after simply excluding B
+    // from `known_repos`' role as a "no findings" repo it flipped to
+    // `E_STATE_DANGLING_BLOCKED_BY` / `E_STATE_DANGLING_CROSS_REPO` instead —
+    // the exact "trade one cascade for another" trap task 1's description
+    // warns about. Both must be silent for a known-but-unavailable target.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn check_state_graph_is_silent_for_a_discovered_but_unparsed_repo_blocked_by() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // alpha (loaded) depends on beta, which is DISCOVERED but not LOADED.
+        let alpha_json = r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-09-03",
+  "focus": { "now": [], "next": [], "blocked": [{ "id": "AL.1.A", "title": "Blocked" }] },
+  "tracks": [{
+    "title": "P1",
+    "blocks": [{
+      "id": "AL.1.A",
+      "title": "Blocked",
+      "depends_on": [
+        { "type": "block", "repo": "beta", "id": "BE.1.A" }
+      ]
+    }]
+  }]
+}"#;
+        let pair_a = make_pair(dir.path(), "alpha-state.json", "project", alpha_json);
+        let files = vec![pair_a];
+
+        // beta was discovered on disk (its state.json exists at this path) but
+        // failed to parse — it is intentionally absent from `files`/`loaded`.
+        let beta_source = StateSource {
+            repo_slug: "beta".to_string(),
+            abs_path: dir.path().join("beta-state.json"),
+            expected_kind: "project",
+        };
+        let mut discovered = test_discovered(&files);
+        discovered.push(beta_source);
+
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files, &discovered);
+
+        assert!(
+            diags.iter().all(|d| d.locator != "E_STATE_UNKNOWN_REPO"),
+            "a known-but-unavailable repo must never fire E_STATE_UNKNOWN_REPO: {diags:?}"
+        );
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.locator != "E_STATE_DANGLING_BLOCKED_BY"),
+            "a known-but-unavailable repo's absent tracks[] must not be reported as \
+             dangling either — that would just trade one cascade for another: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_state_graph_is_silent_for_a_discovered_but_unparsed_repo_cross_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // alpha (loaded) has block AL.1.A.
+        let pair_a = leaf_pair(dir.path(), "alpha", "AL.1.A");
+
+        // brain file's cross_repo edge points 'to' beta, which is discovered
+        // but not loaded.
+        let brain_json = r#"{
+  "repo": "core",
+  "kind": "brain",
+  "updated": "2026-09-03",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "repos": [{ "repo": "alpha", "now": [], "next": [], "blocked": [] }],
+  "cross_repo": [
+    {
+      "from": { "repo": "alpha", "id": "AL.1.A" },
+      "to": { "repo": "beta", "id": "BE.1.A" }
+    }
+  ]
+}"#;
+        let pair_brain = make_pair(dir.path(), "brain-state.json", "brain", brain_json);
+        let files = vec![pair_a, pair_brain];
+
+        let beta_source = StateSource {
+            repo_slug: "beta".to_string(),
+            abs_path: dir.path().join("beta-state.json"),
+            expected_kind: "project",
+        };
+        let mut discovered = test_discovered(&files);
+        discovered.push(beta_source);
+
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files, &discovered);
+
+        assert!(
+            diags.iter().all(|d| d.locator != "E_STATE_UNKNOWN_REPO"),
+            "known-but-unavailable 'to' endpoint must never fire E_STATE_UNKNOWN_REPO: {diags:?}"
+        );
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.locator != "E_STATE_DANGLING_CROSS_REPO"),
+            "known-but-unavailable 'to' endpoint must not be reported as dangling either: {diags:?}"
+        );
+    }
+
+    /// CONTROL that stops this becoming a fail-open: a repo genuinely absent
+    /// from BOTH `files` and `discovered` — i.e. it was never found on disk at
+    /// all, not merely unparsed — must still fire `E_STATE_UNKNOWN_REPO`. This
+    /// duplicates `check_detects_unknown_repo_in_blocked_by` above by design:
+    /// that test already proves the genuine case still fires (it passes both
+    /// `discovered` and `files` as the same set, so "ghost-repo" is absent from
+    /// both), and this test names that guarantee explicitly against the new
+    /// `discovered` parameter so a future edit cannot silently widen
+    /// `known_repos` to "anything anyone names" without a test noticing.
+    #[test]
+    fn check_state_graph_still_fires_unknown_repo_for_a_repo_absent_from_discovered_too() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let alpha_json = r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-09-03",
+  "focus": { "now": [], "next": [], "blocked": [{ "id": "AL.1.A", "title": "Blocked" }] },
+  "tracks": [{
+    "title": "P1",
+    "blocks": [{
+      "id": "AL.1.A",
+      "title": "Blocked",
+      "depends_on": [
+        { "type": "block", "repo": "ghost-repo", "id": "GH.1.X" }
+      ]
+    }]
+  }]
+}"#;
+        let pair_a = make_pair(dir.path(), "alpha-state.json", "project", alpha_json);
+        let files = vec![pair_a];
+        let discovered = test_discovered(&files); // ghost-repo is in neither set
+
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files, &discovered);
+
+        let unknown: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_UNKNOWN_REPO")
+            .collect();
+        assert_eq!(
+            unknown.len(),
+            1,
+            "a repo absent from BOTH files and discovered must still be reported unknown: {diags:?}"
         );
     }
 
@@ -6456,7 +6647,7 @@ mod tests {
 
         let files = vec![pair_a, pair_b];
         let graph = build_state_graph(&files);
-        let diags = check_state_graph(&graph, &files);
+        let diags = check_state_graph(&graph, &files, &test_discovered(&files));
 
         let dangling: Vec<_> = diags
             .iter()
@@ -6507,7 +6698,7 @@ mod tests {
             graph.edges
         );
 
-        let diags = check_state_graph(&graph, &files);
+        let diags = check_state_graph(&graph, &files, &test_discovered(&files));
 
         let noise: Vec<_> = diags
             .iter()
@@ -6530,7 +6721,7 @@ mod tests {
 
         let files = vec![pair_a, pair_b];
         let graph = build_state_graph(&files);
-        let diags = check_state_graph(&graph, &files);
+        let diags = check_state_graph(&graph, &files, &test_discovered(&files));
 
         let dangling: Vec<_> = diags
             .iter()
@@ -6567,7 +6758,7 @@ mod tests {
 
         let files = vec![pair_b];
         let graph = build_state_graph(&files);
-        let diags = check_state_graph(&graph, &files);
+        let diags = check_state_graph(&graph, &files, &test_discovered(&files));
 
         let dangling: Vec<_> = diags
             .iter()
@@ -6619,7 +6810,7 @@ mod tests {
         );
 
         // check_state_graph (task 5) must defer to it, not double-report.
-        let graph_diags = check_state_graph(&graph, &files);
+        let graph_diags = check_state_graph(&graph, &files, &test_discovered(&files));
         let graph_dangling: Vec<_> = graph_diags
             .iter()
             .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
@@ -11864,6 +12055,225 @@ fn carryover_clears_when_missing_required_member_fails_deserialization_not_check
         result.is_err(),
         "a typed predicate missing a required member should fail to deserialize the whole \
          StateFile, not silently land as a Predicate with an empty member"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// MV.ticket.a-parse-error-is-buried-by-its-own-cascade — full-pipeline
+// fixtures, end to end through `crate::validate_brain_state`. Two repos
+// differing by exactly one field: repo A well-formed, carrying a
+// `blocked_by` edge naming repo B; repo B well-formed in the control and
+// malformed (one invalid character) in the test. This is the shape the
+// ticket's `why` measured live: engine-rs's 476 and mev's 358
+// `E_STATE_UNKNOWN_REPO` were errors on the OTHER repo's file, not the one
+// that failed to parse.
+// ---------------------------------------------------------------------------
+
+/// Minimal `brain.toml` for a two-leaf-repo fixture — no tiers, no
+/// conformance writers, just enough for `discover_state_files` to find both
+/// repos' `planning/state.json`.
+#[cfg(test)]
+fn cascade_fixture_brain_toml(root: &std::path::Path) {
+    let toml = r#"[vocab]
+layer = ["brain", "engine", "factory", "console", "surface", "infra", "business", "content", "meta"]
+status = ["active", "draft", "deprecated", "superseded", "archived"]
+
+[crawl]
+skip_dirs = ["target", "node_modules", ".git"]
+
+[[repos]]
+slug = "alpha"
+tier = "primary"
+repo_path = "repos/alpha"
+status_file = "repos/alpha/planning/status.md"
+cache_doc = "docs/projects/alpha.md"
+heading = "alpha"
+
+[[repos]]
+slug = "beta"
+tier = "primary"
+repo_path = "repos/beta"
+status_file = "repos/beta/planning/status.md"
+cache_doc = "docs/projects/beta.md"
+heading = "beta"
+"#;
+    std::fs::write(root.join("brain.toml"), toml).expect("write fixture brain.toml");
+}
+
+/// Repo A: well-formed, one block whose `depends_on` names repo B.
+#[cfg(test)]
+fn cascade_fixture_alpha_json() -> &'static str {
+    r#"{
+  "repo": "alpha",
+  "kind": "project",
+  "updated": "2026-09-03",
+  "focus": { "now": [], "next": [], "blocked": [{ "id": "AL.1.A", "title": "Blocked on beta" }] },
+  "tracks": [{
+    "title": "P1",
+    "blocks": [{
+      "id": "AL.1.A",
+      "title": "Blocked on beta",
+      "sdlc_workflow": "task",
+      "depends_on": [
+        { "type": "block", "repo": "beta", "id": "BE.1.A" }
+      ]
+    }]
+  }]
+}"#
+}
+
+/// HQ root `planning/state.json` — present and well-formed purely so
+/// `discover_state_files` does not emit its own `W_STATE_FILE_MISSING`
+/// warning ahead of everything else, which would otherwise contend with the
+/// "first diagnostic" assertion below for reasons unrelated to this ticket.
+#[cfg(test)]
+fn cascade_fixture_hq_json() -> &'static str {
+    r#"{
+  "repo": "hq",
+  "kind": "brain",
+  "updated": "2026-09-03",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "repos": [
+    { "repo": "alpha", "now": [], "next": [], "blocked": [] },
+    { "repo": "beta", "now": [], "next": [], "blocked": [] }
+  ]
+}"#
+}
+
+/// Repo B, well-formed control: the one field that the malformed fixture
+/// corrupts (`"repo": "beta"`) is present and valid, and B's own block
+/// (`BE.1.A`) exists so A's edge resolves cleanly.
+#[cfg(test)]
+fn cascade_fixture_beta_json_well_formed() -> &'static str {
+    r#"{
+  "repo": "beta",
+  "kind": "project",
+  "updated": "2026-09-03",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [{
+    "title": "P1",
+    "blocks": [{ "id": "BE.1.A", "title": "The target block" }]
+  }]
+}"#
+}
+
+/// Write the two-repo fixture (brain.toml + both `planning/state.json`
+/// files) and return the root dir. `beta_json` is swapped between the
+/// well-formed control and the one-field-malformed test body by the caller.
+#[cfg(test)]
+fn write_cascade_fixture(beta_json: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cascade_fixture_brain_toml(dir.path());
+
+    let hq_path = dir.path().join("planning/state.json");
+    std::fs::create_dir_all(hq_path.parent().unwrap()).unwrap();
+    std::fs::write(&hq_path, cascade_fixture_hq_json()).unwrap();
+
+    let alpha_path = dir.path().join("repos/alpha/planning/state.json");
+    std::fs::create_dir_all(alpha_path.parent().unwrap()).unwrap();
+    std::fs::write(&alpha_path, cascade_fixture_alpha_json()).unwrap();
+
+    let beta_path = dir.path().join("repos/beta/planning/state.json");
+    std::fs::create_dir_all(beta_path.parent().unwrap()).unwrap();
+    std::fs::write(&beta_path, beta_json).unwrap();
+
+    dir
+}
+
+/// POSITIVE CONTROL: the well-formed corpus produces no `E_STATE_*` errors at
+/// all — proves the malformed-fixture assertions below are attributable to
+/// the one corrupted field, not to some other quirk of this fixture shape.
+#[test]
+fn cascade_fixture_well_formed_corpus_produces_no_state_errors() {
+    let dir = write_cascade_fixture(cascade_fixture_beta_json_well_formed());
+
+    let report =
+        crate::validate_brain_state(dir.path()).expect("validate_brain_state should not error");
+    let errors: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "well-formed two-repo fixture (control) must produce zero errors: {errors:?}"
+    );
+    assert!(!report.is_failure(), "a clean corpus must not fail the run");
+}
+
+/// THE MAIN ASSERTION: with B malformed by exactly one field (an invalid
+/// trailing character breaks the JSON), the ONE line naming the real cause —
+/// `E_STATE_MALFORMED_JSON` on B's own file — must be both the FIRST
+/// diagnostic in the report and the ONLY error, never accompanied by a
+/// cascade of `E_STATE_UNKNOWN_REPO` / `E_STATE_DANGLING_BLOCKED_BY` /
+/// `E_STATE_DANGLING_CROSS_REPO` fired by A's edge naming B. Observed RED
+/// before this ticket's fix: `known_repos` was built from LOADED files only
+/// (`files.iter().map(|(s,_)| s.repo_slug)`), so B — absent from `files` once
+/// its parse failed — read as "unknown", and A's `blocked_by` edge naming it
+/// fired `E_STATE_UNKNOWN_REPO` in addition to the one honest parse error.
+/// The exit code (`report.is_failure()`) must stay `true` either way — an
+/// unparseable `state.json` still fails the run.
+#[test]
+fn cascade_fixture_malformed_beta_does_not_cascade_and_parse_error_prints_first() {
+    // Exactly one field corrupted relative to the well-formed control: an
+    // extra trailing comma breaks the JSON, nothing else about the file
+    // changes.
+    let malformed_beta_json = r#"{
+  "repo": "beta",
+  "kind": "project",
+  "updated": "2026-09-03",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [{
+    "title": "P1",
+    "blocks": [{ "id": "BE.1.A", "title": "The target block" }]
+  }],
+}"#;
+    let dir = write_cascade_fixture(malformed_beta_json);
+
+    let report =
+        crate::validate_brain_state(dir.path()).expect("validate_brain_state should not error");
+
+    // Before-count semantics: record what the run actually produced so this
+    // assertion is against an observed run, not a quoted analysis figure.
+    let error_locators: Vec<&str> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::Severity::Error)
+        .map(|d| d.locator.as_str())
+        .collect();
+
+    assert_eq!(
+        error_locators,
+        vec!["E_STATE_MALFORMED_JSON"],
+        "the malformed field must produce exactly one error — the parse error itself — \
+         with no E_STATE_UNKNOWN_REPO/E_STATE_DANGLING_* cascade from A's edge naming B: \
+         {error_locators:?}"
+    );
+
+    let first = report
+        .diagnostics
+        .first()
+        .expect("a malformed corpus must produce at least one diagnostic");
+    assert_eq!(
+        first.locator, "E_STATE_MALFORMED_JSON",
+        "the FIRST diagnostic printed must be the parse error, not a derived cascade: \
+         {:?}",
+        report.diagnostics
+    );
+    assert!(
+        first.file.ends_with("repos/beta/planning/state.json"),
+        "the parse error must name B's own file: {:?}",
+        first.file
+    );
+    assert!(
+        first.message.contains("line") && first.message.contains("column"),
+        "the parse error must name the line and column, per serde_json's error format: {}",
+        first.message
+    );
+
+    assert!(
+        report.is_failure(),
+        "an unparseable state.json must still fail the run (exit code unchanged)"
     );
 }
 

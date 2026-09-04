@@ -530,9 +530,13 @@ pub fn validate_brain_state(root: &std::path::Path) -> anyhow::Result<Report> {
         }
     }
 
-    // 4. Graph build + integrity checks.
+    // 4. Graph build + integrity checks. `sources` (every DISCOVERED
+    // planning/state.json, whether or not it went on to parse) is threaded
+    // through separately from `loaded` (parsed-only) so a repo that exists
+    // but failed to parse is treated as known-but-unavailable rather than
+    // unknown — see check_state_graph's doc comment.
     let graph = build_state_graph(&loaded);
-    let graph_diags = check_state_graph(&graph, &loaded);
+    let graph_diags = check_state_graph(&graph, &loaded, &sources);
     report.diagnostics.extend(graph_diags);
 
     // 5. Cycle detection — flag any depends_on cycle in the DAG.
