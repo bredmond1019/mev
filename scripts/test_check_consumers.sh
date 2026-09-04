@@ -144,11 +144,31 @@ printf '%s' '[{"slug":"bastion","outcome":{"outcome":"pass"}},{"slug":"mev","out
     > "$FIX/pass_and_not_evaluable.json"
 
 # ---------------------------------------------------------------------------
+# Fleet-lock-dir fixture (task 2): a disposable per-run directory the
+# wrapper is pointed at via MEV_CHECK_CONSUMERS_LOCK_DIR, so the
+# live-lease check never reads this machine's real .fleet-locks. Empty
+# (no leases/ entries) after every reset_fixtures -- individual cases opt
+# IN to a live lease via create_lease, so the default state exercises the
+# fail-closed "no lease" path.
+# ---------------------------------------------------------------------------
+LOCK_DIR="$WORK/fleet-locks"
+
+# create_lease <slug> -- writes a minimal live lease file for <slug> so
+# has_live_lease() in check_consumers.sh finds it.
+create_lease() {
+    mkdir -p "$LOCK_DIR/leases"
+    printf '{"agent":"test-agent","repo":"%s","kind":"exclusive","scope":"repo","acquired_at":"2026-09-03T00:00:00Z"}' "$1" \
+        > "$LOCK_DIR/leases/lease-$1.json"
+}
+
+# ---------------------------------------------------------------------------
 # Fixture helpers
 # ---------------------------------------------------------------------------
 reset_fixtures() {
     : > "$WAIVER_FILE"
     : > "$CARGO_LOG"
+    rm -rf "$LOCK_DIR"
+    mkdir -p "$LOCK_DIR/leases"
 }
 
 set_waiver_file() { # set_waiver_file <content>
@@ -158,7 +178,7 @@ set_waiver_file() { # set_waiver_file <content>
 # run_gate <fixture-json-path> -- runs the wrapper with
 # MEV_CHECK_CONSUMERS_CMD overridden to `cat` the fixture file, sets OUT/RC.
 run_gate() {
-    OUT="$(PATH="$TEST_PATH" MEV_CHECK_CONSUMERS_CMD="cat '$1'" "$GATE_DIR/check_consumers.sh" 2>&1)"
+    OUT="$(PATH="$TEST_PATH" MEV_CHECK_CONSUMERS_LOCK_DIR="$LOCK_DIR" MEV_CHECK_CONSUMERS_CMD="cat '$1'" "$GATE_DIR/check_consumers.sh" 2>&1)"
     RC=$?
 }
 
@@ -166,7 +186,7 @@ run_gate() {
 # default `cargo run --release --quiet -- check-consumers --json` path;
 # the shimmed cargo answers with $CANNED_JSON_FILE's content.
 run_gate_default() {
-    OUT="$(PATH="$TEST_PATH" CANNED_JSON_FILE="$1" "$GATE_DIR/check_consumers.sh" 2>&1)"
+    OUT="$(PATH="$TEST_PATH" MEV_CHECK_CONSUMERS_LOCK_DIR="$LOCK_DIR" CANNED_JSON_FILE="$1" "$GATE_DIR/check_consumers.sh" 2>&1)"
     RC=$?
 }
 
@@ -176,7 +196,7 @@ run_gate_default() {
 # consumer is broken (src/main.rs: it prints the JSON, then returns
 # ExitCode::FAILURE). Sets OUT/RC.
 run_gate_failing() {
-    OUT="$(PATH="$TEST_PATH" MEV_CHECK_CONSUMERS_CMD="sh -c \"cat '$1'; exit 1\"" "$GATE_DIR/check_consumers.sh" 2>&1)"
+    OUT="$(PATH="$TEST_PATH" MEV_CHECK_CONSUMERS_LOCK_DIR="$LOCK_DIR" MEV_CHECK_CONSUMERS_CMD="sh -c \"cat '$1'; exit 1\"" "$GATE_DIR/check_consumers.sh" 2>&1)"
     RC=$?
 }
 
@@ -185,7 +205,7 @@ run_gate_failing() {
 # command-not-found (127) before the "tool" ever produces any output.
 # Sets OUT/RC.
 run_gate_unrunnable() {
-    OUT="$(PATH="$TEST_PATH" MEV_CHECK_CONSUMERS_CMD="/no/such/path/mev-check-consumers-does-not-exist-$$" "$GATE_DIR/check_consumers.sh" 2>&1)"
+    OUT="$(PATH="$TEST_PATH" MEV_CHECK_CONSUMERS_LOCK_DIR="$LOCK_DIR" MEV_CHECK_CONSUMERS_CMD="/no/such/path/mev-check-consumers-does-not-exist-$$" "$GATE_DIR/check_consumers.sh" 2>&1)"
     RC=$?
 }
 
@@ -195,7 +215,7 @@ run_gate_unrunnable() {
 # cargo failure (the false-red case observed live, cleared by a clean
 # re-run). Sets OUT/RC.
 run_gate_transient() {
-    OUT="$(PATH="$TEST_PATH" MEV_CHECK_CONSUMERS_CMD="sh -c 'echo error: could not compile mev crate transient failure >&2; exit 1'" "$GATE_DIR/check_consumers.sh" 2>&1)"
+    OUT="$(PATH="$TEST_PATH" MEV_CHECK_CONSUMERS_LOCK_DIR="$LOCK_DIR" MEV_CHECK_CONSUMERS_CMD="sh -c 'echo error: could not compile mev crate transient failure >&2; exit 1'" "$GATE_DIR/check_consumers.sh" 2>&1)"
     RC=$?
 }
 
@@ -240,8 +260,9 @@ check "broken report names the consumer and both error sites" \
 # ---------------------------------------------------------------------------
 reset_fixtures
 set_waiver_file 'bastion | OP.fix-bastion | bastion known broken pending OP.fix-bastion'
+create_lease bastion
 run_gate "$FIX/one_broken.json"
-check "broken + waived -> exit 0" \
+check "broken + waived + live lease -> exit 0" \
     "$( [ "$RC" -eq 0 ] && echo 0 || echo 1 )"
 check "broken + waived summary names the owning block" \
     "$(printf '%s' "$OUT" | grep -q 'waived by OP.fix-bastion' && echo 0 || echo 1)"
@@ -310,6 +331,7 @@ check "waiver row missing reason -> hard error naming line 1" \
 # ---------------------------------------------------------------------------
 reset_fixtures
 set_waiver_file $'# header comment\n\nbastion | OP.fix-bastion | bastion known broken\n'
+create_lease bastion
 run_gate "$FIX/one_broken.json"
 check "comments and blank lines ignored; the real waiver row still applies -> exit 0" \
     "$( [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'waived by OP.fix-bastion' && echo 0 || echo 1 )"
@@ -374,44 +396,46 @@ check "coverage: one broken -> 'verified 1 of 2 consumers (bastion: broken)'" \
 # MV.ticket.consumer-gate-waiver-can-never-apply-to-a-broken-consumer,
 # task 1: adjudicate before aborting; distinguish the three abort
 # conditions; still report the verified-consumer count on a clean run.
-# All five cases from the block record live here (task 2 owns the
-# live-lease requirement, case 2 below, and stays red until it lands —
-# see the note on that case).
+# task 2: a waiver's owning repo must ALSO hold a live lane/lease, or the
+# waiver is refused (case 2 below).
 # ---------------------------------------------------------------------------
 
 # --- case 1: the impossible case. A consumer is `broken`, has a waiver
-# row, AND the tool's own invocation exits non-zero (exactly what real
-# `mev check-consumers --json` does when a consumer is broken — it still
-# prints the JSON first). Before this task, invoke_check_consumers
-# aborted on that non-zero exit and discarded the JSON before main() ever
-# saw it, so a waiver could never reach a broken+waived consumer. This
-# was OBSERVED RED before the fix landed (recorded 2026-09-03): the gate
-# exited non-zero on this exact fixture with the generic "invocation
-# failed" message instead of honouring the waiver.
+# row, the waived repo holds a LIVE LEASE, AND the tool's own invocation
+# exits non-zero (exactly what real `mev check-consumers --json` does
+# when a consumer is broken — it still prints the JSON first). Before
+# task 1, invoke_check_consumers aborted on that non-zero exit and
+# discarded the JSON before main() ever saw it, so a waiver could never
+# reach a broken+waived consumer at all — OBSERVED RED before task 1
+# landed (recorded 2026-09-03): the gate exited non-zero with the generic
+# "invocation failed" message instead of honouring the waiver. Task 2
+# then made honouring the waiver conditional on a live lease; this case
+# supplies one, so it stays green through both tasks.
 reset_fixtures
 set_waiver_file 'bastion | OP.fix-bastion | bastion known broken pending OP.fix-bastion'
+create_lease bastion
 run_gate_failing "$FIX/one_broken.json"
-check "case 1 (impossible case): broken+waived, tool invocation itself exits non-zero -> exit 0, waiver named" \
+check "case 1 (impossible case): broken+waived+live-lease, tool invocation itself exits non-zero -> exit 0, waiver named" \
     "$( [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'waived by OP.fix-bastion' && echo 0 || echo 1 )"
 
 # --- case 2: same shape as case 1, but the waived repo holds NO live
-# lane/lease. Task 2 (not this one) adds the live-lease requirement — a
-# waiver with no owning repo lease behind it must be refused. This task
-# has no lease concept at all yet, so today the fixture above is simply
-# honoured (same outcome as case 1) regardless of any lease. This
-# assertion therefore pins TASK 1's actual, current behaviour; task 2
-# TIGHTENS it to require the lease — observing THIS SAME assertion go red
-# against task-1-final code before implementing the lease check, then
-# green ("task 1 case 2 goes red to green" per task 2's own acceptance
-# criteria). This is deliberate, not an oversight: a task whose only
-# content is an intentionally-failing assertion cannot satisfy this
-# engine's work assertion (see the task-1 description's D68 note), so the
-# red observation for case 2 happens inside task 2, not here.
+# lane/lease (no create_lease call — reset_fixtures leaves LOCK_DIR's
+# leases/ empty). Task 2 (this task) adds the live-lease requirement — a
+# waiver with no owning repo lease behind it must be refused, naming the
+# repo and the absent lease. Against task 1's own final code (before this
+# task's has_live_lease check existed) this exact assertion was OBSERVED
+# RED: the gate exited 0 and honoured the waiver purely on the strength
+# of the waiver row, with no lease concept at all — "task 1 case 2 goes
+# red to green" per this task's acceptance criteria, recorded 2026-09-03.
 reset_fixtures
 set_waiver_file 'bastion | OP.fix-bastion | bastion known broken pending OP.fix-bastion'
 run_gate_failing "$FIX/one_broken.json"
-check "case 2 (task 1 baseline; task 2 tightens this to require a live lease): broken+waived, no lease concept yet -> exit 0, waiver honoured" \
-    "$( [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'waived by OP.fix-bastion' && echo 0 || echo 1 )"
+check "case 2: broken+waived, NO live lease -> refused (non-zero), names repo and absent lease" \
+    "$( [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q 'waiver refused' \
+        && printf '%s' "$OUT" | grep -q 'bastion' \
+        && printf '%s' "$OUT" | grep -qi 'no live lease' && echo 0 || echo 1 )"
+check "case 2: waived-but-refused consumer is NOT reported as simply honoured" \
+    "$( ! printf '%s' "$OUT" | grep -q 'waived by OP.fix-bastion' && echo 0 || echo 1 )"
 
 # --- case 3: the tool is genuinely unrunnable (command not found) ->
 # its own message and exit code, distinct from both a broken consumer

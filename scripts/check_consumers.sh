@@ -250,8 +250,74 @@ json_field_reason() {
 }
 
 # ---------------------------------------------------------------------------
+# Live-lease requirement (task 2): a waiver row names an owning block,
+# but that alone is not enough — the waived repo must ALSO hold a live
+# lane, or the "waiver" is really an unowned break wearing a ticket. The
+# realised cost: a waiver was written against bastion naming all five fix
+# sites correctly, no lane held a bastion lease, the gate read green, and
+# `cargo install --path core/bastion --force` stayed broken fleet-wide
+# until a lane tried to rebuild.
+#
+# Lock-dir resolution mirrors scripts/check_lane_agents.py's precedence
+# exactly (that script's own --lock-dir / FLEET_LOCK_DIR / brain.toml
+# walk-up order, see its module docstring and `resolve_lock_dir`) so this
+# wrapper and the lane-agent tooling can never disagree about which
+# leases are live:
+#   1. MEV_CHECK_CONSUMERS_LOCK_DIR — this wrapper's own explicit
+#      override, standing in for check_lane_agents.py's `--lock-dir`
+#      flag (this script takes no CLI flags of its own); the fixture
+#      suite uses this to point at a disposable per-run directory.
+#   2. FLEET_LOCK_DIR — the same env var check_lane_agents.py reads.
+#   3. A brain.toml discovered by walking up from $REPO_ROOT, joined
+#      with `.fleet-locks` (LOCK_SUBDIR in check_lane_agents.py).
+# Prints the resolved lock dir, or nothing if none of the three resolve
+# (never aborts — an unresolved lock dir is treated the same as "no
+# lease found", i.e. fail-closed on the waiver, not silently ignored).
+resolve_lock_dir() {
+    if [ -n "${MEV_CHECK_CONSUMERS_LOCK_DIR:-}" ]; then
+        printf '%s' "$MEV_CHECK_CONSUMERS_LOCK_DIR"
+        return 0
+    fi
+    if [ -n "${FLEET_LOCK_DIR:-}" ]; then
+        printf '%s' "$FLEET_LOCK_DIR"
+        return 0
+    fi
+    local d="$REPO_ROOT"
+    while [ "$d" != "/" ] && [ -n "$d" ]; do
+        if [ -f "$d/brain.toml" ]; then
+            printf '%s' "$d/.fleet-locks"
+            return 0
+        fi
+        d="$(dirname "$d")"
+    done
+    return 0
+}
+
+# True (0) iff a live lease file exists for repo slug $1 at
+# `<lock_dir>/leases/lease-$1.json` — mirrors check_lane_agents.py's
+# LEASE_SUBDIR ("leases") and its `lease-<slug>.json` naming exactly.
+#
+# STALENESS IS DELIBERATELY OUT OF SCOPE: check_lane_agents.py can
+# report a lease's age, but explicitly does not decide "abandoned" vs
+# "merely slow" — that judgement needs live ListAgents output, which a
+# shell script run from a gate cannot obtain. This function only asks
+# whether the lease FILE EXISTS; inventing a staleness cutoff here would
+# duplicate a decision that script deliberately declines to make.
+LEASE_PATH=""
+has_live_lease() {
+    local slug="$1" lock_dir
+    lock_dir="$(resolve_lock_dir)"
+    LEASE_PATH=""
+    [ -n "$lock_dir" ] || return 1
+    LEASE_PATH="$lock_dir/leases/lease-$slug.json"
+    [ -f "$LEASE_PATH" ]
+}
+
+# ---------------------------------------------------------------------------
 # Adjudication: exit non-zero iff (a) some consumer is `broken` and has
-# no waiver row, or (b) some waiver row names a consumer whose outcome is
+# no waiver row, (a2) some consumer is `broken`, has a waiver row, but
+# the waived repo holds no live lease (an unowned break wearing a
+# ticket), or (b) some waiver row names a consumer whose outcome is
 # `pass` (a stale waiver). `skipped_dirty`, `lockfile_stale` and
 # `not_evaluable` are reported and always exit 0 — they are bookkeeping
 # about someone else's repo, not evidence mev broke anything.
@@ -323,7 +389,13 @@ main() {
                     ;;
                 broken)
                     if [ -n "$owner" ]; then
-                        note="waived by $owner"
+                        if has_live_lease "$slug"; then
+                            note="waived by $owner"
+                        else
+                            local lease_desc="${LEASE_PATH:-no lock dir resolved}"
+                            note="waiver refused: $slug (owned by $owner) has no live lease (expected $lease_desc)"
+                            gate_failed=1
+                        fi
                     else
                         gate_failed=1
                     fi
