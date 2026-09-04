@@ -80,7 +80,22 @@ fn tracked_set(repo_dir: &Path) -> TrackedSetResult {
             repo_dir.display()
         )
     })?;
-    Ok(text.lines().map(|s| s.to_string()).collect())
+    let set: HashSet<String> = text.lines().map(|s| s.to_string()).collect();
+    // An empty tracked set almost never means "this repo genuinely tracks nothing" — it
+    // means `git ls-files` was asked in a repo with no commits yet (`git init`-ed but
+    // never committed), which is exactly the state a freshly built V2 tree starts in.
+    // Reading it as "nothing tracked, so every rule trivially passes" is the fail-open
+    // shape this check exists to close: it would report Pass having scanned zero bytes.
+    // Fail loud instead, naming the repo, so the caller routes it to `NotEvaluable`
+    // rather than treating silence as a clean scan.
+    if set.is_empty() {
+        return Err(format!(
+            "git ls-files in {} returned no tracked files — repo is uncommitted or empty; \
+             refusing to report a scan of zero files as a pass",
+            repo_dir.display()
+        ));
+    }
+    Ok(set)
 }
 
 /// One `[text](target)` markdown link match: the raw target string and the 1-indexed
@@ -391,12 +406,22 @@ pub fn run(ctx: &ConformanceCtx) -> CheckOutcome {
     let public_repos: Vec<&RepoEntry> = ctx.config.repos.iter().filter(|r| r.public).collect();
 
     if public_repos.is_empty() {
+        // `public` is FAIL-CLOSED to `false` when a `[[repos]]` entry omits the key
+        // (config.rs:445), so a brain.toml that simply never marks anything public
+        // reports a clean, silent Pass here today — the second fail-open shape this
+        // block exists to close. Nothing was scanned, so this is not a pass; it is a
+        // condition the caller must be told about explicitly, via the same
+        // `NotEvaluable` status `evaluate_repo` errors already route through below —
+        // reusing that existing status/reason plumbing rather than adding a new one.
         return CheckOutcome {
-            status: CheckStatus::Pass,
+            status: CheckStatus::NotEvaluable,
             left: None,
             right: None,
             findings: Vec::new(),
-            reason: None,
+            reason: Some(
+                "no [[repos]] entry in brain.toml is marked public = true, so nothing was scanned"
+                    .to_string(),
+            ),
         };
     }
 
@@ -722,8 +747,13 @@ mod tests {
             files: Vec::new(),
         };
         let outcome = run(&ctx);
-        assert_eq!(outcome.status, CheckStatus::Pass);
+        // A private repo is never walked, so with no public repos at all this hits the
+        // same zero-public-repos NotEvaluable path as `no_public_repos_is_pass` — a
+        // fixture set of entries that are ALL non-public is indistinguishable from an
+        // empty repos list from this check's point of view.
+        assert_eq!(outcome.status, CheckStatus::NotEvaluable);
         assert!(outcome.findings.is_empty());
+        assert!(outcome.reason.is_some());
     }
 
     #[test]
@@ -793,14 +823,17 @@ mod tests {
     }
 
     #[test]
-    fn no_public_repos_is_pass() {
+    fn no_public_repos_is_not_evaluable() {
+        // No `[[repos]]` entries at all — a run that scans nothing must never report a
+        // silent Pass; it must say why, via NotEvaluable.
         let ctx = ConformanceCtx {
             root: PathBuf::from("."),
             config: crate::brain::config::BrainConfig::default(),
             files: Vec::new(),
         };
         let outcome = run(&ctx);
-        assert_eq!(outcome.status, CheckStatus::Pass);
+        assert_eq!(outcome.status, CheckStatus::NotEvaluable);
+        assert!(outcome.reason.is_some());
     }
 
     /// Positive control for rule 2 (MV.ticket.surface-leak-check task 4, acceptance
