@@ -81,6 +81,10 @@
 //!   `file_contains` predicate's pattern is regex-shaped (`NotEvaluableReason::PatternNotLiteral`);
 //!   the evaluator is literal-substring only, so the predicate can never fire.
 //!   Warning severity only.
+//! - `W_STATE_CARRYOVER_SUMMARY_UNRENDERABLE` — a carryover `summary` is PRESENT but
+//!   cannot function as a one-line Attention row label: it is multiline, or exceeds
+//!   120 characters (measured in `.chars().count()`, not bytes). Never fires on an
+//!   absent `summary` — the field is optional by construction. Warning severity only.
 //! - `W_BACKLOG_ALREADY_SATISFIED` — a `backlog[]` `clears_when` predicate
 //!   evaluates satisfied (the `mev backlog` sweep's `Cleared` lane) while the
 //!   idea is still present and un-disposed. Mirrors
@@ -1747,6 +1751,38 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                     VALID_CARRYOVER_NEEDS.join(", ")
                 ),
             ));
+        }
+
+        // W_STATE_CARRYOVER_SUMMARY_UNRENDERABLE (MV.ticket.attention-rows-render-carryover-summary):
+        // `summary` is rendered VERBATIM as the Attention row label (src/brain/emit.rs), so a
+        // present value that can't function as a one-line label is a write-time defect worth
+        // flagging. Deliberately NO "missing summary" warning, mirroring the `needs` check
+        // above: ~250 live entries have no summary and none of them is wrong for it — the field
+        // is optional by construction (okf-core's own doc comment says so) — and a warning that
+        // fires ~250 times on the first sweep is indistinguishable from a broken gate and trains
+        // every lane to ignore the whole W_STATE_CARRYOVER_* family. Length is measured in
+        // characters via `.chars().count()`, matching `attention_snippet`'s own count, so an
+        // em dash (or any other multi-byte character) does not fire this spuriously.
+        if let Some(summary) = &item.summary {
+            let too_long = summary.chars().count() > 120;
+            let multiline = summary.contains('\n');
+            if too_long || multiline {
+                let reason = match (multiline, too_long) {
+                    (true, true) => "multiline and over 120 characters",
+                    (true, false) => "multiline",
+                    _ => "over 120 characters",
+                };
+                diags.push(Diagnostic::warning(
+                    path,
+                    "W_STATE_CARRYOVER_SUMMARY_UNRENDERABLE",
+                    format!(
+                        "carryover item '{}' has a summary that cannot render as a one-line \
+                         Attention row label ({}); it will still render verbatim, but should be \
+                         shortened to a single line under 120 characters",
+                        item.slug, reason
+                    ),
+                ));
+            }
         }
 
         // W_CARRYOVER_MISFILED (D18, MV.ticket.carryover-needs-validation): an entry that
@@ -6255,6 +6291,182 @@ mod tests {
                 "needs: {known} must never trip W_CARRYOVER_MISFILED: {diags:?}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // carryover[].summary (MV.ticket.attention-rows-render-carryover-summary, task 2)
+    // -----------------------------------------------------------------------
+
+    /// A multiline summary must fire the diagnostic.
+    #[test]
+    fn multiline_carryover_summary_fires_unrenderable_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{"repo":"mev","kind":"project","updated":"2026-09-04",
+            "carryover":[{"slug":"multiline-summary-entry","scope":{"repo":"mev"},
+                          "kind":"deferred","summary":"line one\nline two","text":"x",
+                          "created":"2026-09-01"}]}"#;
+        let file = parse_file(json);
+        assert!(
+            file.carryover[0]
+                .summary
+                .as_deref()
+                .is_some_and(|s| s.contains('\n')),
+            "fixture must actually carry a multiline summary"
+        );
+        let diags = check_schema(&src, &file);
+        let hits: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_CARRYOVER_SUMMARY_UNRENDERABLE")
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "a multiline summary should produce exactly one \
+             W_STATE_CARRYOVER_SUMMARY_UNRENDERABLE: {diags:?}"
+        );
+        assert_eq!(
+            hits[0].severity,
+            crate::Severity::Warning,
+            "W_STATE_CARRYOVER_SUMMARY_UNRENDERABLE must be Warning severity, not error"
+        );
+        assert!(
+            hits[0].message.contains("multiline-summary-entry"),
+            "message must name the entry slug: {}",
+            hits[0].message
+        );
+    }
+
+    /// A summary of exactly 121 characters must fire; one of exactly 120 must not —
+    /// pinning the boundary from both sides rather than assuming it.
+    #[test]
+    fn carryover_summary_length_boundary_120_vs_121_chars() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let exactly_120 = "x".repeat(120);
+        assert_eq!(exactly_120.chars().count(), 120);
+        let json_120 = format!(
+            r#"{{"repo":"mev","kind":"project","updated":"2026-09-04",
+                "carryover":[{{"slug":"summary-120-chars","scope":{{"repo":"mev"}},
+                              "kind":"deferred","summary":"{exactly_120}","text":"x",
+                              "created":"2026-09-01"}}]}}"#
+        );
+        let file_120 = parse_file(&json_120);
+        let diags_120 = check_schema(&src, &file_120);
+        assert!(
+            diags_120
+                .iter()
+                .all(|d| d.locator != "W_STATE_CARRYOVER_SUMMARY_UNRENDERABLE"),
+            "a summary of exactly 120 characters must NOT fire: {diags_120:?}"
+        );
+
+        let exactly_121 = "x".repeat(121);
+        assert_eq!(exactly_121.chars().count(), 121);
+        let json_121 = format!(
+            r#"{{"repo":"mev","kind":"project","updated":"2026-09-04",
+                "carryover":[{{"slug":"summary-121-chars","scope":{{"repo":"mev"}},
+                              "kind":"deferred","summary":"{exactly_121}","text":"x",
+                              "created":"2026-09-01"}}]}}"#
+        );
+        let file_121 = parse_file(&json_121);
+        let diags_121 = check_schema(&src, &file_121);
+        let hits_121: Vec<_> = diags_121
+            .iter()
+            .filter(|d| d.locator == "W_STATE_CARRYOVER_SUMMARY_UNRENDERABLE")
+            .collect();
+        assert_eq!(
+            hits_121.len(),
+            1,
+            "a summary of exactly 121 characters must fire exactly once: {diags_121:?}"
+        );
+    }
+
+    /// A normal short summary must stay silent.
+    #[test]
+    fn normal_carryover_summary_emits_no_unrenderable_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{"repo":"mev","kind":"project","updated":"2026-09-04",
+            "carryover":[{"slug":"normal-summary-entry","scope":{"repo":"mev"},
+                          "kind":"deferred","summary":"a short one-line label","text":"x",
+                          "created":"2026-09-01"}]}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.locator != "W_STATE_CARRYOVER_SUMMARY_UNRENDERABLE"),
+            "a normal short summary must never fire: {diags:?}"
+        );
+    }
+
+    /// An entry with no `summary` at all must stay silent — the ~250-entry live case.
+    /// This is the diagnostic's positive control: a warning that never fires and one
+    /// that always fires look identical on a clean corpus, so this must be asserted
+    /// separately from the "normal summary" silence case above.
+    #[test]
+    fn absent_carryover_summary_emits_no_unrenderable_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{"repo":"mev","kind":"project","updated":"2026-09-04",
+            "carryover":[{"slug":"no-summary-entry","scope":{"repo":"mev"},
+                          "kind":"deferred","text":"x","created":"2026-09-01"}]}"#;
+        let file = parse_file(json);
+        assert!(
+            file.carryover[0].summary.is_none(),
+            "fixture must actually leave summary absent"
+        );
+        let diags = check_schema(&src, &file);
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.locator != "W_STATE_CARRYOVER_SUMMARY_UNRENDERABLE"),
+            "absent summary must produce no diagnostic at all: {diags:?}"
+        );
+    }
+
+    /// Length is measured in characters via `.chars().count()`, not bytes — pinned with
+    /// an em-dash summary. An em dash ('—') is 3 bytes in UTF-8 but 1 char, so a
+    /// byte-length check would fire spuriously (or at a different boundary) on a
+    /// corpus full of em dashes; a char-count check must not.
+    #[test]
+    fn carryover_summary_length_measured_in_chars_not_bytes_em_dash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        // 118 ASCII chars + one em dash = 119 chars, but 118 + 3 = 121 bytes.
+        // A byte-based check would wrongly fire here; a char-based one must not.
+        let summary = format!("{}—", "x".repeat(118));
+        assert_eq!(summary.chars().count(), 119);
+        assert_eq!(
+            summary.len(),
+            121,
+            "em dash must be multi-byte in this fixture"
+        );
+
+        let json = format!(
+            r#"{{"repo":"mev","kind":"project","updated":"2026-09-04",
+                "carryover":[{{"slug":"em-dash-summary-entry","scope":{{"repo":"mev"}},
+                              "kind":"deferred","summary":"{summary}","text":"x",
+                              "created":"2026-09-01"}}]}}"#
+        );
+        let file = parse_file(&json);
+        let diags = check_schema(&src, &file);
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.locator != "W_STATE_CARRYOVER_SUMMARY_UNRENDERABLE"),
+            "a 119-char summary containing an em dash must NOT fire on byte length: {diags:?}"
+        );
     }
 
     /// W_CARRYOVER_PROSE_CLEARS_WHEN / W_CARRYOVER_NO_NEEDS
