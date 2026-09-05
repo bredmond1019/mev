@@ -860,11 +860,13 @@ mod tests {
 
     #[test]
     fn run_aggregates_worst_across_writers_and_names_each() {
-        let mut config = crate::brain::config::BrainConfig::default();
-        config.conformance_writers = vec![ConformanceWriter {
-            name: "bastion".to_string(),
-            repo_path: Some("bastion".to_string()),
-        }];
+        let config = crate::brain::config::BrainConfig {
+            conformance_writers: vec![ConformanceWriter {
+                name: "bastion".to_string(),
+                repo_path: Some("bastion".to_string()),
+            }],
+            ..Default::default()
+        };
         let ctx = ConformanceCtx {
             root: std::path::PathBuf::from("."),
             config,

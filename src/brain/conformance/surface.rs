@@ -739,8 +739,10 @@ mod tests {
         commit_all(dir.path());
 
         let repo = repo_entry("fixture", dir.path().to_str().unwrap(), false);
-        let mut config = crate::brain::config::BrainConfig::default();
-        config.repos = vec![repo];
+        let config = crate::brain::config::BrainConfig {
+            repos: vec![repo],
+            ..Default::default()
+        };
         let ctx = ConformanceCtx {
             root: PathBuf::from("."),
             config,
@@ -809,8 +811,10 @@ mod tests {
         std::fs::create_dir_all(&missing).unwrap();
 
         let repo = repo_entry("broken-repo", "", true);
-        let mut config = crate::brain::config::BrainConfig::default();
-        config.repos = vec![repo];
+        let config = crate::brain::config::BrainConfig {
+            repos: vec![repo],
+            ..Default::default()
+        };
         let ctx = ConformanceCtx {
             root: missing.clone(),
             config,

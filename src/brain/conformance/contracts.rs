@@ -499,19 +499,21 @@ mod tests {
         let pass_rel = write_fixture(&dir, "pass.md", "**Contract Version: 1.0.0**\n");
         let drift_rel = write_fixture(&dir, "drift.md", "**Contract Version: 2.0.0**\n");
 
-        let mut config = crate::brain::config::BrainConfig::default();
-        config.contracts = vec![
-            ContractEntry {
-                name: "ok-contract".to_string(),
-                canonical: endpoint("a", &canonical_rel, "md-version-line", None),
-                consumers: vec![endpoint("b", &pass_rel, "md-version-line", None)],
-            },
-            ContractEntry {
-                name: "bad-contract".to_string(),
-                canonical: endpoint("a", &canonical_rel, "md-version-line", None),
-                consumers: vec![endpoint("c", &drift_rel, "md-version-line", None)],
-            },
-        ];
+        let config = crate::brain::config::BrainConfig {
+            contracts: vec![
+                ContractEntry {
+                    name: "ok-contract".to_string(),
+                    canonical: endpoint("a", &canonical_rel, "md-version-line", None),
+                    consumers: vec![endpoint("b", &pass_rel, "md-version-line", None)],
+                },
+                ContractEntry {
+                    name: "bad-contract".to_string(),
+                    canonical: endpoint("a", &canonical_rel, "md-version-line", None),
+                    consumers: vec![endpoint("c", &drift_rel, "md-version-line", None)],
+                },
+            ],
+            ..Default::default()
+        };
         let ctx = ConformanceCtx {
             root: dir.path().to_path_buf(),
             config,

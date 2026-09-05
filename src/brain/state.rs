@@ -9041,7 +9041,7 @@ mod tests {
             "alpha",
             &[("AL.1.A", Some("superseded"), None, vec![])],
         );
-        let files = vec![pair];
+        let files = [pair];
         let (src, file) = &files[0];
         let diags = check_schema(src, file);
         assert!(
