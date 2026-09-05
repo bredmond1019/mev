@@ -2153,6 +2153,172 @@ mod planning_tests {
     }
 
     // -----------------------------------------------------------------
+    // demote-block leaves inbound refs dangling — Task 3
+    // (MV.ticket.demote-block-leaves-inbound-refs-dangling)
+    //
+    // Operator option-(b) decision: `plan_demote_block` / `plan_promote_block`
+    // themselves are UNCHANGED by this spec (see the block record's `notes`) —
+    // these tests exercise the fix end-to-end, over the real writer output,
+    // through `check_state_graph` + `check_backlog_integrity` directly. This
+    // is acceptance criterion 3's "or the equivalent in-process check set":
+    // running the pure Rust checks over an in-memory corpus is not a weaker
+    // substitute for shelling out to `bastion validate-brain --state`, it is
+    // the same validation logic those diagnostics come from.
+    // -----------------------------------------------------------------
+
+    /// Sum the [`crate::Severity::Error`] diagnostics from both graph checks
+    /// over `files` — the "does this corpus validate clean" predicate these
+    /// tests assert against.
+    fn state_errors(files: &[(StateSource, StateFile)]) -> Vec<Diagnostic> {
+        let graph = okf_core::build_state_graph(files);
+        let discovered: Vec<StateSource> = files.iter().map(|(s, _)| s.clone()).collect();
+        let mut diags = crate::brain::state::check_state_graph(&graph, files, &discovered);
+        diags.extend(crate::brain::state::check_backlog_integrity(files, &graph));
+        diags
+            .into_iter()
+            .filter(|d| d.severity == crate::Severity::Error)
+            .collect()
+    }
+
+    /// The end-to-end cluster case: block X is referenced three ways at once
+    /// — (i) a LIVE block's `depends_on` in another repo, (ii) another
+    /// block's (Y's) `depends_on`, where Y is ALSO parked, and (iii) a
+    /// `promoted` backlog entry's `block` pointer. Parking X then Y must
+    /// leave the corpus at zero errors under option (b).
+    #[test]
+    fn demote_block_cluster_referenced_three_ways_validates_clean() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // mev: X (parked first) and Y (parked second; Y's own depends_on
+        // names X — the by-construction cluster case).
+        let (src_mev, mut file_mev) = file_for(
+            dir.path(),
+            "mev",
+            &[("Phase 9", &[("MV.9.X", 90), ("MV.9.Y", 90)])],
+        );
+        file_mev.tracks[0].blocks[1].depends_on =
+            vec![BlockedBy::Block(crate::brain::state::BlockDep {
+                repo: "mev".to_string(),
+                id: "MV.9.X".to_string(),
+                what: None,
+            })];
+        write_record(dir.path(), "mev", "MV.9.X", "block");
+        write_record(dir.path(), "mev", "MV.9.Y", "block");
+
+        // other: a LIVE block whose depends_on names X in another repo, plus
+        // a `promoted` backlog entry whose `block` pointer also names X.
+        let (src_other, mut file_other) =
+            file_for(dir.path(), "other", &[("Phase 1", &[("OT.1.L", 10)])]);
+        file_other.tracks[0].blocks[0].depends_on =
+            vec![BlockedBy::Block(crate::brain::state::BlockDep {
+                repo: "mev".to_string(),
+                id: "MV.9.X".to_string(),
+                what: None,
+            })];
+        file_other.backlog.push(Backlog {
+            slug: "OT.5.OLD".to_string(),
+            title: "A previously promoted idea".to_string(),
+            repo: "other".to_string(),
+            kind: "block".to_string(),
+            status: "promoted".to_string(),
+            depends_on: Vec::new(),
+            block: Some("MV.9.X".to_string()),
+            notes: None,
+            origin: None,
+            created: None,
+            reviewed: None,
+            snoozed_until: None,
+            ..Default::default()
+        });
+
+        // Park X first.
+        let files = vec![
+            (src_mev.clone(), file_mev.clone()),
+            (src_other.clone(), file_other.clone()),
+        ];
+        let demote_x = plan_demote_block("mev:MV.9.X", &files, "2026-09-05");
+        assert!(
+            demote_x.diagnostics.is_empty(),
+            "{:?}",
+            demote_x.diagnostics
+        );
+        assert_eq!(demote_x.actions.len(), 1, "{demote_x:?}");
+        let after_x = apply_action_and_reload(&src_mev, &demote_x.actions[0]);
+
+        // Then park Y — its own snapshot depends_on now names an
+        // already-parked block (X).
+        let files_after_x = vec![after_x, (src_other.clone(), file_other.clone())];
+        let demote_y = plan_demote_block("mev:MV.9.Y", &files_after_x, "2026-09-05");
+        assert!(
+            demote_y.diagnostics.is_empty(),
+            "{:?}",
+            demote_y.diagnostics
+        );
+        assert_eq!(demote_y.actions.len(), 1, "{demote_y:?}");
+        let after_y = apply_action_and_reload(&src_mev, &demote_y.actions[0]);
+
+        let final_files = vec![after_y, (src_other, file_other)];
+        let errors = state_errors(&final_files);
+        assert!(
+            errors.is_empty(),
+            "parking a cluster referenced three ways (a live cross-repo depends_on, a \
+             co-parked block's depends_on, and a promoted pointer) must validate clean \
+             under option (b): {errors:?}"
+        );
+    }
+
+    /// AC5: the promote round trip restores a `tracks[].blocks[]` row
+    /// byte-identical to the pre-park row — asserted by comparing
+    /// `serde_json::to_string` on both, not by field-by-field inspection —
+    /// and the restored corpus validates clean.
+    #[test]
+    fn demote_then_promote_round_trip_is_byte_identical_and_validates_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, original_file) = file_for(dir.path(), "mev", &[("Phase 9", &[("MV.9.RT", 90)])]);
+        write_record(dir.path(), "mev", "MV.9.RT", "block");
+        let original_block = original_file.tracks[0].blocks[0].clone();
+        let files = vec![(src.clone(), original_file)];
+
+        let demote_plan = plan_demote_block("mev:MV.9.RT", &files, "2026-09-05");
+        assert!(
+            demote_plan.diagnostics.is_empty(),
+            "{:?}",
+            demote_plan.diagnostics
+        );
+        let after_demote = apply_action_and_reload(&src, &demote_plan.actions[0]);
+
+        let promote_plan = plan_promote_block("mev:MV.9.RT", &[after_demote]);
+        assert!(
+            promote_plan.diagnostics.is_empty(),
+            "{:?}",
+            promote_plan.diagnostics
+        );
+        let after_promote = apply_action_and_reload(&src, &promote_plan.actions[0]);
+
+        let restored_block = after_promote
+            .1
+            .tracks
+            .iter()
+            .flat_map(|t| t.blocks.iter())
+            .find(|b| b.id == "MV.9.RT")
+            .expect("restored tracks[] row");
+        assert_eq!(
+            serde_json::to_string(restored_block).unwrap(),
+            serde_json::to_string(&original_block).unwrap(),
+            "restored tracks[] row must be byte-identical to the original, by \
+             serialized-JSON comparison"
+        );
+
+        let final_files = vec![after_promote];
+        let errors = state_errors(&final_files);
+        assert!(
+            errors.is_empty(),
+            "the restored corpus after a full demote-then-promote round trip must \
+             validate clean: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
     // origin — MV.ticket.create-block-drops-the-origin-field, task 1
     //
     // `CreateBlockPayload` (as of this task) declares no `origin` field, so
