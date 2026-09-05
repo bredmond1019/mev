@@ -340,6 +340,7 @@ When `--state` is passed, `mev` runs the full OKF schema pass first, then append
 | `E_STATE_DATE_FORMAT` | Error | A carryover/backlog `created` / `reviewed` / `snoozed_until` value is not a valid `YYYY-MM-DD` (or RFC3339) date |
 | `W_STATE_FOCUS_DRIFT` | Warning | Stored `focus` disagrees with the derivation from `tracks[]`; exit code is unchanged |
 | `W_STATE_CARRYOVER_STALE` | Warning | A `carryover[]` entry has aged past its per-`kind` `[attention]` threshold and is not snoozed; exit code is unchanged |
+| `W_STATE_CARRYOVER_SUMMARY_UNRENDERABLE` | Warning | A `carryover[]` entry's `summary` is PRESENT but cannot function as an Attention row label — it contains a newline or exceeds 120 characters (measured in `.chars()`, not bytes). Never fires on an absent `summary`, which is optional by construction; exit code is unchanged |
 | `W_STATE_BACKLOG_STALE` | Warning | An HQ `backlog[]` `idea`/`ready` node has aged past the `[attention]` backlog threshold and is not snoozed; exit code is unchanged |
 | `W_DISTILL_STALE` | Warning | A D35-distilled `knowledge.md`/`memory.md` entry has aged past its `[attention]` `knowledge_days`/`memory_days` threshold (`check_distill_staleness`); exit code is unchanged |
 | `E_STATE_OPERATOR_MISSING_EXIT` | Error | A `depends_on[]` `Operator` entry has an empty `exit` field |

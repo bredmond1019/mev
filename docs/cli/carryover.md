@@ -973,6 +973,19 @@ running `/attention` and triaging the whole list in one sitting, `engine-rs`'s o
 thresholds. There is only one board-derivation path in this codebase; the queue can never show a
 different item, or a different order, than `/attention` itself would show.
 
+#### Row-label precedence (carryover rows)
+
+The markdown Attention board built by `emit-state` labels each carryover triage row
+(`Blocking`/`Hot`/`Aging`/`Standing`, same four lanes as above) with the entry's authored
+`summary` when one is present, rendered **verbatim** — never re-snippeted. Only when `summary` is
+absent does the row fall back to the first 80 characters of `text` (`attention_snippet`, which
+cuts mid-sentence and adds an ellipsis). This is a strict either/or: a present `summary` is never
+clipped, truncated, or blended with `text`, no matter how long it is. A `summary` that is too long
+to serve as a one-line label (multiline, or over 120 characters) is instead flagged at write time
+by `W_STATE_CARRYOVER_SUMMARY_UNRENDERABLE` (see [`validate.md`](./validate.md)) — that is a
+fixable authoring problem, not something the renderer silently papers over. `summary` is optional
+by construction; an entry with none renders exactly as it always has.
+
 | Argument / Flag | Default | Description |
 |---|---|---|
 | `path` | `.` | Path to search from when locating `brain.toml` (walks up to find it). |
