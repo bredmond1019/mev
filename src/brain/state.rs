@@ -2570,6 +2570,46 @@ pub fn check_epics(config: &BrainConfig, files: &[(StateSource, StateFile)]) -> 
 // Graph integrity checks
 // ---------------------------------------------------------------------------
 
+/// Build the set of `"repo:id"` keys naming every `backlog[]` node whose
+/// `status` is [`crate::brain::block_create::BACKLOG_STATUS_PARKED`].
+///
+/// **Operator decision (option (b), `MV.ticket.demote-block-leaves-inbound-refs-dangling`,
+/// recorded 2026-09-05):** a `parked` backlog entry is a legitimate resolution
+/// target for a reference that would otherwise be dangling. Both
+/// [`check_backlog_integrity`] and [`check_state_graph`] call this single
+/// function rather than re-deriving the parked set inline — the
+/// `sibling-rule-coverage` conformance check exists to keep those two checks
+/// from drifting out of agreement on what "parked" resolves.
+///
+/// **Accepted cost, stated explicitly:** the graph is no longer literally
+/// true after this — a reference may now resolve to a `repo:id` that is not
+/// registered in any repo's `tracks[]`, only in a `backlog[]` snapshot. That
+/// is the deliberate trade of option (b) over option (a) (reconcile at park
+/// time): only (b) lets a dependency CLUSTER park cleanly, since a
+/// writer-side fix cannot undo a conflict `plan_demote_block` creates by
+/// construction (it writes the removed block's own `depends_on` as a
+/// snapshot, which a naive check then reads as a live edge).
+///
+/// The key is built from the backlog node's own `repo` + `slug` fields, NOT
+/// from the `parked_block` snapshot in `extra` — verified at source
+/// 2026-09-05: `plan_demote_block` sets `slug: block_id.to_string()` and
+/// `repo: repo_slug.to_string()` on the `Backlog` entry it pushes, so
+/// `"{repo}:{slug}"` reconstructs exactly the same `repo:id` key the rest of
+/// this module's `node_set`s are keyed on.
+pub(crate) fn parked_block_keys(
+    files: &[(StateSource, StateFile)],
+) -> std::collections::HashSet<String> {
+    let mut keys = std::collections::HashSet::new();
+    for (_, file) in files {
+        for node in &file.backlog {
+            if node.status == crate::brain::block_create::BACKLOG_STATUS_PARKED {
+                keys.insert(format!("{}:{}", node.repo, node.slug));
+            }
+        }
+    }
+    keys
+}
+
 /// Run integrity checks over a built [`StateGraph`].
 ///
 /// Checks performed:
@@ -2989,6 +3029,11 @@ pub fn check_backlog_integrity(
     // Set of all registered "repo:id" keys.
     let node_set: HashSet<&str> = graph.nodes.iter().map(|n| n.key.as_str()).collect();
 
+    // Option (b) (MV.ticket.demote-block-leaves-inbound-refs-dangling, D1): a
+    // `parked` backlog entry resolves a reference too. Computed once, outside
+    // the per-node loop below, so this stays the single derivation site.
+    let parked_keys = parked_block_keys(files);
+
     let mut diags: Vec<Diagnostic> = Vec::new();
 
     for (src, file) in files {
@@ -3000,18 +3045,31 @@ pub fn check_backlog_integrity(
 
         for backlog_node in &file.backlog {
             // --- 1. Dangling depends_on ---
-            for dep in &backlog_node.depends_on {
-                if let BlockedBy::Block(BlockDep { repo, id, .. }) = dep {
-                    let dep_key = format!("{repo}:{id}");
-                    if !node_set.contains(dep_key.as_str()) {
-                        diags.push(Diagnostic::error(
-                            path,
-                            "E_STATE_DANGLING_BLOCKED_BY",
-                            format!(
-                                "backlog node '{}' depends_on references unknown block '{dep_key}'",
-                                backlog_node.slug
-                            ),
-                        ));
+            //
+            // HALF A: a `parked` node's OWN depends_on is a SNAPSHOT frozen by
+            // `plan_demote_block` at park time (`removed_block.depends_on.clone()`),
+            // not a live edge — validating it as live is a by-construction failure
+            // (park A whose depends_on names B, then park B: A's snapshot now names
+            // a block absent from every tracks[]). Skip check 1 entirely for a node
+            // whose own status is parked.
+            if backlog_node.status != crate::brain::block_create::BACKLOG_STATUS_PARKED {
+                for dep in &backlog_node.depends_on {
+                    if let BlockedBy::Block(BlockDep { repo, id, .. }) = dep {
+                        let dep_key = format!("{repo}:{id}");
+                        // HALF B: a live node's depends_on naming a PARKED block
+                        // resolves — it is not dangling.
+                        if !node_set.contains(dep_key.as_str())
+                            && !parked_keys.contains(dep_key.as_str())
+                        {
+                            diags.push(Diagnostic::error(
+                                path,
+                                "E_STATE_DANGLING_BLOCKED_BY",
+                                format!(
+                                    "backlog node '{}' depends_on references unknown block '{dep_key}'",
+                                    backlog_node.slug
+                                ),
+                            ));
+                        }
                     }
                 }
             }
@@ -3031,8 +3089,16 @@ pub fn check_backlog_integrity(
                         ));
                     }
                     Some(block_id) => {
-                        // Promoted and pointing at a block — verify the block exists anywhere in the graph.
-                        let block_exists = graph.nodes.iter().any(|n| n.id == *block_id);
+                        // Promoted and pointing at a block — verify the block exists
+                        // anywhere in the graph, OR is parked anywhere. Mirrors the
+                        // repo-agnostic bare-id lookup directly above it deliberately —
+                        // repo-qualifying this check is a separate behaviour change
+                        // this block does not make. The parked set is keyed
+                        // "repo:id", so match on the ":id" suffix.
+                        let block_exists = graph.nodes.iter().any(|n| n.id == *block_id)
+                            || parked_keys
+                                .iter()
+                                .any(|k| k.ends_with(&format!(":{block_id}")));
                         if !block_exists {
                             diags.push(Diagnostic::error(
                                 path,
@@ -9593,6 +9659,307 @@ mod tests {
         assert!(
             errs.is_empty(),
             "a parked node whose record pointer resolves should produce no errors, got: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // parked_block_keys (MV.ticket.demote-block-leaves-inbound-refs-dangling, Task 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parked_block_keys_selects_only_parked_nodes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parked = Backlog {
+            slug: "MV.9.PARKED".to_string(),
+            title: "Parked block".to_string(),
+            repo: "mev".to_string(),
+            kind: "block".to_string(),
+            status: crate::brain::block_create::BACKLOG_STATUS_PARKED.to_string(),
+            depends_on: vec![],
+            block: None,
+            notes: None,
+            ..Default::default()
+        };
+        let idea = Backlog {
+            slug: "add-thing".to_string(),
+            title: "Add thing".to_string(),
+            repo: "mev".to_string(),
+            kind: "feature".to_string(),
+            status: "idea".to_string(),
+            depends_on: vec![],
+            block: None,
+            notes: None,
+            ..Default::default()
+        };
+        let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![parked, idea]);
+        let keys = parked_block_keys(&[pair]);
+
+        assert_eq!(
+            keys,
+            std::collections::HashSet::from(["mev:MV.9.PARKED".to_string()]),
+            "only the parked node's key should be returned"
+        );
+    }
+
+    #[test]
+    fn parked_block_keys_same_slug_different_repo_are_distinct() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parked_a = Backlog {
+            slug: "SAME.ID".to_string(),
+            title: "Parked in alpha".to_string(),
+            repo: "alpha".to_string(),
+            kind: "block".to_string(),
+            status: crate::brain::block_create::BACKLOG_STATUS_PARKED.to_string(),
+            depends_on: vec![],
+            block: None,
+            notes: None,
+            ..Default::default()
+        };
+        let parked_b = Backlog {
+            slug: "SAME.ID".to_string(),
+            title: "Parked in beta".to_string(),
+            repo: "beta".to_string(),
+            kind: "block".to_string(),
+            status: crate::brain::block_create::BACKLOG_STATUS_PARKED.to_string(),
+            depends_on: vec![],
+            block: None,
+            notes: None,
+            ..Default::default()
+        };
+        let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![parked_a, parked_b]);
+        let keys = parked_block_keys(&[pair]);
+
+        assert_eq!(
+            keys,
+            std::collections::HashSet::from([
+                "alpha:SAME.ID".to_string(),
+                "beta:SAME.ID".to_string(),
+            ]),
+            "same slug in two different repos must produce two distinct keys"
+        );
+    }
+
+    #[test]
+    fn parked_block_keys_empty_backlog_returns_empty_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![]);
+        let keys = parked_block_keys(&[pair]);
+
+        assert!(
+            keys.is_empty(),
+            "a corpus with no backlog nodes at all must return an empty set, got: {keys:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // check_backlog_integrity learns `parked` (option (b), same ticket, Task 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn check_backlog_integrity_cluster_of_two_parked_blocks_is_clean() {
+        // HALF A, the by-construction cluster case: A and B are both parked,
+        // and A's snapshot depends_on names B — which, after B is parked, is
+        // absent from every tracks[]. This must not raise E_STATE_DANGLING_BLOCKED_BY.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parked_a = Backlog {
+            slug: "MV.9.A".to_string(),
+            title: "Parked A".to_string(),
+            repo: "mev".to_string(),
+            kind: "block".to_string(),
+            status: crate::brain::block_create::BACKLOG_STATUS_PARKED.to_string(),
+            depends_on: vec![BlockedBy::Block(BlockDep {
+                repo: "mev".to_string(),
+                id: "MV.9.B".to_string(),
+                what: None,
+            })],
+            block: None,
+            notes: None,
+            ..Default::default()
+        };
+        let parked_b = Backlog {
+            slug: "MV.9.B".to_string(),
+            title: "Parked B".to_string(),
+            repo: "mev".to_string(),
+            kind: "block".to_string(),
+            status: crate::brain::block_create::BACKLOG_STATUS_PARKED.to_string(),
+            depends_on: vec![],
+            block: None,
+            notes: None,
+            ..Default::default()
+        };
+        let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![parked_a, parked_b]);
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_backlog_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+            .collect();
+        assert!(
+            errs.is_empty(),
+            "a parked node's own snapshot depends_on naming another parked block must not \
+             raise E_STATE_DANGLING_BLOCKED_BY, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_backlog_integrity_live_node_depends_on_parked_block_is_clean() {
+        // HALF B: a live (non-parked) backlog node whose depends_on names a
+        // parked block resolves.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parked = Backlog {
+            slug: "MV.9.PARKED".to_string(),
+            title: "Parked block".to_string(),
+            repo: "mev".to_string(),
+            kind: "block".to_string(),
+            status: crate::brain::block_create::BACKLOG_STATUS_PARKED.to_string(),
+            depends_on: vec![],
+            block: None,
+            notes: None,
+            ..Default::default()
+        };
+        let live = Backlog {
+            slug: "add-thing".to_string(),
+            title: "Add thing".to_string(),
+            repo: "mev".to_string(),
+            kind: "feature".to_string(),
+            status: "idea".to_string(),
+            depends_on: vec![BlockedBy::Block(BlockDep {
+                repo: "mev".to_string(),
+                id: "MV.9.PARKED".to_string(),
+                what: None,
+            })],
+            block: None,
+            notes: None,
+            ..Default::default()
+        };
+        let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![parked, live]);
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_backlog_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+            .collect();
+        assert!(
+            errs.is_empty(),
+            "a live node's depends_on naming a parked block must not raise \
+             E_STATE_DANGLING_BLOCKED_BY, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_backlog_integrity_promoted_pointer_to_parked_block_is_clean() {
+        // Check 2: a `promoted` node's `block` pointer names a parked block.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parked = Backlog {
+            slug: "MV.9.PARKED".to_string(),
+            title: "Parked block".to_string(),
+            repo: "mev".to_string(),
+            kind: "block".to_string(),
+            status: crate::brain::block_create::BACKLOG_STATUS_PARKED.to_string(),
+            depends_on: vec![],
+            block: None,
+            notes: None,
+            ..Default::default()
+        };
+        let promoted = Backlog {
+            slug: "add-thing".to_string(),
+            title: "Add thing".to_string(),
+            repo: "mev".to_string(),
+            kind: "feature".to_string(),
+            status: "promoted".to_string(),
+            depends_on: vec![],
+            block: Some("MV.9.PARKED".to_string()),
+            notes: None,
+            ..Default::default()
+        };
+        let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![parked, promoted]);
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_backlog_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_PROMOTION")
+            .collect();
+        assert!(
+            errs.is_empty(),
+            "a promoted node's block pointer naming a parked block must not raise \
+             E_STATE_DANGLING_PROMOTION, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_backlog_integrity_negative_control_dangling_depends_on_still_errors() {
+        // NEGATIVE CONTROL (acceptance criterion 6): a live node's depends_on
+        // naming a block that is neither in tracks[] nor parked must still
+        // raise exactly one E_STATE_DANGLING_BLOCKED_BY.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = Backlog {
+            slug: "add-thing".to_string(),
+            title: "Add thing".to_string(),
+            repo: "mev".to_string(),
+            kind: "feature".to_string(),
+            status: "idea".to_string(),
+            depends_on: vec![BlockedBy::Block(BlockDep {
+                repo: "mev".to_string(),
+                id: "MV.3.GHOST".to_string(),
+                what: None,
+            })],
+            block: None,
+            notes: None,
+            ..Default::default()
+        };
+        let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![live]);
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_backlog_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "a genuinely dangling depends_on (neither registered nor parked) must still \
+             raise exactly one E_STATE_DANGLING_BLOCKED_BY, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_backlog_integrity_negative_control_dangling_promotion_still_errors() {
+        // NEGATIVE CONTROL for check 2: a promoted pointer to a block that is
+        // neither registered nor parked must still raise E_STATE_DANGLING_PROMOTION.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let promoted = Backlog {
+            slug: "add-thing".to_string(),
+            title: "Add thing".to_string(),
+            repo: "mev".to_string(),
+            kind: "feature".to_string(),
+            status: "promoted".to_string(),
+            depends_on: vec![],
+            block: Some("MV.3.GHOST".to_string()),
+            notes: None,
+            ..Default::default()
+        };
+        let pair = make_brain_with_backlog(dir.path(), "hq", vec![], vec![promoted]);
+        let files = vec![pair];
+        let graph = build_state_graph(&files);
+        let diags = check_backlog_integrity(&files, &graph);
+
+        let errs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_PROMOTION")
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "a genuinely dangling promotion pointer (neither registered nor parked) must \
+             still raise exactly one E_STATE_DANGLING_PROMOTION, got: {diags:?}"
         );
     }
 
