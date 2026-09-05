@@ -133,9 +133,15 @@ while `emit-block-graph --repo` silently does not.
 > module. Only the task(s) explicitly owning full-suite validation for a spec should run the
 > full `cargo test` / `cargo build --release` gates.
 >
-> **`sccache` is wired in via `.cargo/config.toml`** (`rustc-wrapper = "sccache"`) — caches
-> compiled object code across builds so repeated compiles within an SDLC spec reuse work instead
-> of recompiling from scratch. Requires `sccache` on PATH (`brew install sccache`).
+> **`sccache` is NOT used in this repo (D57).** It was measured doing nothing: `sccache
+> --show-stats` reported 1 compile request, 0 executed (rejected as non-cacheable), 0 cache hits,
+> 0 misses. sccache refuses to cache incremental compilations, and cargo passes
+> `-C incremental=...` for the dev/test profile — so every rustc call fell through to plain rustc
+> plus a wrapper hop doing nothing. Incremental compilation is what makes this repo's
+> edit-recompile loop fast; the real cost centre is LINKING, not compilation. `.cargo/config.toml`
+> is gitignored (not tracked) for this reason. The one permitted route back is cold CI builds
+> only: set `RUSTC_WRAPPER` together with `CARGO_INCREMENTAL=0` as environment variables — never
+> in a committed config file.
 >
 > The SDLC pipeline reads its validation suite from `planning/harness.json` (not from this
 > block). Keep the `<test>`/`<build>` commands here in sync with that file's
