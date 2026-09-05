@@ -7041,8 +7041,8 @@ mod attention_board {
         plan_attention_board, render_attention_section, render_attention_section_with_distilled,
     };
     use mev::brain::state::{
-        Backlog, BacklogOrigin, Carryover, CarryoverScope, StateFile, StateSource,
-        build_state_graph, carryover_kind_from_str,
+        Backlog, BacklogOrigin, BlockedBy, Carryover, CarryoverScope, ExternalDep, StateFile,
+        StateSource, build_state_graph, carryover_kind_from_str,
     };
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -7887,6 +7887,261 @@ _none_\n\n\
             "Attention board markdown must be byte-identical to the pre-refactor \
              (task 1) rendering — the row/render split must not move a single \
              character of rendered output:\n--- actual ---\n{out}\n--- expected ---\n{expected}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // MV.ticket.attention-rows-render-carryover-summary — task 1: a
+    // carryover triage row prefers the authored `summary` verbatim over
+    // the snippeted `text`, in all four triage lanes, and never
+    // re-snippets a present summary.
+    // -----------------------------------------------------------------
+
+    /// Same as `carry`, but with `summary` set and `blocks[]` left empty —
+    /// callers that need BLOCKING set `blocks` themselves afterward.
+    fn carry_with_summary(
+        slug: &str,
+        kind: &str,
+        created: &str,
+        repo: &str,
+        summary: &str,
+    ) -> Carryover {
+        let mut c = carry(slug, kind, created, repo);
+        c.summary = Some(summary.to_string());
+        c
+    }
+
+    #[test]
+    fn summary_renders_verbatim_in_all_four_triage_lanes() {
+        let today = day("2026-07-15");
+        let cfg = AttentionThresholds::default();
+
+        // BLOCKING: an unmet `blocks[]` edge (External is unmet regardless
+        // of block_status) plus a summary.
+        let mut blocking = carry_with_summary(
+            "blocked-entry",
+            "deferred",
+            "2026-07-14",
+            "mev",
+            "Blocking summary label",
+        );
+        blocking.blocks = vec![BlockedBy::External(ExternalDep {
+            what: "fleet-wide freeze".to_string(),
+        })];
+
+        // HOT: priority 0/1 routes here regardless of staleness.
+        let mut hot = carry_with_summary(
+            "hot-entry",
+            "deferred",
+            "2026-07-14",
+            "mev",
+            "Hot summary label",
+        );
+        hot.priority = Some(0);
+
+        // AGING: stale (old, no priority, no blocks).
+        let aging = carry_with_summary(
+            "aging-entry",
+            "deferred",
+            "2026-07-01",
+            "mev",
+            "Aging summary label",
+        );
+
+        // STANDING: fresh, no priority, no blocks.
+        let standing = carry_with_summary(
+            "standing-entry",
+            "deferred",
+            "2026-07-14",
+            "mev",
+            "Standing summary label",
+        );
+
+        let carryover = vec![
+            ("mev".to_string(), &blocking),
+            ("mev".to_string(), &hot),
+            ("mev".to_string(), &aging),
+            ("mev".to_string(), &standing),
+        ];
+
+        let (block_priorities, block_status) = no_blocks();
+        let out = render_attention_section(
+            &carryover,
+            &[],
+            today,
+            &cfg,
+            &block_priorities,
+            &block_status,
+        );
+
+        let blocking_lane = out
+            .split("## BLOCKING")
+            .nth(1)
+            .expect("BLOCKING lane present")
+            .split("## HOT")
+            .next()
+            .unwrap();
+        assert!(
+            blocking_lane.contains("Blocking summary label"),
+            "BLOCKING row must render the authored summary verbatim: {blocking_lane}"
+        );
+
+        let hot_lane = out
+            .split("## HOT")
+            .nth(1)
+            .expect("HOT lane present")
+            .split("## AGING")
+            .next()
+            .unwrap();
+        assert!(
+            hot_lane.contains("Hot summary label"),
+            "HOT row must render the authored summary verbatim: {hot_lane}"
+        );
+
+        let aging_lane = out
+            .split("## AGING")
+            .nth(1)
+            .expect("AGING lane present")
+            .split("## STANDING")
+            .next()
+            .unwrap();
+        assert!(
+            aging_lane.contains("Aging summary label"),
+            "AGING row must render the authored summary verbatim: {aging_lane}"
+        );
+
+        let standing_lane = out
+            .split("## STANDING")
+            .nth(1)
+            .expect("STANDING lane present");
+        assert!(
+            standing_lane.contains("Standing summary label"),
+            "STANDING row must render the authored summary verbatim: {standing_lane}"
+        );
+    }
+
+    #[test]
+    fn summary_with_em_dash_renders_unmangled() {
+        let today = day("2026-07-15");
+        let cfg = AttentionThresholds::default();
+        let entry = carry_with_summary(
+            "em-dash-entry",
+            "deferred",
+            "2026-07-14",
+            "mev",
+            "Left half — right half",
+        );
+        let carryover = vec![("mev".to_string(), &entry)];
+        let (block_priorities, block_status) = no_blocks();
+        let out = render_attention_section(
+            &carryover,
+            &[],
+            today,
+            &cfg,
+            &block_priorities,
+            &block_status,
+        );
+        assert!(
+            out.contains("Left half — right half"),
+            "an em-dash summary must render unmangled, not reflowed by \
+             attention_snippet's split_whitespace/join: {out}"
+        );
+    }
+
+    #[test]
+    fn summary_of_exactly_120_chars_renders_in_full() {
+        let today = day("2026-07-15");
+        let cfg = AttentionThresholds::default();
+        let summary_120 = "a".repeat(120);
+        assert_eq!(summary_120.chars().count(), 120);
+        let entry = carry_with_summary(
+            "boundary-120",
+            "deferred",
+            "2026-07-14",
+            "mev",
+            &summary_120,
+        );
+        let carryover = vec![("mev".to_string(), &entry)];
+        let (block_priorities, block_status) = no_blocks();
+        let out = render_attention_section(
+            &carryover,
+            &[],
+            today,
+            &cfg,
+            &block_priorities,
+            &block_status,
+        );
+        assert!(
+            out.contains(&summary_120),
+            "a summary of exactly 120 chars must render in full: {out}"
+        );
+    }
+
+    #[test]
+    fn summary_of_200_chars_renders_in_full_with_no_ellipsis() {
+        let today = day("2026-07-15");
+        let cfg = AttentionThresholds::default();
+        let summary_200 = "b".repeat(200);
+        let entry = carry_with_summary(
+            "long-summary",
+            "deferred",
+            "2026-07-14",
+            "mev",
+            &summary_200,
+        );
+        let carryover = vec![("mev".to_string(), &entry)];
+        let (block_priorities, block_status) = no_blocks();
+        let out = render_attention_section(
+            &carryover,
+            &[],
+            today,
+            &cfg,
+            &block_priorities,
+            &block_status,
+        );
+        assert!(
+            out.contains(&summary_200),
+            "a 200-char summary must render in full, not truncated: {out}"
+        );
+        assert!(
+            !out.contains('…'),
+            "a present summary must never be re-snippeted with an ellipsis: {out}"
+        );
+    }
+
+    #[test]
+    fn absent_summary_renders_byte_identical_to_todays_clip() {
+        let today = day("2026-07-15");
+        let cfg = AttentionThresholds::default();
+        // No `summary` set — must fall back to attention_snippet(&text, 80)
+        // exactly as it did before this change.
+        let entry = carry("no-summary-entry", "deferred", "2026-07-14", "mev");
+        let carryover = vec![("mev".to_string(), &entry)];
+        let (block_priorities, block_status) = no_blocks();
+        let out = render_attention_section(
+            &carryover,
+            &[],
+            today,
+            &cfg,
+            &block_priorities,
+            &block_status,
+        );
+        // `entry.text` is `"text for no-summary-entry"` (from the `carry`
+        // helper), well under 80 chars and already a single line, so
+        // `attention_snippet(&text, 80)` is a no-op identity clip — this is
+        // the exact pre-change string, asserted literally rather than by
+        // recomputing the clip (which is `pub(crate)`, unreachable from
+        // this integration-test crate).
+        let expected_clip = "text for no-summary-entry";
+        assert_eq!(entry.text, expected_clip);
+        let standing_lane = out
+            .split("## STANDING")
+            .nth(1)
+            .expect("STANDING lane present");
+        assert!(
+            standing_lane.contains(&format!("deferred no-summary-entry — {expected_clip}")),
+            "an entry with no summary must render the exact pre-change clipped \
+             string, byte-for-byte: {standing_lane}"
         );
     }
 }

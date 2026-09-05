@@ -1585,10 +1585,12 @@ pub(crate) struct AttentionRow {
     pub(crate) age: Option<i64>,
     pub(crate) kind: String,
     pub(crate) slug: String,
-    /// The free-text portion of the row: a carryover's snippeted `text`, a
-    /// backlog node's `title`, a capture's `"{title} — notes: {notes}"`, or
-    /// a distilled entry's snippeted claim — already truncated at
-    /// construction time by [`attention_snippet`].
+    /// The free-text portion of the row: a carryover's authored `summary`
+    /// when present (rendered verbatim, never re-snippeted), otherwise its
+    /// snippeted `text`; a backlog node's `title`; a capture's `"{title} —
+    /// notes: {notes}"`; or a distilled entry's snippeted claim. Every case
+    /// but the present-summary one is already truncated at construction
+    /// time by [`attention_snippet`].
     pub(crate) title_or_text: String,
     /// Carryover-only: the authored `priority`, absent for every other lane.
     pub(crate) priority: Option<u8>,
@@ -1837,8 +1839,18 @@ pub(crate) fn collect_attention_rows(
         .map(|r| {
             let key = format!("{}:{}", r.repo, r.slug);
             let source = item_by_key.get(&key).copied();
+            // Prefer the authored `summary` verbatim over the snippeted `text`.
+            // Never re-snippet a present summary: it exists specifically to
+            // already be short, so truncating it would cut an authored label
+            // at a boundary its author did not choose. The over-long case is
+            // caught at write time instead (W_STATE_CARRYOVER_SUMMARY_UNRENDERABLE),
+            // where it is fixable.
             let title_or_text = source
-                .map(|item| attention_snippet(&item.text, 80))
+                .map(|item| {
+                    item.summary
+                        .clone()
+                        .unwrap_or_else(|| attention_snippet(&item.text, 80))
+                })
                 .unwrap_or_default();
             let clears_when = source
                 .and_then(|item| item.clears_when.as_ref())
