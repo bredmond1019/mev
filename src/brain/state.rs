@@ -6192,7 +6192,9 @@ mod tests {
             diags
                 .iter()
                 .all(|d| d.locator != "W_STATE_CARRYOVER_UNKNOWN_NEEDS"),
-            "absent needs must produce no diagnostic at all: {diags:?}"
+            "absent needs must not produce W_STATE_CARRYOVER_UNKNOWN_NEEDS (an unrecognised VALUE) \
+             -- it may still correctly produce W_CARRYOVER_NO_NEEDS, asserted separately by \
+             entry_without_needs_warns: {diags:?}"
         );
     }
 
