@@ -2671,6 +2671,12 @@ pub fn check_state_graph(
     // Set of all registered "repo:id" keys (for dangling checks).
     let node_set: HashSet<&str> = node_counts.keys().copied().collect();
 
+    // Operator option-(b) decision (MV.ticket.demote-block-leaves-inbound-refs-dangling):
+    // a `parked` backlog[] entry is a legitimate resolution target for a block
+    // reference, so an edge naming a parked block is not dangling. Computed once,
+    // reused by all three call sites below (BlockedBy, CrossRepo from, CrossRepo to).
+    let parked_keys = parked_block_keys(files);
+
     // --- 1. Duplicate block IDs ---
     let mut duplicate_reported: HashSet<&str> = HashSet::new();
     for node in &graph.nodes {
@@ -2739,7 +2745,9 @@ pub fn check_state_graph(
                     // honest claim about a repo whose tracks[] were never
                     // read — see the E_STATE_MALFORMED_JSON diagnostic on
                     // that repo's own file instead.
-                } else if !node_set.contains(edge.to_ref.as_str()) {
+                } else if !node_set.contains(edge.to_ref.as_str())
+                    && !parked_keys.contains(edge.to_ref.as_str())
+                {
                     diags.push(Diagnostic::error(
                         path,
                         "E_STATE_DANGLING_BLOCKED_BY",
@@ -2763,7 +2771,9 @@ pub fn check_state_graph(
                     ));
                 } else if !loaded_repos.contains(from_repo) {
                     // Known-but-unavailable — see the BlockedBy arm above.
-                } else if !node_set.contains(edge.from.as_str()) {
+                } else if !node_set.contains(edge.from.as_str())
+                    && !parked_keys.contains(edge.from.as_str())
+                {
                     diags.push(Diagnostic::error(
                         path,
                         "E_STATE_DANGLING_CROSS_REPO",
@@ -2786,7 +2796,9 @@ pub fn check_state_graph(
                     ));
                 } else if !loaded_repos.contains(to_repo) {
                     // Known-but-unavailable — see the BlockedBy arm above.
-                } else if !node_set.contains(edge.to_ref.as_str()) {
+                } else if !node_set.contains(edge.to_ref.as_str())
+                    && !parked_keys.contains(edge.to_ref.as_str())
+                {
                     diags.push(Diagnostic::error(
                         path,
                         "E_STATE_DANGLING_CROSS_REPO",
@@ -9960,6 +9972,212 @@ mod tests {
             1,
             "a genuinely dangling promotion pointer (neither registered nor parked) must \
              still raise exactly one E_STATE_DANGLING_PROMOTION, got: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // check_state_graph learns `parked` (option (b),
+    // MV.ticket.demote-block-leaves-inbound-refs-dangling, Task 2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn check_state_graph_blocked_by_onto_parked_block_is_clean() {
+        // A live block's depends_on onto a block parked in another repo must
+        // raise no E_STATE_DANGLING_BLOCKED_BY. Beta must be a genuinely
+        // LOADED repo (present in `files`, not merely named) or the edge
+        // resolves as "known but unavailable" / "unknown repo" instead of
+        // exercising the dangling-target arm this test targets.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live_block = TrackBlock {
+            id: "AL.1.A".to_string(),
+            title: "Live block".to_string(),
+            depends_on: vec![BlockedBy::Block(BlockDep {
+                repo: "beta".to_string(),
+                id: "BE.9.PARKED".to_string(),
+                what: None,
+            })],
+            ..Default::default()
+        };
+        let pair_alpha = make_brain_with_backlog(dir.path(), "alpha", vec![live_block], vec![]);
+        let parked = Backlog {
+            slug: "BE.9.PARKED".to_string(),
+            title: "Parked block".to_string(),
+            repo: "beta".to_string(),
+            kind: "block".to_string(),
+            status: crate::brain::block_create::BACKLOG_STATUS_PARKED.to_string(),
+            depends_on: vec![],
+            block: None,
+            notes: None,
+            ..Default::default()
+        };
+        let pair_beta = make_repo_with_backlog(dir.path(), "beta", vec![parked]);
+        let files = vec![pair_alpha, pair_beta];
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files, &test_discovered(&files));
+
+        let dangling: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+            .collect();
+        assert!(
+            dangling.is_empty(),
+            "a depends_on edge onto a parked block must not be dangling: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_state_graph_cross_repo_from_endpoint_parked_is_clean() {
+        // A cross_repo[] edge whose `from` endpoint is a parked block must
+        // raise no E_STATE_DANGLING_CROSS_REPO. Alpha must be a genuinely
+        // LOADED repo, same reasoning as the BlockedBy test above.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parked = Backlog {
+            slug: "AL.9.PARKED".to_string(),
+            title: "Parked from-endpoint".to_string(),
+            repo: "alpha".to_string(),
+            kind: "block".to_string(),
+            status: crate::brain::block_create::BACKLOG_STATUS_PARKED.to_string(),
+            depends_on: vec![],
+            block: None,
+            notes: None,
+            ..Default::default()
+        };
+        let pair_alpha = make_repo_with_backlog(dir.path(), "alpha", vec![parked]);
+        let pair_b = leaf_pair(dir.path(), "beta", "BE.1.A");
+        let brain_json = r#"{
+  "repo": "core",
+  "kind": "brain",
+  "updated": "2026-09-05",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "repos": [{ "repo": "alpha", "now": [], "next": [], "blocked": [] }, { "repo": "beta", "now": [], "next": [], "blocked": [] }],
+  "cross_repo": [
+    {
+      "from": { "repo": "alpha", "id": "AL.9.PARKED" },
+      "to": { "repo": "beta", "id": "BE.1.A" }
+    }
+  ]
+}"#;
+        let pair_brain = make_pair(dir.path(), "brain-state.json", "brain", brain_json);
+        let files = vec![pair_alpha, pair_b, pair_brain];
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files, &test_discovered(&files));
+
+        let dangling: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_CROSS_REPO")
+            .collect();
+        assert!(
+            dangling.is_empty(),
+            "a cross_repo edge whose 'from' endpoint is parked must not be dangling: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_state_graph_cross_repo_to_endpoint_parked_is_clean() {
+        // Same as above but the parked block is the `to` endpoint — a
+        // distinct code path from `from`, asserted separately.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parked = Backlog {
+            slug: "BE.9.PARKED".to_string(),
+            title: "Parked to-endpoint".to_string(),
+            repo: "beta".to_string(),
+            kind: "block".to_string(),
+            status: crate::brain::block_create::BACKLOG_STATUS_PARKED.to_string(),
+            depends_on: vec![],
+            block: None,
+            notes: None,
+            ..Default::default()
+        };
+        let pair_beta = make_repo_with_backlog(dir.path(), "beta", vec![parked]);
+        let pair_a = leaf_pair(dir.path(), "alpha", "AL.1.A");
+        let brain_json = r#"{
+  "repo": "core",
+  "kind": "brain",
+  "updated": "2026-09-05",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "repos": [{ "repo": "alpha", "now": [], "next": [], "blocked": [] }, { "repo": "beta", "now": [], "next": [], "blocked": [] }],
+  "cross_repo": [
+    {
+      "from": { "repo": "alpha", "id": "AL.1.A" },
+      "to": { "repo": "beta", "id": "BE.9.PARKED" }
+    }
+  ]
+}"#;
+        let pair_brain = make_pair(dir.path(), "brain-state.json", "brain", brain_json);
+        let files = vec![pair_a, pair_beta, pair_brain];
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files, &test_discovered(&files));
+
+        let dangling: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_CROSS_REPO")
+            .collect();
+        assert!(
+            dangling.is_empty(),
+            "a cross_repo edge whose 'to' endpoint is parked must not be dangling: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn check_state_graph_negative_control_neither_registered_nor_parked_still_errors() {
+        // NEGATIVE CONTROL: an edge naming a block in a known, loaded repo
+        // that is neither in tracks[] nor parked must still raise the same
+        // errors it raises today, for both BlockedBy and CrossRepo.
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let live_block = TrackBlock {
+            id: "AL.1.A".to_string(),
+            title: "Live block".to_string(),
+            depends_on: vec![BlockedBy::Block(BlockDep {
+                repo: "beta".to_string(),
+                id: "BE.1.GHOST".to_string(),
+                what: None,
+            })],
+            ..Default::default()
+        };
+        let pair_alpha = make_brain_with_backlog(dir.path(), "alpha", vec![live_block], vec![]);
+        let pair_beta = leaf_pair(dir.path(), "beta", "BE.1.A");
+
+        let brain_json = r#"{
+  "repo": "core",
+  "kind": "brain",
+  "updated": "2026-09-05",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "repos": [{ "repo": "beta", "now": [], "next": [], "blocked": [] }],
+  "cross_repo": [
+    {
+      "from": { "repo": "beta", "id": "BE.1.A" },
+      "to": { "repo": "beta", "id": "BE.1.GHOST2" }
+    }
+  ],
+  "backlog": []
+}"#;
+        let pair_brain = make_pair(dir.path(), "brain-state.json", "brain", brain_json);
+
+        let files = vec![pair_alpha, pair_beta, pair_brain];
+        let graph = build_state_graph(&files);
+        let diags = check_state_graph(&graph, &files, &test_discovered(&files));
+
+        let dangling_blocked_by: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_BLOCKED_BY")
+            .collect();
+        assert_eq!(
+            dangling_blocked_by.len(),
+            1,
+            "a genuinely dangling blocked_by (neither registered nor parked) must still \
+             raise exactly one E_STATE_DANGLING_BLOCKED_BY, got: {diags:?}"
+        );
+
+        let dangling_cross_repo: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "E_STATE_DANGLING_CROSS_REPO")
+            .collect();
+        assert_eq!(
+            dangling_cross_repo.len(),
+            1,
+            "a genuinely dangling cross_repo target (neither registered nor parked) must \
+             still raise exactly one E_STATE_DANGLING_CROSS_REPO, got: {diags:?}"
         );
     }
 
