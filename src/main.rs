@@ -2850,6 +2850,9 @@ fn print_carryover_report(
                             "command-timed-out (rerun with a higher --exec-timeout, or the command genuinely never finishes)"
                         }
                         Some(mev::NotEvaluableReason::CommandSpawnFailed) => "command-spawn-failed",
+                        Some(mev::NotEvaluableReason::CommandIndeterminate) => {
+                            "command-indeterminate (exited 126/127 — the named program could not be run; this is not evidence about the predicate's subject)"
+                        }
                         Some(mev::NotEvaluableReason::FileUnreadable) => "file-unreadable",
                         Some(mev::NotEvaluableReason::PatternNotLiteral) => {
                             "pattern-not-literal (authored as a regex; only literal substring matching is supported)"

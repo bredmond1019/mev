@@ -141,6 +141,17 @@ pub enum NotEvaluableReason {
     /// `PATH`), never evidence about the predicate's subject — never
     /// `Cleared`.
     CommandSpawnFailed,
+    /// A `CommandExitsZero` predicate's command exited 127 ("command not
+    /// found") or 126 ("found but not executable"). Distinct from
+    /// [`Self::CommandSpawnFailed`] — there, `sh` itself never started;
+    /// here `sh -c` started fine and it is the *named program inside the
+    /// command string* that could not run. Also distinct from a genuine
+    /// non-zero exit (which lands `Actionable`): a command that never
+    /// actually executed tells us nothing about the predicate's subject,
+    /// only that the predicate itself is broken (a typo'd binary, a
+    /// brain-root-relative path run from the wrong cwd, …) — never
+    /// `Cleared`, and never `Actionable` either.
+    CommandIndeterminate,
     /// A `FileContains` predicate's target could not be read to completion —
     /// missing, resolved ambiguously under the two-root strategy, larger
     /// than [`FILE_CONTAINS_MAX_BYTES`], or not valid UTF-8. Evidence about
@@ -1046,6 +1057,17 @@ pub enum CommandOutcome {
     /// killed and reaped by the in-process watchdog. Unknown, not failed —
     /// see [`NotEvaluableReason::CommandTimedOut`].
     TimedOut,
+    /// The child ran (the shell itself spawned fine — this is NOT
+    /// [`Self::SpawnFailed`]) but exited with status 127 (`sh -c` shorthand
+    /// for "command not found") or 126 ("found but not executable"). `sh -c`
+    /// reports a missing program this way rather than failing to spawn at
+    /// all, so this never reaches the `SpawnFailed` arm even though it means
+    /// the same thing: the predicate could not actually be run. Evidence
+    /// about the environment the sweep ran in, never evidence about the
+    /// predicate's subject — never `Cleared`, and never folded into
+    /// [`Self::ExitNonZero`], which is reserved for a command that ran and
+    /// gave a genuine answer. See [`NotEvaluableReason::CommandIndeterminate`].
+    Indeterminate,
 }
 
 /// Run a `command_exits_zero` predicate's command: spawns `sh -c <command>`
@@ -1082,7 +1104,17 @@ fn command_exit_zero_outcome(
                 return if status.success() {
                     CommandOutcome::ExitZero
                 } else {
-                    CommandOutcome::ExitNonZero
+                    match status.code() {
+                        // `sh -c` reports "command not found" as 127 and
+                        // "found but not executable" as 126 — the shell
+                        // spawned fine, so these never reach the
+                        // `SpawnFailed` arm above, but they are exactly the
+                        // same class of evidence: the predicate never
+                        // actually ran, so it can never be a genuine
+                        // `ExitNonZero`.
+                        Some(126) | Some(127) => CommandOutcome::Indeterminate,
+                        _ => CommandOutcome::ExitNonZero,
+                    }
                 };
             }
             Ok(None) => {
@@ -1460,6 +1492,9 @@ pub fn evaluate_carryover_with_dedup_and_widening(
                             }
                             CommandOutcome::SpawnFailed => {
                                 forced_reason = Some(NotEvaluableReason::CommandSpawnFailed);
+                            }
+                            CommandOutcome::Indeterminate => {
+                                forced_reason = Some(NotEvaluableReason::CommandIndeterminate);
                             }
                         }
                     } else {
@@ -7809,7 +7844,16 @@ mod tests {
     }
 
     #[test]
-    fn command_exits_zero_with_opt_in_and_nonexistent_binary_is_actionable_never_panics() {
+    fn command_exits_zero_with_opt_in_and_nonexistent_binary_is_not_evaluable_never_panics() {
+        // UPDATED by MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated
+        // (task 2): `sh -c <command>` reports a missing program as exit 127
+        // (command not found) rather than a spawn failure — `sh` itself
+        // spawns fine. Before this fix that 127 fell through to the generic
+        // non-zero branch and read as a genuine, observed failure
+        // (`Actionable`), indistinguishable from a live finding. It must now
+        // land `NotEvaluable` with `CommandIndeterminate`, distinct from both
+        // `CommandSpawnFailed` (sh itself never started) and a real
+        // non-zero exit.
         let files = vec![(
             src("mev"),
             state_file(
@@ -7837,8 +7881,16 @@ mod tests {
             true,
             COMMAND_EXEC_TIMEOUT,
         );
-        assert_eq!(report.actionable, 1);
-        assert!(!matches!(report.entries[0].lane, CarryoverLane::Cleared));
+        assert_eq!(report.actionable, 0);
+        assert!(matches!(
+            report.entries[0].lane,
+            CarryoverLane::NotEvaluable
+        ));
+        assert_eq!(
+            report.entries[0].reason,
+            Some(NotEvaluableReason::CommandIndeterminate)
+        );
+        assert!(report.entries[0].refs.is_empty());
     }
 
     #[test]
