@@ -92,6 +92,7 @@ mod sibling_rules;
 mod smoke;
 mod state_history;
 mod toolchain_freshness_write_banner;
+mod toolchain_path_dependencies;
 // Tests `mev`'s own `validate` subcommand CLI wiring (`--blog`/`--lint` flags, JSON envelope
 // label, exit codes) by driving the built binary — that subcommand exists only behind the
 // `learn-ai` feature (see src/main.rs), so this suite only compiles/runs under it. It stays a
