@@ -85,6 +85,11 @@
 //!   cannot function as a one-line Attention row label: it is multiline, or exceeds
 //!   120 characters (measured in `.chars().count()`, not bytes). Never fires on an
 //!   absent `summary` — the field is optional by construction. Warning severity only.
+//! - `W_STATE_FLEET_CORRECTNESS_UNKNOWN` — a track block or carryover entry's D80
+//!   `fleet_correctness` grade is out-of-vocabulary (∉ {F0,F1,F2,F3}). The field is
+//!   `#[serde(untagged)]` with an `Unknown(String)` fallback, so the value still
+//!   round-trips verbatim and the file still parses; absence produces no diagnostic
+//!   at all. Warning severity only — never fails the state pass.
 //! - `W_BACKLOG_ALREADY_SATISFIED` — a `backlog[]` `clears_when` predicate
 //!   evaluates satisfied (the `mev backlog` sweep's `Cleared` lane) while the
 //!   idea is still present and un-disposed. Mirrors
@@ -458,6 +463,11 @@ pub fn carryover_kind_from_str(kind: &str) -> okf_core::CarryoverKind {
 /// 2026-09-02 — and is deliberately not part of this list: an absent `needs` produces no
 /// diagnostic at all (see `check_schema`'s carryover pass).
 pub const VALID_CARRYOVER_NEEDS: &[&str] = &["code", "docs", "state", "operator", "dedupe"];
+
+/// D80's fleet-correctness grade vocabulary, for the out-of-vocabulary warning message.
+/// Absent (`None`) is normal — a block or carryover entry with no grade produces no
+/// diagnostic at all, mirroring `VALID_CARRYOVER_NEEDS`'s own convention.
+pub const VALID_FLEET_CORRECTNESS: &[&str] = &["F0", "F1", "F2", "F3"];
 
 /// The plain string form of a [`okf_core::CarryoverNeeds`], mirroring [`carryover_kind_str`]
 /// exactly: known values render in their `snake_case` name, an unrecognized value round trips
@@ -1670,6 +1680,31 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                     BlockedBy::External(_) => {}
                 }
             }
+
+            // check 7b (MV.ticket.blocks-query-filters-and-ranks-on-fleet-correctness task 1):
+            // D80's `fleet_correctness` is `#[serde(untagged)]` with `Unknown(String)` as its
+            // fallback variant, so an out-of-vocabulary grade (e.g. a hand-typed "F4") already
+            // round-trips rather than failing the whole file (`E_STATE_MALFORMED_JSON`) — this
+            // is the named warning `FleetCorrectness::is_known()`'s own doc comment assigns to
+            // mev. Absence produces no diagnostic at all, mirroring the `needs` check above:
+            // an ungraded block is the overwhelming default, not a finding.
+            if let Some(grade) = &block.fleet_correctness
+                && !grade.is_known()
+                && let okf_core::FleetCorrectness::Unknown(value) = grade
+            {
+                diags.push(Diagnostic::warning(
+                    path,
+                    "W_STATE_FLEET_CORRECTNESS_UNKNOWN",
+                    format!(
+                        "track block '{}' in repo '{}' has unrecognized fleet_correctness value \
+                         '{}'; expected one of: {}",
+                        block.id,
+                        src.repo_slug,
+                        value,
+                        VALID_FLEET_CORRECTNESS.join(", ")
+                    ),
+                ));
+            }
         }
     }
 
@@ -1749,6 +1784,30 @@ pub fn check_schema(src: &StateSource, file: &StateFile) -> Vec<Diagnostic> {
                     item.slug,
                     value,
                     VALID_CARRYOVER_NEEDS.join(", ")
+                ),
+            ));
+        }
+
+        // `fleet_correctness` (D80, MV.ticket.blocks-query-filters-and-ranks-on-fleet-correctness
+        // task 1): mirrors the `needs` check immediately above exactly. Absent produces no
+        // diagnostic — an ungraded carryover entry is the overwhelming default, not a finding.
+        // An out-of-vocabulary grade warns rather than errors: the untagged-enum contract means
+        // the file still parses and the value still round-trips verbatim, so a hand-typed typo
+        // must never red-gate every lane over one character.
+        if let Some(grade) = &item.fleet_correctness
+            && !grade.is_known()
+            && let okf_core::FleetCorrectness::Unknown(value) = grade
+        {
+            diags.push(Diagnostic::warning(
+                path,
+                "W_STATE_FLEET_CORRECTNESS_UNKNOWN",
+                format!(
+                    "carryover item '{}' in repo '{}' has unrecognized fleet_correctness value \
+                     '{}'; expected one of: {}",
+                    item.slug,
+                    src.repo_slug,
+                    value,
+                    VALID_FLEET_CORRECTNESS.join(", ")
                 ),
             ));
         }
@@ -6195,6 +6254,222 @@ mod tests {
             "absent needs must not produce W_STATE_CARRYOVER_UNKNOWN_NEEDS (an unrecognised VALUE) \
              -- it may still correctly produce W_CARRYOVER_NO_NEEDS, asserted separately by \
              entry_without_needs_warns: {diags:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // fleet_correctness (D80, MV.ticket.blocks-query-filters-and-ranks-on-fleet-correctness
+    // task 1) — the block-side and carryover-side out-of-vocabulary warning.
+    // -----------------------------------------------------------------------
+
+    /// Each of the four known grades, on a track block, must produce no diagnostic at all.
+    #[test]
+    fn known_fleet_correctness_on_block_emits_no_diagnostic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        for known in VALID_FLEET_CORRECTNESS {
+            let json = format!(
+                r#"{{"repo":"mev","kind":"project","updated":"2026-09-06",
+                    "tracks":[{{"title":"P1","blocks":[{{"id":"T.1","title":"X",
+                                "fleet_correctness":"{known}"}}]}}]}}"#
+            );
+            let file = parse_file(&json);
+            let diags = check_schema(&src, &file);
+            assert!(
+                diags
+                    .iter()
+                    .all(|d| d.locator != "W_STATE_FLEET_CORRECTNESS_UNKNOWN"),
+                "known fleet_correctness value '{known}' must not raise \
+                 W_STATE_FLEET_CORRECTNESS_UNKNOWN: {diags:?}"
+            );
+        }
+    }
+
+    /// An unrecognized `fleet_correctness` grade on a track block must warn, name the
+    /// block, the repo, and the value — and the file must still load (warning only).
+    #[test]
+    fn unrecognized_fleet_correctness_on_block_warns_names_block_repo_and_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{"repo":"mev","kind":"project","updated":"2026-09-06",
+            "tracks":[{"title":"P1","blocks":[{"id":"T.1","title":"X",
+                        "fleet_correctness":"F4"}]}]}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+
+        let fc_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_FLEET_CORRECTNESS_UNKNOWN")
+            .collect();
+        assert_eq!(
+            fc_diags.len(),
+            1,
+            "unrecognized fleet_correctness value should produce exactly one \
+             W_STATE_FLEET_CORRECTNESS_UNKNOWN: {diags:?}"
+        );
+        assert_eq!(
+            fc_diags[0].severity,
+            crate::Severity::Warning,
+            "W_STATE_FLEET_CORRECTNESS_UNKNOWN must be Warning severity, not error — the \
+             file must still load"
+        );
+        assert!(
+            fc_diags[0].message.contains("T.1"),
+            "message must name the block id: {}",
+            fc_diags[0].message
+        );
+        assert!(
+            fc_diags[0].message.contains("test"),
+            "message must name the repo: {}",
+            fc_diags[0].message
+        );
+        assert!(
+            fc_diags[0].message.contains("F4"),
+            "message must name the offending value: {}",
+            fc_diags[0].message
+        );
+    }
+
+    /// A track block with no `fleet_correctness` at all produces no diagnostic — absence
+    /// is normal, not a finding.
+    #[test]
+    fn absent_fleet_correctness_on_block_emits_no_diagnostic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{"repo":"mev","kind":"project","updated":"2026-09-06",
+            "tracks":[{"title":"P1","blocks":[{"id":"T.1","title":"X"}]}]}"#;
+        let file = parse_file(json);
+        assert!(
+            file.tracks[0].blocks[0].fleet_correctness.is_none(),
+            "fixture must actually leave fleet_correctness absent"
+        );
+        let diags = check_schema(&src, &file);
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.locator != "W_STATE_FLEET_CORRECTNESS_UNKNOWN"),
+            "absent fleet_correctness must not produce W_STATE_FLEET_CORRECTNESS_UNKNOWN: {diags:?}"
+        );
+    }
+
+    /// The untagged-order trap, pinned on the block side: an out-of-vocabulary grade
+    /// must round-trip verbatim as `Unknown(String)` rather than fail to deserialize —
+    /// this is the whole point of the untagged enum, and it is what lets the file still
+    /// parse (`E_STATE_MALFORMED_JSON` never fires on a hand-typed typo like "F4").
+    #[test]
+    fn unrecognized_fleet_correctness_on_block_round_trips_verbatim() {
+        let json = r#"{"repo":"mev","kind":"project","updated":"2026-09-06",
+            "tracks":[{"title":"P1","blocks":[{"id":"T.1","title":"X",
+                        "fleet_correctness":"F4"}]}]}"#;
+        let file = parse_file(json);
+        assert_eq!(
+            file.tracks[0].blocks[0].fleet_correctness,
+            Some(okf_core::FleetCorrectness::Unknown("F4".to_string())),
+            "an out-of-vocabulary grade must round-trip verbatim as Unknown(String)"
+        );
+    }
+
+    /// Each of the four known grades, on a carryover entry, must produce no diagnostic.
+    #[test]
+    fn known_fleet_correctness_on_carryover_emits_no_diagnostic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        for known in VALID_FLEET_CORRECTNESS {
+            let json = format!(
+                r#"{{"repo":"mev","kind":"project","updated":"2026-09-06",
+                    "carryover":[{{"slug":"fc-{known}","scope":{{"repo":"mev"}},
+                                  "kind":"deferred","text":"x","created":"2026-09-01",
+                                  "fleet_correctness":"{known}"}}]}}"#
+            );
+            let file = parse_file(&json);
+            let diags = check_schema(&src, &file);
+            assert!(
+                diags
+                    .iter()
+                    .all(|d| d.locator != "W_STATE_FLEET_CORRECTNESS_UNKNOWN"),
+                "known fleet_correctness value '{known}' on a carryover entry must not raise \
+                 W_STATE_FLEET_CORRECTNESS_UNKNOWN: {diags:?}"
+            );
+        }
+    }
+
+    /// An unrecognized `fleet_correctness` grade on a carryover entry must warn, name
+    /// the entry, the repo, and the value — and the file must still load.
+    #[test]
+    fn unrecognized_fleet_correctness_on_carryover_warns_names_entry_repo_and_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{"repo":"mev","kind":"project","updated":"2026-09-06",
+            "carryover":[{"slug":"bogus-fc-entry","scope":{"repo":"mev"},
+                          "kind":"deferred","text":"x","created":"2026-09-01",
+                          "fleet_correctness":"F9"}]}"#;
+        let file = parse_file(json);
+        let diags = check_schema(&src, &file);
+
+        let fc_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.locator == "W_STATE_FLEET_CORRECTNESS_UNKNOWN")
+            .collect();
+        assert_eq!(
+            fc_diags.len(),
+            1,
+            "unrecognized fleet_correctness value should produce exactly one \
+             W_STATE_FLEET_CORRECTNESS_UNKNOWN: {diags:?}"
+        );
+        assert_eq!(
+            fc_diags[0].severity,
+            crate::Severity::Warning,
+            "W_STATE_FLEET_CORRECTNESS_UNKNOWN must be Warning severity, not error"
+        );
+        assert!(
+            fc_diags[0].message.contains("bogus-fc-entry"),
+            "message must name the entry slug: {}",
+            fc_diags[0].message
+        );
+        assert!(
+            fc_diags[0].message.contains("test"),
+            "message must name the repo: {}",
+            fc_diags[0].message
+        );
+        assert!(
+            fc_diags[0].message.contains("F9"),
+            "message must name the offending value: {}",
+            fc_diags[0].message
+        );
+    }
+
+    /// A carryover entry with no `fleet_correctness` at all produces no diagnostic —
+    /// absence is normal, not a finding.
+    #[test]
+    fn absent_fleet_correctness_on_carryover_emits_no_diagnostic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let src = make_source(&path, "project");
+
+        let json = r#"{"repo":"mev","kind":"project","updated":"2026-09-06",
+            "carryover":[{"slug":"no-fc-entry","scope":{"repo":"mev"},
+                          "kind":"deferred","text":"x","created":"2026-09-01"}]}"#;
+        let file = parse_file(json);
+        assert!(
+            file.carryover[0].fleet_correctness.is_none(),
+            "fixture must actually leave fleet_correctness absent"
+        );
+        let diags = check_schema(&src, &file);
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.locator != "W_STATE_FLEET_CORRECTNESS_UNKNOWN"),
+            "absent fleet_correctness must not produce W_STATE_FLEET_CORRECTNESS_UNKNOWN: {diags:?}"
         );
     }
 
