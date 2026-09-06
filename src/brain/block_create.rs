@@ -29,10 +29,11 @@
 //! property — a created record can never carry it. `epics` is instead the
 //! cross-repo epic membership carried on the **`state.json`** registration
 //! (`state::TrackBlock::epics` / `state::Block::epics`), and the generated
-//! epic-sequence table renders from that *authored* membership, not from
-//! derived lane membership (the carryover
+//! per-epic board (`planning/open-work/scripts/update_epic_work.py`) renders
+//! from that *authored* membership, not from derived lane membership (the
+//! carryover
 //! `epic-sequence-table-uses-authored-epics-not-derived-lane-membership`).
-//! A block created with no epic renders on no epic-sequence table, so
+//! A block created with no epic shows up on no per-epic board, so
 //! [`CreateBlockPayload::epics`] is required to be non-empty and
 //! [`validate_payload`] refuses a payload that omits it — it is never
 //! silently written with an empty list.
@@ -391,7 +392,7 @@ pub fn validate_payload(payload: &CreateBlockPayload) -> Vec<Diagnostic> {
             &path,
             E_BLOCK_CREATE_MISSING_EPICS,
             "payload carries no 'epics'; block.schema.json has no epics field (it is state.json-only), \
-             but a block created with no authored epic renders on no epic-sequence table, so an empty \
+             but a block created with no authored epic shows up on no per-epic board, so an empty \
              or absent epics list is refused rather than written"
                 .to_string(),
         ));

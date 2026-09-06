@@ -8439,9 +8439,7 @@ fn topo_order_external_deps_do_not_constrain_order() {
 
 mod epic_emit {
     use mev::brain::config::{BrainConfig, RepoEntry};
-    use mev::brain::emit::{
-        epic_members, markers, plan_epic_boards, plan_epic_sequences, render_epic_sequence_table,
-    };
+    use mev::brain::emit::{epic_members, markers, plan_epic_boards};
     use mev::brain::state::{
         BlockDep, BlockedBy, Epic, Focus, StateFile, StateSource, Track, TrackBlock,
         build_state_graph,
@@ -8602,39 +8600,6 @@ mod epic_emit {
             ),
             leaf(dir, "amistad", vec![tb("AM.1", "open", 1, &[], vec![])]),
         ]
-    }
-
-    // -- render_epic_sequence_table ------------------------------------------
-
-    #[test]
-    fn sequence_table_orders_across_repos_and_derives_blocked_status() {
-        let tmp = tempfile::tempdir().unwrap();
-        let files = corpus(tmp.path());
-        let graph = build_state_graph(&files);
-        let status = mev::brain::emit::global_status_map(&files);
-
-        let table =
-            render_epic_sequence_table(&epic_members(&graph, &files, "bastion-os"), &status);
-        assert!(table.contains("| Wave | Repo | Block | Title | Status | Depends on |"));
-        assert!(table.contains("| 1 | bastion | BA.6 |"), "got:\n{table}");
-        assert!(table.contains("| 2 | bastion | BA.7 |"), "got:\n{table}");
-        assert!(
-            !table.contains("AM.1") && !table.contains("BW.1"),
-            "only bastion-os members belong in this table:\n{table}"
-        );
-
-        // BW.1 is open and depends on the still-open BA.7 → derived `blocked`.
-        let web = render_epic_sequence_table(&epic_members(&graph, &files, "bastion-web"), &status);
-        assert!(
-            web.contains("| 3 | bastion-web | BW.1 | BW.1 title | blocked | bastion:BA.7 |"),
-            "got:\n{web}"
-        );
-    }
-
-    #[test]
-    fn sequence_table_renders_a_placeholder_for_an_empty_epic() {
-        let table = render_epic_sequence_table(&[], &Default::default());
-        assert!(table.contains("_no member blocks_"), "got:\n{table}");
     }
 
     // -- plan_epic_boards ----------------------------------------------------
@@ -8803,103 +8768,6 @@ mod epic_emit {
         let plan = plan_epic_boards(tmp.path(), &files, &graph, &config());
         assert!(plan.actions.is_empty());
         assert!(plan.diagnostics.is_empty());
-    }
-
-    // -- plan_epic_sequences -------------------------------------------------
-
-    #[test]
-    fn epic_sequences_splice_into_the_registry_plan_doc() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plan_rel = "core/planning/bastion-os.md";
-        let plan_path = tmp.path().join(plan_rel);
-        std::fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
-        std::fs::write(&plan_path, doc_with(markers::EPIC_SEQUENCE)).unwrap();
-
-        let mut files = corpus(tmp.path());
-        files.push(hq(
-            tmp.path(),
-            "hq",
-            vec![
-                epic("bastion-os", "Bastion OS", "active", Some(plan_rel)),
-                // No `plan` path — skipped silently, not a warning.
-                epic("bastion-web", "Bastion Web", "active", None),
-            ],
-        ));
-        let graph = build_state_graph(&files);
-
-        let plan = plan_epic_sequences(tmp.path(), &files, &graph, &config());
-        assert_eq!(plan.actions.len(), 1);
-        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
-        let out = &plan.actions[0].new_content;
-        assert!(out.contains("| 1 | bastion | BA.6 |"), "got:\n{out}");
-        assert!(out.contains("Before.") && out.contains("After."));
-
-        // Fixed point.
-        std::fs::write(&plan_path, out).unwrap();
-        assert!(
-            plan_epic_sequences(tmp.path(), &files, &graph, &config())
-                .actions
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn epic_sequences_warn_when_the_plan_doc_is_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut files = corpus(tmp.path());
-        files.push(hq(
-            tmp.path(),
-            "hq",
-            vec![epic("bastion-os", "Bastion OS", "active", Some("nope.md"))],
-        ));
-        let graph = build_state_graph(&files);
-
-        let plan = plan_epic_sequences(tmp.path(), &files, &graph, &config());
-        assert!(plan.actions.is_empty());
-        assert_eq!(
-            plan.diagnostics
-                .iter()
-                .map(|d| d.locator.as_str())
-                .collect::<Vec<_>>(),
-            vec!["W_EMIT_NO_SENTINEL"]
-        );
-    }
-
-    #[test]
-    fn two_epics_sharing_a_plan_doc_warn_instead_of_clobbering() {
-        let tmp = tempfile::tempdir().unwrap();
-        let rel = "core/planning/shared.md";
-        let path = tmp.path().join(rel);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, doc_with(markers::EPIC_SEQUENCE)).unwrap();
-
-        let mut files = corpus(tmp.path());
-        files.push(hq(
-            tmp.path(),
-            "hq",
-            vec![
-                epic("bastion-os", "Bastion OS", "active", Some(rel)),
-                epic("bastion-web", "Bastion Web", "active", Some(rel)),
-            ],
-        ));
-        let graph = build_state_graph(&files);
-
-        let plan = plan_epic_sequences(tmp.path(), &files, &graph, &config());
-        assert_eq!(
-            plan.actions.len(),
-            1,
-            "only the first claimant may write; the second must not queue a \
-             competing full-document write"
-        );
-        assert_eq!(
-            plan.diagnostics
-                .iter()
-                .map(|d| d.locator.as_str())
-                .collect::<Vec<_>>(),
-            vec!["W_EMIT_EPIC_PLAN_CONFLICT"]
-        );
-        // The surviving table is the first epic's.
-        assert!(plan.actions[0].new_content.contains("BA.6"));
     }
 
     // -- epic_members_resolved (`MV.13.D` Task 3 — precedence rule) ----------
@@ -9525,10 +9393,8 @@ mod task5_shared_identity_dedup {
 // ---------------------------------------------------------------------------
 
 mod task6_rendering {
-    use mev::brain::emit::{render_epic_sequence_table, render_hq_board, render_unified_board};
-    use mev::brain::state::{
-        ApprovalDep, Block, BlockDep, BlockedBy, Focus, OperatorDep, TrackBlock,
-    };
+    use mev::brain::emit::{render_hq_board, render_unified_board};
+    use mev::brain::state::{ApprovalDep, Block, BlockDep, BlockedBy, Focus, OperatorDep};
     use std::collections::HashMap;
 
     fn blocked_block(repo: &str, id: &str, title: &str, blocked_by: Vec<BlockedBy>) -> Block {
@@ -9643,39 +9509,6 @@ mod task6_rendering {
             rendered.contains("decision: ship it?"),
             "approval must render `what` labeled as a decision, not a description: {rendered}"
         );
-    }
-
-    #[test]
-    fn epic_sequence_table_renders_operator_exit_start_and_approval_decision() {
-        let operator_block = TrackBlock {
-            id: "A.1".to_string(),
-            title: "Block A1".to_string(),
-            depends_on: vec![operator_gate(
-                "gate-z",
-                "PR merged",
-                "mev close-operator-gate gate-z --exit-verified",
-            )],
-            ..Default::default()
-        };
-        let approval_block = TrackBlock {
-            id: "A.2".to_string(),
-            title: "Block A2".to_string(),
-            depends_on: vec![approval_gate("ship-v3", "ship it?", "cafebabe")],
-            ..Default::default()
-        };
-        let members: Vec<(String, &TrackBlock)> = vec![
-            ("core".to_string(), &operator_block),
-            ("core".to_string(), &approval_block),
-        ];
-
-        let table = render_epic_sequence_table(&members, &HashMap::new());
-
-        assert!(table.contains("exit: PR merged"), "{table}");
-        assert!(
-            table.contains("start: `mev close-operator-gate gate-z --exit-verified`"),
-            "{table}"
-        );
-        assert!(table.contains("decision: ship it?"), "{table}");
     }
 
     /// Blocks with no operator/approval edge must render byte-identically to

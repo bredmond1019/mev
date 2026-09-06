@@ -926,9 +926,6 @@ fn diagnose_malformed_state_shape(path: &std::path::Path) -> Vec<Diagnostic> {
 ///   brain-level `status.md` carrying the `<!-- BEGIN generated:epic-board -->`
 ///   sentinels. Lanes are global (an epic is cross-repo by definition); only *which*
 ///   epics appear is tier-scoped.
-/// - [`brain::emit::plan_epic_sequences`] — splices each epic's cross-repo wave-ordered
-///   sequence table into the `plan` doc its registry entry points at
-///   (`<!-- BEGIN generated:epic-sequence -->` sentinels).
 ///
 /// When `write` is `false` (default), the function is a **dry-run**: no files are
 /// written and each planned action is reported as a `W_EMIT_DRY_RUN` diagnostic.
@@ -1242,8 +1239,8 @@ pub fn set_block_status(
 /// shape: resolve `brain.toml`, discover + load every `state.json`, refuse to
 /// write against an incomplete corpus, plan via
 /// [`brain::block_create::plan_create_block`], then apply and re-run
-/// [`emit_state`] so the derived surfaces (boards, wave tables, the
-/// epic-sequence table) agree with the new block in the same invocation.
+/// [`emit_state`] so the derived surfaces (boards, wave tables) agree with
+/// the new block in the same invocation.
 ///
 /// Dry-run by default: without `write` the proposed plan is reported and
 /// nothing on disk is touched. `payload` is already-parsed (the CLI layer
@@ -1331,8 +1328,8 @@ pub fn create_block(
     let had_actions = !plan.actions.is_empty();
     report.diagnostics.extend(apply_plan(&plan, write));
 
-    // Regenerate derived views so the boards and wave/epic-sequence tables
-    // agree with the newly filed block. `scope` narrows which repo's derived
+    // Regenerate derived views so the boards and wave tables agree with the
+    // newly filed block. `scope` narrows which repo's derived
     // surfaces the chained emit regenerates; unscoped (None) regenerates the
     // whole corpus.
     if write && had_actions && !report.is_failure() {
@@ -1695,9 +1692,8 @@ pub fn emit_state(
     use brain::config::find_brain_config;
     use brain::emit::{
         apply_plan, filter_plan_by_scope, plan_attention_board, plan_brain_cache_watermarks,
-        plan_epic_boards, plan_epic_sequences, plan_hq_board, plan_master_plan_tables,
-        plan_project_caches, plan_state_json, plan_status_frontmatter, plan_tier_rollups,
-        plan_unified_board,
+        plan_epic_boards, plan_hq_board, plan_master_plan_tables, plan_project_caches,
+        plan_state_json, plan_status_frontmatter, plan_tier_rollups, plan_unified_board,
     };
     use brain::master_plan::plan_master_plan_body;
     use brain::state::{StateLoadError, build_state_graph, discover_state_files, load_state};
@@ -1884,33 +1880,22 @@ pub fn emit_state(
     );
     let brain_caches_diags = apply_plan(&brain_caches_plan, write);
 
-    // 6. Epic boards + sequence tables run after every planner above has both
-    //    planned and applied. `plan_epic_boards` shares `status.md` with the
-    //    HQ/unified/attention boards, so it reads their already-applied text;
-    //    `plan_epic_sequences` targets its own `epics/<slug>.md` docs, which
-    //    nothing above touches. The two are still planned together and applied
-    //    together (not interleaved) — safe, since they target disjoint files.
-    let epic_board_plan = filter_plan_by_scope(
+    // 6. Epic boards run after every planner above has both planned and
+    //    applied — `plan_epic_boards` shares `status.md` with the
+    //    HQ/unified/attention boards, so it reads their already-applied text.
+    let epic_plan = filter_plan_by_scope(
         plan_epic_boards(root, &loaded, &graph, &config),
         root,
         scope,
     );
-    let epic_seq_plan = filter_plan_by_scope(
-        plan_epic_sequences(root, &loaded, &graph, &config),
-        root,
-        scope,
-    );
-    // `MV.13.D` Task 4: both planners now render lane-derived program membership
+    // `MV.13.D` Task 4: this planner renders lane-derived program membership
     // (Task 3's `epic_members_resolved`) — a cross-repo derivation that, like the
     // lane-segments plan below, can regress the corpus if the derivation logic is
     // wrong (e.g. a duplicate row, a dangling block reference). "Any generator
     // writing into the corpus must validate its own output and roll back on
-    // net-new errors" applies here too, so — in `--write` mode — the two plans
-    // are merged (safe: they target disjoint files, per the comment above) and
-    // applied through [`apply_with_rollback_on_regression`] rather than a plain
+    // net-new errors" applies here too, so — in `--write` mode — it is applied
+    // through [`apply_with_rollback_on_regression`] rather than a plain
     // `apply_plan`. Dry-run is unaffected.
-    let mut epic_plan = epic_board_plan;
-    epic_plan.extend(epic_seq_plan);
     let epic_diags = if write {
         apply_with_rollback_on_regression(&epic_plan, || Ok(validate_brain(root)?.error_count()))?
     } else {

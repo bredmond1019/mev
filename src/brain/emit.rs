@@ -80,11 +80,6 @@ pub mod markers {
     /// Emitted into every brain-level `status.md` that carries the sentinels.
     pub const EPIC_BOARD: &str = "epic-board";
 
-    /// Marker for one epic's cross-repo sequence table, spliced into that
-    /// epic's own `plan` document. Distinct from [`EPIC_BOARD`]: the board is a
-    /// live focus snapshot, this is the full ordered roadmap for one initiative.
-    pub const EPIC_SEQUENCE: &str = "epic-sequence";
-
     /// Marker for the initiative index + per-phase block sections spliced into
     /// a repo's `master-plan.md` by [`crate::brain::master_plan`]
     /// (`MV.ticket.master-plan-generator`). Distinct from [`WAVE_TABLE`]: the
@@ -228,7 +223,7 @@ pub fn topo_order(graph: &StateGraph, files: &[(StateSource, StateFile)]) -> Vec
 /// order.
 ///
 /// Returns `(repo_slug, block)` pairs — the cross-repo sequence for one
-/// initiative, which is what an epic's sequence table renders.
+/// initiative.
 ///
 /// Cross-repo `wave` numbers are **not** on a shared scale (per-repo authors
 /// pick their own range — bastion uses 1-7, bastion-web 10-60, bastion-ui
@@ -1469,94 +1464,6 @@ fn render_epic_relationships(edges: &EpicEdges) -> String {
     }
 
     lines.join("\n")
-}
-
-// ---------------------------------------------------------------------------
-// render_epic_sequence_table — one epic's cross-repo work order
-// ---------------------------------------------------------------------------
-
-/// Render one epic's members as a Markdown table in cross-repo wave order.
-///
-/// Columns: `Wave | Repo | Block | Title | Status | Depends on`. This is
-/// [`render_wave_table`]'s cross-repo sibling — same derived-status rule (an
-/// open block with an unmet `depends_on` renders `blocked`) and the same
-/// `global_status` lookup, but the row set is one epic across every repo rather
-/// than one repo across every epic.
-///
-/// Rendered without a trailing newline.
-pub fn render_epic_sequence_table(
-    members: &[(String, &TrackBlock)],
-    global_status: &HashMap<String, Option<String>>,
-) -> String {
-    let mut lines = vec![
-        "| Wave | Repo | Block | Title | Status | Depends on |".to_string(),
-        "|---|---|---|---|---|---|".to_string(),
-    ];
-
-    if members.is_empty() {
-        lines.push("| — | — | — | _no member blocks_ | — | — |".to_string());
-        return lines.join("\n");
-    }
-
-    for (repo, block) in members {
-        let wave = block
-            .wave
-            .map(|w| w.to_string())
-            .unwrap_or_else(|| "—".to_string());
-
-        let deps: Vec<String> = block
-            .depends_on
-            .iter()
-            .map(|dep| match dep {
-                BlockedBy::Block(BlockDep { repo, id, .. }) => format!("{repo}:{id}"),
-                BlockedBy::External(ExternalDep { what }) => format!("external:{what}"),
-                // Full exit/start/decision rendering (Task 6, `ticket-operator-edge-graph`) —
-                // matches render_hq_board_blocker's annotation form so the epic sequence
-                // table and the NOW/NEXT/BLOCKED boards read consistently.
-                BlockedBy::Operator(OperatorDep {
-                    slug, exit, start, ..
-                }) => format!("{} — exit: {exit}; start: `{start}`", okf_core::op_id(slug)),
-                BlockedBy::Approval(ApprovalDep { slug, what, .. }) => {
-                    format!("{} — decision: {what}", okf_core::op_id(slug))
-                }
-            })
-            .collect();
-        let deps_cell = if deps.is_empty() {
-            "—".to_string()
-        } else {
-            deps.join(", ")
-        };
-
-        let authored = block.status.as_deref().unwrap_or("open");
-        let status = if authored == "open" && has_unmet_dep(block, global_status) {
-            "blocked"
-        } else {
-            authored
-        };
-
-        lines.push(format!(
-            "| {wave} | {repo} | {} | {} | {status} | {deps_cell} |",
-            block.id, block.title
-        ));
-    }
-
-    lines.join("\n")
-}
-
-/// Whether `block` has at least one `depends_on` entry that is not yet met — any
-/// `external`/`operator`/`approval` entry (all three are targetless and unmet for
-/// as long as they are present), or a `block` entry whose target's authored status
-/// in `global_status` is not `closed` (an unresolvable target counts as unmet).
-fn has_unmet_dep(block: &TrackBlock, global_status: &HashMap<String, Option<String>>) -> bool {
-    block.depends_on.iter().any(|dep| match dep {
-        BlockedBy::External(_) | BlockedBy::Operator(_) | BlockedBy::Approval(_) => true,
-        BlockedBy::Block(BlockDep { repo, id, .. }) => {
-            global_status
-                .get(&format!("{repo}:{id}"))
-                .and_then(|s| s.as_deref())
-                != Some("closed")
-        }
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3215,109 +3122,6 @@ pub fn plan_epic_boards(
                         "status.md for '{}' has no <!-- BEGIN generated:{} --> sentinels; skipping",
                         src.repo_slug,
                         markers::EPIC_BOARD
-                    ),
-                ));
-            }
-        }
-    }
-
-    plan
-}
-
-// ---------------------------------------------------------------------------
-// plan_epic_sequences
-// ---------------------------------------------------------------------------
-
-/// Plan the per-epic cross-repo sequence table splice into each registered
-/// epic's own `plan` document.
-///
-/// For every registry entry carrying a `plan` path, resolves it relative to
-/// `root` and splices [`render_epic_sequence_table`] into its
-/// [`markers::EPIC_SEQUENCE`] sentinel pair. An entry with no `plan`, a path
-/// that does not resolve, or a document without the sentinels is skipped
-/// (`W_EMIT_NO_SENTINEL` for the latter two) — never invents sentinels, and
-/// never creates the document.
-pub fn plan_epic_sequences(
-    root: &std::path::Path,
-    files: &[(StateSource, StateFile)],
-    graph: &StateGraph,
-    config: &BrainConfig,
-) -> EmitPlan {
-    let mut plan = EmitPlan::default();
-
-    let Some((_, hq_file)) = files
-        .iter()
-        .find(|(_, f)| f.kind == "brain" && matches!(tier_scope_for(f, config), TierScope::All))
-    else {
-        return plan;
-    };
-
-    let global_status = global_status_map(files);
-    let mut claimed: HashMap<&str, &str> = HashMap::new();
-
-    for epic in &hq_file.epics {
-        let Some(ref rel) = epic.plan else {
-            continue; // an epic with no plan doc is fine — nothing to splice
-        };
-        let doc_path = root.join(rel);
-
-        // Two epics sharing one plan doc would each produce a full-document
-        // write carrying only their own table, and the later apply would drop
-        // the earlier one's. Refuse the second claim rather than lose it.
-        if let Some(first) = claimed.insert(rel.as_str(), epic.slug.as_str()) {
-            plan.diagnostics.push(crate::Diagnostic::warning(
-                &doc_path,
-                "W_EMIT_EPIC_PLAN_CONFLICT",
-                format!(
-                    "epics '{first}' and '{}' both point at plan doc '{rel}'; only one \
-                     epic-sequence table fits per document, so '{}' is skipped — give it \
-                     its own plan doc",
-                    epic.slug, epic.slug
-                ),
-            ));
-            continue;
-        }
-
-        let original = match std::fs::read_to_string(&doc_path) {
-            Ok(s) => s,
-            Err(_) => {
-                plan.diagnostics.push(crate::Diagnostic::warning(
-                    &doc_path,
-                    "W_EMIT_NO_SENTINEL",
-                    format!(
-                        "epic '{}' points at plan doc '{rel}', which does not exist; \
-                         skipping sequence emit",
-                        epic.slug
-                    ),
-                ));
-                continue;
-            }
-        };
-
-        let table = render_epic_sequence_table(
-            &epic_members_resolved(root, graph, files, epic),
-            &global_status,
-        );
-
-        match splice_generated(&original, markers::EPIC_SEQUENCE, &table) {
-            Ok(new_content) => {
-                if new_content != original {
-                    plan.actions.push(EmitAction {
-                        path: doc_path,
-                        new_content,
-                        note: format!("update sequence table for epic '{}'", epic.slug),
-                    });
-                }
-            }
-            Err(_) => {
-                plan.diagnostics.push(crate::Diagnostic::warning(
-                    &doc_path,
-                    "W_EMIT_NO_SENTINEL",
-                    format!(
-                        "plan doc for epic '{}' has no <!-- BEGIN generated:{} --> sentinels; \
-                         skipping",
-                        epic.slug,
-                        markers::EPIC_SEQUENCE
                     ),
                 ));
             }

@@ -727,15 +727,15 @@ enum Command {
     /// `mev::brain::block_create::CreateBlockPayload` for the payload shape.
     ///
     /// Dry-run by default; pass --write to apply. A successful --write also runs
-    /// `emit-state --write`, so the boards, wave table, and epic-sequence table show
-    /// the new block in the same invocation.
+    /// `emit-state --write`, so the boards and wave table show the new block in
+    /// the same invocation.
     ///
     /// An existing block id is a no-op refusal, never an overwrite. A `depends_on`
     /// edge naming a block that does not resolve in the loaded corpus is refused,
     /// with the unresolved `(repo, id)` named in the error — create the dependency
     /// before the dependent. A payload with no `epics` is refused, never written
-    /// with an empty list — a block created with no epic renders on no
-    /// epic-sequence table.
+    /// with an empty list — a block created with no epic shows up on no
+    /// per-epic board.
     ///
     /// Exit codes:
     ///   0 — planned (dry-run) or applied
