@@ -9098,10 +9098,30 @@ mod task2_scope_filter {
             "exactly the four scope surfaces survive filtering: own state.json, \
              cache_doc, tier rollup status.md, and the HQ board status.md"
         );
+        // The pre-existing planning-time diagnostic always passes through regardless
+        // of scope, PLUS one `W_EMIT_SCOPE_SHARED_SURFACE` diagnostic per surviving
+        // action that lands on a SHARED surface — here `core_tier_rollup` and
+        // `hq_board` (block
+        // `MV.ticket.emit-state-write-must-bound-which-files-it-writes`, task 1): a
+        // scoped write to either is correct and still happens, but it silently
+        // destroys `git status` as an attribution signal for every other scope that
+        // also feeds that same file, so it must be reported.
         assert_eq!(
             filtered.diagnostics.len(),
-            1,
-            "diagnostics always pass through regardless of scope"
+            3,
+            "expected the original diagnostic plus one W_EMIT_SCOPE_SHARED_SURFACE per \
+             shared-surface action (core tier rollup + HQ board); got: {:#?}",
+            filtered.diagnostics
+        );
+        let shared_surface_diags: Vec<_> = filtered
+            .diagnostics
+            .iter()
+            .filter(|d| d.locator == "W_EMIT_SCOPE_SHARED_SURFACE")
+            .collect();
+        assert_eq!(
+            shared_surface_diags.len(),
+            2,
+            "expected exactly 2 W_EMIT_SCOPE_SHARED_SURFACE diagnostics; got: {shared_surface_diags:#?}"
         );
     }
 

@@ -68,6 +68,7 @@ mod doc_materialize;
 mod doc_opportunity;
 mod emit_block_graph_cli;
 mod emit_epic_sequence_retired;
+mod emit_scope_shared_surface;
 mod emit_state_authored_roundtrip;
 mod emit_state_lock;
 mod emit_state_scope;

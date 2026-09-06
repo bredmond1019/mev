@@ -2015,14 +2015,66 @@ pub fn filter_plan_by_scope(
     let Some(scope) = scope else {
         return plan;
     };
-    EmitPlan {
-        actions: plan
-            .actions
-            .into_iter()
-            .filter(|a| scope.allows(root, &a.path))
-            .collect(),
-        diagnostics: plan.diagnostics,
+
+    // Of the scope's four target surfaces, two are the repo's OWN files
+    // (`own_state_json`, `cache_doc`/`own_status_file`) and two are SHARED with
+    // every other repo that also feeds them (`tier_rollup_status_file`,
+    // `hq_board_status_file`). A scoped write landing on a shared surface is
+    // correct, documented behaviour (`--scope`'s own contract names the HQ
+    // board and tier rollup as in-scope targets) — but it silently destroys
+    // `git status` as an attribution signal for every OTHER lane also writing
+    // that same file, which is the harm this diagnostic reports on. See
+    // `W_EMIT_SCOPE_SHARED_SURFACE` below.
+    let mut shared_targets: Vec<std::path::PathBuf> = vec![root.join(&scope.hq_board_status_file)];
+    if let Some(tier) = &scope.tier_rollup_status_file {
+        shared_targets.push(root.join(tier));
     }
+
+    let scope_label = scope_label(scope);
+
+    let mut diagnostics = plan.diagnostics;
+    let actions: Vec<EmitAction> = plan
+        .actions
+        .into_iter()
+        .filter(|a| scope.allows(root, &a.path))
+        .collect();
+
+    for action in &actions {
+        if shared_targets.iter().any(|t| t == &action.path) {
+            diagnostics.push(crate::Diagnostic::warning(
+                &action.path,
+                "W_EMIT_SCOPE_SHARED_SURFACE",
+                format!(
+                    "scoped write under --scope {scope_label} touches shared surface \
+                     '{}' — this file is also written by every other scope that feeds \
+                     it, so `git status` on it does not attribute to this scope alone",
+                    action.path.display()
+                ),
+            ));
+        }
+    }
+
+    EmitPlan {
+        actions,
+        diagnostics,
+    }
+}
+
+/// A human-readable identifier for a [`crate::brain::config::ScopeDependencySet`],
+/// for use in diagnostic messages. `ScopeDependencySet` itself does not carry the
+/// `--scope` slug string (it is purely a set of resolved target paths — see
+/// [`crate::brain::config::BrainConfig::scope_dependencies`]), so this derives a
+/// label from `own_state_json`'s repo-path prefix (`{repo_path}/planning/state.json`
+/// -> `{repo_path}`), which is the same value `--scope <repo_path-derived-slug>`
+/// was invoked with in every registered `[[repos]]` entry.
+fn scope_label(scope: &crate::brain::config::ScopeDependencySet) -> String {
+    scope
+        .own_state_json
+        .parent() // "{repo_path}/planning"
+        .and_then(Path::parent) // "{repo_path}"
+        .map(|p| p.display().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| scope.own_state_json.display().to_string())
 }
 
 // ---------------------------------------------------------------------------
