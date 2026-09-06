@@ -52,6 +52,7 @@ mod brain_structure;
 mod brain_sync;
 mod brain_validate;
 mod build_stamp_cli;
+mod carryover_lane_soundness;
 mod check_consumers_cli;
 mod close_operator_gate;
 // Learn-ai's file crawler (`mev::crawl`) is feature-gated (see src/lib.rs); this suite
