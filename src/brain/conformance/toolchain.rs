@@ -13,7 +13,9 @@
 //! changed between the two commits (or that comparison could not be made); a non-build
 //! difference — a docs edit, a `log.md` line, a harness sync — reports Pass instead.
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use super::{CheckOutcome, CheckStatus, ConformanceCtx, FactSide};
 
@@ -56,17 +58,45 @@ pub enum BuildInputComparison {
     Unknown,
 }
 
+/// Whether a writer's Cargo path-dependency closure (see [`path_dependency_closure`]) has
+/// build-input commits newer than the writer's own binary build time. This is a SEPARATE
+/// signal from [`BuildInputComparison`] — that one compares the writer's OWN repo between
+/// two commits; this one asks whether a SIBLING repo the writer path-depends on moved
+/// since the writer was actually compiled, which a same-repo `git diff` can never see.
+///
+/// Follows `BuildInputComparison`'s doctrine verbatim: `Unknown` is not cosmetic. Absence
+/// of an answer (the writer's build time or a dependency's commit history could not be
+/// determined) must never be read as "no difference" — callers treat `Unknown` the same
+/// as `Differ`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum PathDepComparison {
+    /// The writer's manifest has no path dependencies at all (repo-local or transitive).
+    NoPathDeps,
+    /// Every path dependency's build inputs are unchanged since the writer's build time.
+    Same,
+    /// At least one path dependency has a build-input commit newer than the writer's
+    /// build time. Carries the dependency directory names (e.g. `okf-core`) so the
+    /// finding can name exactly which sibling repo moved.
+    Differ(Vec<String>),
+    /// The comparison could not be made (writer executable not found/stat-able, or a
+    /// dependency's commit history could not be read).
+    Unknown,
+}
+
 /// The pure verdict function: given the compiled-in stamp, the live state of the source
-/// tree, and (when the SHAs differ) an already-computed answer to whether the build
-/// inputs actually changed between the two commits, decide pass / drift / not-evaluable.
-/// No I/O — callers gather the live values (via git or otherwise) and pass them in, which
-/// is what makes this directly unit-testable without shelling out to git in tests.
+/// tree, (when the SHAs differ) an already-computed answer to whether the build inputs
+/// actually changed between the two commits, and an already-computed path-dependency
+/// freshness comparison, decide pass / drift / not-evaluable. No I/O — callers gather the
+/// live values (via git or otherwise) and pass them in, which is what makes this directly
+/// unit-testable without shelling out to git in tests.
 fn verdict(
     stamped_sha: &str,
     live_sha: Option<&str>,
     dirty: &str,
     source_dir_exists: bool,
     build_inputs: BuildInputComparison,
+    path_deps: PathDepComparison,
 ) -> (CheckStatus, Vec<String>, Option<String>) {
     if stamped_sha == "unknown" || dirty == "unknown" || !source_dir_exists {
         return (
@@ -123,6 +153,12 @@ fn verdict(
     if stamped_sha != live_sha {
         match build_inputs {
             BuildInputComparison::Same => {
+                // A path-dependency drift is an ADDITIONAL way to reach Drift here, never
+                // a way to turn an existing Drift into a Pass — this branch only runs
+                // when the writer's OWN repo comparison already says `Same`.
+                if let Some(drift) = path_dep_drift(&path_deps) {
+                    return drift;
+                }
                 return (
                     CheckStatus::Pass,
                     vec![format!(
@@ -159,7 +195,45 @@ fn verdict(
         }
     }
 
+    // SHAs match (or `live_sha` was unavailable to compare against — already handled
+    // above): the writer's own repo is current. A path dependency can still make it
+    // stale, which the same-repo SHA comparison above can never see.
+    if let Some(drift) = path_dep_drift(&path_deps) {
+        return drift;
+    }
+
     (CheckStatus::Pass, Vec::new(), None)
+}
+
+/// Turn a [`PathDepComparison`] into a Drift verdict, or `None` when it does not warrant
+/// one. `NoPathDeps` and `Same` both mean "nothing to add" — the caller falls through to
+/// whatever Pass verdict it already had. `Differ` names the dependency repos that moved;
+/// `Unknown` is treated exactly the same as `Differ`, per this module's doctrine that an
+/// unanswerable comparison must never read as "no difference".
+fn path_dep_drift(
+    path_deps: &PathDepComparison,
+) -> Option<(CheckStatus, Vec<String>, Option<String>)> {
+    match path_deps {
+        PathDepComparison::NoPathDeps | PathDepComparison::Same => None,
+        PathDepComparison::Differ(names) => Some((
+            CheckStatus::Drift,
+            vec![format!(
+                "a path dependency has build-input commits newer than this binary's build \
+                 time ({}); rebuild before any --write run",
+                names.join(", ")
+            )],
+            None,
+        )),
+        PathDepComparison::Unknown => Some((
+            CheckStatus::Drift,
+            vec![
+                "a path dependency's freshness could not be determined (build time or \
+                 dependency history unavailable); treated as drift"
+                    .to_string(),
+            ],
+            None,
+        )),
+    }
 }
 
 /// Build the `--build-stamp` JSON payload from raw stamp values, pure and testable without
@@ -235,6 +309,189 @@ pub fn differ_build_inputs(source_dir: &str, from: &str, to: &str) -> BuildInput
         Some(0) => BuildInputComparison::Same,
         Some(1) => BuildInputComparison::Differ,
         _ => BuildInputComparison::Unknown,
+    }
+}
+
+/// Parse `<source_dir>/Cargo.toml` for `path = "..."` dependency entries (across
+/// `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`, and their
+/// target-specific `[target.'cfg(...)'.*]` equivalents), resolve each relative to the
+/// manifest's own directory, and recurse TRANSITIVELY with a visited-set so a dependency
+/// cycle (`a -> b -> a`) cannot hang the check.
+///
+/// Returns the resolved, canonicalized directories of every path dependency reachable
+/// from `source_dir`'s manifest — `source_dir` itself is never included. A missing or
+/// unparseable manifest, or a path entry that does not resolve to a real directory, is
+/// simply skipped rather than treated as an error: the caller reads an empty closure as
+/// `PathDepComparison::NoPathDeps`, never a hard failure.
+///
+/// `pub`/`#[doc(hidden)]` for the same reason as [`BuildInputComparison`] and
+/// [`differ_build_inputs`]: `tests/it` needs to exercise the real manifest-walking logic
+/// against throwaway fixture repos.
+#[doc(hidden)]
+pub fn path_dependency_closure(source_dir: &str) -> Vec<PathBuf> {
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut result = Vec::new();
+    let Ok(start) = Path::new(source_dir).canonicalize() else {
+        return result;
+    };
+    visited.insert(start.clone());
+    collect_path_dependencies(&start, &mut visited, &mut result);
+    result
+}
+
+/// Recursive worker for [`path_dependency_closure`]: reads one manifest directory's
+/// `path = "..."` entries, appends any not-yet-visited resolved directory to `result`,
+/// marks it visited, and recurses into it. The visited-set (keyed by canonicalized path)
+/// is what makes a dependency cycle terminate instead of hang.
+fn collect_path_dependencies(
+    manifest_dir: &Path,
+    visited: &mut HashSet<PathBuf>,
+    result: &mut Vec<PathBuf>,
+) {
+    let manifest_path = manifest_dir.join("Cargo.toml");
+    let Ok(contents) = std::fs::read_to_string(&manifest_path) else {
+        return;
+    };
+    let Ok(value) = contents.parse::<toml::Value>() else {
+        return;
+    };
+
+    for table_name in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        collect_from_dependency_table(value.get(table_name), manifest_dir, visited, result);
+    }
+
+    // Target-specific dependency tables: `[target.'cfg(...)'.dependencies]` and friends.
+    if let Some(target_table) = value.get("target").and_then(|t| t.as_table()) {
+        for cfg_table in target_table.values() {
+            for table_name in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                collect_from_dependency_table(
+                    cfg_table.get(table_name),
+                    manifest_dir,
+                    visited,
+                    result,
+                );
+            }
+        }
+    }
+}
+
+/// Walk one `[dependencies]`-shaped TOML table, resolving every `path = "..."` entry
+/// relative to `manifest_dir`, appending unvisited ones to `result`/`visited`, and
+/// recursing into each.
+fn collect_from_dependency_table(
+    table: Option<&toml::Value>,
+    manifest_dir: &Path,
+    visited: &mut HashSet<PathBuf>,
+    result: &mut Vec<PathBuf>,
+) {
+    let Some(table) = table.and_then(|t| t.as_table()) else {
+        return;
+    };
+    for spec in table.values() {
+        let Some(path_str) = spec.get("path").and_then(|p| p.as_str()) else {
+            continue;
+        };
+        let Ok(dep_dir) = manifest_dir.join(path_str).canonicalize() else {
+            continue;
+        };
+        if !visited.insert(dep_dir.clone()) {
+            continue;
+        }
+        result.push(dep_dir.clone());
+        collect_path_dependencies(&dep_dir, visited, result);
+    }
+}
+
+/// Latest commit time touching `BUILD_INPUT_PATHS` inside `dep_dir`, via
+/// `git log -1 --format=%ct -- <build input paths>`. `None` means the comparison could
+/// not be made at all (git unavailable, `dep_dir` isn't a repo, or the timestamp couldn't
+/// be parsed) — the caller treats that as [`PathDepComparison::Unknown`], never as "not
+/// newer". An empty result (git ran fine but no commit has ever touched a build input in
+/// this dir) is answered as the Unix epoch: a real, very-old answer, not an unknown one.
+fn last_build_input_commit_time(dep_dir: &Path) -> Option<SystemTime> {
+    let mut args: Vec<&str> = vec!["log", "-1", "--format=%ct", "--"];
+    args.extend(BUILD_INPUT_PATHS.iter().copied());
+    let output = crate::shared::git_command()
+        .args(&args)
+        .current_dir(dep_dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return Some(SystemTime::UNIX_EPOCH);
+    }
+    let secs: u64 = trimmed.parse().ok()?;
+    Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+}
+
+/// Resolve the executable backing a writer `name` to a concrete path so its mtime can be
+/// stat'd. A `name` containing a path separator (or absolute) is used literally — matching
+/// how tests and [`query_writer_stamp`] already pass full paths; otherwise `PATH` is
+/// searched by hand, mirroring how [`std::process::Command`] would have found it.
+fn resolve_executable_path(name: &str) -> Option<PathBuf> {
+    let candidate = Path::new(name);
+    if candidate.components().count() > 1 {
+        return candidate.is_file().then(|| candidate.to_path_buf());
+    }
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(name))
+        .find(|full| full.is_file())
+}
+
+/// The build time of writer `name`'s compiled binary: the executable's own mtime. For
+/// `self` (the currently-running `mev` process) that is
+/// [`std::env::current_exe`]; for any other registered writer it is the executable
+/// resolved the same way the registry already invokes it — by name on `PATH` (or a
+/// literal path in tests). `None` if the executable cannot be found or stat'd, which the
+/// caller reads as [`PathDepComparison::Unknown`].
+fn writer_build_time(name: &str) -> Option<SystemTime> {
+    let exe_path = if name == "self" {
+        std::env::current_exe().ok()?
+    } else {
+        resolve_executable_path(name)?
+    };
+    std::fs::metadata(&exe_path).ok()?.modified().ok()
+}
+
+/// Compute [`PathDepComparison`] for a writer built at `build_time` whose source lives at
+/// `source_dir`: walk its transitive Cargo path-dependency closure, and for each
+/// dependency ask whether its own build inputs have a commit newer than `build_time`. A
+/// single unresolvable dependency makes the WHOLE comparison `Unknown` — never a partial
+/// `Same`/`Differ` that silently drops the one dependency that couldn't be checked.
+///
+/// `pub`/`#[doc(hidden)]` for the same reason as its sibling helpers: `tests/it` drives
+/// this directly against fixture repos.
+#[doc(hidden)]
+pub fn path_dependency_comparison(source_dir: &str, build_time: SystemTime) -> PathDepComparison {
+    let closure = path_dependency_closure(source_dir);
+    if closure.is_empty() {
+        return PathDepComparison::NoPathDeps;
+    }
+
+    let mut moved = Vec::new();
+    for dep_dir in &closure {
+        match last_build_input_commit_time(dep_dir) {
+            Some(commit_time) if commit_time > build_time => {
+                let name = dep_dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| dep_dir.display().to_string());
+                moved.push(name);
+            }
+            Some(_) => {}
+            None => return PathDepComparison::Unknown,
+        }
+    }
+
+    if moved.is_empty() {
+        PathDepComparison::Same
+    } else {
+        PathDepComparison::Differ(moved)
     }
 }
 
@@ -333,12 +590,26 @@ fn writer_outcome(name: &str, stamped_sha: &str, dirty: &str, source_dir: &str) 
         }
         _ => BuildInputComparison::Unknown,
     };
+    // Applies to `self` too, deliberately (see this task's SCOPE NOTE): mev itself
+    // path-depends on okf-core, and a per-writer verdict that skipped the closure for
+    // `self` would leave the exact measured failure half-fixed.
+    let path_deps = if source_dir_exists {
+        match writer_build_time(name) {
+            Some(build_time) => path_dependency_comparison(source_dir, build_time),
+            None => PathDepComparison::Unknown,
+        }
+    } else {
+        // `verdict` returns `NotEvaluable` before ever looking at `path_deps` when the
+        // source dir doesn't exist; the value is unused but must still be supplied.
+        PathDepComparison::Unknown
+    };
     let (status, findings, reason) = verdict(
         stamped_sha,
         live_sha.as_deref(),
         dirty,
         source_dir_exists,
         build_inputs,
+        path_deps,
     );
     WriterOutcome {
         name: name.to_string(),
@@ -479,6 +750,7 @@ mod tests {
             "0",
             true,
             BuildInputComparison::Unknown,
+            PathDepComparison::NoPathDeps,
         );
         assert_eq!(status, CheckStatus::NotEvaluable);
         assert!(reason.is_some());
@@ -492,6 +764,7 @@ mod tests {
             "unknown",
             true,
             BuildInputComparison::Unknown,
+            PathDepComparison::NoPathDeps,
         );
         assert_eq!(status, CheckStatus::NotEvaluable);
         assert!(reason.is_some());
@@ -505,6 +778,7 @@ mod tests {
             "0",
             false,
             BuildInputComparison::Unknown,
+            PathDepComparison::NoPathDeps,
         );
         assert_eq!(status, CheckStatus::NotEvaluable);
         assert!(reason.is_some());
@@ -512,8 +786,14 @@ mod tests {
 
     #[test]
     fn not_evaluable_when_live_sha_unavailable() {
-        let (status, _findings, reason) =
-            verdict("abc123", None, "0", true, BuildInputComparison::Unknown);
+        let (status, _findings, reason) = verdict(
+            "abc123",
+            None,
+            "0",
+            true,
+            BuildInputComparison::Unknown,
+            PathDepComparison::NoPathDeps,
+        );
         assert_eq!(status, CheckStatus::NotEvaluable);
         assert!(reason.is_some());
     }
@@ -526,6 +806,7 @@ mod tests {
             "0",
             true,
             BuildInputComparison::Unknown,
+            PathDepComparison::NoPathDeps,
         );
         assert_eq!(status, CheckStatus::NotEvaluable);
         assert!(reason.is_some());
@@ -539,6 +820,7 @@ mod tests {
             "0",
             true,
             BuildInputComparison::Differ,
+            PathDepComparison::NoPathDeps,
         );
         assert_eq!(status, CheckStatus::Drift);
         assert_eq!(findings.len(), 1);
@@ -556,6 +838,7 @@ mod tests {
             "1",
             true,
             BuildInputComparison::Unknown,
+            PathDepComparison::NoPathDeps,
         );
         assert_eq!(status, CheckStatus::Drift);
         assert_eq!(findings.len(), 1);
@@ -571,6 +854,7 @@ mod tests {
             "0",
             true,
             BuildInputComparison::Differ,
+            PathDepComparison::NoPathDeps,
         );
         let (_status2, dirty_findings, _) = verdict(
             "abc123",
@@ -578,6 +862,7 @@ mod tests {
             "1",
             true,
             BuildInputComparison::Unknown,
+            PathDepComparison::NoPathDeps,
         );
         assert_ne!(stale_findings[0], dirty_findings[0]);
     }
@@ -590,6 +875,7 @@ mod tests {
             "0",
             true,
             BuildInputComparison::Unknown,
+            PathDepComparison::NoPathDeps,
         );
         assert_eq!(status, CheckStatus::Pass);
         assert!(findings.is_empty());
@@ -607,6 +893,7 @@ mod tests {
             "0",
             true,
             BuildInputComparison::Same,
+            PathDepComparison::NoPathDeps,
         );
         assert_eq!(status, CheckStatus::Pass);
         // Must be distinguishable from a bare SHA match: assert on the MESSAGE content,
@@ -629,6 +916,7 @@ mod tests {
             "0",
             true,
             BuildInputComparison::Unknown,
+            PathDepComparison::NoPathDeps,
         );
         assert_eq!(status, CheckStatus::Drift);
         assert_eq!(findings.len(), 1);
@@ -649,6 +937,7 @@ mod tests {
             "1",
             true,
             BuildInputComparison::Same,
+            PathDepComparison::NoPathDeps,
         );
         assert_eq!(status, CheckStatus::Drift);
         assert_eq!(findings.len(), 1);
@@ -978,5 +1267,281 @@ mod tests {
         // NotEvaluable — never silently Pass, never dropped from the report.
         assert_eq!(outcomes[1].status, CheckStatus::NotEvaluable);
         assert_eq!(outcomes[2].status, CheckStatus::NotEvaluable);
+    }
+
+    // -----------------------------------------------------------------------------------
+    // `path_dependency_closure` / `path_dependency_comparison` — the sibling-repo
+    // freshness signal this task adds. Fuller fixture coverage (transitive, cycle,
+    // positive control against the live SHA-vs-build-time comparison) lives in
+    // `tests/it/toolchain_path_dependencies.rs` per this ticket's Task 2; these are the
+    // in-file unit tests for the new pure/impure helpers themselves.
+    // -----------------------------------------------------------------------------------
+
+    /// Write `Cargo.toml` at `dir` with the given raw `[dependencies]`-table body.
+    fn write_manifest(dir: &Path, deps_body: &str) {
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            format!("[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\n{deps_body}\n"),
+        )
+        .expect("write fixture Cargo.toml");
+    }
+
+    /// `git init` a fixture directory and commit its current contents, returning the
+    /// commit's Unix timestamp (`%ct`) — mirroring `differ_build_inputs`'s own git
+    /// invocations so a fixture repo test never depends on the ambient `git` config.
+    fn init_and_commit(dir: &Path, message: &str) -> u64 {
+        let run = |args: &[&str]| {
+            let output = crate::shared::git_command()
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .expect("spawn git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed in {}: {}",
+                dir.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        if !dir.join(".git").exists() {
+            run(&["init", "-q"]);
+            run(&["config", "user.email", "test@example.com"]);
+            run(&["config", "user.name", "Test"]);
+        }
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", message]);
+        let output = crate::shared::git_command()
+            .args(["log", "-1", "--format=%ct"])
+            .current_dir(dir)
+            .output()
+            .expect("spawn git log");
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .expect("commit timestamp")
+    }
+
+    #[test]
+    fn path_dependency_closure_empty_when_manifest_has_no_path_deps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_manifest(dir.path(), "[dependencies]\nserde = \"1\"\n");
+        let closure = path_dependency_closure(dir.path().to_str().unwrap());
+        assert!(closure.is_empty(), "no path deps -> empty closure");
+    }
+
+    #[test]
+    fn path_dependency_closure_empty_when_manifest_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No Cargo.toml at all.
+        let closure = path_dependency_closure(dir.path().to_str().unwrap());
+        assert!(closure.is_empty());
+    }
+
+    #[test]
+    fn path_dependency_closure_finds_direct_path_dependency() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer_dir = dir.path().join("writer");
+        let dep_dir = dir.path().join("dep");
+        std::fs::create_dir_all(&writer_dir).unwrap();
+        std::fs::create_dir_all(&dep_dir).unwrap();
+        write_manifest(&writer_dir, "[dependencies]\ndep = { path = \"../dep\" }\n");
+        write_manifest(&dep_dir, "[dependencies]\n");
+
+        let closure = path_dependency_closure(writer_dir.to_str().unwrap());
+        let expected = dep_dir.canonicalize().unwrap();
+        assert_eq!(closure, vec![expected]);
+    }
+
+    #[test]
+    fn path_dependency_closure_is_transitive() {
+        // a -> b -> c: the moved commit lives in c, so the walk must reach it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        let c = dir.path().join("c");
+        for p in [&a, &b, &c] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        write_manifest(&a, "[dependencies]\nb = { path = \"../b\" }\n");
+        write_manifest(&b, "[dependencies]\nc = { path = \"../c\" }\n");
+        write_manifest(&c, "[dependencies]\n");
+
+        let closure = path_dependency_closure(a.to_str().unwrap());
+        let names: Vec<String> = closure
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.contains(&"b".to_string()),
+            "must include b: {names:?}"
+        );
+        assert!(
+            names.contains(&"c".to_string()),
+            "must reach c transitively: {names:?}"
+        );
+    }
+
+    #[test]
+    fn path_dependency_closure_terminates_on_a_cycle() {
+        // a -> b -> a: the visited-set must stop the walk rather than hang.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        write_manifest(&a, "[dependencies]\nb = { path = \"../b\" }\n");
+        write_manifest(&b, "[dependencies]\na = { path = \"../a\" }\n");
+
+        // Bounded by the test harness's own timeout; a regression that removed the
+        // visited-set would hang this call rather than return.
+        let closure = path_dependency_closure(a.to_str().unwrap());
+        let names: std::collections::HashSet<String> = closure
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, std::collections::HashSet::from(["b".to_string()]));
+    }
+
+    #[test]
+    fn path_dependency_comparison_no_path_deps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_manifest(dir.path(), "[dependencies]\n");
+        let cmp = path_dependency_comparison(dir.path().to_str().unwrap(), SystemTime::now());
+        assert_eq!(cmp, PathDepComparison::NoPathDeps);
+    }
+
+    #[test]
+    fn path_dependency_comparison_same_when_dep_commit_predates_build_time() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer_dir = dir.path().join("writer");
+        let dep_dir = dir.path().join("dep");
+        std::fs::create_dir_all(&writer_dir).unwrap();
+        std::fs::create_dir_all(&dep_dir).unwrap();
+        write_manifest(&writer_dir, "[dependencies]\ndep = { path = \"../dep\" }\n");
+        write_manifest(&dep_dir, "[dependencies]\n");
+        let commit_secs = init_and_commit(&dep_dir, "initial dep commit");
+        let build_time =
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(commit_secs + 3600);
+
+        let cmp = path_dependency_comparison(writer_dir.to_str().unwrap(), build_time);
+        assert_eq!(
+            cmp,
+            PathDepComparison::Same,
+            "a dependency commit an hour before the writer's build time must not be Differ"
+        );
+    }
+
+    #[test]
+    fn path_dependency_comparison_differ_names_the_moved_dependency() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer_dir = dir.path().join("writer");
+        let dep_dir = dir.path().join("dep");
+        std::fs::create_dir_all(&writer_dir).unwrap();
+        std::fs::create_dir_all(&dep_dir).unwrap();
+        write_manifest(&writer_dir, "[dependencies]\ndep = { path = \"../dep\" }\n");
+        write_manifest(&dep_dir, "[dependencies]\n");
+        let commit_secs = init_and_commit(&dep_dir, "dep commit after the writer was built");
+        // Build time an hour BEFORE the dependency's commit -> Differ.
+        let build_time = SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(commit_secs.saturating_sub(3600));
+
+        let cmp = path_dependency_comparison(writer_dir.to_str().unwrap(), build_time);
+        match cmp {
+            PathDepComparison::Differ(names) => {
+                assert_eq!(names, vec!["dep".to_string()]);
+            }
+            other => panic!("expected Differ naming `dep`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn path_dep_drift_maps_no_path_deps_and_same_to_no_drift() {
+        assert!(path_dep_drift(&PathDepComparison::NoPathDeps).is_none());
+        assert!(path_dep_drift(&PathDepComparison::Same).is_none());
+    }
+
+    #[test]
+    fn path_dep_drift_maps_differ_and_unknown_to_drift_naming_the_dependency() {
+        let (status, findings, reason) =
+            path_dep_drift(&PathDepComparison::Differ(vec!["okf-core".to_string()]))
+                .expect("Differ must drift");
+        assert_eq!(status, CheckStatus::Drift);
+        assert!(findings[0].contains("okf-core"));
+        assert!(reason.is_none());
+
+        let (status, findings, _reason) =
+            path_dep_drift(&PathDepComparison::Unknown).expect("Unknown must drift");
+        assert_eq!(status, CheckStatus::Drift);
+        assert!(!findings.is_empty());
+    }
+
+    #[test]
+    fn verdict_reports_drift_from_a_moved_path_dependency_even_when_own_sha_matches() {
+        // The core behaviour this task adds: the writer's OWN sha/build-input comparison
+        // is clean, but a path dependency moved -> still Drift, never a silent Pass.
+        let (status, findings, reason) = verdict(
+            "abc123",
+            Some("abc123"),
+            "0",
+            true,
+            BuildInputComparison::Unknown,
+            PathDepComparison::Differ(vec!["okf-core".to_string()]),
+        );
+        assert_eq!(status, CheckStatus::Drift);
+        assert!(findings[0].contains("okf-core"));
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn verdict_no_path_deps_or_same_never_turns_a_pass_into_drift() {
+        let (status, findings, _) = verdict(
+            "abc123",
+            Some("abc123"),
+            "0",
+            true,
+            BuildInputComparison::Unknown,
+            PathDepComparison::NoPathDeps,
+        );
+        assert_eq!(status, CheckStatus::Pass);
+        assert!(findings.is_empty());
+
+        let (status, findings, _) = verdict(
+            "abc123",
+            Some("def456"),
+            "0",
+            true,
+            BuildInputComparison::Same,
+            PathDepComparison::Same,
+        );
+        assert_eq!(status, CheckStatus::Pass);
+        assert!(!findings.is_empty()); // still carries the own-repo "Same" explanation
+    }
+
+    #[test]
+    fn verdict_path_dep_drift_never_downgrades_an_existing_drift_to_pass() {
+        // An existing Drift verdict (own SHA differs, build inputs Differ) stays Drift
+        // regardless of what path_deps says — path deps only ADD Drift, never remove it.
+        let (status, findings, _) = verdict(
+            "abc123",
+            Some("def456"),
+            "0",
+            true,
+            BuildInputComparison::Differ,
+            PathDepComparison::NoPathDeps,
+        );
+        assert_eq!(status, CheckStatus::Drift);
+        assert!(findings[0].contains("rebuild"));
+
+        // The dirty branch, too: dirty=1 wins outright.
+        let (status, findings, _) = verdict(
+            "abc123",
+            Some("abc123"),
+            "1",
+            true,
+            BuildInputComparison::Unknown,
+            PathDepComparison::Differ(vec!["okf-core".to_string()]),
+        );
+        assert_eq!(status, CheckStatus::Drift);
+        assert!(findings[0].contains("uncommitted"));
     }
 }
