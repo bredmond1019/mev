@@ -2227,6 +2227,7 @@ pub fn attention_queue(root: &std::path::Path, notify_only: bool) -> anyhow::Res
                 effective_priority: None,
                 lane: None,
                 clears_when: None,
+                fleet_correctness: None,
             });
         } else {
             rows.push(AttentionRow {
@@ -2239,6 +2240,7 @@ pub fn attention_queue(root: &std::path::Path, notify_only: bool) -> anyhow::Res
                 effective_priority: None,
                 lane: None,
                 clears_when: None,
+                fleet_correctness: None,
             });
         }
     }
@@ -2262,6 +2264,7 @@ pub fn attention_queue(root: &std::path::Path, notify_only: bool) -> anyhow::Res
             effective_priority: None,
             lane: None,
             clears_when: None,
+            fleet_correctness: None,
         });
     }
 

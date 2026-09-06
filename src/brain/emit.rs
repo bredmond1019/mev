@@ -431,8 +431,14 @@ pub fn render_wave_table(
     let _ = graph;
 
     // Header
-    let header = "| Wave | Block | Title | Status | Depends on |";
-    let sep = "|------|-------|-------|--------|------------|";
+    //
+    // `Fleet` renders D80's `fleet_correctness` grade beside `Status`/wave —
+    // never blended into it (D80's composition rule: the two axes are
+    // recorded and displayed separately, never averaged into one score).
+    // An ungraded block renders the em-dash, matching the `Wave` column's
+    // own absent-value convention rather than a bespoke "ungraded" string.
+    let header = "| Wave | Block | Title | Status | Depends on | Fleet |";
+    let sep = "|------|-------|-------|--------|------------|-------|";
 
     let mut rows: Vec<String> = Vec::new();
     rows.push(header.to_string());
@@ -492,8 +498,13 @@ pub fn render_wave_table(
                 .join(", ")
         };
 
+        let fleet_col = match &block.fleet_correctness {
+            Some(grade) => crate::brain::state::fleet_correctness_label(grade).into_owned(),
+            None => "\u{2014}".to_string(), // em-dash — ungraded, never guessed at
+        };
+
         rows.push(format!(
-            "| {wave_col} | {block_id} | {} | {derived_status} | {deps_col} |",
+            "| {wave_col} | {block_id} | {} | {derived_status} | {deps_col} | {fleet_col} |",
             block.title
         ));
     }
@@ -1508,6 +1519,12 @@ pub(crate) struct AttentionRow {
     pub(crate) lane: Option<TriageLane>,
     /// Carryover-only: the display form of `clears_when`, if any.
     pub(crate) clears_when: Option<String>,
+    /// Carryover-only: D80's `fleet_correctness` grade, passed through
+    /// verbatim from the source [`Carryover`] item. `None` for every other
+    /// lane (backlog/capture/distilled carry no such field) and for a
+    /// carryover entry that has not been graded — absence is normal, not a
+    /// finding. Rendered beside `priority`, never blended with it (D80).
+    pub(crate) fleet_correctness: Option<okf_core::FleetCorrectness>,
 }
 
 /// Truncate `text` to a single tidy line of at most `max` chars for a board row.
@@ -1607,6 +1624,16 @@ fn render_triage_detail(row: &AttentionRow) -> String {
         (Some(p), None) => detail.push_str(&format!(" [P{p}]")),
         (None, Some(ep)) => detail.push_str(&format!(" [effective P{ep}]")),
         (None, None) => {}
+    }
+    // D80's fleet-correctness grade, rendered beside priority as its own
+    // bracket — NEVER folded into the `[P..]` annotation above or combined
+    // into a single score. An ungraded entry (the common case today) adds
+    // nothing: absence is normal, not a finding.
+    if let Some(grade) = &row.fleet_correctness {
+        detail.push_str(&format!(
+            " [{}]",
+            crate::brain::state::fleet_correctness_label(grade)
+        ));
     }
     if let Some(c) = &row.clears_when {
         detail.push_str(&format!(" (clears when: {c})"));
@@ -1774,6 +1801,7 @@ pub(crate) fn collect_attention_rows(
                 effective_priority: r.effective_priority,
                 lane: Some(r.lane),
                 clears_when,
+                fleet_correctness: source.and_then(|item| item.fleet_correctness.clone()),
             }
         })
         .collect()
@@ -1832,6 +1860,7 @@ pub fn render_attention_section_with_distilled(
                     effective_priority: None,
                     lane: None,
                     clears_when: None,
+                    fleet_correctness: None,
                 });
             } else {
                 backlog_rows.push(AttentionRow {
@@ -1844,6 +1873,7 @@ pub fn render_attention_section_with_distilled(
                     effective_priority: None,
                     lane: None,
                     clears_when: None,
+                    fleet_correctness: None,
                 });
             }
         }
@@ -1867,6 +1897,7 @@ pub fn render_attention_section_with_distilled(
                 effective_priority: None,
                 lane: None,
                 clears_when: None,
+                fleet_correctness: None,
             });
         }
     }

@@ -449,6 +449,7 @@ mod tests {
             effective_priority: None,
             lane: row_lane,
             clears_when: None,
+            fleet_correctness: None,
         }
     }
 
