@@ -483,6 +483,53 @@ check "no real consumer build was ever spawned (no nextest invocation logged)" \
 check "mev on PATH recorded ZERO invocations across the entire suite" \
     "$( [ ! -s "$MEV_LOG_ALL" ] && echo 0 || echo 1 )"
 
+# ---------------------------------------------------------------------------
+# MV.ticket.consumer-gate-must-report-its-real-coverage, task 1:
+# --require-full-coverage gives incomplete coverage its own exit code (4)
+# without changing default (no-flag) behaviour, and a broken consumer still
+# wins (exit 1) over incomplete coverage even under the flag.
+#
+# run_gate_flag <flag> <fixture-json-path> -- like run_gate but inserts
+# <flag> as the wrapper's own argv[1] (before the MEV_CHECK_CONSUMERS_CMD
+# override takes effect), so --require-full-coverage is exercised exactly
+# as a caller would pass it. Sets OUT/RC.
+# ---------------------------------------------------------------------------
+run_gate_flag() {
+    local flag="$1" fixture="$2"
+    OUT="$(PATH="$TEST_PATH" MEV_CHECK_CONSUMERS_LOCK_DIR="$LOCK_DIR" MEV_CHECK_CONSUMERS_CMD="cat '$fixture'" "$GATE_DIR/check_consumers.sh" "$flag" 2>&1)"
+    RC=$?
+}
+
+# (a) incomplete coverage WITHOUT the flag -> exit 0 (regression guard: the
+# existing consumer-compile-gate row's semantics stay byte-for-byte
+# unchanged when the flag is never passed).
+reset_fixtures
+run_gate "$FIX/mixed_pass_skipped.json"
+check "coverage flag: incomplete coverage WITHOUT --require-full-coverage -> exit 0" \
+    "$( [ "$RC" -eq 0 ] && echo 0 || echo 1 )"
+
+# (b) incomplete coverage WITH the flag -> exit 4.
+reset_fixtures
+run_gate_flag "--require-full-coverage" "$FIX/mixed_pass_skipped.json"
+check "coverage flag: incomplete coverage WITH --require-full-coverage -> exit 4" \
+    "$( [ "$RC" -eq 4 ] && echo 0 || echo 1 )"
+
+# (c) a broken consumer WITH the flag -> exit 1, not 4 (exit 1 wins even
+# though coverage is also incomplete — a broken consumer is a real
+# regression, incomplete coverage is merely an unknown).
+reset_fixtures
+run_gate_flag "--require-full-coverage" "$FIX/one_broken.json"
+check "coverage flag: broken consumer WITH --require-full-coverage -> exit 1, not 4" \
+    "$( [ "$RC" -eq 1 ] && echo 0 || echo 1 )"
+
+# (d) THE POSITIVE CONTROL: full coverage WITH the flag -> exit 0. Without
+# this case, a regression that always exited 4 whenever the flag was passed
+# (ignoring actual coverage) would satisfy (b) and (c) above.
+reset_fixtures
+run_gate_flag "--require-full-coverage" "$FIX/all_pass.json"
+check "coverage flag: full coverage WITH --require-full-coverage -> exit 0 (positive control)" \
+    "$( [ "$RC" -eq 0 ] && echo 0 || echo 1 )"
+
 echo
 echo "== $pass_count passed, $fail_count failed =="
 exit "$fail"

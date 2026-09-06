@@ -314,6 +314,39 @@ has_live_lease() {
 }
 
 # ---------------------------------------------------------------------------
+# Coverage result file (MV.ticket.consumer-gate-must-report-its-real-coverage
+# task 1): every run — flagged or not — writes a small machine-readable
+# record of what was actually verified, under $REPO_ROOT/target/ (gitignored,
+# and never under planning/, which is a symlink into a private vault
+# invisible to CI). A separate, non-gating harness check
+# (`consumer-coverage`) reads this file rather than re-invoking the compile,
+# which costs two real cold cargo builds over other repos. The recorded git
+# SHA lets that reader detect a stale file left over from an earlier commit.
+# ---------------------------------------------------------------------------
+write_coverage_result_file() {
+    local verified="$1" total="$2"
+    shift 2
+    local sha
+    sha="$(cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null)"
+    [ -n "$sha" ] || sha="unknown"
+    mkdir -p "$REPO_ROOT/target"
+    {
+        printf '{"git_sha":"%s","verified_count":%d,"total_count":%d,"consumers":[' \
+            "$sha" "$verified" "$total"
+        local first=1 pair
+        for pair in "${@+"$@"}"; do
+            if [ "$first" -eq 1 ]; then
+                first=0
+            else
+                printf ','
+            fi
+            printf '%s' "$pair"
+        done
+        printf ']}'
+    } > "$REPO_ROOT/target/consumer-coverage.json"
+}
+
+# ---------------------------------------------------------------------------
 # Adjudication: exit non-zero iff (a) some consumer is `broken` and has
 # no waiver row, (a2) some consumer is `broken`, has a waiver row, but
 # the waived repo holds no live lease (an unowned break wearing a
@@ -321,8 +354,21 @@ has_live_lease() {
 # `pass` (a stale waiver). `skipped_dirty`, `lockfile_stale` and
 # `not_evaluable` are reported and always exit 0 — they are bookkeeping
 # about someone else's repo, not evidence mev broke anything.
+#
+# --require-full-coverage (opt-in, default behaviour byte-for-byte
+# unchanged without it): after adjudication, if fewer than all discovered
+# consumers were actually verified, exit 4 — a THIRD verdict distinct from
+# both "pass" (exit 0) and "broken" (exit 1). Exit 1 always wins when both
+# apply: a broken consumer is a real regression, incomplete coverage is
+# merely an unknown.
 # ---------------------------------------------------------------------------
 main() {
+    local require_full_coverage=0
+    if [ "${1:-}" = "--require-full-coverage" ]; then
+        require_full_coverage=1
+        shift
+    fi
+
     parse_waivers
 
     invoke_check_consumers
@@ -359,6 +405,7 @@ main() {
     local verified_count=0
     local total_count=0
     local unverified_notes=()
+    local coverage_pairs=()
 
     if [ -n "$objects" ]; then
         while IFS= read -r obj; do
@@ -373,6 +420,7 @@ main() {
             else
                 unverified_notes+=("$slug: $outcome")
             fi
+            coverage_pairs+=("{\"slug\":\"$slug\",\"outcome\":\"$outcome\"}")
 
             owner=""
             if lookup_waiver "$slug"; then
@@ -458,9 +506,17 @@ main() {
     fi
     echo "$coverage_line"
 
+    write_coverage_result_file "$verified_count" "$total_count" \
+        "${coverage_pairs[@]+"${coverage_pairs[@]}"}"
+
     if [ "$gate_failed" -eq 1 ]; then
         exit 1
     fi
+
+    if [ "$require_full_coverage" -eq 1 ] && [ "$verified_count" -lt "$total_count" ]; then
+        exit 4
+    fi
+
     exit 0
 }
 
