@@ -149,6 +149,17 @@ pub fn extract_links(contents: &str) -> Vec<LinkRef> {
             continue;
         }
 
+        // An unterminated inline code span closes at end of line, the way real
+        // markdown parsers do — this must run BEFORE the skip branch below, or
+        // the newline is swallowed while `in_inline_code` is still true and the
+        // reset never happens (the original bug). Fenced code spans multiple
+        // lines legitimately, so `in_fenced_code` is untouched here.
+        if bytes[i] == b'\n' {
+            in_inline_code = false;
+            i += 1;
+            continue;
+        }
+
         // Skip link matching if inside any code block
         if in_fenced_code || in_inline_code {
             let ch_width = {

@@ -78,6 +78,7 @@ mod graph_findings_cli;
 mod lane_segments_dependency_split;
 mod lane_segments_fleet;
 mod lanes_driver;
+mod links_unterminated_backtick;
 mod master_plan_fixtures;
 // Learn-ai's struct/frontmatter validator (`mev::validate_file`) is feature-gated; see the
 // `crawl` mod comment above for why this stays here, gated, rather than moving.
