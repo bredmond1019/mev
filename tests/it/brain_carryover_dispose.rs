@@ -683,10 +683,16 @@ fn write_failure_between_the_two_writes_leaves_no_orphaned_removal() {
 
 /// AC2 — REGRESSION FIXTURE, bella, verbatim: prose reading
 /// `path scripts/check_scenes.sh exists; path scripts/vhs/scenes.toml exists` with BOTH
-/// files present on disk. Before this task this entry's two mined path refs were both
-/// satisfied and `--dispose` removed it; after, it must survive on disk untouched.
+/// files present on disk. Originally, before `--dispose`-only refusal landed, this
+/// entry's two mined path refs were both satisfied and `--dispose` removed it.
+///
+/// UPDATED for `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`:
+/// this `clears_when` is prose, so `evaluate_carryover` no longer lands it in
+/// `Cleared` at all (regardless of the mined refs being satisfied) — it must
+/// survive on disk untouched, and it is no longer even a candidate reaching
+/// `compute_disposal_plan`'s `Cleared`-only loop, so `plan.refused` is empty too.
 #[test]
-fn dispose_refuses_the_bella_scenes_prose_regression_verbatim() {
+fn dispose_never_disposes_the_bella_scenes_prose_regression_verbatim() {
     let dir = temp_dir("bella-prose-regression");
     write_brain_toml(&dir, &["bella"]);
     write_json(
@@ -717,8 +723,13 @@ fn dispose_refuses_the_bella_scenes_prose_regression_verbatim() {
     let (loaded, load_errors, report) = load_and_evaluate_for_dispose(&dir, false);
     assert!(load_errors.is_empty(), "no repo should fail to load here");
     assert_eq!(
-        report.cleared, 1,
-        "both mined paths exist, so this still lands in Cleared for reporting"
+        report.cleared, 0,
+        "both mined paths exist, but a prose clears_when never lands Cleared"
+    );
+    assert_eq!(
+        report.entries[0].lane,
+        mev::CarryoverLane::NotEvaluable,
+        "the bella regression must be NotEvaluable, not Cleared"
     );
 
     let plan = compute_disposal_plan(&report, &loaded, &load_errors, mev::COMMAND_EXEC_TIMEOUT);
@@ -727,9 +738,11 @@ fn dispose_refuses_the_bella_scenes_prose_regression_verbatim() {
         "the bella regression must never be disposed, got: {:#?}",
         plan.candidates
     );
-    assert_eq!(plan.refused.len(), 1);
-    assert_eq!(plan.refused[0].repo, "bella");
-    assert_eq!(plan.refused[0].slug, "rapid-keypresses-blank-the-render");
+    assert!(
+        plan.refused.is_empty(),
+        "the entry never reaches Cleared, so it is never a candidate for refusal, got: {:#?}",
+        plan.refused
+    );
 
     // Drive the actual write path too: the entry must survive untouched on disk, not
     // merely be absent from the in-memory `plan.candidates`.
@@ -763,10 +776,16 @@ fn dispose_refuses_the_bella_scenes_prose_regression_verbatim() {
 }
 
 /// AC3 — REGRESSION FIXTURE, engine-rs: prose containing a block id whose status is
-/// closed. Before this task the mined block ref resolved satisfied and `--dispose`
-/// removed the entry; after, it must survive on disk untouched.
+/// closed. Originally, before `--dispose`-only refusal landed, the mined block ref
+/// resolved satisfied and `--dispose` removed the entry.
+///
+/// UPDATED for `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`:
+/// this `clears_when` is prose, so `evaluate_carryover` no longer lands it in
+/// `Cleared` at all — it must survive on disk untouched, and it never even
+/// reaches `compute_disposal_plan`'s `Cleared`-only loop, so `plan.refused` is
+/// empty too.
 #[test]
-fn dispose_refuses_the_engine_rs_closed_block_prose_regression() {
+fn dispose_never_disposes_the_engine_rs_closed_block_prose_regression() {
     let dir = temp_dir("engine-rs-prose-regression");
     write_brain_toml(&dir, &["engine-rs"]);
     write_json(
@@ -805,8 +824,13 @@ fn dispose_refuses_the_engine_rs_closed_block_prose_regression() {
     let (loaded, load_errors, report) = load_and_evaluate_for_dispose(&dir, false);
     assert!(load_errors.is_empty(), "no repo should fail to load here");
     assert_eq!(
-        report.cleared, 1,
-        "the mined block id resolves closed, so this still lands in Cleared for reporting"
+        report.cleared, 0,
+        "the mined block id resolves closed, but a prose clears_when never lands Cleared"
+    );
+    assert_eq!(
+        report.entries[0].lane,
+        mev::CarryoverLane::NotEvaluable,
+        "the engine-rs regression must be NotEvaluable, not Cleared"
     );
 
     let plan = compute_disposal_plan(&report, &loaded, &load_errors, mev::COMMAND_EXEC_TIMEOUT);
@@ -815,11 +839,10 @@ fn dispose_refuses_the_engine_rs_closed_block_prose_regression() {
         "the engine-rs regression must never be disposed, got: {:#?}",
         plan.candidates
     );
-    assert_eq!(plan.refused.len(), 1);
-    assert_eq!(plan.refused[0].repo, "engine-rs");
-    assert_eq!(
-        plan.refused[0].slug,
-        "engine-leaves-allow-dead-code-on-helpers-it-later-wires-up"
+    assert!(
+        plan.refused.is_empty(),
+        "the entry never reaches Cleared, so it is never a candidate for refusal, got: {:#?}",
+        plan.refused
     );
 
     let dispose_report = run_dispose(&plan, &loaded, "2026-09-02", false);

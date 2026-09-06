@@ -95,8 +95,13 @@ fn write_beta_state(root: &Path) {
 }
 
 /// Write alpha's leaf state: three `carryover[]` entries —
-///   - `alpha-cleared-cross-repo`: `related[]` names beta's closed `BE.1.A` → Cleared.
-///   - `alpha-actionable-cross-repo`: prose names beta's open `BE.1.B` → Actionable.
+///   - `alpha-cleared-cross-repo`: TYPED `block_closed` naming beta's closed `BE.1.A` →
+///     Cleared. `related[]` also names it for good measure, but `related[]` is never
+///     consulted by `evaluate_carryover` — only `clears_when` decides the lane
+///     (`MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`: this used
+///     to be prose, which can no longer ever land `Cleared`).
+///   - `alpha-actionable-cross-repo`: TYPED `block_closed` naming beta's open `BE.1.B`
+///     → Actionable (same reason: prose can no longer land `Actionable` either).
 ///   - `alpha-prose-only`: no resolvable block/path token → NotEvaluable(Prose).
 fn write_alpha_state(root: &Path) {
     let state = serde_json::json!({
@@ -121,7 +126,7 @@ fn write_alpha_state(root: &Path) {
                 "related": [
                     { "type": "block", "repo": "beta", "id": "BE.1.A" }
                 ],
-                "clears_when": "BE.1.A lands",
+                "clears_when": { "type": "block_closed", "repo": "beta", "id": "BE.1.A" },
                 "created": "2026-06-01"
             },
             {
@@ -129,7 +134,7 @@ fn write_alpha_state(root: &Path) {
                 "scope": { "repo": "alpha" },
                 "kind": "deferred",
                 "text": "Alpha is waiting on beta's block B landing.",
-                "clears_when": "BE.1.B lands",
+                "clears_when": { "type": "block_closed", "repo": "beta", "id": "BE.1.B" },
                 "created": "2026-06-01"
             },
             {
@@ -416,6 +421,12 @@ fn live_corpus_evaluable_floor_and_cleared_ceiling() {
 /// is scoped `cross_repo: true` with an UNSATISFIED predicate, and one is
 /// `tier`-scoped, also unsatisfied.
 ///
+/// All four `clears_when` are TYPED `block_closed` predicates, not prose —
+/// `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated` made a
+/// prose `clears_when` land `NotEvaluable` unconditionally, so a prose
+/// fixture could no longer exercise this test's `Cleared`/`Actionable`
+/// distinction.
+///
 /// The cross-repo entry is the load-bearing one: it is invisible to a bare
 /// `--repo alpha`, admitted by `--include-cross-repo`, and must arrive in
 /// `Actionable` when it does. A widening that manufactured a false `cleared`
@@ -442,7 +453,7 @@ fn write_widening_alpha_state(root: &Path) {
                 "kind": "deferred",
                 "text": "Alpha was waiting on beta's block A landing.",
                 "related": [ { "type": "block", "repo": "beta", "id": "BE.1.A" } ],
-                "clears_when": "BE.1.A lands",
+                "clears_when": { "type": "block_closed", "repo": "beta", "id": "BE.1.A" },
                 "created": "2026-06-01"
             },
             {
@@ -451,7 +462,7 @@ fn write_widening_alpha_state(root: &Path) {
                 "kind": "deferred",
                 "text": "Alpha is waiting on beta's block B landing.",
                 "related": [ { "type": "block", "repo": "beta", "id": "BE.1.B" } ],
-                "clears_when": "BE.1.B lands",
+                "clears_when": { "type": "block_closed", "repo": "beta", "id": "BE.1.B" },
                 "created": "2026-06-01"
             },
             {
@@ -460,7 +471,7 @@ fn write_widening_alpha_state(root: &Path) {
                 "kind": "deferred",
                 "text": "No single repo owns this; it waits on beta's open block B.",
                 "related": [ { "type": "block", "repo": "beta", "id": "BE.1.B" } ],
-                "clears_when": "BE.1.B lands",
+                "clears_when": { "type": "block_closed", "repo": "beta", "id": "BE.1.B" },
                 "created": "2026-06-01"
             },
             {
@@ -469,7 +480,7 @@ fn write_widening_alpha_state(root: &Path) {
                 "kind": "deferred",
                 "text": "Tier-wide item, also waiting on beta's open block B.",
                 "related": [ { "type": "block", "repo": "beta", "id": "BE.1.B" } ],
-                "clears_when": "BE.1.B lands",
+                "clears_when": { "type": "block_closed", "repo": "beta", "id": "BE.1.B" },
                 "created": "2026-06-01"
             }
         ]

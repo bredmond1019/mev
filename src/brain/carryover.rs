@@ -1475,47 +1475,63 @@ pub fn evaluate_carryover_with_dedup_and_widening(
                 None => {}
             }
 
-            let (lane, reason) = if !refs.is_empty() {
-                let all_satisfied = refs.iter().all(|r| match r {
-                    CarryoverRef::Block { satisfied, .. } => *satisfied,
-                    CarryoverRef::Path { satisfied, .. } => *satisfied,
-                    CarryoverRef::PathAbsent { satisfied, .. } => *satisfied,
-                    CarryoverRef::UnresolvedBlock { .. } => false,
-                    CarryoverRef::FileContains { satisfied, .. } => *satisfied,
-                    CarryoverRef::CommandExitsZero { satisfied, .. } => *satisfied,
-                });
-                let lane = if all_satisfied {
-                    CarryoverLane::Cleared
+            let (lane, reason) =
+                if let Some(ClearsWhen::Prose(clears_when)) = item.clears_when.as_ref() {
+                    // A prose `clears_when` can still mine real `CarryoverRef`s
+                    // above (block ids, path assertions) — those stay on the
+                    // verdict as evidence for a human and for `--dispose`'s
+                    // refusal path. But it must NEVER land in `Cleared` on the
+                    // strength of them: a free-form sentence that merely
+                    // mentions a block which has since closed, or a path that
+                    // happens to exist, is not evidence the finding itself was
+                    // addressed. This is checked FIRST, before the refs-based
+                    // decision below, so it wins regardless of whether every
+                    // mined ref is satisfied — MV.ticket
+                    // .carryover-sweep-must-not-clear-what-it-never-evaluated,
+                    // reversing the prior mitigation (refusing only at
+                    // `--dispose` time via `RefusedDisposal`) that a human
+                    // reading the plain, non-`--dispose` report would still see
+                    // such an entry as `Cleared`.
+                    let reason = if ambiguous {
+                        NotEvaluableReason::AmbiguousReference
+                    } else if !has_closure_verb(clears_when)
+                        && !extract_block_id_tokens(clears_when).is_empty()
+                    {
+                        // Names a block but never says it must close.
+                        NotEvaluableReason::NoClosureVerb
+                    } else if mentions_gate(clears_when) {
+                        // Names a validator/gate/CI concept but nothing checkable
+                        // (no path, no block) could be extracted from it — a
+                        // candidate for a typed `command_exits_zero` predicate,
+                        // never something this sweep derives and runs itself.
+                        NotEvaluableReason::GateMentionNotCheckable
+                    } else {
+                        NotEvaluableReason::Prose
+                    };
+                    (CarryoverLane::NotEvaluable, Some(reason))
+                } else if !refs.is_empty() {
+                    let all_satisfied = refs.iter().all(|r| match r {
+                        CarryoverRef::Block { satisfied, .. } => *satisfied,
+                        CarryoverRef::Path { satisfied, .. } => *satisfied,
+                        CarryoverRef::PathAbsent { satisfied, .. } => *satisfied,
+                        CarryoverRef::UnresolvedBlock { .. } => false,
+                        CarryoverRef::FileContains { satisfied, .. } => *satisfied,
+                        CarryoverRef::CommandExitsZero { satisfied, .. } => *satisfied,
+                    });
+                    let lane = if all_satisfied {
+                        CarryoverLane::Cleared
+                    } else {
+                        CarryoverLane::Actionable
+                    };
+                    (lane, None)
+                } else if let Some(reason) = forced_reason {
+                    (CarryoverLane::NotEvaluable, Some(reason))
                 } else {
-                    CarryoverLane::Actionable
+                    (
+                        CarryoverLane::NotEvaluable,
+                        Some(NotEvaluableReason::NoPredicate),
+                    )
                 };
-                (lane, None)
-            } else if let Some(reason) = forced_reason {
-                (CarryoverLane::NotEvaluable, Some(reason))
-            } else if let Some(ClearsWhen::Prose(clears_when)) = item.clears_when.as_ref() {
-                let reason = if ambiguous {
-                    NotEvaluableReason::AmbiguousReference
-                } else if !has_closure_verb(clears_when)
-                    && !extract_block_id_tokens(clears_when).is_empty()
-                {
-                    // Names a block but never says it must close.
-                    NotEvaluableReason::NoClosureVerb
-                } else if mentions_gate(clears_when) {
-                    // Names a validator/gate/CI concept but nothing checkable
-                    // (no path, no block) could be extracted from it — a
-                    // candidate for a typed `command_exits_zero` predicate,
-                    // never something this sweep derives and runs itself.
-                    NotEvaluableReason::GateMentionNotCheckable
-                } else {
-                    NotEvaluableReason::Prose
-                };
-                (CarryoverLane::NotEvaluable, Some(reason))
-            } else {
-                (
-                    CarryoverLane::NotEvaluable,
-                    Some(NotEvaluableReason::NoPredicate),
-                )
-            };
 
             let (age_days, stale) = match today_date {
                 Some(today_d) => {
@@ -1762,18 +1778,21 @@ pub struct SkippedRepo {
     pub error: String,
 }
 
-/// One `Cleared`-lane entry `compute_disposal_plan` refused to dispose
-/// because its `clears_when` is free-form prose rather than a typed
-/// predicate — `MV.ticket.dispose-must-refuse-prose-predicates`.
+/// One entry `compute_disposal_plan` refused to dispose because its
+/// `clears_when` is free-form prose rather than a typed predicate —
+/// originally `MV.ticket.dispose-must-refuse-prose-predicates`.
 ///
-/// A prose `clears_when` can still land in [`CarryoverLane::Cleared`] (the
-/// mined [`CarryoverRef`]s it produced were all satisfied) so `mev
-/// carryover`'s plain, non-`--dispose` report keeps surfacing it as cleared
-/// for a human to read — see the "Reporting is unchanged" note on
-/// [`compute_disposal_plan`]. What must never happen is an *automated*
-/// disposal driven by that mined data, so `--dispose` refuses the entry
-/// outright instead of silently skipping it (a silent skip would be
-/// indistinguishable from "nothing to dispose").
+/// **Superseded by `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`:**
+/// a prose `clears_when` can no longer land in [`CarryoverLane::Cleared`] at
+/// all — [`evaluate_carryover`] now forces [`CarryoverLane::NotEvaluable`]
+/// for any prose predicate regardless of whether its mined [`CarryoverRef`]s
+/// are satisfied, so `mev carryover`'s plain, non-`--dispose` report no
+/// longer surfaces such an entry as cleared for a human to read either. This
+/// function's `Some(ClearsWhen::Prose(_))` check below is kept as a
+/// defensive second guard — it inspects the raw record directly rather than
+/// trusting the lane a caller passed in — but in practice it can no longer
+/// be reached via a `Cleared`-lane verdict, since `evaluate_carryover` never
+/// produces one for a prose entry any more.
 #[derive(Debug, Clone)]
 pub struct RefusedDisposal {
     /// Owning repo slug.
@@ -1832,19 +1851,24 @@ pub struct DisposalPlan {
 /// yields a report with no `Cleared` `CommandExitsZero` candidates at all.
 ///
 /// **Guard (5) — a `Cleared` entry whose `clears_when` is prose is refused,
-/// never disposed** (`MV.ticket.dispose-must-refuse-prose-predicates`). The
-/// mined [`CarryoverRef`]s a prose predicate produces (`block_refs_from_prose`
-/// / `path_refs_from_prose`, upstream in `evaluate_carryover_with_dedup`)
-/// can still land the entry in `Cleared` for REPORTING — `mev carryover`
-/// without `--dispose` is unchanged by this guard, and keeps showing such an
-/// entry as cleared for a human to read. But this function checks the raw
-/// [`Carryover`] record's own `clears_when` variant directly (already loaded
-/// for step 2 above) and never treats a mined ref as license to dispose: a
-/// `Some(ClearsWhen::Prose(_))` entry is pushed to `refused` instead of
-/// `candidates`, with a reason naming the slug and stating that a typed
-/// predicate is required. This function calls no prose-mining function
-/// itself and extracts no path or block id from any string — it only
-/// pattern-matches the already-typed `ClearsWhen` enum.
+/// never disposed** (originally `MV.ticket.dispose-must-refuse-prose-predicates`).
+/// **As of `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`,
+/// `evaluate_carryover` never assigns [`CarryoverLane::Cleared`] to a prose
+/// entry in the first place** — a prose `clears_when` always lands
+/// [`CarryoverLane::NotEvaluable`], regardless of whether the mined
+/// [`CarryoverRef`]s it produced (`block_refs_from_prose` /
+/// `path_refs_from_prose`, upstream in `evaluate_carryover_with_dedup`) are
+/// all satisfied. So `report.entries` can no longer contain a prose entry
+/// with `lane == Cleared`, and the loop below can no longer reach this
+/// guard's check via that path. It is kept anyway as a defensive second
+/// guard: this function checks the raw [`Carryover`] record's own
+/// `clears_when` variant directly (already loaded for step 2 above) rather
+/// than trusting the lane alone, and never treats a mined ref as license to
+/// dispose — a `Some(ClearsWhen::Prose(_))` entry is pushed to `refused`
+/// instead of `candidates`, with a reason naming the slug and stating that a
+/// typed predicate is required. This function calls no prose-mining
+/// function itself and extracts no path or block id from any string — it
+/// only pattern-matches the already-typed `ClearsWhen` enum.
 pub fn compute_disposal_plan(
     report: &CarryoverReport,
     files: &[(StateSource, StateFile)],
@@ -5647,8 +5671,12 @@ mod tests {
         AttentionThresholds::default()
     }
 
+    /// UPDATED for `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`:
+    /// `clears_when` here is prose ("EN.5.B1 lands"), so even though the
+    /// mined block ref resolves closed, the entry must land NotEvaluable,
+    /// never Cleared. Renamed from `evaluate_satisfied_block_ref_lands_cleared`.
     #[test]
-    fn evaluate_satisfied_block_ref_lands_cleared() {
+    fn evaluate_prose_naming_a_satisfied_block_ref_is_not_evaluable_never_cleared() {
         let files = vec![
             (
                 src("engine-rs"),
@@ -5684,12 +5712,24 @@ mod tests {
             COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.total, 1);
-        assert_eq!(report.cleared, 1);
-        assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
+        assert_eq!(report.cleared, 0);
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::Block {
+                key: "engine-rs:EN.5.B1".to_string(),
+                satisfied: true,
+            }],
+            "the mined ref is still satisfied — only the lane changed"
+        );
     }
 
+    /// UPDATED for `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`:
+    /// `clears_when` here is prose too, so it lands NotEvaluable regardless
+    /// of the (unsatisfied) mined ref. Renamed from
+    /// `evaluate_unsatisfied_block_ref_lands_actionable`.
     #[test]
-    fn evaluate_unsatisfied_block_ref_lands_actionable() {
+    fn evaluate_prose_naming_an_unsatisfied_block_ref_is_not_evaluable_never_actionable() {
         let files = vec![
             (
                 src("engine-rs"),
@@ -5725,15 +5765,16 @@ mod tests {
             COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(report.total, 1);
-        assert_eq!(report.actionable, 1);
+        assert_eq!(report.actionable, 0);
         let entry = &report.entries[0];
-        assert_eq!(entry.lane, CarryoverLane::Actionable);
+        assert_eq!(entry.lane, CarryoverLane::NotEvaluable);
         assert_eq!(
             entry.refs,
             vec![CarryoverRef::Block {
                 key: "engine-rs:EN.5.B1".to_string(),
                 satisfied: false,
-            }]
+            }],
+            "the mined ref is still present and unsatisfied — only the lane changed"
         );
     }
 
@@ -5937,8 +5978,13 @@ mod tests {
         );
     }
 
+    /// UPDATED for `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`:
+    /// this is still prose, so it lands NotEvaluable even though it has a
+    /// closure verb and its mined block ref is satisfied — the closure-verb
+    /// ladder only picks the NotEvaluableReason, it never earns a `Cleared`.
+    /// Renamed from `evaluate_block_id_with_a_closure_verb_still_clears`.
     #[test]
-    fn evaluate_block_id_with_a_closure_verb_still_clears() {
+    fn evaluate_prose_block_id_with_a_closure_verb_is_not_evaluable_not_cleared() {
         // The gate must not break the legitimate case.
         let files = vec![
             (
@@ -5978,8 +6024,16 @@ mod tests {
             false,
             COMMAND_EXEC_TIMEOUT,
         );
-        assert_eq!(report.cleared, 1);
-        assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
+        assert_eq!(report.cleared, 0);
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::Block {
+                key: "base-template:BT.ticket.worktree-env-file-copy".to_string(),
+                satisfied: true,
+            }],
+            "the mined ref is still satisfied — only the lane changed"
+        );
     }
 
     #[test]
@@ -6019,8 +6073,13 @@ mod tests {
         );
     }
 
+    /// UPDATED for `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`:
+    /// this `clears_when` is prose, so the entry lands NotEvaluable
+    /// regardless of the mixed satisfied/unsatisfied mined path refs — both
+    /// refs are still mined and asserted below, only the lane changed.
+    /// Renamed from `evaluate_exists_path_predicate_satisfied_and_unsatisfied`.
     #[test]
-    fn evaluate_exists_path_predicate_satisfied_and_unsatisfied() {
+    fn evaluate_prose_exists_path_assertions_are_not_evaluable_regardless_of_mined_refs() {
         let dir = tempfile::tempdir().expect("tempdir");
         let present = dir.path().join("docs/present.md");
         std::fs::create_dir_all(present.parent().unwrap()).unwrap();
@@ -6054,7 +6113,11 @@ mod tests {
             false,
             COMMAND_EXEC_TIMEOUT,
         );
-        assert_eq!(report.actionable, 1, "one path missing -> actionable");
+        assert_eq!(
+            report.actionable, 0,
+            "prose never lands Actionable, even with a missing mined path"
+        );
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
         let entry = &report.entries[0];
         let mut refs = entry.refs.clone();
         refs.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
@@ -6780,6 +6843,12 @@ mod tests {
         assert_eq!(both.entries[0].repo, "mev");
     }
 
+    /// UPDATED for `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`:
+    /// the `Cleared`/`Actionable` entries must now use TYPED `block_closed`
+    /// predicates rather than prose — prose can no longer reach either lane,
+    /// which is exactly what this fix ensures, so a prose fixture would no
+    /// longer exercise the `Cleared`/`Actionable` ordering this test is
+    /// about. The `NotEvaluable` entry stays prose.
     #[test]
     fn evaluate_output_ordering_is_deterministic() {
         let files = vec![(
@@ -6788,23 +6857,23 @@ mod tests {
                 "mev",
                 vec![("MV.1.A", "closed"), ("MV.1.B", "open")],
                 vec![
-                    item(
+                    predicate_item(
                         "zz-cleared",
                         "env",
-                        Some("MV.1.A lands"),
-                        vec![],
-                        "2020-01-01",
-                        None,
-                        None,
+                        ClearsWhenPredicate::BlockClosed {
+                            repo: "mev".to_string(),
+                            id: "MV.1.A".to_string(),
+                            note: None,
+                        },
                     ),
-                    item(
+                    predicate_item(
                         "aa-actionable",
                         "known_issue",
-                        Some("MV.1.B lands"),
-                        vec![],
-                        "2020-01-01",
-                        None,
-                        None,
+                        ClearsWhenPredicate::BlockClosed {
+                            repo: "mev".to_string(),
+                            id: "MV.1.B".to_string(),
+                            note: None,
+                        },
                     ),
                     item(
                         "mm-not-evaluable",
@@ -8121,7 +8190,19 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing entry {slug}"))
         };
         assert_eq!(by_slug("typed-satisfied").lane, CarryoverLane::Cleared);
-        assert_eq!(by_slug("prose-unsatisfied").lane, CarryoverLane::Actionable);
+        // UPDATED for `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`:
+        // a prose `clears_when` never lands Actionable/Cleared any more —
+        // it lands NotEvaluable regardless of whether its mined ref is
+        // satisfied. The mined ref itself (unsatisfied) is still present.
+        let prose_entry = by_slug("prose-unsatisfied");
+        assert_eq!(prose_entry.lane, CarryoverLane::NotEvaluable);
+        assert_eq!(
+            prose_entry.refs,
+            vec![CarryoverRef::Block {
+                key: "engine-rs:EN.5.B2".to_string(),
+                satisfied: false,
+            }]
+        );
     }
 
     #[test]
@@ -8175,13 +8256,21 @@ mod tests {
 
     /// RED-FIRST GUARD (a continued) — the polarity guard: an
     /// absence-assertion ("X is removed") over a path that in fact still
-    /// EXISTS must land Actionable, never Cleared. Before `PathAbsent`
-    /// existed, the only representable ref was `Path { satisfied: exists }`,
-    /// which would have reported this entry `cleared` purely because the
-    /// path is named and resolves — exactly the false-`cleared` shape this
-    /// guard exists to catch.
+    /// EXISTS must never land Cleared. Before `PathAbsent` existed, the only
+    /// representable ref was `Path { satisfied: exists }`, which would have
+    /// reported this entry `cleared` purely because the path is named and
+    /// resolves — exactly the false-`cleared` shape this guard exists to
+    /// catch.
+    ///
+    /// UPDATED for `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`:
+    /// this predicate is prose, so it now lands `NotEvaluable` unconditionally
+    /// rather than `Actionable` — a prose `clears_when` never gets to
+    /// `Actionable`/`Cleared` at all any more, regardless of whether its
+    /// mined refs are satisfied. The mined `PathAbsent` ref (unsatisfied) is
+    /// still asserted below, proving the polarity mining itself is
+    /// unaffected — only the LANE changed.
     #[test]
-    fn absence_assertion_over_a_still_existing_path_is_actionable_never_cleared() {
+    fn absence_assertion_over_a_still_existing_path_is_not_evaluable_never_cleared() {
         let dir = std::env::temp_dir().join(format!(
             "mev-carryover-path-absent-still-exists-{}",
             std::process::id()
@@ -8217,7 +8306,7 @@ mod tests {
             false,
             COMMAND_EXEC_TIMEOUT,
         );
-        assert_eq!(report.entries[0].lane, CarryoverLane::Actionable);
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
         assert_eq!(
             report.entries[0].refs,
             vec![CarryoverRef::PathAbsent {
@@ -8229,10 +8318,17 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The positive case, for completeness: an absence-assertion over a path
-    /// that has genuinely been removed clears.
+    /// The mirror case, for completeness: an absence-assertion over a path
+    /// that has genuinely been removed still mines a satisfied
+    /// `PathAbsent` ref, but — same as above — a prose `clears_when` never
+    /// lands `Cleared` regardless.
+    ///
+    /// UPDATED for `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`:
+    /// this used to assert `Cleared`; it now asserts `NotEvaluable`, which is
+    /// exactly the regression this block fixes (a prose predicate mining an
+    /// all-satisfied ref set must never clear).
     #[test]
-    fn absence_assertion_over_a_missing_path_clears() {
+    fn absence_assertion_over_a_missing_path_is_not_evaluable_not_cleared() {
         let dir = std::env::temp_dir().join(format!(
             "mev-carryover-path-absent-gone-{}",
             std::process::id()
@@ -8267,7 +8363,15 @@ mod tests {
             false,
             COMMAND_EXEC_TIMEOUT,
         );
-        assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::PathAbsent {
+                path: "docs/stale.md".to_string(),
+                satisfied: true,
+            }],
+            "the mined ref is still satisfied — only the lane changed"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -8351,12 +8455,19 @@ mod tests {
         );
     }
 
-    /// A gate mention that ALSO names a closing block still evaluates via
-    /// the existing block path — `mentions_gate` only supplies a more
-    /// specific reason label when nothing else was extracted; it never
+    /// A gate mention that ALSO names a closing block still mines the block
+    /// ref via the existing block path — `mentions_gate` only supplies a
+    /// more specific reason label when nothing else was extracted; it never
     /// suppresses real extraction.
+    ///
+    /// UPDATED for `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`:
+    /// the mined ref no longer earns `Cleared` — this `clears_when` is
+    /// prose, so it lands `NotEvaluable` regardless. The mined, satisfied
+    /// `Block` ref is asserted below to prove extraction is unaffected —
+    /// only the lane changed. Renamed from
+    /// `gate_mention_paired_with_a_closing_block_still_evaluates_via_block_ref`.
     #[test]
-    fn gate_mention_paired_with_a_closing_block_still_evaluates_via_block_ref() {
+    fn gate_mention_paired_with_a_closing_block_still_mines_the_block_ref() {
         let files = vec![(
             src("engine-rs"),
             state_file(
@@ -8385,7 +8496,15 @@ mod tests {
             false,
             COMMAND_EXEC_TIMEOUT,
         );
-        assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
+        assert_eq!(
+            report.entries[0].refs,
+            vec![CarryoverRef::Block {
+                key: "engine-rs:EN.5.B1".to_string(),
+                satisfied: true,
+            }],
+            "the mined ref is still present and satisfied — only the lane changed"
+        );
     }
 
     /// Live-data twin of the CLOSURE_VERBS pinning test, re-run through the
@@ -10076,11 +10195,19 @@ mod tests {
         assert_eq!(candidate.evidence, "block repo-a:MV.3.A closed");
     }
 
-    /// AC1: a `Cleared`-lane entry whose `clears_when` is a `String` (prose) is
-    /// refused, not disposed — even though its mined refs are all satisfied and
-    /// it landed in `CarryoverLane::Cleared` for reporting purposes.
+    /// AC1 — UPDATED for `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`:
+    /// a prose `clears_when` never disposes, because it never even reaches
+    /// `CarryoverLane::Cleared` any more — `evaluate_carryover` now forces
+    /// `NotEvaluable` regardless of whether its mined refs are all
+    /// satisfied. This test used to prove the `--dispose`-only refusal
+    /// (`plan.refused`); now that the entry cannot reach `Cleared` in the
+    /// first place, `compute_disposal_plan`'s loop (which only inspects
+    /// `Cleared`-lane verdicts) never reaches its own `refused` push either,
+    /// so `plan.refused` is empty too — the refusal is now redundant with
+    /// the lane fix, not a separate mechanism. Restated (not deleted) to
+    /// assert the new, stronger guarantee.
     #[test]
-    fn compute_disposal_plan_refuses_a_prose_clears_when_even_when_fully_cleared() {
+    fn compute_disposal_plan_never_disposes_a_prose_clears_when_even_when_fully_cleared() {
         let files = vec![(
             src("repo-a"),
             state_file(
@@ -10109,9 +10236,10 @@ mod tests {
             false,
             COMMAND_EXEC_TIMEOUT,
         );
-        // Reporting is unchanged: the prose entry still lands in Cleared.
-        assert_eq!(report.cleared, 1);
-        assert_eq!(report.entries[0].lane, CarryoverLane::Cleared);
+        // A prose clears_when never lands Cleared, even with a fully
+        // satisfied mined block ref.
+        assert_eq!(report.cleared, 0);
+        assert_eq!(report.entries[0].lane, CarryoverLane::NotEvaluable);
 
         let plan = compute_disposal_plan(&report, &files, &[], COMMAND_EXEC_TIMEOUT);
         assert!(
@@ -10119,27 +10247,23 @@ mod tests {
             "a prose clears_when must never produce a disposal candidate, got: {:#?}",
             plan.candidates
         );
-        assert_eq!(plan.refused.len(), 1);
-        assert_eq!(plan.refused[0].repo, "repo-a");
-        assert_eq!(plan.refused[0].slug, "prose-cleared");
         assert!(
-            plan.refused[0].reason.contains("prose-cleared"),
-            "refusal must name the slug, got: {}",
-            plan.refused[0].reason
-        );
-        assert!(
-            plan.refused[0].reason.to_lowercase().contains("typed"),
-            "refusal must state a typed predicate is required, got: {}",
-            plan.refused[0].reason
+            plan.refused.is_empty(),
+            "the entry never reaches Cleared, so compute_disposal_plan's Cleared-only \
+             loop never reaches the refusal branch either, got: {:#?}",
+            plan.refused
         );
     }
 
     /// AC2 — REGRESSION FIXTURE, bella, verbatim: prose reading
     /// `path scripts/check_scenes.sh exists; path scripts/vhs/scenes.toml exists`
-    /// with BOTH files present. Before this task, both mined path refs were
-    /// satisfied and the entry disposed; after, it must be refused.
+    /// with BOTH files present. Originally, before `--dispose`-only
+    /// refusal landed, both mined path refs were satisfied and the entry
+    /// disposed; now — per `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`
+    /// — it never reaches `Cleared` at all, so it is never even a candidate
+    /// for refusal.
     #[test]
-    fn compute_disposal_plan_refuses_the_bella_scenes_prose_regression() {
+    fn compute_disposal_plan_never_disposes_the_bella_scenes_prose_regression() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path();
         std::fs::create_dir_all(dir.join("scripts/vhs")).unwrap();
@@ -10179,8 +10303,13 @@ mod tests {
             COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(
-            report.cleared, 1,
-            "both mined paths exist, so this still lands in Cleared for reporting"
+            report.cleared, 0,
+            "both mined paths exist, but a prose clears_when never lands Cleared"
+        );
+        assert_eq!(
+            report.entries[0].lane,
+            CarryoverLane::NotEvaluable,
+            "the bella regression must be NotEvaluable, not Cleared"
         );
 
         let plan = compute_disposal_plan(&report, &files, &[], COMMAND_EXEC_TIMEOUT);
@@ -10189,15 +10318,21 @@ mod tests {
             "the bella regression must not be disposed, got: {:#?}",
             plan.candidates
         );
-        assert_eq!(plan.refused.len(), 1);
-        assert_eq!(plan.refused[0].slug, "rapid-keypresses-blank-the-render");
+        assert!(
+            plan.refused.is_empty(),
+            "never reaches Cleared, so it is never even considered for refusal, got: {:#?}",
+            plan.refused
+        );
     }
 
     /// AC3 — REGRESSION FIXTURE, engine-rs: prose containing a block id whose
-    /// status is closed. Before this task, the mined block ref was satisfied
-    /// and the entry disposed; after, it must be refused.
+    /// status is closed. Originally, before `--dispose`-only refusal
+    /// landed, the mined block ref was satisfied and the entry disposed; now
+    /// — per `MV.ticket.carryover-sweep-must-not-clear-what-it-never-evaluated`
+    /// — it never reaches `Cleared` at all, so it is never even a candidate
+    /// for refusal.
     #[test]
-    fn compute_disposal_plan_refuses_the_engine_rs_closed_block_prose_regression() {
+    fn compute_disposal_plan_never_disposes_the_engine_rs_closed_block_prose_regression() {
         let files = vec![(
             src("engine-rs"),
             state_file(
@@ -10227,8 +10362,13 @@ mod tests {
             COMMAND_EXEC_TIMEOUT,
         );
         assert_eq!(
-            report.cleared, 1,
-            "the mined block id resolves closed, so this still lands in Cleared for reporting"
+            report.cleared, 0,
+            "the mined block id resolves closed, but a prose clears_when never lands Cleared"
+        );
+        assert_eq!(
+            report.entries[0].lane,
+            CarryoverLane::NotEvaluable,
+            "the engine-rs regression must be NotEvaluable, not Cleared"
         );
 
         let plan = compute_disposal_plan(&report, &files, &[], COMMAND_EXEC_TIMEOUT);
@@ -10237,10 +10377,10 @@ mod tests {
             "the engine-rs regression must not be disposed, got: {:#?}",
             plan.candidates
         );
-        assert_eq!(plan.refused.len(), 1);
-        assert_eq!(
-            plan.refused[0].slug,
-            "engine-leaves-allow-dead-code-on-helpers-it-later-wires-up"
+        assert!(
+            plan.refused.is_empty(),
+            "never reaches Cleared, so it is never even considered for refusal, got: {:#?}",
+            plan.refused
         );
     }
 
