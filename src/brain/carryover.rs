@@ -288,6 +288,15 @@ pub struct CarryoverVerdict {
     /// [`okf_core::CarryoverNeeds::Unknown`] one without re-parsing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub needs: Option<CarryoverNeeds>,
+    /// D80's fleet-correctness grade, passed through verbatim from the source
+    /// [`Carryover`] item — mirrors `priority` above exactly: recorded
+    /// separately, never averaged or blended with priority, and an absent or
+    /// out-of-vocabulary grade is `None` here (its own bucket for `mev
+    /// carryover --fleet-correctness` and `--sort-fleet-correctness`, never
+    /// coerced to a value) — see
+    /// `MV.ticket.blocks-query-filters-and-ranks-on-fleet-correctness`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fleet_correctness: Option<okf_core::FleetCorrectness>,
 }
 
 /// Per-`needs`-value counts, computed by [`compute_needs_distribution`].
@@ -1600,6 +1609,7 @@ pub fn evaluate_carryover_with_dedup_and_widening(
                 blocks: item.blocks.clone(),
                 enforce: item.enforce,
                 needs: item.needs.clone(),
+                fleet_correctness: item.fleet_correctness.clone(),
             });
         }
     }
@@ -8741,6 +8751,7 @@ mod tests {
             blocks: Vec::new(),
             enforce: None,
             needs: None,
+            fleet_correctness: None,
         }
     }
 
@@ -8931,6 +8942,7 @@ mod tests {
             blocks: Vec::new(),
             enforce: None,
             needs: None,
+            fleet_correctness: None,
         }
     }
 
@@ -9116,6 +9128,7 @@ mod tests {
             blocks: Vec::new(),
             enforce: None,
             needs: None,
+            fleet_correctness: None,
         }
     }
 
@@ -9210,6 +9223,7 @@ mod tests {
             blocks,
             enforce: None,
             needs: None,
+            fleet_correctness: None,
         }
     }
 
@@ -10766,6 +10780,7 @@ mod tests {
             blocks: vec![],
             enforce: None,
             needs: None,
+            fleet_correctness: None,
         };
         assert_eq!(
             describe_clearing_evidence(&verdict, COMMAND_EXEC_TIMEOUT),
@@ -10795,6 +10810,7 @@ mod tests {
             blocks: vec![],
             enforce: None,
             needs: None,
+            fleet_correctness: None,
         };
         assert_eq!(
             describe_clearing_evidence(&verdict, std::time::Duration::from_secs(5)),
@@ -12180,6 +12196,7 @@ mod tests {
             blocks: Vec::new(),
             enforce: None,
             needs: None,
+            fleet_correctness: None,
         }
     }
 
@@ -12548,6 +12565,7 @@ heading = "{slug}"
             blocks: Vec::new(),
             enforce: None,
             needs,
+            fleet_correctness: None,
         }
     }
 

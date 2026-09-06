@@ -2821,6 +2821,7 @@ pub fn blocks_brain(
         let status = status_of(&node.key);
         let track_block = track_index.get(node.key.as_str());
         let priority = track_block.and_then(|b| b.priority);
+        let fleet_correctness = track_block.and_then(|b| b.fleet_correctness.clone());
         let startable = status != "closed"
             && track_block.is_some_and(|b| {
                 b.depends_on.iter().all(|dep| match dep {
@@ -2840,6 +2841,7 @@ pub fn blocks_brain(
             roadmap: roadmap_of.get(&node.key).cloned(),
             startable,
             priority,
+            fleet_correctness,
         });
     }
 
@@ -2881,6 +2883,10 @@ pub fn blocks_brain(
                 record: readiness.record,
                 tasks: readiness.tasks,
                 runnable: readiness.runnable(),
+                fleet_correctness: b
+                    .fleet_correctness
+                    .as_ref()
+                    .map(|g| brain::state::fleet_correctness_label(g).into_owned()),
             }
         })
         .filter(|row| runnable.is_none_or(|want| row.runnable == want))

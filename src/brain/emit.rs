@@ -1735,6 +1735,7 @@ pub(crate) fn collect_attention_rows(
             blocks: item.blocks.clone(),
             enforce: item.enforce,
             needs: item.needs.clone(),
+            fleet_correctness: item.fleet_correctness.clone(),
         });
         item_by_key.insert(key, item);
     }

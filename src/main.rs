@@ -1333,6 +1333,22 @@ enum Command {
         /// already gone from it; this pass is archive-write-only.
         #[arg(long)]
         backfill: bool,
+        /// Narrow to entries carrying exactly this D80 fleet-correctness grade
+        /// (F0/F1/F2/F3, case-insensitive) — the same flag spelling as
+        /// `mev blocks --fleet-correctness`. An entry with no grade, or an
+        /// out-of-vocabulary one, never matches. Only applies to the plain
+        /// per-entry sweep — combining it with `--audit`, `--trajectory`,
+        /// `--dispose`, `--backfill`, or `--would-block` is a usage error,
+        /// same as `--grep`.
+        #[arg(long, value_name = "GRADE")]
+        fleet_correctness: Option<String>,
+        /// Sort the plain per-entry sweep by fleet-correctness grade, hottest
+        /// (F0) first — same semantics as `mev blocks --sort-fleet-
+        /// correctness`. Ungraded entries sort last as their own bucket. Only
+        /// applies to the plain per-entry sweep; see `--fleet-correctness`
+        /// above for the mutual-exclusion list.
+        #[arg(long)]
+        sort_fleet_correctness: bool,
     },
     /// Scan the corpus for mechanically-detectable `carryover[]` findings instead of
     /// having an agent notice them by hand (`MV.ticket.graph-derived-carryover-findings`).
@@ -1607,6 +1623,24 @@ enum Command {
         /// Cap the number of blocks printed/serialized.
         #[arg(long, value_name = "N")]
         limit: Option<usize>,
+        /// Narrow to blocks carrying exactly this D80 fleet-correctness grade
+        /// (F0/F1/F2/F3, case-insensitive). A block with no grade at all, or
+        /// an out-of-vocabulary one, never matches — it is reported by
+        /// `mev validate-brain --state`'s `W_STATE_FLEET_CORRECTNESS_UNKNOWN`
+        /// diagnostic, not silently coerced here. Composes with every other
+        /// filter by AND.
+        #[arg(long, value_name = "GRADE")]
+        fleet_correctness: Option<String>,
+        /// Sort selected blocks by fleet-correctness grade, hottest (F0)
+        /// first — mirroring priority's own 0-is-most-urgent convention.
+        /// Ungraded blocks (no grade, or an out-of-vocabulary one) sort last,
+        /// as their own bucket, never coerced into the graded range. Ties
+        /// within a grade (or within "ungraded") break on the block key for
+        /// deterministic output. Never blended with `--max-priority` into a
+        /// combined score — D80 forbids that; this sorts on fleet-correctness
+        /// ALONE.
+        #[arg(long)]
+        sort_fleet_correctness: bool,
         /// Emit this verb's own JSON report shape instead of one text line per block.
         #[arg(long)]
         json: bool,
@@ -2738,11 +2772,122 @@ fn print_backlog_report(
     }
 }
 
+/// Validate and uppercase a `--fleet-correctness` argument for both `mev blocks`
+/// and `mev carryover` — the shared flag spelling and shared vocabulary
+/// (`MV.ticket.blocks-query-filters-and-ranks-on-fleet-correctness`, task 2).
+/// `None` (the flag was not passed) passes through untouched. `Some(s)` must
+/// case-insensitively match one of D80's known grades (`F0`..`F3`); anything
+/// else is a usage error, not a silent no-op — a typo here should be caught at
+/// the CLI, not read back later as "filters to nothing".
+fn normalize_fleet_correctness_arg(grade: Option<String>) -> Result<Option<String>, String> {
+    match grade {
+        None => Ok(None),
+        Some(raw) => {
+            let upper = raw.to_ascii_uppercase();
+            if mev::brain::state::VALID_FLEET_CORRECTNESS.contains(&upper.as_str()) {
+                Ok(Some(upper))
+            } else {
+                Err(format!(
+                    "invalid --fleet-correctness value '{raw}'; expected one of: {}",
+                    mev::brain::state::VALID_FLEET_CORRECTNESS.join(", ")
+                ))
+            }
+        }
+    }
+}
+
+/// Sort rank for `--sort-fleet-correctness`: a known grade label (`"F0"`..`"F3"`)
+/// ranks by its own D80 number (F0 hottest, sorts first); `None` (ungraded — no
+/// grade or an out-of-vocabulary one) ranks last, as its own bucket, never
+/// coerced into the 0..=3 range.
+fn fleet_correctness_sort_rank(grade: Option<&str>) -> u8 {
+    match grade {
+        Some("F0") => 0,
+        Some("F1") => 1,
+        Some("F2") => 2,
+        Some("F3") => 3,
+        _ => u8::MAX,
+    }
+}
+
+/// Apply `mev carryover --fleet-correctness <GRADE>` / `--sort-fleet-correctness`
+/// to an already-evaluated [`mev::CarryoverReport`], in place — post-processing
+/// over the plain per-entry sweep rather than plumbed through
+/// [`mev::brain::carryover::evaluate_carryover_with_grep`], since the grade is a
+/// pure pass-through field on [`mev::CarryoverVerdict`] and never affects
+/// `clears_when` evaluation. A no-op when both are unset, so the pre-existing
+/// sweep's output stays unchanged. When a filter narrows the set, every count
+/// (`total`/`cleared`/`actionable`/`not_evaluable`) and the `needs`
+/// distribution are recomputed over the *filtered* entries, mirroring
+/// `evaluate_carryover_with_grep`'s own recompute-after-filter discipline —
+/// never left describing the pre-filter corpus.
+fn apply_carryover_fleet_correctness(
+    report: &mut mev::CarryoverReport,
+    grade: Option<&str>,
+    sort: bool,
+) {
+    if grade.is_none() && !sort {
+        return;
+    }
+
+    if let Some(want) = grade {
+        report.entries.retain(|e| {
+            e.fleet_correctness
+                .as_ref()
+                .map(|g| mev::brain::state::fleet_correctness_label(g).eq_ignore_ascii_case(want))
+                .unwrap_or(false)
+        });
+
+        report.total = report.entries.len();
+        report.cleared = report
+            .entries
+            .iter()
+            .filter(|e| e.lane == mev::CarryoverLane::Cleared)
+            .count();
+        report.actionable = report
+            .entries
+            .iter()
+            .filter(|e| e.lane == mev::CarryoverLane::Actionable)
+            .count();
+        report.not_evaluable = report
+            .entries
+            .iter()
+            .filter(|e| e.lane == mev::CarryoverLane::NotEvaluable)
+            .count();
+        let (needs_by_repo, needs_fleet) =
+            mev::brain::carryover::compute_needs_distribution(&report.entries);
+        report.needs_by_repo = needs_by_repo;
+        report.needs_fleet = needs_fleet;
+        // The cross-repo dedup sections describe the whole corpus, not a
+        // narrowed subset — suppressed here exactly as `--grep` already
+        // suppresses them (see `evaluate_carryover_with_grep`'s doc comment).
+        report.clusters.clear();
+        report.suggestions.clear();
+        report.single_repo_finding_ids.clear();
+    }
+
+    if sort {
+        report.entries.sort_by(|a, b| {
+            let ra = a
+                .fleet_correctness
+                .as_ref()
+                .map(mev::brain::state::fleet_correctness_label);
+            let rb = b
+                .fleet_correctness
+                .as_ref()
+                .map(mev::brain::state::fleet_correctness_label);
+            fleet_correctness_sort_rank(ra.as_deref())
+                .cmp(&fleet_correctness_sort_rank(rb.as_deref()))
+        });
+    }
+}
+
 fn print_carryover_report(
     report: &mev::CarryoverReport,
     grep_pattern: Option<&str>,
     repo_filter: Option<&str>,
     include_cross_repo: bool,
+    show_fleet_correctness: bool,
 ) {
     if let Some(filter) = repo_filter {
         println!(
@@ -2798,6 +2943,15 @@ fn print_carryover_report(
                 "  {}:{} [{}]{age} — {}",
                 entry.repo, entry.slug, entry.kind, entry.text
             );
+            if show_fleet_correctness {
+                match &entry.fleet_correctness {
+                    Some(grade) => println!(
+                        "      fleet_correctness: {}",
+                        mev::brain::state::fleet_correctness_label(grade)
+                    ),
+                    None => println!("      fleet_correctness: ungraded"),
+                }
+            }
             match lane {
                 mev::CarryoverLane::Actionable => {
                     for r in &entry.refs {
@@ -4453,6 +4607,8 @@ fn main() -> ExitCode {
             leverage,
             chain,
             limit,
+            fleet_correctness,
+            sort_fleet_correctness,
             json,
         } => {
             if startable && blocked {
@@ -4467,6 +4623,16 @@ fn main() -> ExitCode {
                 eprintln!("error: --runnable and --not-runnable are mutually exclusive");
                 return ExitCode::FAILURE;
             }
+            let fleet_correctness = match normalize_fleet_correctness_arg(fleet_correctness) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // Pre-existing output must stay byte-identical when neither new flag is
+            // passed — captured before `fleet_correctness` moves into the query below.
+            let show_fleet_correctness = fleet_correctness.is_some() || sort_fleet_correctness;
 
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,
@@ -4492,6 +4658,7 @@ fn main() -> ExitCode {
                     None
                 },
                 max_priority,
+                fleet_correctness,
             };
             let want_runnable = if runnable {
                 Some(true)
@@ -4516,6 +4683,13 @@ fn main() -> ExitCode {
                                 .map(|c| c.live_count())
                                 .unwrap_or(0);
                             lb.cmp(&la).then_with(|| a.key.cmp(&b.key))
+                        });
+                    }
+                    if sort_fleet_correctness {
+                        report.blocks.sort_by(|a, b| {
+                            fleet_correctness_sort_rank(a.fleet_correctness.as_deref())
+                                .cmp(&fleet_correctness_sort_rank(b.fleet_correctness.as_deref()))
+                                .then_with(|| a.key.cmp(&b.key))
                         });
                     }
                     if let Some(limit) = limit {
@@ -4548,6 +4722,12 @@ fn main() -> ExitCode {
                             }
                             if let Some(run) = report.chains.get(&row.key) {
                                 println!("  chain: {}", run.join(" -> "));
+                            }
+                            if show_fleet_correctness {
+                                match &row.fleet_correctness {
+                                    Some(grade) => println!("  fleet_correctness: {grade}"),
+                                    None => println!("  fleet_correctness: ungraded"),
+                                }
                             }
                         }
                         ExitCode::SUCCESS
@@ -4729,9 +4909,18 @@ fn main() -> ExitCode {
             dry_run,
             would_block,
             backfill,
+            fleet_correctness,
+            sort_fleet_correctness,
         } => {
             let root = match mev::brain::config::find_brain_root(&path) {
                 Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let fleet_correctness = match normalize_fleet_correctness_arg(fleet_correctness) {
+                Ok(v) => v,
                 Err(e) => {
                     eprintln!("error: {e}");
                     return ExitCode::FAILURE;
@@ -4764,6 +4953,21 @@ fn main() -> ExitCode {
             if grep.is_some() && (audit || trajectory || dispose || backfill || would_block) {
                 eprintln!(
                     "error: --grep only applies to the plain per-entry sweep; it cannot be combined with --audit, --trajectory, --dispose, --backfill, or --would-block"
+                );
+                return ExitCode::FAILURE;
+            }
+            if fleet_correctness.is_some()
+                && (audit || trajectory || dispose || backfill || would_block)
+            {
+                eprintln!(
+                    "error: --fleet-correctness only applies to the plain per-entry sweep; it cannot be combined with --audit, --trajectory, --dispose, --backfill, or --would-block"
+                );
+                return ExitCode::FAILURE;
+            }
+            if sort_fleet_correctness && (audit || trajectory || dispose || backfill || would_block)
+            {
+                eprintln!(
+                    "error: --sort-fleet-correctness only applies to the plain per-entry sweep; it cannot be combined with --audit, --trajectory, --dispose, --backfill, or --would-block"
                 );
                 return ExitCode::FAILURE;
             }
@@ -4835,7 +5039,12 @@ fn main() -> ExitCode {
                     exec_timeout,
                     grep.as_deref(),
                 ) {
-                    Ok(report) => {
+                    Ok(mut report) => {
+                        apply_carryover_fleet_correctness(
+                            &mut report,
+                            fleet_correctness.as_deref(),
+                            sort_fleet_correctness,
+                        );
                         if json || cli.json {
                             match serde_json::to_string(&report) {
                                 Ok(s) => {
@@ -4853,6 +5062,7 @@ fn main() -> ExitCode {
                                 grep.as_deref(),
                                 repo.as_deref(),
                                 include_cross_repo,
+                                fleet_correctness.is_some() || sort_fleet_correctness,
                             );
                             ExitCode::SUCCESS
                         }
@@ -5154,6 +5364,227 @@ mod backlog_carryover_flag_parity_tests {
             assert!(
                 !backlog_flags.contains(forbidden),
                 "mev backlog must stay read-only; found forbidden flag --{forbidden}"
+            );
+        }
+    }
+}
+
+/// `mev blocks --fleet-correctness`/`--sort-fleet-correctness` and `mev
+/// carryover --fleet-correctness`/`--sort-fleet-correctness`
+/// (`MV.ticket.blocks-query-filters-and-ranks-on-fleet-correctness`, task 2).
+#[cfg(test)]
+mod fleet_correctness_query_tests {
+    use super::{
+        apply_carryover_fleet_correctness, fleet_correctness_sort_rank,
+        normalize_fleet_correctness_arg,
+    };
+    use clap::CommandFactory;
+
+    // -- normalize_fleet_correctness_arg -------------------------------------
+
+    #[test]
+    fn absent_flag_passes_through_as_none() {
+        assert_eq!(normalize_fleet_correctness_arg(None), Ok(None));
+    }
+
+    #[test]
+    fn known_grade_uppercases() {
+        assert_eq!(
+            normalize_fleet_correctness_arg(Some("f2".to_string())),
+            Ok(Some("F2".to_string()))
+        );
+        assert_eq!(
+            normalize_fleet_correctness_arg(Some("F2".to_string())),
+            Ok(Some("F2".to_string()))
+        );
+    }
+
+    #[test]
+    fn out_of_vocabulary_grade_is_a_usage_error_not_a_silent_no_op() {
+        let err = normalize_fleet_correctness_arg(Some("F9".to_string()))
+            .expect_err("F9 is not one of D80's known grades");
+        assert!(err.contains("F9"));
+        assert!(
+            err.contains("F0"),
+            "error must name the valid vocabulary: {err}"
+        );
+    }
+
+    // -- fleet_correctness_sort_rank -----------------------------------------
+
+    #[test]
+    fn sort_rank_orders_f0_hottest_and_buckets_ungraded_last() {
+        assert_eq!(fleet_correctness_sort_rank(Some("F0")), 0);
+        assert_eq!(fleet_correctness_sort_rank(Some("F3")), 3);
+        assert!(fleet_correctness_sort_rank(None) > fleet_correctness_sort_rank(Some("F3")));
+        assert!(
+            fleet_correctness_sort_rank(Some("F9")) > fleet_correctness_sort_rank(Some("F3")),
+            "an out-of-vocabulary grade must never be coerced into the known 0..=3 range"
+        );
+    }
+
+    // -- apply_carryover_fleet_correctness ------------------------------------
+
+    fn verdict(
+        slug: &str,
+        grade: Option<okf_core::FleetCorrectness>,
+        lane: mev::CarryoverLane,
+    ) -> mev::CarryoverVerdict {
+        mev::CarryoverVerdict {
+            repo: "mev".to_string(),
+            slug: slug.to_string(),
+            kind: "deferred".to_string(),
+            text: "text".to_string(),
+            clears_when: None,
+            created: "2026-01-01".to_string(),
+            age_days: None,
+            stale: false,
+            lane,
+            refs: Vec::new(),
+            reason: None,
+            priority: None,
+            finding_id: None,
+            blocks: Vec::new(),
+            enforce: None,
+            needs: None,
+            fleet_correctness: grade,
+        }
+    }
+
+    fn base_report(entries: Vec<mev::CarryoverVerdict>) -> mev::CarryoverReport {
+        let cleared = entries
+            .iter()
+            .filter(|e| e.lane == mev::CarryoverLane::Cleared)
+            .count();
+        let actionable = entries
+            .iter()
+            .filter(|e| e.lane == mev::CarryoverLane::Actionable)
+            .count();
+        let not_evaluable = entries
+            .iter()
+            .filter(|e| e.lane == mev::CarryoverLane::NotEvaluable)
+            .count();
+        mev::CarryoverReport {
+            total: entries.len(),
+            cleared,
+            actionable,
+            not_evaluable,
+            entries,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_grade_and_no_sort_is_a_no_op() {
+        let mut report = base_report(vec![verdict(
+            "a",
+            Some(okf_core::FleetCorrectness::Known(
+                okf_core::KnownFleetCorrectness::F0,
+            )),
+            mev::CarryoverLane::Actionable,
+        )]);
+        let before = report.entries.clone();
+        apply_carryover_fleet_correctness(&mut report, None, false);
+        assert_eq!(
+            report.entries.iter().map(|e| &e.slug).collect::<Vec<_>>(),
+            before.iter().map(|e| &e.slug).collect::<Vec<_>>(),
+            "with neither flag set the pre-existing sweep output must be unchanged"
+        );
+    }
+
+    #[test]
+    fn filter_narrows_entries_and_recomputes_counts() {
+        let mut report = base_report(vec![
+            verdict(
+                "a",
+                Some(okf_core::FleetCorrectness::Known(
+                    okf_core::KnownFleetCorrectness::F0,
+                )),
+                mev::CarryoverLane::Cleared,
+            ),
+            verdict(
+                "b",
+                Some(okf_core::FleetCorrectness::Known(
+                    okf_core::KnownFleetCorrectness::F1,
+                )),
+                mev::CarryoverLane::Actionable,
+            ),
+            verdict("c", None, mev::CarryoverLane::NotEvaluable),
+        ]);
+        apply_carryover_fleet_correctness(&mut report, Some("F0"), false);
+
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].slug, "a");
+        assert_eq!(report.total, 1, "total must describe the FILTERED set");
+        assert_eq!(report.cleared, 1);
+        assert_eq!(report.actionable, 0);
+        assert_eq!(report.not_evaluable, 0);
+    }
+
+    #[test]
+    fn filter_never_matches_ungraded_entries() {
+        let mut report = base_report(vec![
+            verdict("a", None, mev::CarryoverLane::NotEvaluable),
+            verdict(
+                "b",
+                Some(okf_core::FleetCorrectness::Unknown("F9".to_string())),
+                mev::CarryoverLane::NotEvaluable,
+            ),
+        ]);
+        apply_carryover_fleet_correctness(&mut report, Some("F0"), false);
+        assert!(
+            report.entries.is_empty(),
+            "neither an absent nor an out-of-vocabulary grade may match a specific-grade filter"
+        );
+    }
+
+    #[test]
+    fn sort_orders_f0_first_and_ungraded_last() {
+        let mut report = base_report(vec![
+            verdict("ungraded", None, mev::CarryoverLane::NotEvaluable),
+            verdict(
+                "f2",
+                Some(okf_core::FleetCorrectness::Known(
+                    okf_core::KnownFleetCorrectness::F2,
+                )),
+                mev::CarryoverLane::Actionable,
+            ),
+            verdict(
+                "f0",
+                Some(okf_core::FleetCorrectness::Known(
+                    okf_core::KnownFleetCorrectness::F0,
+                )),
+                mev::CarryoverLane::Actionable,
+            ),
+        ]);
+        apply_carryover_fleet_correctness(&mut report, None, true);
+
+        let order: Vec<&str> = report.entries.iter().map(|e| e.slug.as_str()).collect();
+        assert_eq!(order, vec!["f0", "f2", "ungraded"]);
+    }
+
+    // -- shared flag spelling across mev blocks / mev carryover --------------
+
+    #[test]
+    fn blocks_and_carryover_share_fleet_correctness_flag_spelling() {
+        let app = super::Cli::command();
+        let blocks = app
+            .find_subcommand("blocks")
+            .expect("mev blocks subcommand must exist");
+        let carryover = app
+            .find_subcommand("carryover")
+            .expect("mev carryover subcommand must exist");
+
+        for flag in ["fleet-correctness", "sort-fleet-correctness"] {
+            assert!(
+                blocks.get_arguments().any(|a| a.get_long() == Some(flag)),
+                "mev blocks is missing --{flag}"
+            );
+            assert!(
+                carryover
+                    .get_arguments()
+                    .any(|a| a.get_long() == Some(flag)),
+                "mev carryover is missing --{flag}"
             );
         }
     }

@@ -41,6 +41,7 @@ fn verdict(
         blocks,
         enforce: None,
         needs: None,
+        fleet_correctness: None,
     }
 }
 

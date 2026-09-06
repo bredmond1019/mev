@@ -469,6 +469,44 @@ pub const VALID_CARRYOVER_NEEDS: &[&str] = &["code", "docs", "state", "operator"
 /// diagnostic at all, mirroring `VALID_CARRYOVER_NEEDS`'s own convention.
 pub const VALID_FLEET_CORRECTNESS: &[&str] = &["F0", "F1", "F2", "F3"];
 
+/// The plain display string for a [`okf_core::FleetCorrectness`] grade: a known grade
+/// renders its own uppercase D80 name (`"F0"`..`"F3"`), an unrecognized value round
+/// trips verbatim — mirroring [`carryover_kind_str`] and [`carryover_needs_str`]
+/// exactly. Consumed by `mev blocks --fleet-correctness` / `mev carryover
+/// --fleet-correctness` (filter comparison) and by the generated boards' rendering
+/// (`MV.ticket.blocks-query-filters-and-ranks-on-fleet-correctness`, task 2/3).
+pub fn fleet_correctness_label(grade: &okf_core::FleetCorrectness) -> std::borrow::Cow<'_, str> {
+    match grade {
+        okf_core::FleetCorrectness::Known(k) => std::borrow::Cow::Borrowed(match k {
+            okf_core::KnownFleetCorrectness::F0 => "F0",
+            okf_core::KnownFleetCorrectness::F1 => "F1",
+            okf_core::KnownFleetCorrectness::F2 => "F2",
+            okf_core::KnownFleetCorrectness::F3 => "F3",
+        }),
+        okf_core::FleetCorrectness::Unknown(s) => std::borrow::Cow::Borrowed(s.as_str()),
+    }
+}
+
+/// The sort rank for a *known* `fleet_correctness` grade — `F0` is the hottest and
+/// sorts first (`0`), mirroring this fleet's own priority convention where `0` is
+/// most urgent (D43). Returns `None` for an absent grade OR an out-of-vocabulary
+/// one: both are deliberately excluded from the known `0..=3` range rather than
+/// coerced into it, so a caller sorting on this rank can bucket "ungraded" (absent
+/// or unrecognized) separately and never silently treat it as any particular grade
+/// (`MV.ticket.blocks-query-filters-and-ranks-on-fleet-correctness`, task 2's
+/// non-negotiable composition rule).
+pub fn fleet_correctness_rank(grade: Option<&okf_core::FleetCorrectness>) -> Option<u8> {
+    match grade {
+        Some(okf_core::FleetCorrectness::Known(k)) => Some(match k {
+            okf_core::KnownFleetCorrectness::F0 => 0,
+            okf_core::KnownFleetCorrectness::F1 => 1,
+            okf_core::KnownFleetCorrectness::F2 => 2,
+            okf_core::KnownFleetCorrectness::F3 => 3,
+        }),
+        _ => None,
+    }
+}
+
 /// The plain string form of a [`okf_core::CarryoverNeeds`], mirroring [`carryover_kind_str`]
 /// exactly: known values render in their `snake_case` name, an unrecognized value round trips
 /// verbatim rather than being coerced or rejected.

@@ -31,6 +31,7 @@ fn verdict(repo: &str, slug: &str, text: &str) -> CarryoverVerdict {
         blocks: Vec::new(),
         enforce: None,
         needs: None,
+        fleet_correctness: None,
     }
 }
 

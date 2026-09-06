@@ -16,7 +16,10 @@ use std::path::Path;
 /// One block as seen by this module's queries — a minimal, self-contained view.
 /// Callers (the `mev blocks` verb, task 3) build these from the real corpus;
 /// nothing here reads `state.json` directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// `Eq` is deliberately not derived here (unlike this module's other structs) —
+// `okf_core::FleetCorrectness` only derives `PartialEq`, since D80's `Unknown(String)`
+// fallback carries no meaningful total-equality contract okf-core wants to commit to.
+#[derive(Debug, Clone, PartialEq)]
 pub struct BlockInfo {
     /// Canonical `"repo:id"` key.
     pub key: String,
@@ -33,6 +36,12 @@ pub struct BlockInfo {
     pub startable: bool,
     /// Effective priority (`0..=3`), if resolvable.
     pub priority: Option<u8>,
+    /// D80's fleet-correctness grade, passed through verbatim from the owning
+    /// `TrackBlock`. Recorded separately from `priority` and NEVER averaged or
+    /// blended with it — a sort may order by either axis (or by both
+    /// lexicographically), but never compute a combined score
+    /// (`MV.ticket.blocks-query-filters-and-ranks-on-fleet-correctness`).
+    pub fleet_correctness: Option<okf_core::FleetCorrectness>,
 }
 
 impl BlockInfo {
@@ -65,6 +74,12 @@ pub struct BlockQuery {
     pub status: Option<BTreeSet<String>>,
     pub startable: Option<bool>,
     pub max_priority: Option<u8>,
+    /// Narrow to one D80 fleet-correctness grade, matched against
+    /// [`crate::brain::state::fleet_correctness_label`]'s rendering of a
+    /// *known* grade only (case-insensitive) — an ungraded block (no
+    /// `fleet_correctness` at all, or an out-of-vocabulary value) never
+    /// matches a specific grade filter; it is reported, never guessed at.
+    pub fleet_correctness: Option<String>,
 }
 
 /// The live/parked split of one block's transitive downstream cone — everything
@@ -135,6 +150,12 @@ pub struct BlockRow {
     pub record: bool,
     pub tasks: bool,
     pub runnable: bool,
+    /// D80 fleet-correctness grade label (`"F0"`..`"F3"`, or the verbatim
+    /// out-of-vocabulary value), rendered via
+    /// [`crate::brain::state::fleet_correctness_label`]. `None` means the block
+    /// carries no grade at all — its own bucket, never coerced to a value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fleet_correctness: Option<String>,
 }
 
 /// `mev blocks`' own JSON/text report shape. Populated by the verb (task 3);
@@ -183,6 +204,14 @@ pub fn select<'a>(blocks: &'a [BlockInfo], query: &BlockQuery) -> Vec<&'a BlockI
             if let Some(max_priority) = query.max_priority {
                 match b.priority {
                     Some(p) if p <= max_priority => {}
+                    _ => return false,
+                }
+            }
+            if let Some(want) = &query.fleet_correctness {
+                match &b.fleet_correctness {
+                    Some(grade)
+                        if crate::brain::state::fleet_correctness_label(grade)
+                            .eq_ignore_ascii_case(want) => {}
                     _ => return false,
                 }
             }
@@ -318,6 +347,7 @@ mod tests {
             roadmap: None,
             startable,
             priority,
+            fleet_correctness: None,
         }
     }
 
@@ -690,6 +720,143 @@ mod tests {
         let result = select(&blocks, &query);
         let keys: BTreeSet<&str> = result.iter().map(|b| b.key.as_str()).collect();
         assert_eq!(keys, BTreeSet::from(["mev:A"]));
+    }
+
+    // -----------------------------------------------------------------
+    // select / BlockQuery — fleet_correctness
+    // (MV.ticket.blocks-query-filters-and-ranks-on-fleet-correctness, task 2)
+    // -----------------------------------------------------------------
+
+    fn block_with_grade(key: &str, grade: Option<okf_core::FleetCorrectness>) -> BlockInfo {
+        let mut b = block(key, "open", true, None);
+        b.fleet_correctness = grade;
+        b
+    }
+
+    fn known(grade: okf_core::KnownFleetCorrectness) -> okf_core::FleetCorrectness {
+        okf_core::FleetCorrectness::Known(grade)
+    }
+
+    #[test]
+    fn fleet_correctness_filter_matches_only_the_requested_known_grade() {
+        let blocks = vec![
+            block_with_grade("mev:A", Some(known(okf_core::KnownFleetCorrectness::F0))),
+            block_with_grade("mev:B", Some(known(okf_core::KnownFleetCorrectness::F1))),
+            block_with_grade("mev:C", Some(known(okf_core::KnownFleetCorrectness::F0))),
+        ];
+        let query = BlockQuery {
+            fleet_correctness: Some("F0".to_string()),
+            ..Default::default()
+        };
+
+        let result = select(&blocks, &query);
+        let keys: BTreeSet<&str> = result.iter().map(|b| b.key.as_str()).collect();
+
+        assert_eq!(
+            keys,
+            BTreeSet::from(["mev:A", "mev:C"]),
+            "the filter must match exactly the requested grade; got {keys:?}"
+        );
+    }
+
+    #[test]
+    fn fleet_correctness_filter_is_case_insensitive() {
+        let blocks = vec![block_with_grade(
+            "mev:A",
+            Some(known(okf_core::KnownFleetCorrectness::F2)),
+        )];
+        let query = BlockQuery {
+            fleet_correctness: Some("f2".to_string()),
+            ..Default::default()
+        };
+
+        let result = select(&blocks, &query);
+        assert_eq!(result.len(), 1, "a lowercase grade must still match F2");
+    }
+
+    #[test]
+    fn fleet_correctness_filter_never_matches_an_ungraded_block() {
+        let blocks = vec![
+            block_with_grade("mev:A", None),
+            block_with_grade(
+                "mev:B",
+                Some(okf_core::FleetCorrectness::Unknown("F9".to_string())),
+            ),
+            block_with_grade("mev:C", Some(known(okf_core::KnownFleetCorrectness::F0))),
+        ];
+        let query = BlockQuery {
+            fleet_correctness: Some("F0".to_string()),
+            ..Default::default()
+        };
+
+        let result = select(&blocks, &query);
+        let keys: BTreeSet<&str> = result.iter().map(|b| b.key.as_str()).collect();
+
+        assert_eq!(
+            keys,
+            BTreeSet::from(["mev:C"]),
+            "an absent or out-of-vocabulary grade must never be coerced into a \
+             specific-grade match; got {keys:?}"
+        );
+    }
+
+    #[test]
+    fn fleet_correctness_filter_composes_with_other_filters() {
+        let blocks = vec![
+            block_with_grade("mev:A", Some(known(okf_core::KnownFleetCorrectness::F0))),
+            block_with_grade("other:B", Some(known(okf_core::KnownFleetCorrectness::F0))),
+        ];
+        let query = BlockQuery {
+            repo: Some("mev".to_string()),
+            fleet_correctness: Some("F0".to_string()),
+            ..Default::default()
+        };
+
+        let result = select(&blocks, &query);
+        let keys: BTreeSet<&str> = result.iter().map(|b| b.key.as_str()).collect();
+        assert_eq!(keys, BTreeSet::from(["mev:A"]));
+    }
+
+    // -----------------------------------------------------------------
+    // fleet_correctness_rank / fleet_correctness_label
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn fleet_correctness_rank_orders_f0_hottest_and_buckets_ungraded_separately() {
+        use crate::brain::state::fleet_correctness_rank;
+
+        assert_eq!(
+            fleet_correctness_rank(Some(&known(okf_core::KnownFleetCorrectness::F0))),
+            Some(0)
+        );
+        assert_eq!(
+            fleet_correctness_rank(Some(&known(okf_core::KnownFleetCorrectness::F3))),
+            Some(3)
+        );
+        assert_eq!(
+            fleet_correctness_rank(None),
+            None,
+            "an absent grade must never be coerced into the known 0..=3 range"
+        );
+        assert_eq!(
+            fleet_correctness_rank(Some(&okf_core::FleetCorrectness::Unknown("F9".to_string()))),
+            None,
+            "an out-of-vocabulary grade must never be coerced into the known 0..=3 range"
+        );
+    }
+
+    #[test]
+    fn fleet_correctness_label_renders_known_grades_and_round_trips_unknown_verbatim() {
+        use crate::brain::state::fleet_correctness_label;
+
+        assert_eq!(
+            fleet_correctness_label(&known(okf_core::KnownFleetCorrectness::F1)),
+            "F1"
+        );
+        assert_eq!(
+            fleet_correctness_label(&okf_core::FleetCorrectness::Unknown("F9".to_string())),
+            "F9"
+        );
     }
 
     // -----------------------------------------------------------------
