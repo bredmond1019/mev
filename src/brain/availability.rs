@@ -8,26 +8,42 @@
 //! `/lanes` endpoint, the cockpit board) never re-derive the same judgement call
 //! themselves.
 //!
-//! ## The single source of truth for "a lane is live in repo X" (`MV.13.C` Task 2)
+//! ## The single source of truth for "a lane is live in repo X" (`MV.20.A` reverses `MV.13.C` Task 2)
 //!
-//! **Decided here, at spec time, and not re-litigated in code: the single source of
-//! truth for lane liveness is the per-`(repo, roadmap)` orchestration-run record's
-//! `lifecycle:` frontmatter** — `planning/orchestration-run/<roadmap-slug>/notes.md`,
-//! `lifecycle: active | lane-complete | consolidated` ([D57], the orchestration-run
-//! artifact contract). Two other candidates were considered and rejected:
+//! **`MV.13.C` Task 2 decided the source of truth was the per-`(repo, roadmap)`
+//! orchestration-run record's `lifecycle:` frontmatter. `MV.20.A`'s spike REFUTED
+//! that: `mev lanes` reported a repo live on two roadmaps at once — one from a stale
+//! `lifecycle: active` record that had never been updated to `lane-complete`, the
+//! other from the registry — while the `.fleet-locks/lane-agents/` registry named
+//! exactly one. A lane that closed without stamping `lifecycle: lane-complete` kept
+//! its repo reading busy forever under the old rule.**
+//!
+//! **The rule as of `MV.20.A`: the single source of truth for lane liveness is a
+//! `.fleet-locks/lane-agents/*.json` registry claim (`okf_core::Coord<RegistryClaim>`)
+//! with a `heartbeat` no older than [`okf_core::COORD_STALE_TTL_SECONDS`]. The
+//! orchestration-run record's `lifecycle:` frontmatter is now a DEGRADED fallback,
+//! consulted only for a repo no live registry claim names at all** — see
+//! [`discover_live_runs`], which returns [`LiveRun::degraded`] `true` for a
+//! fallback-derived run and `false` for a registry-derived one, so a degraded hold
+//! never reads on the wire as a plain live one. A reader who finds the old
+//! `MV.13.C` rule quoted elsewhere (a stale doc, a cached board) should trust this
+//! module, not that quote — this one reversed it.
+//!
+//! Two other candidates were considered and rejected, unchanged by `MV.20.A`:
 //!
 //! - **`lane-log.jsonl`** records **integrated blocks**, not liveness. A lane that
 //!   opened and is mid-block has written nothing to it yet, so it reads as idle
 //!   exactly when it is busiest. It remains the cross-lane progress channel and is
 //!   read by nothing in this module.
-//! - **`fleet_concurrency_check.py`'s `.fleet-locks` registry** only ever knows about
-//!   **heavy** repos (`heavy_category` returns `None` for a light one), so it
-//!   structurally cannot answer the liveness question for the light half of the
-//!   fleet. It is the source for `HeldSlot` (Task 3) and for nothing else.
+//! - **`fleet_concurrency_check.py`'s `.fleet-locks` registry** (the ordinary
+//!   pid-keyed slot entries, not the `lane-agents/` heartbeat registry above) only
+//!   ever knows about **heavy** repos (`heavy_category` returns `None` for a light
+//!   one), so it structurally cannot answer the liveness question for the light half
+//!   of the fleet. It is the source for `HeldSlot` (Task 3) and for nothing else.
 //!
-//! The run record is the only candidate that covers every repo, is written when the
-//! lane **opens** rather than when a block closes, and is contract-validated
-//! (`test_orchestration_run_contract.py`).
+//! The `lane-agents/` registry claim is the only candidate that covers every repo,
+//! is refreshed by a live heartbeat rather than going stale silently on a missed
+//! frontmatter update, and is contract-validated the same way the run record was.
 //!
 //! [D57]: ../../../../base-template/planning/decisions/D57-orchestration-run-artifact-contract.md
 

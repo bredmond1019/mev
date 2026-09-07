@@ -25,31 +25,40 @@
 //!   permissiveness `availability.rs::read_fleet_lock_entries` already applies to ordinary
 //!   fleet-lock entries.
 //!
-//! ## Which TTL governs lease staleness (there are three numbers in the corpus and they disagree)
+//! ## Which TTL governs lease staleness (`MV.20.A`, 2026-09-07: down to two numbers, by design)
 //!
-//! Three "staleness window" constants exist in this fleet and they are NOT the same rule:
+//! Before `MV.20.A` this fleet carried three disagreeing "staleness window" constants.
+//! `MV.20.A` deleted one of them — `availability.rs`'s own `DEFAULT_TTL_SECONDS` (14400s / 4h)
+//! is gone; `availability.rs::is_stale` now reads [`okf_core::COORD_STALE_TTL_SECONDS`] (5400s /
+//! 90 min), the same single value `fleet_concurrency_check.py`'s own `DEFAULT_TTL_SECONDS`
+//! defines, for the ordinary pid-keyed `.fleet-locks/*.json` entries (`register`/`release`/
+//! `status`, liveness signal pid + `started_at`) and now also for the `lane-agents/` heartbeat
+//! registry `discover_live_runs` reads. `/begin-orchestration` step 3's documented "90 minutes"
+//! agrees with this value; the old disagreement with `availability.rs`'s 4h is resolved by
+//! deletion, not by reconciliation.
 //!
-//! - **5400s / 90 min** — `fleet_concurrency_check.py`'s own `DEFAULT_TTL_SECONDS`. This governs
-//!   *ordinary* `.fleet-locks/*.json` pid-keyed entries (the `register`/`release`/`status`
-//!   subcommands), a different record shape with a different liveness signal (pid + `started_at`).
-//! - **14400s / 4h** — `availability.rs`'s own `DEFAULT_TTL_SECONDS`, documented there as
-//!   "Mirrors `DEFAULT_TTL_SECONDS` in `fleet_concurrency_check.py`" and used by
-//!   [`super::availability::is_stale`] for the same ordinary pid-keyed entries. `/begin-orchestration`
-//!   step 3's documented "90 minutes" therefore already disagrees with `availability.rs`'s own 4h
-//!   — a pre-existing disagreement this module did not create and does not resolve.
-//! - **10800s / 3h** — `check_lane_agents.py`'s `STALE_THRESHOLD_SECONDS`, reused via
+//! What remains, deliberately, is **two** numbers for **two different record kinds**:
+//!
+//! - **5400s / 90 min** — [`okf_core::COORD_STALE_TTL_SECONDS`], governing the pid-keyed
+//!   `.fleet-locks` entries and the `lane-agents/` registry claims, as above.
+//! - **10800s / 3h** — [`LEASE_STALE_THRESHOLD_SECONDS`] below, governing *this* module's
+//!   record kind, a lease (no `pid`, an `acquired_at`/`heartbeat` pair instead of `started_at`).
+//!   It mirrors `check_lane_agents.py::STALE_THRESHOLD_SECONDS`, reused via
 //!   `lease_liveness_timestamp`/`staleness_seconds` by `fleet_concurrency_check.py`'s
-//!   `_non_stale_exclusive_leases` — i.e. **this is the actual, in-production rule the reference
-//!   Python implementation uses to judge *lease* staleness.** Leases are a different record kind
-//!   from ordinary `.fleet-locks` entries (no `pid`, an `acquired_at`/`heartbeat` pair instead of
-//!   `started_at`), so neither of the two numbers above is the right mirror for this module.
+//!   `_non_stale_exclusive_leases` — the actual, in-production rule the reference Python
+//!   implementation uses to judge *lease* staleness, and NOT the same rule as the pid-keyed
+//!   entries above even though both scripts live in `fleet_concurrency_check.py`.
 //!
-//! [`LEASE_STALE_THRESHOLD_SECONDS`] below is therefore **10800s (3h)**, mirroring
-//! `check_lane_agents.py::STALE_THRESHOLD_SECONDS` — not `availability.rs`'s constant. Per this
-//! ticket's scope, mev is the mirror here, not the authority: `availability.rs` is left
-//! untouched (its constant is correct for the record kind it governs), and this module reuses
-//! only its time helper ([`super::availability::now_unix_seconds`]), not its TTL value, because
-//! that value governs a different record kind than a lease.
+//! This module deliberately does **not** adopt `COORD_STALE_TTL_SECONDS`: a lease and a
+//! `lane-agents`/`.fleet-locks` entry are different record kinds with different reference-Python
+//! staleness rules (`MV.20.A`'s block record's `out_of_scope` explicitly keeps the Python's own
+//! 5400s/10800s split, by design — see `planning/blocks/MV.20.A.json`), so collapsing this
+//! module's 10800s into 5400s would make mev's lease staleness disagree with
+//! `check_lane_agents.py`, the thing it exists to mirror. `planning/blocks/MV.20.A.json`'s
+//! `files.modified` entry for this file is amended accordingly (2026-09-07): it names this file
+//! for review, not for adopting the single TTL. This module reuses only `availability.rs`'s time
+//! helper ([`super::availability::now_unix_seconds`]), never its TTL value, because that value
+//! now governs a different record kind than a lease.
 
 use std::path::{Path, PathBuf};
 
