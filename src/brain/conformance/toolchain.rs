@@ -514,6 +514,20 @@ pub struct WriterOutcome {
     pub findings: Vec<String>,
     /// Populated on `NotEvaluable`, already prefixed with `name`.
     pub reason: Option<String>,
+    /// Whether this writer's compiled-in stamp reported an uncommitted (`dirty`)
+    /// working tree at build time — the raw `dirty` flag `verdict` was given, exposed
+    /// alongside its `status` rather than folded away.
+    ///
+    /// `verdict` reports `Drift` for a dirty build for exactly the same reason it
+    /// reports `Drift` for a genuine SHA mismatch — the provenance is unverifiable
+    /// either way — but a caller deciding whether to SKIP a chained action on Drift
+    /// (see `MV.ticket.an-authored-write-must-not-require-a-fresh-binary`) needs to
+    /// tell the two apart: a dirty build is exactly the state of the binary compiling
+    /// and running the current source RIGHT NOW (unavoidable mid-development, e.g. this
+    /// crate's own `cargo test`), never a released binary lagging behind HEAD. `false`
+    /// for `NotEvaluable`/`Pass` too (dirty is meaningless when there is no Drift to
+    /// explain), not only for a clean Drift.
+    pub dirty: bool,
 }
 
 fn status_label(status: CheckStatus) -> &'static str {
@@ -619,6 +633,7 @@ fn writer_outcome(name: &str, stamped_sha: &str, dirty: &str, source_dir: &str) 
             .map(|f| format!("{name}: {f}"))
             .collect(),
         reason: reason.map(|r| format!("{name}: {r}")),
+        dirty: status == CheckStatus::Drift && dirty == "1",
     }
 }
 
@@ -641,6 +656,7 @@ fn cross_binary_outcome(writer: &ConformanceWriter) -> WriterOutcome {
                 status: CheckStatus::NotEvaluable,
                 findings: Vec::new(),
                 reason: Some(reason),
+                dirty: false,
             }
         }
     }

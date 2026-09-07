@@ -1715,41 +1715,119 @@ pub fn emit_state(
 
     // 0. Toolchain freshness: every --write path chains through this function (see the
     //    doc comment above), so this is the single choke point where a stale binary gets
-    //    caught before it silently no-ops or destroys authored state. `NotEvaluable`
-    //    never warns or blocks — only a genuine `Drift` does. Interactive default: warn
-    //    loudly on stderr and proceed. `MEV_REQUIRE_FRESH` (any of "1"/"true", matched
-    //    case-insensitively): promote Drift to a hard failure, checked here, before any
-    //    plan is computed or applied, so no write happens.
+    //    caught before it silently rewrites derived surfaces in an older format.
+    //    `NotEvaluable` never warns or blocks — only a genuine `Drift` does (and a repo
+    //    with no `brain.toml` never reaches this point at all: `find_brain_config` above
+    //    already returned early, so behaviour there is unchanged).
+    //
+    //    `MEV_REQUIRE_FRESH` (any of "1"/"true", matched case-insensitively): promote
+    //    Drift to a hard failure, checked here, before any plan is computed or applied,
+    //    so no write happens at all — including whatever authored edit the *caller*
+    //    already applied via its own `apply_plan` before invoking this function.
+    //
+    //    Default (MEV_REQUIRE_FRESH unset): SKIP this chained regeneration rather than
+    //    performing it from a stale binary (the silent-regression exit) or failing the
+    //    whole verb (`MEV_REQUIRE_FRESH`'s job, and the wrong default because the
+    //    caller's authored write already landed and is format-independent — see
+    //    MV.ticket.an-authored-write-must-not-require-a-fresh-binary). The skip is
+    //    loud, not silent: a `W_EMIT_SKIPPED_STALE_BINARY` diagnostic names the drifted
+    //    binary(ies), the surfaces now left stale, and the exact refresh command, and
+    //    the eprintln banner mirrors it on stderr for a human watching a live run.
+    //
+    //    A Drift caused ENTIRELY by an uncommitted (`dirty`) tree is exempt from the
+    //    skip and keeps the historical warn-and-proceed behaviour. `verdict` reports
+    //    `Drift` for a dirty build for the same "provenance unverifiable" reason it
+    //    reports Drift for a genuine stale SHA, but a dirty build is exactly the state
+    //    of the binary compiling and running this very write right now — unavoidable
+    //    mid-development (every `cargo test` in this repo runs from an uncommitted
+    //    tree while a task is in flight) and never a released binary lagging behind
+    //    HEAD. Skipping on it would make every write-chaining verb no-op for the
+    //    remainder of any session with an uncommitted change — the exact failure mode
+    //    this ticket exists to remove, just relocated. A single genuinely-stale
+    //    (non-dirty) writer in the mix still skips.
     if write {
         let (status, outcomes) =
             brain::conformance::toolchain::writer_outcomes(&config.conformance_writers);
         if status == CheckStatus::Drift {
-            let drifted: Vec<String> = outcomes
+            let drifted_outcomes: Vec<&brain::conformance::toolchain::WriterOutcome> = outcomes
                 .iter()
                 .filter(|o| o.status == CheckStatus::Drift)
+                .collect();
+            let drifted: Vec<String> = drifted_outcomes
+                .iter()
                 .flat_map(|o| o.findings.clone())
                 .collect();
-            let banner = format!(
-                "\n\
-                 ================ TOOLCHAIN DRIFT ================\n\
-                 mev emit-state --write: at least one registered writer's binary does \
-                 not match its source tree.\n\
-                 {}\n\
-                 Rebuild/reinstall the stale binary before trusting this write. Set \
-                 MEV_REQUIRE_FRESH=1 (or pass --require-fresh to `mev emit-state`) to make \
-                 this a hard failure instead of a warning.\n\
-                 ===================================================\n",
-                drifted.join("\n")
-            );
-            eprintln!("{banner}");
+            let genuinely_stale = drifted_outcomes.iter().any(|o| !o.dirty);
 
             if require_fresh_env_set() {
+                let banner = format!(
+                    "\n\
+                     ================ TOOLCHAIN DRIFT ================\n\
+                     mev emit-state --write: at least one registered writer's binary does \
+                     not match its source tree.\n\
+                     {}\n\
+                     Refusing to write: MEV_REQUIRE_FRESH is set.\n\
+                     ===================================================\n",
+                    drifted.join("\n")
+                );
+                eprintln!("{banner}");
                 report.diagnostics.push(Diagnostic::error(
                     root,
                     "E_TOOLCHAIN_STALE",
                     format!(
                         "refusing to write: toolchain-freshness reported Drift and \
                          MEV_REQUIRE_FRESH is set. {}",
+                        drifted.join("; ")
+                    ),
+                ));
+                return Ok(report);
+            }
+
+            if !genuinely_stale {
+                // Every drifted writer is dirty-only — see the comment above this
+                // block. Keep the historical warn-and-proceed behaviour unchanged.
+                let banner = format!(
+                    "\n\
+                     ================ TOOLCHAIN DRIFT ================\n\
+                     mev emit-state --write: at least one registered writer's binary does \
+                     not match its source tree.\n\
+                     {}\n\
+                     Rebuild/reinstall the stale binary before trusting this write. Set \
+                     MEV_REQUIRE_FRESH=1 (or pass --require-fresh to `mev emit-state`) to make \
+                     this a hard failure instead of a warning.\n\
+                     ===================================================\n",
+                    drifted.join("\n")
+                );
+                eprintln!("{banner}");
+            } else {
+                let banner = format!(
+                    "\n\
+                     ================ TOOLCHAIN DRIFT ================\n\
+                     mev emit-state --write: at least one registered writer's binary does \
+                     not match its source tree. SKIPPING the derived-view regeneration so \
+                     boards/focus/project-caches/state.json's derived fields are not \
+                     rewritten in a stale format.\n\
+                     {}\n\
+                     Any authored edit that got you here already landed — only the derived \
+                     surfaces are stale now. Rebuild/reinstall the stale binary (e.g. \
+                     `cargo install --path <repo> --force`), then re-run `mev emit-state \
+                     --write` to refresh them. Set MEV_REQUIRE_FRESH=1 (or pass \
+                     --require-fresh) to make Drift a hard failure instead of a skip.\n\
+                     ===================================================\n",
+                    drifted.join("\n")
+                );
+                eprintln!("{banner}");
+                report.diagnostics.push(Diagnostic::warning(
+                    root,
+                    "W_EMIT_SKIPPED_STALE_BINARY",
+                    format!(
+                        "skipped the chained emit-state regeneration: toolchain-freshness \
+                         reported Drift ({}). Derived surfaces (focus, boards, project \
+                         caches, tier rollups, master-plan/epic tables, and state.json's own \
+                         derived fields) are now stale. Rebuild/reinstall the stale binary \
+                         (e.g. `cargo install --path <repo> --force`) then re-run `mev \
+                         emit-state --write` to refresh them. This write's exit code still \
+                         reports success — the authored change that led here already landed.",
                         drifted.join("; ")
                     ),
                 ));

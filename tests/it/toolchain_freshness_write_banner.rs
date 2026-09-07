@@ -170,11 +170,14 @@ fn minimal_path_without_real_bastion(extra_dir: &Path) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Default path: Drift warns loudly on stderr and the write still proceeds.
+// Default path (MV.ticket.an-authored-write-must-not-require-a-fresh-binary):
+// Drift warns loudly on stderr and the chained regeneration is SKIPPED — no
+// generated surface is rewritten in the stale binary's format — but the verb
+// still exits success (a skip is not a failure).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn drift_banner_reaches_stderr_on_write_and_write_still_proceeds() {
+fn drift_banner_reaches_stderr_on_write_and_regeneration_is_skipped() {
     let dir = temp_dir("default-warn");
     write_fixture(&dir);
     let fake_bin_dir = dir.join("fake-bin");
@@ -187,7 +190,8 @@ fn drift_banner_reaches_stderr_on_write_and_write_still_proceeds() {
 
     assert!(
         output.status.success(),
-        "a default (non-require-fresh) write must still succeed on Drift; status: {:?}, stderr: {}",
+        "a default (non-require-fresh) write must still succeed on Drift, even though the \
+         chained regeneration is skipped; status: {:?}, stderr: {}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
@@ -196,6 +200,11 @@ fn drift_banner_reaches_stderr_on_write_and_write_still_proceeds() {
     assert!(
         stderr.contains("TOOLCHAIN DRIFT"),
         "the drift banner must actually reach stderr on a drifting write; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("SKIPPING"),
+        "the banner must say the regeneration is being skipped, not silently performed; \
+         stderr: {stderr}"
     );
     assert!(
         stderr.contains("bastion"),
@@ -207,13 +216,19 @@ fn drift_banner_reaches_stderr_on_write_and_write_still_proceeds() {
         "the banner should carry the stamped-vs-live SHA detail; stderr: {stderr}"
     );
 
-    // The write proceeded despite Drift: derived state changed (updated timestamps /
-    // regenerated views), not left byte-identical to the pre-write fixture.
-    let after = fs::read(&alpha_state_path).unwrap();
-    let _ = before; // presence of `after` read alone proves the file is still readable/written
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !after.is_empty(),
-        "emit-state --write must have produced output on the default (warn) path"
+        stdout.contains("W_EMIT_SKIPPED_STALE_BINARY"),
+        "stdout must carry the named skip diagnostic; stdout: {stdout}"
+    );
+
+    // The chained regeneration did NOT run: the authored state.json this fixture wrote
+    // is left byte-for-byte untouched (no derived-field rewrite, no timestamp bump).
+    let after = fs::read(&alpha_state_path).unwrap();
+    assert_eq!(
+        before, after,
+        "emit-state --write must leave state.json untouched when the chained \
+         regeneration is skipped for a stale binary"
     );
 
     let _ = fs::remove_dir_all(&dir);
