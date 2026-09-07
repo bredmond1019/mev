@@ -295,9 +295,14 @@ fn live_head(source_dir: &str) -> Option<String> {
 /// needs to exercise the real git-shelling comparison against a throwaway fixture repo,
 /// and a separate integration-test crate can only link `pub` items.
 #[doc(hidden)]
-pub fn differ_build_inputs(source_dir: &str, from: &str, to: &str) -> BuildInputComparison {
+pub fn differ_build_inputs(
+    source_dir: &str,
+    from: &str,
+    to: &str,
+    build_input_paths: &[String],
+) -> BuildInputComparison {
     let mut args: Vec<&str> = vec!["diff", "--quiet", from, to, "--"];
-    args.extend(BUILD_INPUT_PATHS.iter().copied());
+    args.extend(build_input_paths.iter().map(String::as_str));
     let output = crate::shared::git_command()
         .args(&args)
         .current_dir(source_dir)
@@ -408,9 +413,12 @@ fn collect_from_dependency_table(
 /// be parsed) — the caller treats that as [`PathDepComparison::Unknown`], never as "not
 /// newer". An empty result (git ran fine but no commit has ever touched a build input in
 /// this dir) is answered as the Unix epoch: a real, very-old answer, not an unknown one.
-fn last_build_input_commit_time(dep_dir: &Path) -> Option<SystemTime> {
+fn last_build_input_commit_time(
+    dep_dir: &Path,
+    build_input_paths: &[String],
+) -> Option<SystemTime> {
     let mut args: Vec<&str> = vec!["log", "-1", "--format=%ct", "--"];
-    args.extend(BUILD_INPUT_PATHS.iter().copied());
+    args.extend(build_input_paths.iter().map(String::as_str));
     let output = crate::shared::git_command()
         .args(&args)
         .current_dir(dep_dir)
@@ -467,7 +475,11 @@ fn writer_build_time(name: &str) -> Option<SystemTime> {
 /// `pub`/`#[doc(hidden)]` for the same reason as its sibling helpers: `tests/it` drives
 /// this directly against fixture repos.
 #[doc(hidden)]
-pub fn path_dependency_comparison(source_dir: &str, build_time: SystemTime) -> PathDepComparison {
+pub fn path_dependency_comparison(
+    source_dir: &str,
+    build_time: SystemTime,
+    build_input_paths: &[String],
+) -> PathDepComparison {
     let closure = path_dependency_closure(source_dir);
     if closure.is_empty() {
         return PathDepComparison::NoPathDeps;
@@ -475,7 +487,7 @@ pub fn path_dependency_comparison(source_dir: &str, build_time: SystemTime) -> P
 
     let mut moved = Vec::new();
     for dep_dir in &closure {
-        match last_build_input_commit_time(dep_dir) {
+        match last_build_input_commit_time(dep_dir, build_input_paths) {
             Some(commit_time) if commit_time > build_time => {
                 let name = dep_dir
                     .file_name()
@@ -589,9 +601,35 @@ fn query_writer_stamp(name: &str) -> Result<(String, String, String), String> {
     Ok((git_sha, dirty, source_dir))
 }
 
+/// Resolve a writer's effective build-input path list: an ABSENT (or EMPTY)
+/// `build_input_paths` means "use the default", never "no build inputs" — see the
+/// doc comment on `ConformanceWriter::build_input_paths` for why an empty-means-none
+/// reading would be a silent false-PASS. Cloning here keeps the pure default (`&'static
+/// [&str]`) and the config-owned override (`Vec<String>`) behind one `Vec<String>`
+/// call-site shape for `differ_build_inputs`/`last_build_input_commit_time`.
+///
+/// `pub`/`#[doc(hidden)]` for the same reason as its sibling helpers: `tests/it` needs
+/// the resolved default list to call [`differ_build_inputs`]/[`path_dependency_comparison`]
+/// directly.
+#[doc(hidden)]
+pub fn resolve_build_input_paths(build_input_paths: &[String]) -> Vec<String> {
+    if build_input_paths.is_empty() {
+        BUILD_INPUT_PATHS.iter().map(|s| s.to_string()).collect()
+    } else {
+        build_input_paths.to_vec()
+    }
+}
+
 /// Run the pure [`verdict`] for one already-resolved `(stamped_sha, dirty, source_dir)`
-/// triple, naming `name` in every finding/reason.
-fn writer_outcome(name: &str, stamped_sha: &str, dirty: &str, source_dir: &str) -> WriterOutcome {
+/// triple, naming `name` in every finding/reason. `build_input_paths` is this writer's
+/// already-resolved (see [`resolve_build_input_paths`]) list of build-input paths.
+fn writer_outcome(
+    name: &str,
+    stamped_sha: &str,
+    dirty: &str,
+    source_dir: &str,
+    build_input_paths: &[String],
+) -> WriterOutcome {
     let source_dir_exists = Path::new(source_dir).exists();
     let live_sha = if source_dir_exists {
         live_head(source_dir)
@@ -600,7 +638,7 @@ fn writer_outcome(name: &str, stamped_sha: &str, dirty: &str, source_dir: &str) 
     };
     let build_inputs = match &live_sha {
         Some(live) if live != stamped_sha && live != "unknown" && stamped_sha != "unknown" => {
-            differ_build_inputs(source_dir, stamped_sha, live)
+            differ_build_inputs(source_dir, stamped_sha, live, build_input_paths)
         }
         _ => BuildInputComparison::Unknown,
     };
@@ -609,7 +647,9 @@ fn writer_outcome(name: &str, stamped_sha: &str, dirty: &str, source_dir: &str) 
     // `self` would leave the exact measured failure half-fixed.
     let path_deps = if source_dir_exists {
         match writer_build_time(name) {
-            Some(build_time) => path_dependency_comparison(source_dir, build_time),
+            Some(build_time) => {
+                path_dependency_comparison(source_dir, build_time, build_input_paths)
+            }
             None => PathDepComparison::Unknown,
         }
     } else {
@@ -644,8 +684,11 @@ fn writer_outcome(name: &str, stamped_sha: &str, dirty: &str, source_dir: &str) 
 /// reader can find the source repo of a writer that could not be queried.
 fn cross_binary_outcome(writer: &ConformanceWriter) -> WriterOutcome {
     let name = writer.name.as_str();
+    let build_input_paths = resolve_build_input_paths(&writer.build_input_paths);
     match query_writer_stamp(name) {
-        Ok((git_sha, dirty, source_dir)) => writer_outcome(name, &git_sha, &dirty, &source_dir),
+        Ok((git_sha, dirty, source_dir)) => {
+            writer_outcome(name, &git_sha, &dirty, &source_dir, &build_input_paths)
+        }
         Err(reason) => {
             let reason = match &writer.repo_path {
                 Some(repo_path) => format!("{name}: {reason} (repo_path: {repo_path})"),
@@ -678,11 +721,22 @@ fn worst_status(a: CheckStatus, b: CheckStatus) -> CheckStatus {
 /// worst-wins overall status. An empty registry degrades to mev-only: exactly one
 /// outcome, named `self`, never a panic or a silent pass.
 pub fn writer_outcomes(writers: &[ConformanceWriter]) -> (CheckStatus, Vec<WriterOutcome>) {
+    // `self` (mev) is deliberately NOT config-expressible: `brain.toml` cannot know
+    // mev's own build-input layout, and letting it try would let a config file cause
+    // mev to under-report its own staleness. mev's build inputs are a property of
+    // mev's own source layout, known at compile time by the binary that computes
+    // every OTHER writer's verdict — a wrong self list here is not one bad answer, it
+    // is a wrong instrument. So `self` always resolves to the hardcoded default,
+    // never to a per-writer override. See `ConformanceWriter::build_input_paths` and
+    // `resolve_build_input_paths` for the config-expressible case every other writer
+    // uses.
+    let self_build_input_paths = resolve_build_input_paths(&[]);
     let mut outcomes = vec![writer_outcome(
         "self",
         STAMPED_SHA,
         STAMPED_DIRTY,
         STAMPED_SOURCE_DIR,
+        &self_build_input_paths,
     )];
     for writer in writers {
         outcomes.push(cross_binary_outcome(writer));
@@ -1113,6 +1167,7 @@ mod tests {
         let writer = ConformanceWriter {
             name: "/definitely/not/a/real/path/mev_test_ghost_writer".to_string(),
             repo_path: None,
+            build_input_paths: Vec::new(),
         };
         let outcome = cross_binary_outcome(&writer);
         assert_eq!(outcome.status, CheckStatus::NotEvaluable);
@@ -1132,6 +1187,7 @@ mod tests {
         let writer = ConformanceWriter {
             name: "/definitely/not/a/real/path/mev_test_ghost_writer".to_string(),
             repo_path: Some("bastion".to_string()),
+            build_input_paths: Vec::new(),
         };
         let outcome = cross_binary_outcome(&writer);
         assert_eq!(outcome.status, CheckStatus::NotEvaluable);
@@ -1142,7 +1198,8 @@ mod tests {
     fn writer_outcome_drift_names_the_binary() {
         // A writer claiming a source_dir that exists (".") but a sha that cannot match
         // live HEAD in that dir yields Drift, named for that writer.
-        let outcome = writer_outcome("bastion", "not-a-real-sha-ever", "0", ".");
+        let default_paths = resolve_build_input_paths(&[]);
+        let outcome = writer_outcome("bastion", "not-a-real-sha-ever", "0", ".", &default_paths);
         // Only assert Drift when live_head could actually be resolved (git present);
         // otherwise this legitimately falls back to NotEvaluable, which is also a valid,
         // named (never-Pass) outcome.
@@ -1169,6 +1226,7 @@ mod tests {
             conformance_writers: vec![ConformanceWriter {
                 name: "bastion".to_string(),
                 repo_path: Some("bastion".to_string()),
+                build_input_paths: Vec::new(),
             }],
             ..Default::default()
         };
@@ -1256,10 +1314,12 @@ mod tests {
             ConformanceWriter {
                 name: first.to_str().unwrap().to_string(),
                 repo_path: Some("writer-one-repo".to_string()),
+                build_input_paths: Vec::new(),
             },
             ConformanceWriter {
                 name: second.to_str().unwrap().to_string(),
                 repo_path: Some("writer-two-repo".to_string()),
+                build_input_paths: Vec::new(),
             },
         ];
 
@@ -1422,7 +1482,12 @@ mod tests {
     fn path_dependency_comparison_no_path_deps() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_manifest(dir.path(), "[dependencies]\n");
-        let cmp = path_dependency_comparison(dir.path().to_str().unwrap(), SystemTime::now());
+        let default_paths = resolve_build_input_paths(&[]);
+        let cmp = path_dependency_comparison(
+            dir.path().to_str().unwrap(),
+            SystemTime::now(),
+            &default_paths,
+        );
         assert_eq!(cmp, PathDepComparison::NoPathDeps);
     }
 
@@ -1439,7 +1504,9 @@ mod tests {
         let build_time =
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(commit_secs + 3600);
 
-        let cmp = path_dependency_comparison(writer_dir.to_str().unwrap(), build_time);
+        let default_paths = resolve_build_input_paths(&[]);
+        let cmp =
+            path_dependency_comparison(writer_dir.to_str().unwrap(), build_time, &default_paths);
         assert_eq!(
             cmp,
             PathDepComparison::Same,
@@ -1461,7 +1528,9 @@ mod tests {
         let build_time = SystemTime::UNIX_EPOCH
             + std::time::Duration::from_secs(commit_secs.saturating_sub(3600));
 
-        let cmp = path_dependency_comparison(writer_dir.to_str().unwrap(), build_time);
+        let default_paths = resolve_build_input_paths(&[]);
+        let cmp =
+            path_dependency_comparison(writer_dir.to_str().unwrap(), build_time, &default_paths);
         match cmp {
             PathDepComparison::Differ(names) => {
                 assert_eq!(names, vec!["dep".to_string()]);
@@ -1559,5 +1628,51 @@ mod tests {
         );
         assert_eq!(status, CheckStatus::Drift);
         assert!(findings[0].contains("uncommitted"));
+    }
+
+    // `resolve_build_input_paths` — MV.ticket.build-input-paths-are-per-writer-config.
+    // Pure resolution logic, unit-tested directly per the module's own git-shelling
+    // split; the git-backed proof that a resolved override actually changes a verdict
+    // lives in `tests/it` (`differ_build_inputs` already shells out there).
+
+    #[test]
+    fn resolve_build_input_paths_absent_resolves_to_the_default_list() {
+        // AC1: no `build_input_paths` (an empty slice, matching an absent/default-derived
+        // `Vec<String>` field) resolves to exactly today's `BUILD_INPUT_PATHS`, byte for
+        // byte, so every existing `[[conformance_writers]]` entry's verdict is unchanged.
+        let resolved = resolve_build_input_paths(&[]);
+        let expected: Vec<String> = BUILD_INPUT_PATHS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn resolve_build_input_paths_present_resolves_to_exactly_the_given_list() {
+        // AC2 (resolution half): a writer WITH `build_input_paths` gets exactly those
+        // paths back, not the default, and not the default plus the override.
+        let narrower = vec!["src/".to_string()];
+        let resolved = resolve_build_input_paths(&narrower);
+        assert_eq!(resolved, narrower);
+        assert_ne!(
+            resolved.len(),
+            BUILD_INPUT_PATHS.len(),
+            "a genuinely narrower override must not silently widen back out to the default"
+        );
+    }
+
+    #[test]
+    fn resolve_build_input_paths_empty_list_resolves_to_default_not_no_inputs() {
+        // AC3: an EMPTY `build_input_paths` (config says `build_input_paths = []`)
+        // resolves to the DEFAULT list, never to "this writer has no build inputs" — an
+        // empty-means-none reading would make the writer permanently Pass regardless of
+        // what actually changed, which is the exact silent false-PASS this field exists
+        // to prevent, just relocated into config.
+        let empty: Vec<String> = Vec::new();
+        let resolved = resolve_build_input_paths(&empty);
+        let expected: Vec<String> = BUILD_INPUT_PATHS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(resolved, expected);
+        assert!(
+            !resolved.is_empty(),
+            "an empty override must never resolve to an empty (i.e. no-inputs) list"
+        );
     }
 }

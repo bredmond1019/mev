@@ -400,6 +400,24 @@ pub struct ConformanceWriter {
     /// queried, so a reader can find where to go look.
     #[serde(default)]
     pub repo_path: Option<String>,
+    /// This writer's own build-input paths (repo-relative), overriding
+    /// `toolchain::BUILD_INPUT_PATHS` for THIS writer only.
+    ///
+    /// `#[serde(default)]` — an ABSENT field means "use the default list",
+    /// preserving every existing entry's verdict byte-for-byte. An EMPTY
+    /// list (`build_input_paths = []`) also means "use the default list",
+    /// NOT "this writer has no build inputs": a list that meant "nothing is
+    /// a build input" would make the writer permanently Pass regardless of
+    /// what actually changed — the exact silent false-PASS this field exists
+    /// to prevent, just moved into config instead of code. Resolution lives
+    /// in `toolchain::resolve_build_input_paths`.
+    ///
+    /// Does NOT apply to the `self` (mev) arm — `self` is not an entry in
+    /// this table and always uses the hardcoded default; see the comment at
+    /// its `writer_outcome("self", ...)` call site in `toolchain.rs` for why
+    /// that asymmetry is deliberate.
+    #[serde(default)]
+    pub build_input_paths: Vec<String>,
 }
 
 /// One endpoint (canonical or consumer) inside a `[[contracts]]` entry.

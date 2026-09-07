@@ -18,6 +18,7 @@
 
 use mev::brain::conformance::toolchain::{
     PathDepComparison, path_dependency_closure, path_dependency_comparison,
+    resolve_build_input_paths,
 };
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -96,7 +97,8 @@ fn direct_dependency_with_newer_build_input_commit_is_drift_naming_the_dep() {
         "fixture commit clock must land after the writer's fixed build time"
     );
 
-    let cmp = path_dependency_comparison(writer_dir.to_str().unwrap(), build_time);
+    let default_paths = resolve_build_input_paths(&[]);
+    let cmp = path_dependency_comparison(writer_dir.to_str().unwrap(), build_time, &default_paths);
     match cmp {
         PathDepComparison::Differ(names) => {
             assert_eq!(
@@ -131,7 +133,8 @@ fn dependency_commit_touching_only_docs_is_not_drift() {
     std::fs::write(dep_dir.join("README.md"), "docs only change\n").unwrap();
     init_and_commit(&dep_dir, "docs-only change, not a build input");
 
-    let cmp = path_dependency_comparison(writer_dir.to_str().unwrap(), build_time);
+    let default_paths = resolve_build_input_paths(&[]);
+    let cmp = path_dependency_comparison(writer_dir.to_str().unwrap(), build_time, &default_paths);
     assert_eq!(
         cmp,
         PathDepComparison::Same,
@@ -149,7 +152,8 @@ fn writer_with_no_path_dependencies_is_unaffected() {
     let closure = path_dependency_closure(root.to_str().unwrap());
     assert!(closure.is_empty(), "no path deps -> empty closure");
 
-    let cmp = path_dependency_comparison(root.to_str().unwrap(), SystemTime::now());
+    let default_paths = resolve_build_input_paths(&[]);
+    let cmp = path_dependency_comparison(root.to_str().unwrap(), SystemTime::now(), &default_paths);
     assert_eq!(cmp, PathDepComparison::NoPathDeps);
 }
 
@@ -187,7 +191,8 @@ fn transitive_closure_reaches_the_leaf_and_reports_its_drift() {
         "must reach c transitively: {names:?}"
     );
 
-    let cmp = path_dependency_comparison(a.to_str().unwrap(), build_time);
+    let default_paths = resolve_build_input_paths(&[]);
+    let cmp = path_dependency_comparison(a.to_str().unwrap(), build_time, &default_paths);
     match cmp {
         PathDepComparison::Differ(names) => {
             assert!(
@@ -224,7 +229,8 @@ fn dependency_cycle_terminates_instead_of_hanging() {
     );
 
     // Comparison must also terminate and produce a real answer, not hang.
-    let cmp = path_dependency_comparison(a.to_str().unwrap(), SystemTime::now());
+    let default_paths = resolve_build_input_paths(&[]);
+    let cmp = path_dependency_comparison(a.to_str().unwrap(), SystemTime::now(), &default_paths);
     assert!(
         matches!(
             cmp,
@@ -247,7 +253,8 @@ fn unmoved_path_dependency_is_pass_not_drift() {
     let commit_secs = init_and_commit(&dep_dir, "dep commit, well before the writer was built");
     let build_time = build_time_secs(commit_secs + 3600);
 
-    let cmp = path_dependency_comparison(writer_dir.to_str().unwrap(), build_time);
+    let default_paths = resolve_build_input_paths(&[]);
+    let cmp = path_dependency_comparison(writer_dir.to_str().unwrap(), build_time, &default_paths);
     assert_eq!(
         cmp,
         PathDepComparison::Same,

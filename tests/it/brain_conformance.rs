@@ -414,10 +414,12 @@ fn differ_build_inputs_covers_same_differ_and_unknown() {
     differ_run_git(&dir, &["commit", "-q", "-m", "edit docs/x.md"]);
     let sha2 = differ_run_git(&dir, &["rev-parse", "HEAD"]);
 
+    let default_paths = mev::brain::conformance::toolchain::resolve_build_input_paths(&[]);
     let same = mev::brain::conformance::toolchain::differ_build_inputs(
         dir.to_str().unwrap(),
         &sha1,
         &sha2,
+        &default_paths,
     );
     assert_eq!(
         same,
@@ -435,6 +437,7 @@ fn differ_build_inputs_covers_same_differ_and_unknown() {
         dir.to_str().unwrap(),
         &sha2,
         &sha3,
+        &default_paths,
     );
     assert_eq!(
         differ,
@@ -448,11 +451,112 @@ fn differ_build_inputs_covers_same_differ_and_unknown() {
         dir.to_str().unwrap(),
         "0000000000000000000000000000000000000000",
         &sha3,
+        &default_paths,
     );
     assert_eq!(
         unknown,
         mev::brain::conformance::toolchain::BuildInputComparison::Unknown,
         "an unresolvable SHA must report Unknown, never Same"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------------------
+// `differ_build_inputs` with a per-writer RESOLVED path list —
+// MV.ticket.build-input-paths-are-per-writer-config. Proves the feature, not just the
+// plumbing: the same commit pair reports a DIFFERENT verdict depending on which resolved
+// list is passed in.
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn differ_build_inputs_narrower_override_changes_the_verdict_from_the_default() {
+    let dir = temp_dir("differ-build-inputs-override");
+
+    differ_run_git(&dir, &["init", "-q"]);
+    differ_run_git(&dir, &["config", "user.email", "test@example.com"]);
+    differ_run_git(&dir, &["config", "user.name", "Test"]);
+
+    write_file(&dir, "docs/x.md", "# hello\n");
+    differ_run_git(&dir, &["add", "."]);
+    differ_run_git(&dir, &["commit", "-q", "-m", "init"]);
+    let sha1 = differ_run_git(&dir, &["rev-parse", "HEAD"]);
+
+    // Touch `tests/`, a path in the DEFAULT build-input list.
+    write_file(&dir, "tests/it_smoke.rs", "#[test] fn smoke() {}\n");
+    differ_run_git(&dir, &["add", "."]);
+    differ_run_git(&dir, &["commit", "-q", "-m", "add tests/it_smoke.rs"]);
+    let sha2 = differ_run_git(&dir, &["rev-parse", "HEAD"]);
+
+    let default_paths = mev::brain::conformance::toolchain::resolve_build_input_paths(&[]);
+    let under_default = mev::brain::conformance::toolchain::differ_build_inputs(
+        dir.to_str().unwrap(),
+        &sha1,
+        &sha2,
+        &default_paths,
+    );
+    assert_eq!(
+        under_default,
+        mev::brain::conformance::toolchain::BuildInputComparison::Differ,
+        "tests/ is a default-list build input, so the default list must see this as Differ"
+    );
+
+    // A writer's narrower override that does NOT include `tests/` — the same commit
+    // pair now reads as Same under that resolved list. This is what proves the feature:
+    // an implementation that accepted `build_input_paths` but ignored it would still
+    // report Differ here.
+    let narrower = mev::brain::conformance::toolchain::resolve_build_input_paths(&[
+        "src/".to_string(),
+        "Cargo.toml".to_string(),
+    ]);
+    let under_override = mev::brain::conformance::toolchain::differ_build_inputs(
+        dir.to_str().unwrap(),
+        &sha1,
+        &sha2,
+        &narrower,
+    );
+    assert_eq!(
+        under_override,
+        mev::brain::conformance::toolchain::BuildInputComparison::Same,
+        "a writer's narrower override excluding tests/ must not see this commit as a build-input change"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn differ_build_inputs_cargo_lock_only_change_still_drifts_under_the_default() {
+    // A dependency bump touches only `Cargo.lock`, no first-party source — the default
+    // list must still report Differ, since a `Cargo.lock`-only change is a real build
+    // input with no source diff to otherwise notice.
+    let dir = temp_dir("differ-build-inputs-cargo-lock");
+
+    differ_run_git(&dir, &["init", "-q"]);
+    differ_run_git(&dir, &["config", "user.email", "test@example.com"]);
+    differ_run_git(&dir, &["config", "user.name", "Test"]);
+
+    write_file(&dir, "Cargo.lock", "# v1\n");
+    differ_run_git(&dir, &["add", "."]);
+    differ_run_git(&dir, &["commit", "-q", "-m", "init lockfile"]);
+    let sha1 = differ_run_git(&dir, &["rev-parse", "HEAD"]);
+
+    write_file(&dir, "Cargo.lock", "# v2 (dependency bump)\n");
+    differ_run_git(&dir, &["add", "."]);
+    differ_run_git(&dir, &["commit", "-q", "-m", "bump a dependency"]);
+    let sha2 = differ_run_git(&dir, &["rev-parse", "HEAD"]);
+
+    let default_paths = mev::brain::conformance::toolchain::resolve_build_input_paths(&[]);
+    let result = mev::brain::conformance::toolchain::differ_build_inputs(
+        dir.to_str().unwrap(),
+        &sha1,
+        &sha2,
+        &default_paths,
+    );
+    assert_eq!(
+        result,
+        mev::brain::conformance::toolchain::BuildInputComparison::Differ,
+        "a Cargo.lock-only change is a build input with no first-party source change; \
+         the default list must still report Differ"
     );
 
     let _ = fs::remove_dir_all(&dir);
