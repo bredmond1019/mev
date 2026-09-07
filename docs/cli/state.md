@@ -346,6 +346,7 @@ mev set-block-status mev:MV.10.A closed --write --lock-dir /tmp/fixture-locks --
 - **Tier rollup tables** (each tier sub-brain's sibling `status.md`): splices a rendered per-repo now/next/blocked rollup table into the `<!-- BEGIN generated:tier-rollup -->` / `<!-- END generated:tier-rollup -->` sentinels. Only brain files scoped to a single tier (`tier_scope_for` resolves to `TierScope::Tier`) are targeted — the HQ root (`TierScope::All`) is skipped by this planner.
 - **HQ Operating Board** (the HQ brain's `status.md`): splices a rendered NOW/NEXT/BLOCKED board across every registered repo into the `<!-- BEGIN generated:hq-board -->` / `<!-- END generated:hq-board -->` sentinels.
 - **HQ unified priority board** (the same HQ brain's `status.md`, independent sentinel region): splices a priority-ranked NOW/NEXT/BLOCKED/DUE-SOON board into the `<!-- BEGIN generated:unified-board -->` / `<!-- END generated:unified-board -->` sentinels. Rows are tagged `[BIZ]`/`[ENG]` by the source repo's configured tier; `NEXT` is stably re-sorted by `(effective priority asc, due asc)` (absent values last, wave order as the implicit tiebreak). Effective priority (MV.7.A) is computed by `effective_priorities` via reverse-topological `min`-propagation over the `depends_on` DAG, so a block with no own priority that gates a hotter dependent inherits that dependent's priority and floats to the top instead of sorting last; it falls back to the block's own raw `priority` when no hotter dependent exists. `DUE-SOON` lists blocks due within 14 days (overdue included and annotated) sorted by due date ascending.
+- **Epics index** (the single doc at `config.epics.index_path` — a `[epics]` `brain.toml` setting, not a hardcoded path; an absent table defaults to today's location): splices the whole `Doc | Epic | Status | Repos` contents-page table for the HQ `epics[]` registry into the `<!-- BEGIN generated:epic-index -->` / `<!-- END generated:epic-index -->` sentinels — one row per registry entry, in registry order, with `Status` rendered verbatim from `epics[].status`. Distinct from the per-epic board below: the board is a live NOW/NEXT/BLOCKED focus snapshot, this is the registry's own contents page. Rows for a doc that resolves to no registry entry belong in a hand-maintained section **below** the `END` sentinel — content there always survives a re-render untouched. A corpus-wide artifact like the master-plan/lane-segments planners: `--scope <slug>` excludes it entirely (see `--scope` above), and in `--write` mode it is applied through the same validate-and-roll-back-on-regression guard as every other generator that writes into the corpus.
 - **Attention board** (every brain-level `status.md`, tier-scoped): splices the stale-item board into the `<!-- BEGIN generated:attention -->` / `<!-- END generated:attention -->` sentinels. Unlike the boards above (HQ root only), this emits for **both** scopes: the HQ root (`TierScope::All`) unions `carryover[]` from every loaded repo/tier plus the whole HQ `backlog[]`; each tier sub-brain (`TierScope::Tier`) shows its own tier's leaf-repo carryover (plus the tier brain's own) and the HQ backlog nodes whose `repo` belongs to that tier. Seven lanes total: four **carryover triage lanes** — `BLOCKING` · `HOT` · `AGING` · `STANDING` (`MV.ticket.carryover-triage-ranking`) — followed by Aging backlog · Orphaned captures · Stale distilled knowledge, each row `[<repo>]`-tagged. See [Carryover triage lanes](#carryover-triage-lanes) below for how the first four are populated and ordered; the latter three are unchanged — sorted oldest-first, showing only items past their `[attention]` threshold (the visible twin of `W_STATE_BACKLOG_STALE`/`W_DISTILL_STALE`). The fourth lane (distill-freshness-lane) reads each repo's `knowledge.md`/`memory.md` once (cached across boards) and lists D35-distilled entries whose `distill_stale_age` exceeds the `[attention]` `knowledge_days`/`memory_days` threshold, capped at 10 rows per board with an "…and N more" tail — the same predicate `check_distill_staleness` fires `W_DISTILL_STALE` on, so the board never shows an entry the warning didn't also flag.
 
 #### Carryover triage lanes
@@ -429,8 +430,8 @@ the worktree path and exits non-zero (`E_EMIT_LINKED_WORKTREE`) without writing 
 
 `--write` also refuses to run when the corpus is incomplete: if any discovered `state.json` fails
 to load (an `E_STATE_MALFORMED_JSON` diagnostic), every derived view is a cross-repo union
-(`repos[]`/`cross_repo[]`, tier rollups, HQ/unified/epic boards, master-plan and epic sequence
-tables) — regenerating them from a partial corpus would silently erase the missing repo(s) from
+(`repos[]`/`cross_repo[]`, tier rollups, HQ/unified/epic boards, master-plan tables, and the
+epics index) — regenerating them from a partial corpus would silently erase the missing repo(s) from
 every surface, and rewriting `cross_repo[]` would delete the dangling references that are the only
 evidence of the failure. The command pushes `E_EMIT_INCOMPLETE_CORPUS` alongside the underlying
 `E_STATE_MALFORMED_JSON` cause, writes nothing, and exits non-zero. Dry-run is unaffected — it is
@@ -682,9 +683,9 @@ it enforces:
 
 **`epics` is payload-only, not a `block.schema.json` field.** The block record itself never carries
 it (the schema is `additionalProperties: false`); it drives only the `state.json`
-`tracks[].blocks[].epics` registration, which the epic-sequence table renders from. A payload with
+`tracks[].blocks[].epics` registration, which the epic board renders from. A payload with
 no `epics` is refused, never written with an empty list — a block created with no epic renders on
-no epic-sequence table.
+no epic board.
 
 **`spec_dir` is always derived**, never read from the payload — always exactly
 `planning/<BlockID>/`, so a typo in the payload can never diverge from the schema's own pattern
@@ -692,8 +693,8 @@ constraint.
 
 **Dry-run by default**, exactly like `set-block-status`: without `--write` the proposed record and
 `state.json` edit print and not a byte is touched. A successful `--write` takes the same advisory
-lock, and then runs `emit-state --write` so the boards, wave table, and epic-sequence table show the
-new block in the same invocation.
+lock, and then runs `emit-state --write` so the boards and wave table show the new block in the
+same invocation.
 
 **An existing block id is a no-op refusal, never an overwrite.** `E_BLOCK_CREATE_EXISTS` fires and
 nothing is written — creation only files new blocks.
@@ -710,7 +711,7 @@ none matches.
 **`--scope <slug>` narrows only the chained `emit-state` regeneration**, identically to
 `set-block-status --scope` — the new record and its `state.json` registration are always written to
 exactly the target repo regardless of scope. Note that `--scope` excludes HQ-level docs outside the
-scoped repo's own path (e.g. a cross-repo `master-plan.md` epic-sequence table); omit `--scope` if a
+scoped repo's own path (e.g. the corpus-wide epics index below); omit `--scope` if a
 non-repo-local surface needs to see the new block too.
 
 ```bash

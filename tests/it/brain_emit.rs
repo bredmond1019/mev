@@ -8992,6 +8992,333 @@ mod epic_emit {
 }
 
 // ---------------------------------------------------------------------------
+// MV.chore.emit-state-renders-the-epic-index — plan_epic_index / render_epic_index
+// ---------------------------------------------------------------------------
+
+mod epic_index_emit {
+    use mev::brain::config::{BrainConfig, EpicsConfig};
+    use mev::brain::emit::{markers, plan_epic_index, render_epic_index};
+    use mev::brain::state::{Epic, Focus, StateFile, StateSource};
+
+    fn config_at(index_path: &str) -> BrainConfig {
+        BrainConfig {
+            epics: EpicsConfig {
+                index_path: index_path.to_string(),
+            },
+            ..BrainConfig::default()
+        }
+    }
+
+    fn epic(slug: &str, title: &str, status: &str, plan: Option<&str>, repos: &[&str]) -> Epic {
+        Epic {
+            slug: slug.to_string(),
+            title: title.to_string(),
+            description: Some(format!("{slug} description")),
+            status: Some(status.to_string()),
+            weight: None,
+            plan: plan.map(|p| p.to_string()),
+            repos: repos.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn hq(dir: &std::path::Path, epics: Vec<Epic>) -> (StateSource, StateFile) {
+        (
+            StateSource {
+                repo_slug: "hq".to_string(),
+                abs_path: dir.join("hq").join("planning/state.json"),
+                expected_kind: "brain",
+            },
+            StateFile {
+                epics,
+                repo: "hq".to_string(),
+                kind: "brain".to_string(),
+                updated: "2026-09-06".to_string(),
+                focus: Focus::default(),
+                tracks: vec![],
+                repos: vec![],
+                cross_repo: vec![],
+                tiers: vec![],
+                note: None,
+                backlog: vec![],
+                carryover: vec![],
+                ..Default::default()
+            },
+        )
+    }
+
+    fn doc_with(marker: &str, tail: &str) -> String {
+        format!(
+            "---\ntype: Index\ntitle: T\ndescription: D\n---\n\n\
+             # Epics\n\nBefore.\n\n\
+             <!-- BEGIN generated:{marker} -->\n<!-- END generated:{marker} -->\n\n\
+             {tail}"
+        )
+    }
+
+    fn no_sentinel_doc() -> String {
+        "---\ntype: Index\ntitle: T\ndescription: D\n---\n\n# Epics\n\nNo sentinels here.\n"
+            .to_string()
+    }
+
+    fn write_doc(dir: &std::path::Path, rel: &str, contents: &str) {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, contents).unwrap();
+    }
+
+    // -- positive control: a well-formed fixture actually renders rows -------
+
+    #[test]
+    fn plan_epic_index_renders_one_row_per_registry_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config_at("core/planning/epics/index.md");
+        write_doc(
+            tmp.path(),
+            &config.epics.index_path,
+            &doc_with(markers::EPIC_INDEX, "After.\n"),
+        );
+
+        let epics = vec![
+            epic(
+                "alpha",
+                "Alpha",
+                "active",
+                Some("core/planning/epics/alpha.md"),
+                &["bastion"],
+            ),
+            epic("beta", "Beta", "paused", None, &[]),
+            epic(
+                "gamma",
+                "Gamma",
+                "complete",
+                Some("planning/roadmaps/gamma/roadmap.md"),
+                &["mev", "okf-core"],
+            ),
+        ];
+        let registry_len = epics.len();
+        let files = vec![hq(tmp.path(), epics)];
+
+        let plan = plan_epic_index(tmp.path(), &files, &config);
+        assert!(
+            plan.diagnostics.is_empty(),
+            "well-formed fixture must not diagnose: {:?}",
+            plan.diagnostics
+        );
+        assert_eq!(plan.actions.len(), 1, "exactly one write expected");
+
+        let new_content = &plan.actions[0].new_content;
+        let rows = new_content
+            .lines()
+            .filter(|l| l.trim_start().starts_with("| [") || l.trim_start().starts_with("|["))
+            .count();
+        assert_eq!(
+            rows, registry_len,
+            "row count must equal registry.len(), never a literal — got {rows} rows for \
+             {registry_len} registry entries:\n{new_content}"
+        );
+
+        // Each row carries all four columns.
+        for line in new_content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("| [") {
+                let cols = trimmed
+                    .trim_start_matches('|')
+                    .trim_end_matches('|')
+                    .split('|')
+                    .count();
+                assert_eq!(cols, 4, "row must carry Doc|Epic|Status|Repos: {trimmed}");
+            }
+        }
+
+        // gamma's link resolves relative to the index doc's own directory,
+        // exactly like the real corpus's roadmap-pointing epics do.
+        assert!(
+            new_content.contains("../../../planning/roadmaps/gamma/roadmap.md"),
+            "plan-pointing epic must resolve a relative link, not the raw root-relative \
+             path:\n{new_content}"
+        );
+        // beta has no `plan`, so it falls back to `<slug>.md` beside the index.
+        assert!(
+            new_content.contains("[beta.md](beta.md)"),
+            "plan-less epic must link to `<slug>.md`:\n{new_content}"
+        );
+    }
+
+    // -- AC2: index path is resolved from config, never a literal ------------
+
+    #[test]
+    fn plan_epic_index_resolves_path_from_config_not_a_literal() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Deliberately NOT the default `core/planning/epics/index.md` — proves
+        // the planner reads `config.epics.index_path` rather than a hardcoded
+        // literal.
+        let config = config_at("planning/epics/index.md");
+        write_doc(
+            tmp.path(),
+            &config.epics.index_path,
+            &doc_with(markers::EPIC_INDEX, "After.\n"),
+        );
+        // Also plant a file at the OLD default location with different content,
+        // to prove the planner never touches it.
+        write_doc(
+            tmp.path(),
+            "core/planning/epics/index.md",
+            &doc_with(markers::EPIC_INDEX, "Should never be touched.\n"),
+        );
+
+        let epics = vec![epic("solo", "Solo", "active", None, &["mev"])];
+        let files = vec![hq(tmp.path(), epics)];
+
+        let plan = plan_epic_index(tmp.path(), &files, &config);
+        assert_eq!(plan.actions.len(), 1);
+        assert_eq!(
+            plan.actions[0].path,
+            tmp.path().join("planning/epics/index.md"),
+            "must write to the CONFIGURED path"
+        );
+        assert!(
+            !tmp.path()
+                .join("core/planning/epics/index.md")
+                .to_string_lossy()
+                .is_empty()
+        );
+        let untouched =
+            std::fs::read_to_string(tmp.path().join("core/planning/epics/index.md")).unwrap();
+        assert!(
+            untouched.contains("Should never be touched."),
+            "the default-location doc must be left byte-for-byte alone"
+        );
+    }
+
+    // -- AC4: content below END sentinel survives untouched -------------------
+
+    #[test]
+    fn content_below_end_sentinel_survives_render_unmodified() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config_at("core/planning/epics/index.md");
+        let hand_maintained = "| [orphan.md](orphan.md) | **Orphan** — not in the registry | \
+             `superseded` | — |\n";
+        write_doc(
+            tmp.path(),
+            &config.epics.index_path,
+            &doc_with(markers::EPIC_INDEX, hand_maintained),
+        );
+
+        let epics = vec![epic("alpha", "Alpha", "active", None, &["bastion"])];
+        let files = vec![hq(tmp.path(), epics)];
+
+        let plan = plan_epic_index(tmp.path(), &files, &config);
+        assert_eq!(plan.actions.len(), 1);
+        assert!(
+            plan.actions[0].new_content.contains(hand_maintained.trim()),
+            "hand-maintained rows below the END sentinel must survive a render \
+             unmodified:\n{}",
+            plan.actions[0].new_content
+        );
+    }
+
+    // -- AC5: a target doc with no sentinels is skipped, no write -------------
+
+    #[test]
+    fn doc_with_no_sentinels_is_skipped_with_diagnostic_and_no_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config_at("core/planning/epics/index.md");
+        write_doc(tmp.path(), &config.epics.index_path, &no_sentinel_doc());
+
+        let epics = vec![epic("alpha", "Alpha", "active", None, &["bastion"])];
+        let files = vec![hq(tmp.path(), epics)];
+
+        let plan = plan_epic_index(tmp.path(), &files, &config);
+        assert!(plan.actions.is_empty(), "no sentinels => no write");
+        assert!(
+            plan.diagnostics
+                .iter()
+                .any(|d| d.locator == "W_EMIT_NO_SENTINEL"),
+            "must log a skip diagnostic; got {:?}",
+            plan.diagnostics
+        );
+    }
+
+    #[test]
+    fn missing_target_doc_is_skipped_with_diagnostic_and_no_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config_at("core/planning/epics/index.md");
+        // No file written at all.
+
+        let epics = vec![epic("alpha", "Alpha", "active", None, &["bastion"])];
+        let files = vec![hq(tmp.path(), epics)];
+
+        let plan = plan_epic_index(tmp.path(), &files, &config);
+        assert!(plan.actions.is_empty(), "missing doc => no write");
+        assert!(
+            plan.diagnostics
+                .iter()
+                .any(|d| d.locator == "W_EMIT_NO_SENTINEL"),
+            "must log a skip diagnostic; got {:?}",
+            plan.diagnostics
+        );
+    }
+
+    #[test]
+    fn empty_registry_yields_no_actions_and_no_diagnostics() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config_at("core/planning/epics/index.md");
+        write_doc(
+            tmp.path(),
+            &config.epics.index_path,
+            &doc_with(markers::EPIC_INDEX, "After.\n"),
+        );
+
+        let files = vec![hq(tmp.path(), vec![])];
+        let plan = plan_epic_index(tmp.path(), &files, &config);
+        assert!(
+            plan.actions.is_empty(),
+            "no registry authored => nothing to emit"
+        );
+        assert!(plan.diagnostics.is_empty());
+    }
+
+    // -- AC6: Status column renders epics[].status verbatim -------------------
+
+    #[test]
+    fn status_column_renders_registry_status_verbatim() {
+        let epics = vec![
+            epic("alpha", "Alpha", "focused", None, &[]),
+            epic("beta", "Beta", "complete", None, &[]),
+        ];
+        let table = render_epic_index(&epics, "core/planning/epics/index.md");
+        assert!(
+            table.contains("`focused`"),
+            "status must render verbatim, not remapped:\n{table}"
+        );
+        assert!(
+            table.contains("`complete`"),
+            "status must render verbatim, not remapped:\n{table}"
+        );
+    }
+
+    #[test]
+    fn render_epic_index_joins_repos_and_falls_back_to_em_dash() {
+        let epics = vec![
+            epic("alpha", "Alpha", "active", None, &["bastion", "mev"]),
+            epic("beta", "Beta", "active", None, &[]),
+        ];
+        let table = render_epic_index(&epics, "core/planning/epics/index.md");
+        assert!(
+            table.contains("bastion · mev"),
+            "repos join with ' · ':\n{table}"
+        );
+        assert!(
+            table
+                .lines()
+                .any(|l| l.contains("| — |") && l.contains("Beta")),
+            "empty repos render as an em dash:\n{table}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Task 2 (ticket-emit-state-scope-and-lock) — filter_plan_by_scope
 // ---------------------------------------------------------------------------
 

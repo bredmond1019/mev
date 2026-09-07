@@ -80,6 +80,14 @@ pub mod markers {
     /// Emitted into every brain-level `status.md` that carries the sentinels.
     pub const EPIC_BOARD: &str = "epic-board";
 
+    /// Marker for the epics registry's own contents-page table (`Doc | Epic |
+    /// Status | Repos`), spliced into the epics index doc at
+    /// `BrainConfig::epics.index_path`. Distinct from [`EPIC_BOARD`]: the board
+    /// is a live NOW/NEXT/BLOCKED focus snapshot rendered per active initiative,
+    /// while the index is the registry's own contents page — one row per
+    /// `epics[]` entry, regardless of status, with no lane content at all.
+    pub const EPIC_INDEX: &str = "epic-index";
+
     /// Marker for the initiative index + per-phase block sections spliced into
     /// a repo's `master-plan.md` by [`crate::brain::master_plan`]
     /// (`MV.ticket.master-plan-generator`). Distinct from [`WAVE_TABLE`]: the
@@ -3209,6 +3217,174 @@ pub fn plan_epic_boards(
                     ),
                 ));
             }
+        }
+    }
+
+    plan
+}
+
+// ---------------------------------------------------------------------------
+// plan_epic_index
+// ---------------------------------------------------------------------------
+
+/// Resolve a repo-root-relative `target` path into a link relative to `dir`
+/// (also repo-root-relative), inserting one `..` per directory of `dir` beyond
+/// the longest shared path-component prefix.
+///
+/// This is the inverse of `crate::brain::conformance::epics_index`'s
+/// `resolve_link_target`, which resolves an index-doc link *back* to a
+/// root-relative path for comparison against `epics[].plan`. Kept independent
+/// (not shared) because the two run in opposite directions and each is a
+/// handful of lines — a shared abstraction would cost more to read than it
+/// would save.
+fn relative_link(dir: &str, target: &str) -> String {
+    let dir_parts: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    let target_parts: Vec<&str> = target.split('/').filter(|s| !s.is_empty()).collect();
+
+    let common = dir_parts
+        .iter()
+        .zip(target_parts.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let ups = dir_parts.len() - common;
+    let mut parts: Vec<String> = std::iter::repeat_n("..".to_string(), ups).collect();
+    parts.extend(target_parts[common..].iter().map(|s| s.to_string()));
+    parts.join("/")
+}
+
+/// Render the HQ `epics[]` registry as its own contents-page table — `Doc |
+/// Epic | Status | Repos` — one row per registry entry, in registry order.
+///
+/// `index_path` is the root-relative path of the target doc itself (e.g.
+/// `config.epics.index_path`); its parent directory is what every `plan`
+/// target is resolved relative to, so a row's link is exactly what a reader
+/// clicks from that doc's own location — an epic with no `plan` links to
+/// `<slug>.md` in that same directory, today's convention for a
+/// registry-only epic with a colocated doc.
+///
+/// The `Status` column renders `epics[].status` **verbatim** — this is what
+/// makes the doc's claim that the column mirrors the registry true by
+/// construction rather than by hand-sync discipline. `Repos` joins
+/// `epics[].repos` with `" · "`, or renders `—` when empty (an area epic with
+/// no repos yet, matching the doc's existing convention for that case).
+///
+/// Rendered without a trailing newline, matching [`render_epic_board`] /
+/// [`render_hq_board`]; callers own any surrounding blank lines.
+pub fn render_epic_index(epics: &[Epic], index_path: &str) -> String {
+    let index_dir = Path::new(index_path)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let mut lines = vec![
+        "| Doc | Epic | Status | Repos |".to_string(),
+        "|---|---|---|---|".to_string(),
+    ];
+
+    for epic in epics {
+        let target = match &epic.plan {
+            Some(plan) => relative_link(&index_dir, plan),
+            None => format!("{}.md", epic.slug),
+        };
+
+        let mut epic_cell = format!("**{}**", epic.title);
+        if let Some(description) = &epic.description {
+            epic_cell.push_str(&format!(" — {description}"));
+        }
+
+        let status_cell = match &epic.status {
+            Some(status) => format!("`{status}`"),
+            None => String::new(),
+        };
+
+        let repos_cell = if epic.repos.is_empty() {
+            "—".to_string()
+        } else {
+            epic.repos.join(" · ")
+        };
+
+        lines.push(format!(
+            "| [{target}]({target}) | {epic_cell} | {status_cell} | {repos_cell} |"
+        ));
+    }
+
+    lines.join("\n")
+}
+
+/// Plan the epics-registry contents-page splice into the single epics index
+/// doc at `config.epics.index_path` (`markers::EPIC_INDEX`).
+///
+/// Unlike [`plan_epic_boards`], which fans out over every brain-level
+/// `status.md`, this targets exactly one corpus-wide doc — the registry's own
+/// index — resolved from config, never a literal, so relocating the epics
+/// directory (`BT.chore.move-epics-beside-roadmaps`-style) is a config edit
+/// here rather than a code change.
+///
+/// The registry and its `epics[]` both come from the single All-scoped HQ
+/// brain file, matching [`plan_epic_boards`]'s own source. An empty registry,
+/// a missing target doc, or one lacking the sentinel pair all yield
+/// `W_EMIT_NO_SENTINEL` and no write — sentinels are never invented, and an
+/// empty registry has nothing to render.
+pub fn plan_epic_index(
+    root: &Path,
+    files: &[(StateSource, StateFile)],
+    config: &BrainConfig,
+) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+
+    let Some((_, hq_file)) = files
+        .iter()
+        .find(|(_, f)| f.kind == "brain" && matches!(tier_scope_for(f, config), TierScope::All))
+    else {
+        return plan;
+    };
+    if hq_file.epics.is_empty() {
+        return plan; // no registry authored yet — nothing to emit
+    }
+
+    let index_path = root.join(&config.epics.index_path);
+
+    let original = match std::fs::read_to_string(&index_path) {
+        Ok(s) => s,
+        Err(_) => {
+            plan.diagnostics.push(crate::Diagnostic::warning(
+                &index_path,
+                "W_EMIT_NO_SENTINEL",
+                format!(
+                    "no epics index doc at '{}'; skipping epic-index emit",
+                    config.epics.index_path
+                ),
+            ));
+            return plan;
+        }
+    };
+
+    let table = render_epic_index(&hq_file.epics, &config.epics.index_path);
+
+    match splice_generated(&original, markers::EPIC_INDEX, &table) {
+        Ok(new_content) => {
+            if new_content != original {
+                plan.actions.push(EmitAction {
+                    path: index_path,
+                    new_content,
+                    note: format!(
+                        "update epic index for {} registry entries",
+                        hq_file.epics.len()
+                    ),
+                });
+            }
+        }
+        Err(_) => {
+            plan.diagnostics.push(crate::Diagnostic::warning(
+                &index_path,
+                "W_EMIT_NO_SENTINEL",
+                format!(
+                    "'{}' has no <!-- BEGIN generated:{} --> sentinels; skipping",
+                    config.epics.index_path,
+                    markers::EPIC_INDEX
+                ),
+            ));
         }
     }
 

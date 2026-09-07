@@ -1979,6 +1979,28 @@ pub fn emit_state(
         apply_plan(&availability_plan, false)
     };
 
+    // 11. Epic-index derivation (`MV.chore.emit-state-renders-the-epic-index`)
+    //    — the registry's own contents-page table, spliced into the single
+    //    epics index doc at `config.epics.index_path`. A corpus-wide artifact
+    //    whose one target path never matches a scope's four target surfaces
+    //    (same reasoning as the lane-segments/frontier/availability planners
+    //    above), so it is run through `filter_plan_by_scope` too and a scoped
+    //    run writes none of it; the unscoped default is unaffected. Applied
+    //    through `apply_with_rollback_on_regression` in `--write` mode so a
+    //    generator bug here cannot leave a permanent red gate either.
+    let epic_index_plan = filter_plan_by_scope(
+        brain::emit::plan_epic_index(root, &loaded, &config),
+        root,
+        scope,
+    );
+    let epic_index_diags = if write {
+        apply_with_rollback_on_regression(&epic_index_plan, || {
+            Ok(validate_brain(root)?.error_count())
+        })?
+    } else {
+        apply_plan(&epic_index_plan, false)
+    };
+
     report.diagnostics.extend(state_diags);
     report.diagnostics.extend(mp_diags);
     report.diagnostics.extend(mp_body_diags);
@@ -1993,6 +2015,7 @@ pub fn emit_state(
     report.diagnostics.extend(lane_segments_diags);
     report.diagnostics.extend(frontier_diags);
     report.diagnostics.extend(availability_diags);
+    report.diagnostics.extend(epic_index_diags);
 
     Ok(report)
 }
