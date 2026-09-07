@@ -3561,6 +3561,92 @@ impl JsonReport {
     }
 }
 
+/// Diagnostic code for a corpus-wide write refused because a sibling lane's exclusive
+/// lease declares a quiet window over this write — distinct from `E_EMIT_LOCK_HELD`
+/// (another writer is mid-write, retry shortly) because the remedy is the opposite: do
+/// NOT retry, wait for the lease to be released or contact the holding lane.
+/// `MV.20.B` Task 1: relocated from `src/main.rs` so an in-process library caller can
+/// match on it too.
+pub const E_QUIESCE_LEASE_HELD: &str = "E_QUIESCE_LEASE_HELD";
+
+/// Diagnostic code for a write refused because the target block carries an unmet
+/// `operator` `depends_on` edge (D71) and no override was supplied. `MV.20.B` Task 1:
+/// previously only a string literal inside `main.rs`'s `set-block-status` handler;
+/// promoted to a named public constant so a consumer can match on it instead of
+/// re-typing the string.
+pub const E_BLOCK_OPERATOR_GATED: &str = "E_BLOCK_OPERATOR_GATED";
+
+/// Returns whether the block named by `key` (`repo:id`) currently carries an unmet
+/// `operator` `depends_on` entry — the check behind `set-block-status`'s D71
+/// operator gate.
+///
+/// `None` means "could not determine" (bad key shape, `brain.toml` not found, the
+/// block not found, or a `state.json` failed to load) — callers must treat that as
+/// "don't gate" and let the normal `set-block-status` path surface the real error
+/// (`E_BLOCK_BAD_KEY` / `E_CONFIG_NOT_FOUND` / `E_BLOCK_NOT_FOUND` / etc.), never as
+/// an implicit pass on the gate.
+///
+/// `MV.20.B` Task 1: relocated from `src/main.rs` (previously private, forcing
+/// engine-rs's `CloseBlockNode` to reimplement it by hand — see
+/// `engine-core/src/workflows/sdlc_flow/close_block.rs`'s header) and made `pub` so
+/// that consumer can call this copy instead.
+pub fn block_has_unmet_operator_gate(root: &std::path::Path, key: &str) -> Option<bool> {
+    use brain::config::find_brain_config;
+    use brain::state::{BlockedBy, discover_state_files, load_state};
+
+    let (repo_slug, block_id) = key.split_once(':')?;
+    let config = find_brain_config(root).ok()?;
+    let (sources, _diags) = discover_state_files(root, &config);
+    for src in &sources {
+        if src.repo_slug != repo_slug {
+            continue;
+        }
+        let Ok(file) = load_state(&src.abs_path) else {
+            continue;
+        };
+        for track in &file.tracks {
+            for block in &track.blocks {
+                if block.id == block_id {
+                    return Some(
+                        block
+                            .depends_on
+                            .iter()
+                            .any(|d| matches!(d, BlockedBy::Operator { .. })),
+                    );
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Decide whether a write against `root` (resolved from `dir`) is quiesced by a
+/// sibling lane's exclusive lease, without printing or exiting — the library owns the
+/// decision, the CLI owns presentation. Returns `Some(HeldLease)` naming the holder
+/// when the write must be refused, `None` when clear to proceed.
+///
+/// `agent` and `lock_dir` are the same `--agent`/`--lock-dir` inputs a write verb
+/// already resolved; `dir` is the directory `root` was resolved from, used to derive
+/// this call's own repo identity for the `scope: repo` / self-exemption rules in
+/// [`brain::lease::check_quiesce`].
+///
+/// `MV.20.B` Task 1: this is the refusal DECISION previously inlined in
+/// `src/main.rs`'s `refuse_if_quiesced`; that function now calls this and keeps only
+/// the message formatting and `ExitCode` translation.
+pub fn quiesce_refusal(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    agent: Option<&str>,
+    lock_dir: Option<&std::path::Path>,
+) -> Option<brain::lease::HeldLease> {
+    let resolved_lock_dir = brain::lease::resolve_lock_dir(lock_dir, root);
+    let repo = brain::lease::resolve_own_repo(root, dir);
+    match brain::lease::check_quiesce(&resolved_lock_dir, &repo, agent) {
+        brain::lease::Quiesce::Clear => None,
+        brain::lease::Quiesce::Held(held) => Some(held),
+    }
+}
+
 #[cfg(test)]
 mod entry_point_tests {
     use super::*;

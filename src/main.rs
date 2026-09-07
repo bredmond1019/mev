@@ -5,68 +5,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use mev::E_QUIESCE_LEASE_HELD;
 use mev::Severity;
 use mev::theme;
-
-/// Diagnostic code for a corpus-wide write refused because a sibling lane's exclusive
-/// lease declares a quiet window over this write — distinct from `E_EMIT_LOCK_HELD`
-/// (another writer is mid-write, retry shortly) because the remedy is the opposite: do
-/// NOT retry, wait for the lease to be released or contact the holding lane.
-/// `MV.ticket.write-verbs-ignore-the-quiesce-lease` Task 2.
-const E_QUIESCE_LEASE_HELD: &str = "E_QUIESCE_LEASE_HELD";
-
-/// Resolve the fleet lock directory a write verb's `--agent`/`--lock-dir` options and
-/// the quiesce-lease check both consult, per the SAME precedence
-/// `base-template/scripts/check_lane_agents.py::resolve_lock_dir` uses (do not
-/// re-derive this differently): explicit `--lock-dir`, else the `FLEET_LOCK_DIR`
-/// environment variable, else `<brain_root>/.fleet-locks` — the exact
-/// [`mev::brain::availability::FLEET_LOCK_SUBDIR`] constant `availability.rs` already
-/// defines for the sibling `.fleet-locks` fleet-lock-slot reader, so the two mechanisms
-/// can never silently disagree on which directory is "the" lock dir.
-fn resolve_lock_dir(explicit: Option<&std::path::Path>, root: &std::path::Path) -> PathBuf {
-    if let Some(p) = explicit {
-        return p.to_path_buf();
-    }
-    if let Ok(env_dir) = std::env::var("FLEET_LOCK_DIR")
-        && !env_dir.is_empty()
-    {
-        return PathBuf::from(env_dir);
-    }
-    root.join(mev::brain::availability::FLEET_LOCK_SUBDIR)
-}
-
-/// Resolve which `[[repos]]` slug `dir` belongs to, for the quiesce check's `repo`
-/// parameter — mirrors `check_lane_agents.py::resolve_own_repo`'s brain.toml-lookup
-/// path (no explicit `--repo` flag exists on mev's write verbs, so there is no
-/// "explicit" branch to mirror here): find the registered `[[repos]]` entry whose
-/// `repo_path` (joined onto `root`) canonicalizes to the same place as `dir`.
-///
-/// Returns `""` when the config can't be loaded or no entry matches — this is a
-/// fail-OPEN default for repo-scoped leases specifically (an unresolvable identity
-/// can never equal any real lease's `repo` field, so a `scope: repo` lease simply
-/// won't quiesce an unidentified caller). This does not weaken the primary guard: a
-/// `scope: fleet` lease quiesces regardless of `repo`, and that is the scope the
-/// incident this ticket fixes actually needed.
-fn resolve_own_repo(root: &std::path::Path, dir: &std::path::Path) -> String {
-    let Ok(config) = mev::brain::config::load_brain_config(&root.join("brain.toml")) else {
-        return String::new();
-    };
-    let dir_canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    for entry in &config.repos {
-        let entry_path = if entry.repo_path.is_empty() || entry.repo_path == "." {
-            root.to_path_buf()
-        } else {
-            root.join(&entry.repo_path)
-        };
-        let entry_canon = entry_path
-            .canonicalize()
-            .unwrap_or_else(|_| entry_path.clone());
-        if entry_canon == dir_canon {
-            return entry.slug.clone();
-        }
-    }
-    String::new()
-}
 
 /// Consult the quiesce-lease store immediately before a write verb would take
 /// `<root>/.mev-emit.lock`, and print + return a refusal (`Some`) when a sibling
@@ -84,26 +25,20 @@ fn refuse_if_quiesced(
     lock_dir: Option<&std::path::Path>,
     verb: &str,
 ) -> Option<ExitCode> {
-    let resolved_lock_dir = resolve_lock_dir(lock_dir, root);
-    let repo = resolve_own_repo(root, dir);
-    match mev::brain::lease::check_quiesce(&resolved_lock_dir, &repo, agent) {
-        mev::brain::lease::Quiesce::Clear => None,
-        mev::brain::lease::Quiesce::Held(held) => {
-            eprintln!(
-                "error [{E_QUIESCE_LEASE_HELD}] refusing to {verb}: lane '{}' (agent '{}') holds \
-                 a {}-scope exclusive lease at {} — this is a declared quiet window, a different \
-                 condition from E_EMIT_LOCK_HELD (contention; retry shortly). Do NOT retry: wait \
-                 for the lease to be released, or contact the holding lane — or, if you ARE the \
-                 holding lane, re-run with `--agent <holder>` naming that agent. Nothing was \
-                 written.",
-                held.lane,
-                held.agent,
-                held.scope,
-                held.path.display()
-            );
-            Some(ExitCode::FAILURE)
-        }
-    }
+    let held = mev::quiesce_refusal(root, dir, agent, lock_dir)?;
+    eprintln!(
+        "error [{E_QUIESCE_LEASE_HELD}] refusing to {verb}: lane '{}' (agent '{}') holds \
+         a {}-scope exclusive lease at {} — this is a declared quiet window, a different \
+         condition from E_EMIT_LOCK_HELD (contention; retry shortly). Do NOT retry: wait \
+         for the lease to be released, or contact the holding lane — or, if you ARE the \
+         holding lane, re-run with `--agent <holder>` naming that agent. Nothing was \
+         written.",
+        held.lane,
+        held.agent,
+        held.scope,
+        held.path.display()
+    );
+    Some(ExitCode::FAILURE)
 }
 
 /// `--scope` mode for `mev emit-block-graph`. Maps onto
@@ -2102,45 +2037,6 @@ fn doc_read_json(path: &std::path::Path) -> Result<serde_json::Value, ExitCode> 
     })
 }
 
-/// Returns whether the block named by `key` (`repo:id`) currently carries an unmet
-/// `operator` `depends_on` entry — the check behind `set-block-status`'s D71
-/// operator gate.
-///
-/// `None` means "could not determine" (bad key shape, `brain.toml` not found, the
-/// block not found, or a `state.json` failed to load) — callers must treat that as
-/// "don't gate" and let the normal `set-block-status` path surface the real error
-/// (`E_BLOCK_BAD_KEY` / `E_CONFIG_NOT_FOUND` / `E_BLOCK_NOT_FOUND` / etc.), never as
-/// an implicit pass on the gate.
-fn block_has_unmet_operator_gate(root: &std::path::Path, key: &str) -> Option<bool> {
-    use mev::brain::config::find_brain_config;
-    use mev::brain::state::{BlockedBy, discover_state_files, load_state};
-
-    let (repo_slug, block_id) = key.split_once(':')?;
-    let config = find_brain_config(root).ok()?;
-    let (sources, _diags) = discover_state_files(root, &config);
-    for src in &sources {
-        if src.repo_slug != repo_slug {
-            continue;
-        }
-        let Ok(file) = load_state(&src.abs_path) else {
-            continue;
-        };
-        for track in &file.tracks {
-            for block in &track.blocks {
-                if block.id == block_id {
-                    return Some(
-                        block
-                            .depends_on
-                            .iter()
-                            .any(|d| matches!(d, BlockedBy::Operator { .. })),
-                    );
-                }
-            }
-        }
-    }
-    None
-}
-
 /// Shared reporting tail for every `mev doc ...` verb: print diagnostics (or a `--json`
 /// envelope), then a `<label> <mode> <root>: N error(s), M warning(s)` summary, and translate
 /// the report's failure state into the process exit code.
@@ -3719,12 +3615,13 @@ fn main() -> ExitCode {
             if write
                 && status == "in_progress"
                 && !force_operator_gate
-                && let Some(true) = block_has_unmet_operator_gate(&root, &key)
+                && let Some(true) = mev::block_has_unmet_operator_gate(&root, &key)
             {
                 eprintln!(
-                    "error [E_BLOCK_OPERATOR_GATED] refusing to start '{key}': it carries an \
+                    "error [{}] refusing to start '{key}': it carries an \
                      unmet operator depends_on edge. Pass --force-operator-gate (human-only, \
-                     refused on non-TTY stdin) to override."
+                     refused on non-TTY stdin) to override.",
+                    mev::E_BLOCK_OPERATOR_GATED
                 );
                 return ExitCode::FAILURE;
             }
