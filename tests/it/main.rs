@@ -79,6 +79,7 @@ mod graph_findings_cli;
 mod lane_segments_dependency_split;
 mod lane_segments_fleet;
 mod lanes_driver;
+mod lib_guard_entry_points;
 mod lib_guard_relocation;
 mod links_unterminated_backtick;
 mod master_plan_fixtures;
