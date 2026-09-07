@@ -141,12 +141,8 @@ fn not_evaluable(reason: String) -> CheckOutcome {
 
 /// Run the `epics-index-parity` check.
 pub fn run(ctx: &ConformanceCtx) -> CheckOutcome {
-    let index_path = ctx
-        .root
-        .join("core")
-        .join("planning")
-        .join("epics")
-        .join("index.md");
+    let index_rel = &ctx.config.epics.index_path;
+    let index_path = ctx.root.join(index_rel);
 
     if !index_path.exists() {
         return not_evaluable(format!("index.md not found at {}", index_path.display()));
@@ -180,7 +176,7 @@ pub fn run(ctx: &ConformanceCtx) -> CheckOutcome {
         items: left_items,
     };
     let right = FactSide {
-        label: "core/planning/epics/index.md".to_string(),
+        label: index_rel.clone(),
         source: index_path.display().to_string(),
         digest: super::digest(&right_items),
         items: right_items,
@@ -264,6 +260,18 @@ mod tests {
         ConformanceCtx {
             root: root.to_path_buf(),
             config: BrainConfig::default(),
+            files: vec![(state_source(root), state_file(epics))],
+        }
+    }
+
+    /// Like [`ctx_with`], but with the `[epics].index_path` config value set
+    /// explicitly rather than left at its default.
+    fn ctx_with_index_path(root: &Path, epics: Vec<Epic>, index_path: &str) -> ConformanceCtx {
+        let mut config = BrainConfig::default();
+        config.epics.index_path = index_path.to_string();
+        ConformanceCtx {
+            root: root.to_path_buf(),
+            config,
             files: vec![(state_source(root), state_file(epics))],
         }
     }
@@ -413,6 +421,69 @@ mod tests {
                 "focused",
                 Some("planning/bullet-proof-software/roadmap.md"),
             )],
+        );
+
+        let outcome = run(&ctx);
+        assert_eq!(outcome.status, CheckStatus::Pass, "{:?}", outcome.findings);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn default_config_resolves_to_todays_location() {
+        // Positive control: a `BrainConfig` with no `[epics]` section (the
+        // `Default` impl) must still resolve `index.md` at its CURRENT
+        // location, unchanged — the whole point of the serde default.
+        let root = crate::testsupport::unique_temp_dir("mev-conformance-epics-default-config");
+        write_index_md(
+            &root,
+            "| Doc | Epic | Status | Repos |\n|---|---|---|---|\n\
+             | [bastion-tui.md](bastion-tui.md) | **Bastion Console** | `paused` | `bastion` |\n",
+        );
+        write_doc(&root, "core/planning/epics/bastion-tui.md");
+        let ctx = ctx_with(
+            &root,
+            vec![epic(
+                "bastion-tui",
+                "paused",
+                Some("core/planning/epics/bastion-tui.md"),
+            )],
+        );
+        assert_eq!(
+            ctx.config.epics.index_path, "core/planning/epics/index.md",
+            "BrainConfig::default() must default [epics].index_path to today's location"
+        );
+
+        let outcome = run(&ctx);
+        assert_eq!(outcome.status, CheckStatus::Pass, "{:?}", outcome.findings);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn configured_index_path_at_a_different_location_resolves_there() {
+        // The capability being added: an `[epics].index_path` pointing
+        // somewhere other than `core/planning/epics/index.md` is honored,
+        // and the check passes against `index.md` at THAT location — never
+        // demonstrable by the default-path control above.
+        let root = crate::testsupport::unique_temp_dir("mev-conformance-epics-relocated-index");
+        let index_dir = root.join("planning").join("epics");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        std::fs::write(
+            index_dir.join("index.md"),
+            "| Doc | Epic | Status | Repos |\n|---|---|---|---|\n\
+             | [roadmap.md](../../../planning/bullet-proof-software/roadmap.md) | **BPS** | `focused` | `brain` |\n",
+        )
+        .unwrap();
+        write_doc(&root, "planning/bullet-proof-software/roadmap.md");
+        let ctx = ctx_with_index_path(
+            &root,
+            vec![epic(
+                "bullet-proof-software",
+                "focused",
+                Some("planning/bullet-proof-software/roadmap.md"),
+            )],
+            "planning/epics/index.md",
         );
 
         let outcome = run(&ctx);

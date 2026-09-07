@@ -99,6 +99,7 @@ mod tests {
     fn three_unit_config() -> BrainConfig {
         BrainConfig {
             surface_allowlist: Default::default(),
+            epics: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),

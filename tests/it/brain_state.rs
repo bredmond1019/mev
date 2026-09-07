@@ -1421,6 +1421,7 @@ fn make_config_with_repo(slug: &str, tier: &str) -> mev::brain::config::BrainCon
     use mev::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
     BrainConfig {
         surface_allowlist: Default::default(),
+        epics: Default::default(),
         conformance_writers: Vec::new(),
         contracts: Vec::new(),
         permission_profiles: Default::default(),

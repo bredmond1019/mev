@@ -117,6 +117,7 @@ fn empty_self_pair(dir: &Path, repo: &str) -> (StateSource, StateFile) {
 fn mixed_kind_config() -> BrainConfig {
     BrainConfig {
         surface_allowlist: Default::default(),
+        epics: Default::default(),
         conformance_writers: Vec::new(),
         contracts: Vec::new(),
         permission_profiles: Default::default(),

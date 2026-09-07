@@ -122,7 +122,7 @@ pub fn all_checks() -> Vec<ConformanceCheck> {
         },
         ConformanceCheck {
             name: "epics-index-parity",
-            description: "HQ state.json epics[] vs core/planning/epics/index.md",
+            description: "HQ state.json epics[] vs the epics index doc (path from brain.toml's [epics] section)",
             run: epics_index::run,
             reads_live_checkout: false,
         },

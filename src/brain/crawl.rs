@@ -833,6 +833,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
             surface_allowlist: Default::default(),
+            epics: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -1051,6 +1052,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
             surface_allowlist: Default::default(),
+            epics: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),

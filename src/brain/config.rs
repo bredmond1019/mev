@@ -276,6 +276,36 @@ impl Default for HistoryConfig {
     }
 }
 
+/// `[epics]` section of `brain.toml` — the epics index doc's root-relative
+/// location, read by the `epics-index-parity` conformance check
+/// (`crate::brain::conformance::epics_index`) to find the `index.md` it
+/// compares against the HQ `epics[]` registry.
+///
+/// An absent `[epics]` table yields the default via [`Default`]: today's
+/// location, `core/planning/epics/index.md` — additive, so every existing
+/// and fixture `brain.toml` continues to resolve unchanged. Moving the
+/// epics directory (e.g. to `planning/epics/index.md`) is then a config
+/// edit here rather than a code change.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EpicsConfig {
+    /// Root-relative path (forward-slash separated, resolved against the
+    /// brain corpus root) to the epics index doc.
+    #[serde(default = "default_epics_index_path")]
+    pub index_path: String,
+}
+
+fn default_epics_index_path() -> String {
+    "core/planning/epics/index.md".to_string()
+}
+
+impl Default for EpicsConfig {
+    fn default() -> Self {
+        Self {
+            index_path: default_epics_index_path(),
+        }
+    }
+}
+
 /// `[carryover]` section of `brain.toml` — the block-level startability
 /// enforcement knob for `carryover[].blocks[]` edges (`MV.16.C`).
 ///
@@ -532,6 +562,12 @@ pub struct BrainConfig {
     /// `brain.toml`s still parse.
     #[serde(default)]
     pub surface_allowlist: SurfaceAllowlist,
+    /// `[epics]` section — the epics index doc's root-relative location. An
+    /// absent table defaults to today's `core/planning/epics/index.md`, so
+    /// older/fixture `brain.toml`s still parse and resolve unchanged. Read
+    /// by the `epics-index-parity` conformance check.
+    #[serde(default)]
+    pub epics: EpicsConfig,
 }
 
 impl BrainConfig {
@@ -1205,6 +1241,7 @@ enforce_blocks = true
     fn scoped_fixture_config() -> BrainConfig {
         BrainConfig {
             surface_allowlist: Default::default(),
+            epics: Default::default(),
             permission_profiles: Default::default(),
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),

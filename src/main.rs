@@ -1398,7 +1398,9 @@ enum Command {
     /// (see `brain::conformance::all_checks` for the authoritative, current list):
     ///   backlog-parity           — HQ planning/backlog.md ## Active + ## Promoted vs
     ///                               state.json backlog[]
-    ///   epics-index-parity       — core/planning/epics/index.md vs the HQ epics[] registry
+    ///   epics-index-parity       — the epics index doc (path from brain.toml's [epics]
+    ///                               section, default core/planning/epics/index.md) vs
+    ///                               the HQ epics[] registry
     ///   project-cache-watermark  — docs/projects/<project>.md synced_from vs the sub-repo's
     ///                               real planning/status.md timestamp (an adapter over
     ///                               `mev validate-brain --sync`)

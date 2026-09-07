@@ -5228,6 +5228,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
             surface_allowlist: Default::default(),
+            epics: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -5320,6 +5321,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
             surface_allowlist: Default::default(),
+            epics: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -5409,6 +5411,7 @@ mod tests {
 
         let config = BrainConfig {
             surface_allowlist: Default::default(),
+            epics: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -5459,6 +5462,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
             surface_allowlist: Default::default(),
+            epics: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -5581,6 +5585,7 @@ mod tests {
         use crate::brain::config::{BrainConfig, CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
             surface_allowlist: Default::default(),
+            epics: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -11532,6 +11537,7 @@ mod tests {
         use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
         BrainConfig {
             surface_allowlist: Default::default(),
+            epics: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -11630,6 +11636,7 @@ mod tests {
         // its own tier (not `All`, which would spuriously target it as HQ).
         let config = BrainConfig {
             surface_allowlist: Default::default(),
+            epics: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -12130,6 +12137,7 @@ mod tests {
         // listing must not produce a duplicate (repo, id) block in focus.now.
         let config = BrainConfig {
             surface_allowlist: Default::default(),
+            epics: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -12320,6 +12328,7 @@ mod tests {
         use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
         let config = BrainConfig {
             surface_allowlist: Default::default(),
+            epics: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
@@ -14334,6 +14343,7 @@ mod check_epics_tests {
         };
         BrainConfig {
             surface_allowlist: Default::default(),
+            epics: Default::default(),
             conformance_writers: Vec::new(),
             contracts: Vec::new(),
             permission_profiles: Default::default(),
