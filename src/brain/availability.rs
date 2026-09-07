@@ -350,16 +350,23 @@ pub fn intrinsic_segment_statuses(
 // held-repo-busy — MV.13.C Task 2
 // ---------------------------------------------------------------------------
 
-/// One repo's known-live lane, read from an orchestration-run record whose
-/// `lifecycle:` frontmatter is `active`. See the module doc comment for why this
-/// record — and not `lane-log.jsonl` or `.fleet-locks` — is the single source of
-/// truth for "a lane is live in repo X".
+/// One repo's known-live lane. Primarily derived from a `.fleet-locks/lane-agents/*.json`
+/// registry claim with a live heartbeat (`MV.20.A`); falls back to an orchestration-run
+/// record's `lifecycle: active` frontmatter only when no registry claim names the repo at
+/// all. See the module doc comment for the full precedence and why `lane-log.jsonl` is
+/// never a candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveRun {
     /// `[[repos]]` slug of the repo the record belongs to.
     pub repo: String,
-    /// The roadmap this record's `roadmap:` frontmatter names.
+    /// The roadmap this record's `roadmap:` frontmatter (or registry claim's `roadmap`)
+    /// names.
     pub roadmap: String,
+    /// `false` when derived from a live lane-agents registry claim; `true` when derived
+    /// from the `lifecycle:` fallback because no registry claim named this repo. A
+    /// degraded hold is reported as visibly degraded on the wire — see
+    /// [`repo_busy_status`] — and must never read as a plain live hold.
+    pub degraded: bool,
 }
 
 /// The subset of an orchestration-run record's frontmatter this module reads.
@@ -404,15 +411,116 @@ fn child_dirs_sorted(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Walk every `[[repos]]` entry's `planning/orchestration-run/*/notes.md` under
-/// `root` and return the `active` [`LiveRun`]s, plus a [`Diagnostic`] for every
-/// record whose frontmatter could not be read/parsed or is missing the fields this
-/// module needs.
+/// Name of the lane-agents registry directory, relative to `<root>/.fleet-locks`. Each
+/// file is one running lane's [`okf_core::RegistryClaim`], per
+/// `base-template/.claude/workflows/lane-agent.schema.json`.
+const LANE_AGENTS_SUBDIR: &str = "lane-agents";
+
+/// Parse an RFC 3339 timestamp into Unix seconds. `None` for anything that does not
+/// parse — the caller treats an unparsable heartbeat as stale, never as a wedge. Same
+/// shape as `lease.rs::parse_timestamp_seconds`; duplicated rather than shared because
+/// that helper is private to its own module and this module has no second time source
+/// of its own ([`now_unix_seconds`] remains the single clock).
+fn parse_rfc3339_seconds(value: &str) -> Option<f64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.timestamp() as f64 + f64::from(dt.timestamp_subsec_nanos()) / 1e9)
+}
+
+/// Read every `*.json` entry directly under `<root>/.fleet-locks/lane-agents`, skipping
+/// (not erroring on) any file that is not valid JSON — mirrors
+/// `read_fleet_lock_entries`'s "unreadable/corrupt: treat as stale/absent" posture. A
+/// [`okf_core::Coord::Legacy`] record — one that does not match
+/// [`okf_core::RegistryClaim`]'s strict shape — is reported as a [`Diagnostic::warning`]
+/// naming the file and contributes no claim, never a hard error.
+///
+/// Returns an empty `Vec` (never an error) when the directory is missing or unreadable —
+/// a repo with no registry entry at all is the normal case, not a diagnostic.
+fn read_lane_agent_claims(root: &Path) -> (Vec<okf_core::RegistryClaim>, Vec<Diagnostic>) {
+    let dir = root.join(FLEET_LOCK_SUBDIR).join(LANE_AGENTS_SUBDIR);
+    let mut claims = Vec::new();
+    let mut diagnostics = Vec::new();
+
+    let Ok(read_dir) = std::fs::read_dir(&dir) else {
+        return (claims, diagnostics);
+    };
+    for dir_entry in read_dir.flatten() {
+        let path = dir_entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(record) =
+            serde_json::from_str::<okf_core::Coord<okf_core::RegistryClaim>>(&contents)
+        else {
+            continue;
+        };
+        match record {
+            okf_core::Coord::Typed(claim) => claims.push(claim),
+            okf_core::Coord::Legacy(_) => diagnostics.push(Diagnostic::warning(
+                path.clone(),
+                "lane-agent-registry",
+                format!(
+                    "{}: does not match the lane-agent registry claim shape — skipped",
+                    path.display()
+                ),
+            )),
+        }
+    }
+    (claims, diagnostics)
+}
+
+/// Whether `claim`'s `heartbeat` is fresh enough to count as live: parses, and is no
+/// older than [`okf_core::COORD_STALE_TTL_SECONDS`]. An unparsable heartbeat is stale,
+/// never a wedge.
+fn claim_is_live(claim: &okf_core::RegistryClaim, now: f64) -> bool {
+    match parse_rfc3339_seconds(&claim.heartbeat) {
+        Some(ts) => (now - ts) <= okf_core::COORD_STALE_TTL_SECONDS as f64,
+        None => false,
+    }
+}
+
+/// The primary source for "a lane is live in repo X": every lane-agents registry claim
+/// with a fresh heartbeat, keyed by repo. A repo can appear at most once — the first
+/// live claim found for it wins (ties are not expected in practice; nothing here
+/// depends on which one is chosen when they occur).
+fn live_runs_from_registry(root: &Path) -> (Vec<LiveRun>, Vec<Diagnostic>) {
+    let (claims, diagnostics) = read_lane_agent_claims(root);
+    let now = now_unix_seconds();
+    let mut seen_repos: HashSet<String> = HashSet::new();
+    let mut live = Vec::new();
+    for claim in claims {
+        if !claim_is_live(&claim, now) {
+            continue;
+        }
+        if !seen_repos.insert(claim.repo.clone()) {
+            continue;
+        }
+        live.push(LiveRun {
+            repo: claim.repo,
+            roadmap: claim.roadmap,
+            degraded: false,
+        });
+    }
+    (live, diagnostics)
+}
+
+/// Walk every `[[repos]]` entry's `planning/orchestration-run/*/notes.md` under `root`
+/// and return the `active` records as degraded [`LiveRun`]s, plus a [`Diagnostic`] for
+/// every record whose frontmatter could not be read/parsed or is missing the fields
+/// this module needs.
 ///
 /// Only `lifecycle: active` counts as live — `lane-complete` and `consolidated`
-/// records are read (so a parse failure elsewhere in the same repo is still
-/// reported) but never contribute a [`LiveRun`].
-pub fn discover_live_runs(root: &Path, repos: &[RepoEntry]) -> (Vec<LiveRun>, Vec<Diagnostic>) {
+/// records are read (so a parse failure elsewhere in the same repo is still reported)
+/// but never contribute a [`LiveRun`]. Every run this function contributes is
+/// `degraded: true` — see [`discover_live_runs`], which uses this only as a fallback
+/// for a repo the registry says nothing about.
+fn discover_live_runs_from_lifecycle(
+    root: &Path,
+    repos: &[RepoEntry],
+) -> (Vec<LiveRun>, Vec<Diagnostic>) {
     let mut live = Vec::new();
     let mut diagnostics = Vec::new();
 
@@ -435,6 +543,7 @@ pub fn discover_live_runs(root: &Path, repos: &[RepoEntry]) -> (Vec<LiveRun>, Ve
                         Some(roadmap) => live.push(LiveRun {
                             repo: repo.slug.clone(),
                             roadmap,
+                            degraded: true,
                         }),
                         None => diagnostics.push(Diagnostic::warning(
                             notes.clone(),
@@ -457,6 +566,28 @@ pub fn discover_live_runs(root: &Path, repos: &[RepoEntry]) -> (Vec<LiveRun>, Ve
     (live, diagnostics)
 }
 
+/// The single source of truth for "a lane is live in repo X": a lane-agents registry
+/// claim with a fresh heartbeat is primary; a repo's `lifecycle: active`
+/// orchestration-run record contributes a **degraded** [`LiveRun`] only when no live
+/// registry claim names that repo at all. See the module doc comment for the full
+/// rationale and the history this reverses (`MV.13.C` -> `MV.20.A`).
+pub fn discover_live_runs(root: &Path, repos: &[RepoEntry]) -> (Vec<LiveRun>, Vec<Diagnostic>) {
+    let (registry_live, mut diagnostics) = live_runs_from_registry(root);
+    let registry_repos: HashSet<String> = registry_live.iter().map(|r| r.repo.clone()).collect();
+
+    let (lifecycle_live, lifecycle_diags) = discover_live_runs_from_lifecycle(root, repos);
+    diagnostics.extend(lifecycle_diags);
+
+    let mut live = registry_live;
+    for run in lifecycle_live {
+        if !registry_repos.contains(&run.repo) {
+            live.push(run);
+        }
+    }
+
+    (live, diagnostics)
+}
+
 /// Resolve the environmental `HeldRepoBusy` hold for one [`FrontierEntry`], or
 /// `None` if no live run holds its repo against a different roadmap.
 ///
@@ -470,10 +601,15 @@ fn repo_busy_status(
         .iter()
         .find(|run| run.repo == entry.repo && run.roadmap != entry.roadmap)
         .map(|run| {
-            (
-                SegmentAvailability::HeldRepoBusy,
-                format!("repo {} is live on {}", entry.repo, run.roadmap),
-            )
+            let reason = if run.degraded {
+                format!(
+                    "repo {} is live on {} (degraded: lifecycle: fallback, no registry claim)",
+                    entry.repo, run.roadmap
+                )
+            } else {
+                format!("repo {} is live on {}", entry.repo, run.roadmap)
+            };
+            (SegmentAvailability::HeldRepoBusy, reason)
         })
 }
 
@@ -1496,6 +1632,8 @@ mod tests {
         let root = crate::testsupport::unique_temp_dir("mev-availability-live-runs-active");
         write_run_record(&root, "bastion", "close-the-loop", "active");
 
+        // No lane-agents registry claim exists in this fixture, so the lifecycle:
+        // record is the only source — a degraded fallback, per MV.20.A.
         let (live, diags) = discover_live_runs(&root, &[repo_entry("bastion")]);
         assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
         assert_eq!(
@@ -1503,6 +1641,7 @@ mod tests {
             vec![LiveRun {
                 repo: "bastion".to_string(),
                 roadmap: "close-the-loop".to_string(),
+                degraded: true,
             }]
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -1552,12 +1691,136 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Writes one lane-agents registry claim JSON file under
+    /// `<root>/.fleet-locks/lane-agents/<file_stem>.json`. `heartbeat` is a full RFC
+    /// 3339 timestamp so callers can pass a stale one directly.
+    fn write_lane_agent_claim(
+        root: &Path,
+        file_stem: &str,
+        repo: &str,
+        roadmap: &str,
+        heartbeat: &str,
+    ) {
+        let dir = root.join(FLEET_LOCK_SUBDIR).join(LANE_AGENTS_SUBDIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{file_stem}.json")),
+            serde_json::json!({
+                "agent_name": format!("{repo}-agent"),
+                "repo": repo,
+                "lane": repo,
+                "roadmap": roadmap,
+                "started_at": "2026-09-07T00:00:00Z",
+                "heartbeat": heartbeat,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn mv_20_a_observed_red_registry_outranks_stale_lifecycle() {
+        // MV.20.A Task 1 observed-red fixture (D68): the registry names repo `r` on
+        // roadmap `X` with a fresh heartbeat; a stale `lifecycle: active` record also
+        // names repo `r`, but on roadmap `Y`. The single source of truth must be `X`.
+        // Run against the pre-change `discover_live_runs` this failed with:
+        //   left: "Y", right: "X" — "registry claim must win over stale lifecycle:
+        //   fallback" — see `planning/orchestration-run/coordination-layer-port/notes.md`
+        //   under `## MV.20.A observed_red` for the full captured output.
+        let root = crate::testsupport::unique_temp_dir("mev-availability-mv20a-observed-red");
+        write_lane_agent_claim(&root, "agent-a", "r", "X", &chrono::Utc::now().to_rfc3339());
+        write_run_record(&root, "r", "Y", "active");
+
+        let (live, diags) = discover_live_runs(&root, &[repo_entry("r")]);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        assert_eq!(live.len(), 1, "expected exactly one LiveRun, got {live:?}");
+        assert_eq!(
+            live[0],
+            LiveRun {
+                repo: "r".to_string(),
+                roadmap: "X".to_string(),
+                degraded: false,
+            }
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discover_live_runs_lifecycle_only_yields_degraded_run() {
+        // No registry claim names `r` at all — the lifecycle: fallback contributes a
+        // degraded LiveRun, never a plain live one.
+        let root = crate::testsupport::unique_temp_dir("mev-availability-mv20a-lifecycle-only");
+        write_run_record(&root, "r", "Y", "active");
+
+        let (live, diags) = discover_live_runs(&root, &[repo_entry("r")]);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        assert_eq!(
+            live,
+            vec![LiveRun {
+                repo: "r".to_string(),
+                roadmap: "Y".to_string(),
+                degraded: true,
+            }]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discover_live_runs_stale_registry_heartbeat_contributes_no_run() {
+        // A registry claim whose heartbeat is older than COORD_STALE_TTL_SECONDS is
+        // stale and contributes nothing — not from the registry, and (since no
+        // lifecycle: record exists in this fixture) not from the fallback either.
+        let root = crate::testsupport::unique_temp_dir("mev-availability-mv20a-stale-heartbeat");
+        let stale_heartbeat = chrono::Utc::now()
+            - chrono::Duration::seconds(okf_core::COORD_STALE_TTL_SECONDS as i64 + 600);
+        write_lane_agent_claim(&root, "agent-a", "r", "X", &stale_heartbeat.to_rfc3339());
+
+        let (live, diags) = discover_live_runs(&root, &[repo_entry("r")]);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        assert!(
+            live.is_empty(),
+            "a stale registry heartbeat must contribute no LiveRun, got {live:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_lane_agent_claims_legacy_record_yields_warning_and_no_claim() {
+        let root = crate::testsupport::unique_temp_dir("mev-availability-mv20a-legacy-claim");
+        let dir = root.join(FLEET_LOCK_SUBDIR).join(LANE_AGENTS_SUBDIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Missing `heartbeat`, a required field — this does not match RegistryClaim's
+        // strict shape and falls back to Coord::Legacy.
+        std::fs::write(
+            dir.join("legacy.json"),
+            serde_json::json!({
+                "agent_name": "r-agent",
+                "repo": "r",
+                "lane": "r",
+                "roadmap": "X",
+                "started_at": "2026-09-07T00:00:00Z",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let (claims, diagnostics) = read_lane_agent_claims(&root);
+        assert!(claims.is_empty(), "expected no claims, got {claims:?}");
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "expected exactly one diagnostic, got {diagnostics:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn held_repo_busy_when_active_record_is_a_different_roadmap() {
         let e = entry(vec![], vec![]);
         let live_runs = vec![LiveRun {
             repo: "mev".to_string(),
             roadmap: "close-the-loop".to_string(),
+            degraded: false,
         }];
         let (avail, reason) = resolve_status(&e, &live_runs);
         assert_eq!(avail, SegmentAvailability::HeldRepoBusy);
@@ -1574,6 +1837,7 @@ mod tests {
         let live_runs = vec![LiveRun {
             repo: "mev".to_string(),
             roadmap: "engine-orchestration".to_string(),
+            degraded: false,
         }];
         let (avail, reason) = resolve_status(&e, &live_runs);
         assert_eq!(avail, SegmentAvailability::Startable);
@@ -1586,6 +1850,7 @@ mod tests {
         let live_runs = vec![LiveRun {
             repo: "mev".to_string(),
             roadmap: "close-the-loop".to_string(),
+            degraded: false,
         }];
         let (avail, reason) = resolve_status(&e, &live_runs);
         assert_eq!(avail, SegmentAvailability::HeldBlock);
@@ -1602,6 +1867,7 @@ mod tests {
         let live_runs = vec![LiveRun {
             repo: "mev".to_string(),
             roadmap: "close-the-loop".to_string(),
+            degraded: false,
         }];
         let statuses = segment_statuses(&frontier, &live_runs, &[]);
         assert_eq!(statuses.len(), 1);
