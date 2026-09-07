@@ -1721,7 +1721,7 @@ candidate.
   3. **A blind gate** — `harness.json` runs `cargo clippy -- -D warnings`, which skips test targets,
      so a lint violation in `tests/brain_conformance.rs` landed green. `--all-targets` catches it.
   4. **A spec error caught before it ran** — `epics-index-parity` would have hardcoded
-     `core/planning/epics/<slug>.md`, emitting a false missing-doc finding for
+     `planning/epics/<slug>.md`, emitting a false missing-doc finding for
      `bullet-proof-software` (whose `plan` points outside that directory). Rewritten to join on the
      authored `epics[].plan` pointer.
 
@@ -1810,7 +1810,7 @@ e94553f fix(tests): indent a doc list continuation flagged by clippy --all-targe
   crate dependency), a shared `compare_sides()`, and `all_checks()`/`run_checks()`. Tasks 2-5 each
   registered one seed check as a sibling file: `backlog.rs` (`planning/backlog.md` `## Active` +
   `## Promoted` vs `state.json backlog[]`, joined on exact ticket title), `epics_index.rs`
-  (`core/planning/epics/index.md` vs the HQ `epics[]` registry, joined on the registry's own
+  (`planning/epics/index.md` vs the HQ `epics[]` registry, joined on the registry's own
   `plan` pointer resolved brain-root-relative with a plan-relative fallback for out-of-directory
   docs like `bullet-proof-software`, plus a per-epic doc-exists assertion), `project_cache.rs` (a
   thin adapter over the existing `brain::sync::check_sync` — delegation, not reimplementation),
@@ -2325,7 +2325,7 @@ a21f478 feat: implement 9.A-doc-materializer-task1
     **after** the first apply batch. Also parameterized `render_unified_board_section` with a
     heading level — epic lanes were rendering `## NOW` beneath an `### Epic` heading.
   - **Data:** 3-epic registry (`bastion-os`, `bastion-surfaces`, `engine-split`), **157 core-tier
-    blocks tagged**, sentinels in both status docs, and new `core/planning/epics/` sequence docs.
+    blocks tagged**, sentinels in both status docs, and new `planning/epics/` sequence docs.
   - Refactored the six `Block` construction sites in `derive_rollup` / `derive_brain_focus` onto
     shared `track_block_index` + `focus_block` helpers (a 3-tuple lookup MV.6.B had already widened
     once).
@@ -2343,7 +2343,7 @@ a21f478 feat: implement 9.A-doc-materializer-task1
   `bastion-web-external-deps-not-block-edges` and `epic-taxonomy-open-calls` (core tier),
   `emit-state-same-file-batching` and `epic-sequence-wave-scale` (mev). See `planning/handoff.md`.
 - **Refs:** `planning/handoff.md`, `docs/state/state-schema.md` (`epics[]`),
-  `core/planning/epics/index.md`
+  `planning/epics/index.md`
 
 ---
 
