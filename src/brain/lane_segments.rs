@@ -46,7 +46,14 @@ const ROADMAPS_DIR: &str = "roadmaps";
 
 /// Directory names that are never roadmap slugs, even though they sit directly under
 /// `planning/` alongside legacy roadmap directories.
-const NON_ROADMAP_DIR_NAMES: &[&str] = &["archive", "decisions", "artifacts"];
+///
+/// `open-work` is the operator-authored surface (HQ D87): pre-plan folders live at
+/// `planning/open-work/pre-plan/<slug>/`, and `/plan --lane` may drop a `lane-<slug>.json`
+/// into a sibling initiative folder. Without this entry the legacy scan below would recurse
+/// into `open-work/` and attribute every lane record it found there to the slug `open-work`
+/// — a silently WRONG attribution, which is worse than a silent miss because nothing
+/// downstream can tell the difference between it and a real single-lane roadmap.
+const NON_ROADMAP_DIR_NAMES: &[&str] = &["archive", "decisions", "artifacts", "open-work"];
 
 /// One block reference inside a lane record: the ID plus the authored ownership the
 /// record's `blocks[]` entry carries — the repo it runs in, and the roadmap it was
@@ -1449,6 +1456,44 @@ mod tests {
         assert!(
             diags.is_empty(),
             "expected no collision diagnostic, got {diags:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_lane_files_never_attributes_open_work_lanes_to_an_open_work_slug() {
+        // HQ D87: authored pre-plan work lives at planning/open-work/pre-plan/<slug>/, and
+        // `/plan --lane` can leave a lane-<slug>.json inside an initiative folder there.
+        // The legacy scan must not recurse into open-work/ and claim those records under the
+        // slug "open-work" — a WRONG attribution, not merely a missed one. Positive control:
+        // the roadmaps/ record in the same fixture is still discovered, so an empty result
+        // here would mean the walker is broken rather than that the exclusion works.
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-discover-open-work-excluded");
+        write(
+            &dir,
+            "planning/roadmaps/alpha/lane-substrate.json",
+            &simple_lane_json("substrate", "alpha", &[("MV.ticket.a", "alpha", "mev")]),
+        );
+        write(
+            &dir,
+            "planning/open-work/pre-plan/beta/lane-beta.json",
+            &simple_lane_json("beta", "beta", &[("MV.ticket.b", "beta", "mev")]),
+        );
+
+        let (files, diags) = discover_lane_files(&dir);
+        assert_eq!(
+            files.len(),
+            1,
+            "expected only the roadmaps/ lane file (control), got {files:?}"
+        );
+        assert!(
+            files.iter().all(|f| f.roadmap != "open-work"),
+            "no lane may be attributed to the slug `open-work`, got {files:?}"
+        );
+        assert!(
+            diags.is_empty(),
+            "open-work/ must not raise a no-lane-record warning either, got {diags:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
