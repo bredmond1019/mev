@@ -239,6 +239,56 @@ The `--sync` flag reads `synced_from` and compares it against the sub-repo's cur
 
 ---
 
+## Cross-tree links: the `${BRAIN_ROOT}` prefix
+
+`mev validate-brain --links` checks every markdown link and `file://` URI in the corpus against
+the filesystem (`E_LINK_DEAD_MARKDOWN` / `E_LINK_DEAD_FILE_URI`). A link that stays inside one
+document's own subtree resolves fine as an ordinary relative path. A link that has to reach
+**across** the tree — say, from a `mev` doc into `core/celia/planning/blocks/` — has never had a
+good shape. All three shapes people reach for are wrong:
+
+- **A deep relative chain** (`../../../../../core/celia/planning/blocks/`) resolves, but it
+  encodes the *citing file's* depth in the corpus. Move the citing file one directory and every
+  such link silently breaks — nothing about the chain says what it was reaching for.
+- **A machine-absolute `file://` URI** (`file:///Users/brandon/Dev/agentic-portfolio/...`)
+  resolves on the machine that authored it and nowhere else. It is wrong in any clone whose brain
+  root differs — the sandbox-v2 builder included, which constructs a corpus at a different root by
+  design and has to carry a bespoke rewriter (`rewrite_decision_links` in
+  `scripts/sandbox/build-v2.sh`) purely to work around this.
+- **A literal `${BRAIN_ROOT}` written with no support in the checker** used to just fail: the
+  resolver treated `${BRAIN_ROOT}` as an ordinary path segment relative to the citing file, so the
+  link reported `E_LINK_DEAD_MARKDOWN` even when the target existed.
+
+**The supported shape** is a leading `${BRAIN_ROOT}/` (or the bare `$BRAIN_ROOT/`, without braces)
+at the very start of the link target. The checker expands it to the brain root already resolved
+for the run — the same root `validate-brain` prints in its summary line — before checking the
+path on disk:
+
+```markdown
+[the celia blocks dir](${BRAIN_ROOT}/core/celia/planning/blocks/)
+[same thing, bare form]($BRAIN_ROOT/core/celia/planning/blocks/)
+```
+
+Both lines above resolve identically. The same expansion applies to a `file://` URI carrying the
+prefix (`file://${BRAIN_ROOT}/core/celia/...`).
+
+This is a resolution-time expansion, not an extraction-time rewrite: the reported `raw`/`target`
+values, and every diagnostic message, still show `${BRAIN_ROOT}/...` exactly as authored — never an
+expanded machine path. It does **not** weaken the check: a `${BRAIN_ROOT}`-prefixed link whose
+expanded path does not exist still reports a dead link, exactly like any other broken link. The
+prefix is recognized only at the start of a target — `${BRAIN_ROOT}` appearing mid-path is not a
+template language, and a partial or malformed token (`${BRAIN_ROOT` unterminated, `${BRAIN_ROOTX}/`)
+does not expand and is not silently accepted; it resolves (and fails) exactly as an unrecognized
+path does today.
+
+**Until the binary that ships this expansion is built and installed, do not write a literal
+`${BRAIN_ROOT}` link into any corpus document as a live link** — an older checker reports it dead,
+and one dead link red-gates the whole corpus's push gate for every concurrent lane, not just the
+file that carries it. Show the shape in a fenced code block (as above) when documenting it before
+then; the link extractor does not scan fenced code.
+
+---
+
 ## Unknown fields
 
 Unknown frontmatter keys are tolerated — `mev` does not reject files for having extra fields. This allows the live corpus to carry fields defined by future schema versions without failing validation.

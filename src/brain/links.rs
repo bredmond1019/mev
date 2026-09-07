@@ -25,7 +25,7 @@
 //! Tasks 2–3 (`check_links`, `check_moved_references`) extend this module.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -313,6 +313,42 @@ fn file_uri_to_path(uri: &str) -> &str {
     uri.strip_prefix("file://").unwrap_or(uri)
 }
 
+/// Expand a leading `${BRAIN_ROOT}/` or bare `$BRAIN_ROOT/` prefix in `path_str`
+/// against `root` — the brain root already resolved for this run (the same root
+/// `validate-brain` reports in its summary line).
+///
+/// This is a RESOLUTION-TIME expansion, not an extraction-time one: it must run
+/// in [`check_links`] (or any other resolver), never in [`extract_links`], so the
+/// `raw`/`target` a reader sees stays exactly as authored and error messages keep
+/// reporting the resolved filesystem path rather than a machine-absolute one.
+///
+/// Returns `Some(expanded_path)` only when the prefix appears at the very START
+/// of `path_str` and is followed by `/` — the recognized cross-tree link shape.
+/// Returns `None` for everything else, so the caller falls through to resolving
+/// `path_str` exactly as it does today:
+/// - no prefix at all (the overwhelmingly common case — relative/absolute paths,
+///   plain `file://` URIs);
+/// - the token appearing mid-path rather than at the start (`${BRAIN_ROOT}` is not
+///   a general templating language);
+/// - a partial or malformed prefix (`${BRAIN_ROOT` unterminated, `${BRAIN_ROOTX}/`,
+///   a bare `$BRAIN_ROOTX/`) — these are NOT expanded, and so still resolve (and
+///   fail) exactly as an unrecognized path does today.
+///
+/// Expansion never asserts the resulting path exists — that check stays with the
+/// caller, so a `${BRAIN_ROOT}`-prefixed link to a path that does not exist still
+/// reports a dead link. This function only ever changes WHERE a path resolves
+/// from, never WHETHER the result is treated as live.
+fn expand_brain_root_prefix(path_str: &str, root: &Path) -> Option<PathBuf> {
+    const BRACED_PREFIX: &str = "${BRAIN_ROOT}/";
+    const BARE_PREFIX: &str = "$BRAIN_ROOT/";
+
+    let rest = path_str
+        .strip_prefix(BRACED_PREFIX)
+        .or_else(|| path_str.strip_prefix(BARE_PREFIX))?;
+
+    Some(root.join(rest))
+}
+
 /// Resolve and check all local link references in every [`CorpusEntry`].
 ///
 /// For each entry the function reads its contents (graceful degrade on I/O error),
@@ -327,9 +363,12 @@ fn file_uri_to_path(uri: &str) -> &str {
 ///   set of all authored bare `doc_id`s, scope-agnostic).  Unknown slug →
 ///   `E_LINK_DANGLING_WIKILINK` (error).
 ///
-/// `root` is accepted for signature symmetry with sibling `check_*` functions but
-/// is not used in this pass (relative markdown links resolve from `entry.path`).
-pub fn check_links(corpus: &Corpus, _root: &Path, doc_ids: &HashSet<String>) -> Vec<Diagnostic> {
+/// `root` is the brain root already resolved for this run — the same root
+/// `validate-brain` reports in its summary line. Relative markdown links and
+/// `file://` paths still resolve exactly as before (from `entry.path` / the raw
+/// path); `root` is consulted only when a target carries a leading
+/// `${BRAIN_ROOT}/` or `$BRAIN_ROOT/` prefix — see [`expand_brain_root_prefix`].
+pub fn check_links(corpus: &Corpus, root: &Path, doc_ids: &HashSet<String>) -> Vec<Diagnostic> {
     let mut diags: Vec<Diagnostic> = Vec::new();
 
     for entry in &corpus.entries {
@@ -344,9 +383,16 @@ pub fn check_links(corpus: &Corpus, _root: &Path, doc_ids: &HashSet<String>) -> 
         for link in &links {
             match link.kind {
                 LinkKind::Markdown => {
-                    // Resolve relative to the referring file's directory.
-                    let base = entry.path.parent().unwrap_or_else(|| Path::new("."));
-                    let resolved = base.join(&link.target);
+                    // A ${BRAIN_ROOT}/ (or bare $BRAIN_ROOT/) prefix resolves
+                    // against the run's brain root; everything else resolves
+                    // relative to the referring file's directory, as before.
+                    let resolved = match expand_brain_root_prefix(&link.target, root) {
+                        Some(expanded) => expanded,
+                        None => {
+                            let base = entry.path.parent().unwrap_or_else(|| Path::new("."));
+                            base.join(&link.target)
+                        }
+                    };
                     if !resolved.exists() {
                         let file_name = resolved.file_name().and_then(|n| n.to_str()).unwrap_or("");
                         if is_ephemeral(file_name) {
@@ -374,7 +420,10 @@ pub fn check_links(corpus: &Corpus, _root: &Path, doc_ids: &HashSet<String>) -> 
                 }
                 LinkKind::FileUri => {
                     let path_str = file_uri_to_path(&link.target);
-                    let path = Path::new(path_str);
+                    let path = match expand_brain_root_prefix(path_str, root) {
+                        Some(expanded) => expanded,
+                        None => Path::new(path_str).to_path_buf(),
+                    };
                     if !path.exists() {
                         diags.push(Diagnostic::error(
                             &entry.rel,
@@ -832,6 +881,238 @@ mod tests {
         let diags = check_links(&corpus, &dir, &doc_ids);
 
         assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // =========================================================================
+    // ${BRAIN_ROOT} prefix expansion (MV.ticket.brain-root-link-prefix)
+    // =========================================================================
+
+    // --- positive control: a ${BRAIN_ROOT}-prefixed link to an existing target resolves clean ---
+
+    #[test]
+    fn brain_root_braced_prefix_to_existing_target_resolves_clean() {
+        let dir = crate::testsupport::unique_temp_dir("mev-links-brainroot-braced-live");
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::create_dir_all(dir.join("core/celia/planning/blocks")).unwrap();
+        std::fs::write(dir.join("core/celia/planning/blocks/.keep"), b"").unwrap();
+
+        let entry = write_corpus_entry(
+            &dir,
+            "docs/page.md",
+            "See [x](${BRAIN_ROOT}/core/celia/planning/blocks/.keep) here.",
+        );
+        let corpus = Corpus {
+            entries: vec![entry],
+            ephemeral_ids: Default::default(),
+        };
+        let doc_ids = HashSet::new();
+        let diags = check_links(&corpus, &dir, &doc_ids);
+
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for a live ${{BRAIN_ROOT}} link, got: {diags:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- bare $BRAIN_ROOT/ form resolves identically to the braced form ---
+
+    #[test]
+    fn brain_root_bare_prefix_to_existing_target_resolves_clean() {
+        let dir = crate::testsupport::unique_temp_dir("mev-links-brainroot-bare-live");
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::create_dir_all(dir.join("core/celia/planning/blocks")).unwrap();
+        std::fs::write(dir.join("core/celia/planning/blocks/.keep"), b"").unwrap();
+
+        let entry = write_corpus_entry(
+            &dir,
+            "docs/page.md",
+            "See [x]($BRAIN_ROOT/core/celia/planning/blocks/.keep) here.",
+        );
+        let corpus = Corpus {
+            entries: vec![entry],
+            ephemeral_ids: Default::default(),
+        };
+        let doc_ids = HashSet::new();
+        let diags = check_links(&corpus, &dir, &doc_ids);
+
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for a live bare $BRAIN_ROOT link, got: {diags:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- ${BRAIN_ROOT}-prefixed markdown link whose expanded target is missing still reports dead ---
+    // (rule 2 — the feature must not become a way to silence the checker)
+
+    #[test]
+    fn brain_root_prefix_to_missing_target_still_reports_dead_markdown() {
+        let dir = crate::testsupport::unique_temp_dir("mev-links-brainroot-md-dead");
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+
+        let entry = write_corpus_entry(
+            &dir,
+            "docs/page.md",
+            "See [x](${BRAIN_ROOT}/core/celia/planning/blocks/) here.",
+        );
+        let corpus = Corpus {
+            entries: vec![entry],
+            ephemeral_ids: Default::default(),
+        };
+        let doc_ids = HashSet::new();
+        let diags = check_links(&corpus, &dir, &doc_ids);
+
+        assert_eq!(diags.len(), 1, "expected 1 diagnostic, got: {diags:?}");
+        assert_eq!(diags[0].locator, "E_LINK_DEAD_MARKDOWN");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- the same expansion applies to a file:// URI carrying the prefix ---
+
+    #[test]
+    fn brain_root_prefix_applies_to_file_uri() {
+        let dir = crate::testsupport::unique_temp_dir("mev-links-brainroot-file-uri-live");
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::create_dir_all(dir.join("core/celia")).unwrap();
+        std::fs::write(dir.join("core/celia/status.md"), b"").unwrap();
+
+        let entry = write_corpus_entry(
+            &dir,
+            "docs/page.md",
+            "Open [doc](file://${BRAIN_ROOT}/core/celia/status.md) now.",
+        );
+        let corpus = Corpus {
+            entries: vec![entry],
+            ephemeral_ids: Default::default(),
+        };
+        let doc_ids = HashSet::new();
+        let diags = check_links(&corpus, &dir, &doc_ids);
+
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for a live ${{BRAIN_ROOT}} file URI, got: {diags:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- a ${BRAIN_ROOT}-prefixed file:// URI whose expanded target is missing still reports dead ---
+
+    #[test]
+    fn brain_root_prefix_to_missing_target_still_reports_dead_file_uri() {
+        let dir = crate::testsupport::unique_temp_dir("mev-links-brainroot-file-uri-dead");
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+
+        let entry = write_corpus_entry(
+            &dir,
+            "docs/page.md",
+            "Open [doc](file://${BRAIN_ROOT}/core/celia/does-not-exist.md) now.",
+        );
+        let corpus = Corpus {
+            entries: vec![entry],
+            ephemeral_ids: Default::default(),
+        };
+        let doc_ids = HashSet::new();
+        let diags = check_links(&corpus, &dir, &doc_ids);
+
+        assert_eq!(diags.len(), 1, "expected 1 diagnostic, got: {diags:?}");
+        assert_eq!(diags[0].locator, "E_LINK_DEAD_FILE_URI");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- ${BRAIN_ROOT} appearing mid-path must NOT expand ---
+
+    #[test]
+    fn brain_root_prefix_mid_path_does_not_expand() {
+        let dir = crate::testsupport::unique_temp_dir("mev-links-brainroot-midpath");
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        // Even though this exact suffix exists under the real root, the ${BRAIN_ROOT}
+        // token is not at the start of the target, so it must not expand — and
+        // "docs/${BRAIN_ROOT}/core/celia/blocks" does not exist relative to the
+        // referring file, so this must still report dead.
+        let entry = write_corpus_entry(
+            &dir,
+            "docs/page.md",
+            "See [x](${BRAIN_ROOT}/core/celia/blocks) here.",
+        );
+        // Prove the token-at-start case WOULD have resolved, to make sure this
+        // test is exercising "mid-path" and not merely "missing target" again.
+        std::fs::create_dir_all(dir.join("core/celia/blocks")).unwrap();
+
+        // Now construct a target where the prefix is not at position 0.
+        let entry_midpath = write_corpus_entry(
+            &dir,
+            "docs/other.md",
+            "See [x](nested/${BRAIN_ROOT}/core/celia/blocks) here.",
+        );
+        let corpus = Corpus {
+            entries: vec![entry, entry_midpath],
+            ephemeral_ids: Default::default(),
+        };
+        let doc_ids = HashSet::new();
+        let diags = check_links(&corpus, &dir, &doc_ids);
+
+        // The first entry's target (prefix AT the start) resolves against the
+        // brain root and exists -> no diagnostic. The second's prefix is
+        // mid-path, so it resolves relative to "docs/" as `nested/${BRAIN_ROOT}/...`
+        // which does not exist -> still reports dead.
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly 1 diagnostic (the mid-path case), got: {diags:?}"
+        );
+        assert_eq!(diags[0].locator, "E_LINK_DEAD_MARKDOWN");
+        assert!(diags[0].message.contains("nested"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- a malformed/partial prefix does not silently pass ---
+
+    #[test]
+    fn brain_root_malformed_prefix_does_not_silently_pass() {
+        let dir = crate::testsupport::unique_temp_dir("mev-links-brainroot-malformed");
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        // Also create the literal path that a naive expansion might produce, so a
+        // false pass here can only come from a broken implementation matching the
+        // malformed token anyway, not from the target coincidentally existing.
+        std::fs::create_dir_all(dir.join("${BRAIN_ROOTX}")).unwrap();
+
+        // Unterminated brace, and a lookalike token with an extra trailing char —
+        // neither is the recognized prefix, so both resolve (and fail) exactly as
+        // an ordinary relative path does today.
+        let entry_unterminated = write_corpus_entry(
+            &dir,
+            "docs/a.md",
+            "See [x](${BRAIN_ROOT/core/celia/blocks) here.",
+        );
+        let entry_lookalike = write_corpus_entry(
+            &dir,
+            "docs/b.md",
+            "See [x](${BRAIN_ROOTX}/core/celia/blocks) here.",
+        );
+        let corpus = Corpus {
+            entries: vec![entry_unterminated, entry_lookalike],
+            ephemeral_ids: Default::default(),
+        };
+        let doc_ids = HashSet::new();
+        let diags = check_links(&corpus, &dir, &doc_ids);
+
+        assert_eq!(
+            diags.len(),
+            2,
+            "both malformed/lookalike prefixes must still report dead, got: {diags:?}"
+        );
+        for diag in &diags {
+            assert_eq!(diag.locator, "E_LINK_DEAD_MARKDOWN");
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
