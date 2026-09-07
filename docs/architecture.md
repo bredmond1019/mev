@@ -913,35 +913,59 @@ the actual next action.
 | `held-slot` | The head's repo is a heavy repo whose concurrency category is at capacity |
 | `startable` | No intrinsic or environmental hold applies — the segment can be worked now |
 
-#### The single source of truth for "a lane is live in repo X"
+#### The single source of truth for "a lane is live in repo X" (`MV.20.A` reverses `MV.13.C` Task 2)
 
-**Decided at spec time, not re-litigated in code: the single source of truth for lane
-liveness — what `held-repo-busy` reads from — is the per-`(repo, roadmap)`
-orchestration-run record's `lifecycle:` frontmatter**
-(`planning/orchestration-run/<roadmap-slug>/notes.md`, `lifecycle: active |
-lane-complete | consolidated`, per D57, the orchestration-run artifact contract). Two
-other candidates were considered and rejected:
+**`MV.13.C` Task 2 decided the source of truth was the per-`(repo, roadmap)`
+orchestration-run record's `lifecycle:` frontmatter. `MV.20.A`'s spike REFUTED that:**
+`mev lanes` reported a repo live on two roadmaps at once — one from a stale
+`lifecycle: active` record that had never been updated to `lane-complete`, the other
+from the registry — while the `.fleet-locks/lane-agents/` registry named exactly one.
+A lane that closed without stamping `lifecycle: lane-complete` kept its repo reading
+busy forever under the old rule.
+
+**The rule as of `MV.20.A`: the single source of truth for lane liveness — what
+`held-repo-busy` reads from — is a `.fleet-locks/lane-agents/*.json` registry claim
+(`okf_core::Coord<RegistryClaim>`) with a `heartbeat` no older than
+`okf_core::COORD_STALE_TTL_SECONDS`. The orchestration-run record's `lifecycle:`
+frontmatter** (`planning/orchestration-run/<roadmap-slug>/notes.md`, `lifecycle: active
+| lane-complete | consolidated`, per D57, the orchestration-run artifact contract) **is
+now a DEGRADED fallback, consulted only for a repo no live registry claim names at
+all** — see `discover_live_runs` below, which returns `LiveRun::degraded` `true` for a
+fallback-derived run and `false` for a registry-derived one, so a degraded hold never
+reads on the wire as a plain live one. A reader who finds the old `MV.13.C` rule quoted
+elsewhere (a stale doc, a cached board) should trust this module, not that quote — this
+one reversed it.
+
+Two other candidates were considered and rejected, unchanged by `MV.20.A`:
 
 - **`lane-log.jsonl`** — rejected because it records **integrated blocks**, not
   liveness. A lane that opened and is mid-block has written nothing to it yet, so it
   reads as idle exactly when it is busiest. It remains the cross-lane progress channel
   and is read by nothing in this module.
-- **`fleet_concurrency_check.py`'s `.fleet-locks` registry** — rejected as the
+- **`fleet_concurrency_check.py`'s `.fleet-locks` registry** (the ordinary pid-keyed
+  slot entries, not the `lane-agents/` heartbeat registry above) — rejected as the
   liveness source because it only ever knows about **heavy** repos (`heavy_category`
   returns `None` for a light one), so it structurally cannot answer the liveness
   question for the light half of the fleet. It is, however, the correct source for
   `held-slot` — a different question (is a heavy repo's concurrency category at
   capacity) that the run record cannot answer, since it says nothing about capacity.
 
-The run record is the only candidate that covers every repo, is written when the lane
-**opens** rather than when a block closes, and is contract-validated
+The `lane-agents/` registry claim is the only candidate that covers every repo, is
+refreshed by a live heartbeat rather than going stale silently on a missed frontmatter
+update, and is contract-validated the same way the run record was
 (`test_orchestration_run_contract.py`).
 
-- **`discover_live_runs(root, repos) -> (Vec<LiveRun>, Vec<Diagnostic>)`** — walks
-  every registered repo's `planning/orchestration-run/*/notes.md`, returning a
-  `LiveRun { repo, roadmap }` for every record whose `lifecycle:` is `active`. A
-  record that cannot be read/parsed, or is `active` but missing `roadmap:`, yields a
-  diagnostic and never invents a hold.
+- **`discover_live_runs(root, repos) -> (Vec<LiveRun>, Vec<Diagnostic>)`** — reads
+  `.fleet-locks/lane-agents/*.json` registry claims as the primary liveness source
+  (fresh `heartbeat` vs `okf_core::COORD_STALE_TTL_SECONDS`); a `Coord::Legacy` record
+  is skipped with a `Diagnostic::warning`, matching the existing "unreadable/corrupt:
+  treat as stale" posture. Only for a repo no live registry claim names at all does it
+  fall back to that repo's `planning/orchestration-run/*/notes.md`, returning a
+  `LiveRun { repo, roadmap, degraded: true }` for a record whose `lifecycle:` is
+  `active` (`degraded: false` for a registry-derived `LiveRun`). A fallback record that
+  cannot be read/parsed, or is `active` but missing `roadmap:`, yields a diagnostic and
+  never invents a hold. Registry claims are deduplicated per repo (first live claim
+  wins).
 - **`discover_segments(lane_positions) -> Vec<DiscoveredSegment>`** — every
   `(roadmap, lane, segment)` triple the lane files describe, in first-appearance order,
   **including segments whose blocks are all closed**. The frontier deliberately carries only
@@ -956,9 +980,12 @@ The run record is the only candidate that covers every repo, is written when the
   the head block id.
 - **`compute_fleet_slot_view(root) -> FleetSlotView`** / **`heavy_category(repo_root)
   -> Option<String>`** — read `.fleet-locks` directly (never shell out to
-  `fleet_concurrency_check.py`; `timeout` does not exist on this shell) and mirror its
-  staleness rules (dead/absent pid, `started_at` past the TTL) and per-category
-  capacity (`native-build`: 4, everything else: 2). A missing/unreadable
+  `fleet_concurrency_check.py`; `timeout` does not exist on this shell), parsing each
+  entry as `okf_core::Coord<okf_core::SlotRecord>`, and mirror its staleness rule
+  (`is_stale`, `MV.20.A`: pid liveness is checked only when `pid_source: explicit`;
+  `pid_source: self` — the production writer's default — relies solely on `started_at`
+  age against `okf_core::COORD_STALE_TTL_SECONDS`, replacing a local 4h constant) and
+  per-category capacity (`native-build`: 4, everything else: 2). A missing/unreadable
   `.fleet-locks` sets `degraded: true` — "unknown", resolved as *not held*, never a
   hold, mirroring the script's own degrade-to-advisory behavior.
   **Known hazard, pinned by test, not endorsed:** `heavy_category` returns `None` for a
