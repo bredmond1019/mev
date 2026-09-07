@@ -84,6 +84,43 @@ pub enum PathDepComparison {
     Unknown,
 }
 
+/// The structured ROOT CAUSE behind a `Drift` verdict, carried alongside the existing
+/// human-prose `findings`/`reason` rather than derived from them after the fact.
+/// `run()` groups writers by this — never by regexing `WriterOutcome::findings`, which is
+/// prose already `name`-prefixed for a human, not a second source of truth for grouping.
+///
+/// `NotEvaluable`/`Pass` verdicts carry `None` — there is no cause to group when nothing
+/// is stale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum DriftCause {
+    /// This writer's OWN repo's source moved between `from` and `to`, and the diff
+    /// touched a build input. The repo identity itself (`"mev"` for `self`, a writer's
+    /// `repo_path`/`name` otherwise) is attached by the caller that knows it
+    /// ([`writer_outcome`]) — `verdict` only knows the two SHAs.
+    OwnSource { from: String, to: String },
+    /// A Cargo path dependency's build inputs have commits newer than this writer's
+    /// build time. `deps` names the dependency directories (e.g. `["mev"]`) so a
+    /// caller can correlate this with another writer's `OwnSource` cause naming the
+    /// same repo — that correlation is exactly how two writers stale from the SAME
+    /// upstream change are recognised as one cause.
+    PathDependency { deps: Vec<String> },
+    /// The binary was built from an uncommitted tree. Never correlated with any other
+    /// writer — dirtiness is a property of one binary's own build, not a shared
+    /// upstream change.
+    Dirty,
+    /// A comparison could not be made (unresolvable SHA, git unavailable, dependency
+    /// history unreadable). Treated as Drift per this module's doctrine, but — like
+    /// `Dirty` — never correlated with another writer: there is no named repo to match
+    /// on.
+    Unknown,
+}
+
+/// `(status, findings, reason, drift_cause)` — the shared return shape of [`verdict`] and
+/// [`path_dep_drift`]. A type alias only to satisfy `clippy::type_complexity`; carries no
+/// behaviour of its own.
+type VerdictOutcome = (CheckStatus, Vec<String>, Option<String>, Option<DriftCause>);
+
 /// The pure verdict function: given the compiled-in stamp, the live state of the source
 /// tree, (when the SHAs differ) an already-computed answer to whether the build inputs
 /// actually changed between the two commits, and an already-computed path-dependency
@@ -97,7 +134,7 @@ fn verdict(
     source_dir_exists: bool,
     build_inputs: BuildInputComparison,
     path_deps: PathDepComparison,
-) -> (CheckStatus, Vec<String>, Option<String>) {
+) -> VerdictOutcome {
     if stamped_sha == "unknown" || dirty == "unknown" || !source_dir_exists {
         return (
             CheckStatus::NotEvaluable,
@@ -106,6 +143,7 @@ fn verdict(
                 "build provenance unavailable: stamped SHA, dirty flag, or source dir missing"
                     .to_string(),
             ),
+            None,
         );
     }
 
@@ -117,6 +155,7 @@ fn verdict(
                 "could not determine the live HEAD of the source tree (git unavailable)"
                     .to_string(),
             ),
+            None,
         );
     };
 
@@ -128,6 +167,7 @@ fn verdict(
                 "could not determine the live HEAD of the source tree (git unavailable)"
                     .to_string(),
             ),
+            None,
         );
     }
 
@@ -147,6 +187,7 @@ fn verdict(
                     .to_string(),
             ],
             None,
+            Some(DriftCause::Dirty),
         );
     }
 
@@ -168,6 +209,7 @@ fn verdict(
                          the binary is still current"
                     )],
                     None,
+                    None,
                 );
             }
             BuildInputComparison::Differ => {
@@ -178,6 +220,10 @@ fn verdict(
                          at {live_sha}; rebuild before any --write run"
                     )],
                     None,
+                    Some(DriftCause::OwnSource {
+                        from: stamped_sha.to_string(),
+                        to: live_sha.to_string(),
+                    }),
                 );
             }
             BuildInputComparison::Unknown => {
@@ -190,6 +236,7 @@ fn verdict(
                          drift)"
                     )],
                     None,
+                    Some(DriftCause::Unknown),
                 );
             }
         }
@@ -202,7 +249,7 @@ fn verdict(
         return drift;
     }
 
-    (CheckStatus::Pass, Vec::new(), None)
+    (CheckStatus::Pass, Vec::new(), None, None)
 }
 
 /// Turn a [`PathDepComparison`] into a Drift verdict, or `None` when it does not warrant
@@ -210,9 +257,7 @@ fn verdict(
 /// whatever Pass verdict it already had. `Differ` names the dependency repos that moved;
 /// `Unknown` is treated exactly the same as `Differ`, per this module's doctrine that an
 /// unanswerable comparison must never read as "no difference".
-fn path_dep_drift(
-    path_deps: &PathDepComparison,
-) -> Option<(CheckStatus, Vec<String>, Option<String>)> {
+fn path_dep_drift(path_deps: &PathDepComparison) -> Option<VerdictOutcome> {
     match path_deps {
         PathDepComparison::NoPathDeps | PathDepComparison::Same => None,
         PathDepComparison::Differ(names) => Some((
@@ -223,6 +268,9 @@ fn path_dep_drift(
                 names.join(", ")
             )],
             None,
+            Some(DriftCause::PathDependency {
+                deps: names.clone(),
+            }),
         )),
         PathDepComparison::Unknown => Some((
             CheckStatus::Drift,
@@ -232,6 +280,7 @@ fn path_dep_drift(
                     .to_string(),
             ],
             None,
+            Some(DriftCause::Unknown),
         )),
     }
 }
@@ -522,10 +571,20 @@ use crate::brain::config::ConformanceWriter;
 pub struct WriterOutcome {
     pub name: String,
     pub status: CheckStatus,
+    /// The repo whose source compiles into this writer's binary — `"mev"` for `self`
+    /// (the writer named `self` IS the mev source tree); a cross-binary writer's
+    /// `repo_path` when configured, else its `name`. This is the identity `run()`
+    /// correlates a [`DriftCause::OwnSource`] against a sibling writer's
+    /// [`DriftCause::PathDependency`] naming the same dependency — the mechanism that
+    /// recognises two writers stale from the SAME upstream change as one cause.
+    pub repo: String,
     /// Drift details, already prefixed with `name`.
     pub findings: Vec<String>,
     /// Populated on `NotEvaluable`, already prefixed with `name`.
     pub reason: Option<String>,
+    /// The structured root cause behind a `Drift` verdict (`None` for `Pass`/
+    /// `NotEvaluable`). See [`DriftCause`].
+    pub drift_cause: Option<DriftCause>,
     /// Whether this writer's compiled-in stamp reported an uncommitted (`dirty`)
     /// working tree at build time — the raw `dirty` flag `verdict` was given, exposed
     /// alongside its `status` rather than folded away.
@@ -623,8 +682,12 @@ pub fn resolve_build_input_paths(build_input_paths: &[String]) -> Vec<String> {
 /// Run the pure [`verdict`] for one already-resolved `(stamped_sha, dirty, source_dir)`
 /// triple, naming `name` in every finding/reason. `build_input_paths` is this writer's
 /// already-resolved (see [`resolve_build_input_paths`]) list of build-input paths.
+/// `repo` is the source repo identity this writer's binary is compiled from (see
+/// [`WriterOutcome::repo`]) — passed in rather than derived here, since only the caller
+/// (`self` vs. a registered cross-binary writer) knows the mapping.
 fn writer_outcome(
     name: &str,
+    repo: &str,
     stamped_sha: &str,
     dirty: &str,
     source_dir: &str,
@@ -657,7 +720,7 @@ fn writer_outcome(
         // source dir doesn't exist; the value is unused but must still be supplied.
         PathDepComparison::Unknown
     };
-    let (status, findings, reason) = verdict(
+    let (status, findings, reason, drift_cause) = verdict(
         stamped_sha,
         live_sha.as_deref(),
         dirty,
@@ -668,11 +731,13 @@ fn writer_outcome(
     WriterOutcome {
         name: name.to_string(),
         status,
+        repo: repo.to_string(),
         findings: findings
             .into_iter()
             .map(|f| format!("{name}: {f}"))
             .collect(),
         reason: reason.map(|r| format!("{name}: {r}")),
+        drift_cause,
         dirty: status == CheckStatus::Drift && dirty == "1",
     }
 }
@@ -684,11 +749,17 @@ fn writer_outcome(
 /// reader can find the source repo of a writer that could not be queried.
 fn cross_binary_outcome(writer: &ConformanceWriter) -> WriterOutcome {
     let name = writer.name.as_str();
+    let repo = writer.repo_path.as_deref().unwrap_or(name);
     let build_input_paths = resolve_build_input_paths(&writer.build_input_paths);
     match query_writer_stamp(name) {
-        Ok((git_sha, dirty, source_dir)) => {
-            writer_outcome(name, &git_sha, &dirty, &source_dir, &build_input_paths)
-        }
+        Ok((git_sha, dirty, source_dir)) => writer_outcome(
+            name,
+            repo,
+            &git_sha,
+            &dirty,
+            &source_dir,
+            &build_input_paths,
+        ),
         Err(reason) => {
             let reason = match &writer.repo_path {
                 Some(repo_path) => format!("{name}: {reason} (repo_path: {repo_path})"),
@@ -697,8 +768,10 @@ fn cross_binary_outcome(writer: &ConformanceWriter) -> WriterOutcome {
             WriterOutcome {
                 name: name.to_string(),
                 status: CheckStatus::NotEvaluable,
+                repo: repo.to_string(),
                 findings: Vec::new(),
                 reason: Some(reason),
+                drift_cause: None,
                 dirty: false,
             }
         }
@@ -733,6 +806,7 @@ pub fn writer_outcomes(writers: &[ConformanceWriter]) -> (CheckStatus, Vec<Write
     let self_build_input_paths = resolve_build_input_paths(&[]);
     let mut outcomes = vec![writer_outcome(
         "self",
+        "mev",
         STAMPED_SHA,
         STAMPED_DIRTY,
         STAMPED_SOURCE_DIR,
@@ -754,6 +828,150 @@ pub fn writer_outcomes(writers: &[ConformanceWriter]) -> (CheckStatus, Vec<Write
 /// `--build-stamp`. The overall status is worst-wins; `findings` names every writer's
 /// individual verdict so a reader can see exactly which binary drifted or could not be
 /// evaluated, not just an aggregate.
+/// Repo-identity key a [`DriftCause`] can be grouped on, or `None` when it must never be
+/// grouped with any other writer (`Dirty`, `Unknown`, or a `PathDependency` naming more
+/// than one sibling repo — ambiguous, and not a shape any registered writer produces
+/// today; falling back to an ungrouped finding is always correct, only sometimes
+/// non-minimal).
+///
+/// `OwnSource` keys on the writer's OWN repo identity (`outcome.repo` — `"mev"` for
+/// `self`); `PathDependency` with exactly one named dependency keys on THAT dependency's
+/// name. These two are the same string exactly when the same upstream repo is
+/// responsible — e.g. `self`'s `OwnSource{ repo: "mev" }` and `bastion`'s
+/// `PathDependency{ deps: ["mev"] }` both key on `"mev"` — which is precisely how two
+/// writers stale from one upstream change are recognised as one cause.
+fn drift_group_key(repo: &str, cause: &DriftCause) -> Option<String> {
+    match cause {
+        DriftCause::OwnSource { .. } => Some(repo.to_string()),
+        DriftCause::PathDependency { deps } if deps.len() == 1 => Some(deps[0].clone()),
+        DriftCause::PathDependency { .. } | DriftCause::Dirty | DriftCause::Unknown => None,
+    }
+}
+
+/// The single rebuild command for a set of stale binaries' own repo directories
+/// (`outcome.repo`, deduped and sorted for determinism) — one `cargo install` per repo,
+/// chained with `&&`. Reuses the exact install shape `build_and_install.sh`'s
+/// `reinstall_closure` already performs per repo; this does not derive a second closure,
+/// only names the command for the closure the caller already computed via
+/// `path_dependency_closure`/`drift_group_key`.
+fn rebuild_command(repos: &[String]) -> String {
+    let mut sorted: Vec<&str> = repos.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    sorted
+        .into_iter()
+        .map(|repo| format!("cargo install --path core/{repo} --force"))
+        .collect::<Vec<_>>()
+        .join(" && ")
+}
+
+/// One finding for every writer whose `Drift` shares a root cause with at least one other
+/// writer (`group.len() >= 2`), naming the cause, the full stale-binary set, and the
+/// single rebuild command — plus a statement that rebuild order does not matter, since a
+/// path-dependency closure has no ordering constraint (every listed binary compiles the
+/// same source).
+fn combined_cause_finding(cause_repo: &str, group: &[&WriterOutcome]) -> String {
+    let own_source_range = group.iter().find_map(|o| match &o.drift_cause {
+        Some(DriftCause::OwnSource { from, to }) => Some((from.clone(), to.clone())),
+        _ => None,
+    });
+    let cause_desc = match own_source_range {
+        Some((from, to)) => format!(
+            "{cause_repo}'s source changed between {from} and {to}, and the difference \
+             touched a build input"
+        ),
+        None => format!(
+            "{cause_repo}'s source has commits newer than these binaries' build time, \
+             touching a build input"
+        ),
+    };
+
+    let mut names: Vec<&str> = group.iter().map(|o| o.name.as_str()).collect();
+    names.sort_unstable();
+    let repos: Vec<String> = group.iter().map(|o| o.repo.clone()).collect();
+    let command = rebuild_command(&repos);
+
+    format!(
+        "{cause_desc}, which leaves {count} binaries stale: {names_list}. Rebuild order \
+         does not matter for a path-dependency closure — every listed binary compiles the \
+         same source, so there is no dependency-first sequencing to follow. Rebuild all of \
+         them before any --write run: {command}",
+        count = names.len(),
+        names_list = names.join(", "),
+    )
+}
+
+/// Build the final `findings` list from a set of writer outcomes, applying the same-cause
+/// grouping documented on [`run`]. Split out as its own pure function (over already
+/// -computed [`WriterOutcome`]s, no I/O) so fixture tests can exercise the grouping
+/// directly with synthesized outcomes, without shelling out to git or spawning a writer
+/// binary.
+///
+/// Drift outcomes are grouped by [`DriftCause`] first: when two or more writers are
+/// `Drift` for the SAME root cause (the same upstream repo moved), they are reported as
+/// ONE finding naming the cause, the full stale-binary set, and a single rebuild command
+/// — never suppressed, never collapsed into fewer binaries than are actually stale, and
+/// never split across two derivations of the dependency graph (the grouping key comes
+/// from [`DriftCause`], itself built from the existing
+/// `path_dependency_closure`/`BuildInputComparison` machinery). A writer whose Drift
+/// shares no cause with any other writer (including `Dirty`/`Unknown` causes, which are
+/// never grouped) reads exactly as it did before this grouping existed — its own prose,
+/// unchanged.
+#[doc(hidden)]
+pub fn grouped_findings(outcomes: &[WriterOutcome]) -> Vec<String> {
+    let mut groups: std::collections::BTreeMap<String, Vec<&WriterOutcome>> =
+        std::collections::BTreeMap::new();
+    for outcome in outcomes {
+        if outcome.status != CheckStatus::Drift {
+            continue;
+        }
+        if let Some(key) = outcome
+            .drift_cause
+            .as_ref()
+            .and_then(|cause| drift_group_key(&outcome.repo, cause))
+        {
+            groups.entry(key).or_default().push(outcome);
+        }
+    }
+    groups.retain(|_, members| members.len() >= 2);
+
+    let mut findings = Vec::new();
+    let mut emitted_group_keys: HashSet<String> = HashSet::new();
+
+    for outcome in outcomes {
+        let group_key = outcome
+            .drift_cause
+            .as_ref()
+            .and_then(|cause| drift_group_key(&outcome.repo, cause))
+            .filter(|key| groups.contains_key(key));
+
+        match group_key {
+            Some(key) => {
+                // A group member's OWN per-writer prose is never emitted individually
+                // once it is part of a merged finding — that prose is still readable
+                // on `WriterOutcome::findings` (kept, per this ticket's scope) for any
+                // caller that wants it, but the assembled report emits the merged line
+                // exactly once, at the first member's position.
+                if emitted_group_keys.insert(key.clone()) {
+                    let group = groups.get(&key).expect("key came from groups");
+                    findings.push(combined_cause_finding(&key, group));
+                }
+            }
+            None => {
+                findings.extend(outcome.findings.clone());
+            }
+        }
+    }
+
+    findings
+}
+
+/// Run the `toolchain-freshness` check across every registered writer: `mev` itself
+/// (the compiled-in stamp, as before) plus every writer named in `brain.toml`'s
+/// `[[conformance_writers]]` table (`ctx.config.conformance_writers`), queried via
+/// `--build-stamp`. The overall status is worst-wins; `findings` names every writer's
+/// individual verdict so a reader can see exactly which binary drifted or could not be
+/// evaluated, not just an aggregate — grouped by root cause via [`grouped_findings`].
 pub fn run(ctx: &ConformanceCtx) -> CheckOutcome {
     let (_, outcomes) = writer_outcomes(&ctx.config.conformance_writers);
 
@@ -767,14 +985,14 @@ pub fn run(ctx: &ConformanceCtx) -> CheckOutcome {
         ],
     };
 
+    let findings = grouped_findings(&outcomes);
+
     let mut overall_status = CheckStatus::Pass;
-    let mut findings = Vec::new();
     let mut reasons = Vec::new();
     let mut right_items = Vec::new();
 
     for outcome in &outcomes {
         overall_status = worst_status(overall_status, outcome.status);
-        findings.extend(outcome.findings.clone());
         if let Some(reason) = &outcome.reason {
             reasons.push(reason.clone());
         }
@@ -814,7 +1032,7 @@ mod tests {
 
     #[test]
     fn not_evaluable_when_stamped_sha_unknown() {
-        let (status, _findings, reason) = verdict(
+        let (status, _findings, reason, _cause) = verdict(
             "unknown",
             Some("abc123"),
             "0",
@@ -828,7 +1046,7 @@ mod tests {
 
     #[test]
     fn not_evaluable_when_dirty_flag_unknown() {
-        let (status, _findings, reason) = verdict(
+        let (status, _findings, reason, _cause) = verdict(
             "abc123",
             Some("abc123"),
             "unknown",
@@ -842,7 +1060,7 @@ mod tests {
 
     #[test]
     fn not_evaluable_when_source_dir_missing() {
-        let (status, _findings, reason) = verdict(
+        let (status, _findings, reason, _cause) = verdict(
             "abc123",
             Some("abc123"),
             "0",
@@ -856,7 +1074,7 @@ mod tests {
 
     #[test]
     fn not_evaluable_when_live_sha_unavailable() {
-        let (status, _findings, reason) = verdict(
+        let (status, _findings, reason, _cause) = verdict(
             "abc123",
             None,
             "0",
@@ -870,7 +1088,7 @@ mod tests {
 
     #[test]
     fn not_evaluable_when_live_sha_literal_unknown() {
-        let (status, _findings, reason) = verdict(
+        let (status, _findings, reason, _cause) = verdict(
             "abc123",
             Some("unknown"),
             "0",
@@ -884,7 +1102,7 @@ mod tests {
 
     #[test]
     fn drift_when_sha_differs() {
-        let (status, findings, reason) = verdict(
+        let (status, findings, reason, _cause) = verdict(
             "abc123",
             Some("def456"),
             "0",
@@ -902,7 +1120,7 @@ mod tests {
 
     #[test]
     fn drift_when_dirty_even_with_matching_sha() {
-        let (status, findings, reason) = verdict(
+        let (status, findings, reason, _cause) = verdict(
             "abc123",
             Some("abc123"),
             "1",
@@ -918,7 +1136,7 @@ mod tests {
 
     #[test]
     fn dirty_drift_message_distinct_from_stale_sha_drift_message() {
-        let (_status1, stale_findings, _) = verdict(
+        let (_status1, stale_findings, _, _cause1) = verdict(
             "abc123",
             Some("def456"),
             "0",
@@ -926,7 +1144,7 @@ mod tests {
             BuildInputComparison::Differ,
             PathDepComparison::NoPathDeps,
         );
-        let (_status2, dirty_findings, _) = verdict(
+        let (_status2, dirty_findings, _, _cause2) = verdict(
             "abc123",
             Some("abc123"),
             "1",
@@ -939,7 +1157,7 @@ mod tests {
 
     #[test]
     fn pass_when_sha_matches_and_clean() {
-        let (status, findings, reason) = verdict(
+        let (status, findings, reason, _cause) = verdict(
             "abc123",
             Some("abc123"),
             "0",
@@ -957,7 +1175,7 @@ mod tests {
         // The core behaviour this ticket adds: SHAs differ, but the build-input
         // comparison says `Same` (e.g. only docs/ changed between the two commits) ->
         // Pass, not Drift.
-        let (status, findings, reason) = verdict(
+        let (status, findings, reason, _cause) = verdict(
             "abc123",
             Some("def456"),
             "0",
@@ -980,7 +1198,7 @@ mod tests {
         // Absence of a diff answer (unresolvable stamped SHA, git unavailable) must never
         // be read as "no difference" -> still Drift, with a message saying the comparison
         // could not be made.
-        let (status, findings, reason) = verdict(
+        let (status, findings, reason, _cause) = verdict(
             "abc123",
             Some("def456"),
             "0",
@@ -1001,7 +1219,7 @@ mod tests {
         // The other collapse-prone case: dirty==1 still wins even when the SHAs differ
         // AND the build-input comparison independently says `Same` — a careless refactor
         // that checks build_inputs before dirty would wrongly report Pass here.
-        let (status, findings, reason) = verdict(
+        let (status, findings, reason, _cause) = verdict(
             "abc123",
             Some("def456"),
             "1",
@@ -1199,7 +1417,14 @@ mod tests {
         // A writer claiming a source_dir that exists (".") but a sha that cannot match
         // live HEAD in that dir yields Drift, named for that writer.
         let default_paths = resolve_build_input_paths(&[]);
-        let outcome = writer_outcome("bastion", "not-a-real-sha-ever", "0", ".", &default_paths);
+        let outcome = writer_outcome(
+            "bastion",
+            "bastion",
+            "not-a-real-sha-ever",
+            "0",
+            ".",
+            &default_paths,
+        );
         // Only assert Drift when live_head could actually be resolved (git present);
         // otherwise this legitimately falls back to NotEvaluable, which is also a valid,
         // named (never-Pass) outcome.
@@ -1547,14 +1772,14 @@ mod tests {
 
     #[test]
     fn path_dep_drift_maps_differ_and_unknown_to_drift_naming_the_dependency() {
-        let (status, findings, reason) =
+        let (status, findings, reason, _cause) =
             path_dep_drift(&PathDepComparison::Differ(vec!["okf-core".to_string()]))
                 .expect("Differ must drift");
         assert_eq!(status, CheckStatus::Drift);
         assert!(findings[0].contains("okf-core"));
         assert!(reason.is_none());
 
-        let (status, findings, _reason) =
+        let (status, findings, _reason, _cause) =
             path_dep_drift(&PathDepComparison::Unknown).expect("Unknown must drift");
         assert_eq!(status, CheckStatus::Drift);
         assert!(!findings.is_empty());
@@ -1564,7 +1789,7 @@ mod tests {
     fn verdict_reports_drift_from_a_moved_path_dependency_even_when_own_sha_matches() {
         // The core behaviour this task adds: the writer's OWN sha/build-input comparison
         // is clean, but a path dependency moved -> still Drift, never a silent Pass.
-        let (status, findings, reason) = verdict(
+        let (status, findings, reason, _cause) = verdict(
             "abc123",
             Some("abc123"),
             "0",
@@ -1579,7 +1804,7 @@ mod tests {
 
     #[test]
     fn verdict_no_path_deps_or_same_never_turns_a_pass_into_drift() {
-        let (status, findings, _) = verdict(
+        let (status, findings, _, _cause) = verdict(
             "abc123",
             Some("abc123"),
             "0",
@@ -1590,7 +1815,7 @@ mod tests {
         assert_eq!(status, CheckStatus::Pass);
         assert!(findings.is_empty());
 
-        let (status, findings, _) = verdict(
+        let (status, findings, _, _cause) = verdict(
             "abc123",
             Some("def456"),
             "0",
@@ -1606,7 +1831,7 @@ mod tests {
     fn verdict_path_dep_drift_never_downgrades_an_existing_drift_to_pass() {
         // An existing Drift verdict (own SHA differs, build inputs Differ) stays Drift
         // regardless of what path_deps says — path deps only ADD Drift, never remove it.
-        let (status, findings, _) = verdict(
+        let (status, findings, _, _cause) = verdict(
             "abc123",
             Some("def456"),
             "0",
@@ -1618,7 +1843,7 @@ mod tests {
         assert!(findings[0].contains("rebuild"));
 
         // The dirty branch, too: dirty=1 wins outright.
-        let (status, findings, _) = verdict(
+        let (status, findings, _, _cause) = verdict(
             "abc123",
             Some("abc123"),
             "1",
@@ -1673,6 +1898,262 @@ mod tests {
         assert!(
             !resolved.is_empty(),
             "an empty override must never resolve to an empty (i.e. no-inputs) list"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------
+    // `grouped_findings` — MV.ticket.toolchain-freshness-reports-one-cause-and-one-fix.
+    // Fixtures over synthesized `WriterOutcome`s only; nothing here shells out to git,
+    // cargo, or spawns a writer binary.
+    // -----------------------------------------------------------------------------------
+
+    /// Build a synthesized `Drift` outcome naming `name`/`repo` with the given
+    /// `drift_cause`, and per-writer prose that would be distinguishable in the output
+    /// (so a test can assert on WHICH per-writer line, if any, survived ungrouped).
+    fn drift_outcome(name: &str, repo: &str, cause: DriftCause) -> WriterOutcome {
+        WriterOutcome {
+            name: name.to_string(),
+            status: CheckStatus::Drift,
+            repo: repo.to_string(),
+            findings: vec![format!("{name}: own-prose-marker-for-{name}")],
+            reason: None,
+            drift_cause: Some(cause),
+            dirty: false,
+        }
+    }
+
+    fn pass_outcome(name: &str, repo: &str) -> WriterOutcome {
+        WriterOutcome {
+            name: name.to_string(),
+            status: CheckStatus::Pass,
+            repo: repo.to_string(),
+            findings: Vec::new(),
+            reason: None,
+            drift_cause: None,
+            dirty: false,
+        }
+    }
+
+    #[test]
+    fn grouped_findings_two_writers_stale_from_same_upstream_change_produce_one_finding() {
+        // (a) self's OWN source moved (mev, abc111 -> def222) and bastion is stale
+        // ONLY via its path dependency on mev — the same upstream change, two stale
+        // binaries, ONE cause.
+        let outcomes = vec![
+            drift_outcome(
+                "self",
+                "mev",
+                DriftCause::OwnSource {
+                    from: "abc111".to_string(),
+                    to: "def222".to_string(),
+                },
+            ),
+            drift_outcome(
+                "bastion",
+                "bastion",
+                DriftCause::PathDependency {
+                    deps: vec!["mev".to_string()],
+                },
+            ),
+        ];
+
+        let findings = grouped_findings(&outcomes);
+
+        assert_eq!(
+            findings.len(),
+            1,
+            "one shared cause must produce exactly one finding, not one per writer"
+        );
+        let finding = &findings[0];
+        assert!(finding.contains("mev"), "names the cause repo");
+        assert!(finding.contains("abc111") && finding.contains("def222"));
+        assert!(finding.contains("self"), "names every stale binary");
+        assert!(finding.contains("bastion"), "names every stale binary");
+        assert!(
+            finding.contains("order does not matter"),
+            "states that rebuild order is irrelevant for a path-dependency closure"
+        );
+        assert!(
+            finding.contains("cargo install --path core/mev --force")
+                && finding.contains("cargo install --path core/bastion --force"),
+            "names a single rebuild command covering every stale binary: {finding}"
+        );
+        // Neither writer's own per-writer prose survives ungrouped once merged.
+        assert!(!findings.iter().any(|f| f.contains("own-prose-marker")));
+    }
+
+    #[test]
+    fn grouped_findings_different_causes_remain_separate_findings() {
+        // (b) THE POSITIVE CONTROL: two writers Drift for DIFFERENT causes (different
+        // upstream repos) must NOT collapse into one finding — without this test, an
+        // implementation that blanket-merges every Drift into a single line would pass
+        // every other assertion here.
+        let outcomes = vec![
+            drift_outcome(
+                "self",
+                "mev",
+                DriftCause::OwnSource {
+                    from: "abc111".to_string(),
+                    to: "def222".to_string(),
+                },
+            ),
+            drift_outcome(
+                "bella",
+                "bella",
+                DriftCause::OwnSource {
+                    from: "111aaa".to_string(),
+                    to: "222bbb".to_string(),
+                },
+            ),
+        ];
+
+        let findings = grouped_findings(&outcomes);
+
+        assert_eq!(
+            findings.len(),
+            2,
+            "two independent causes must remain two findings, not collapse into one"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("own-prose-marker-for-self"))
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("own-prose-marker-for-bella"))
+        );
+    }
+
+    #[test]
+    fn grouped_findings_single_stale_writer_with_no_downstream_reads_as_today() {
+        // (c) A lone Drift with no sibling sharing its cause emits exactly its own
+        // existing per-writer prose — no new ceremony for the common case.
+        let outcomes = vec![
+            drift_outcome(
+                "self",
+                "mev",
+                DriftCause::OwnSource {
+                    from: "abc111".to_string(),
+                    to: "def222".to_string(),
+                },
+            ),
+            pass_outcome("bastion", "bastion"),
+        ];
+
+        let findings = grouped_findings(&outcomes);
+
+        assert_eq!(
+            findings,
+            vec!["self: own-prose-marker-for-self".to_string()]
+        );
+    }
+
+    #[test]
+    fn grouped_findings_upstream_and_downstream_both_stale_downstream_never_suppressed() {
+        // (d) Both the upstream (self/mev) AND the downstream (bastion, via its path
+        // dependency on mev) are stale for the SAME cause: the downstream MUST still
+        // appear in the stale-binaries set of the merged finding — suppression would be
+        // a silent false PASS on a binary every lane's push gate runs.
+        let outcomes = vec![
+            drift_outcome(
+                "self",
+                "mev",
+                DriftCause::OwnSource {
+                    from: "abc111".to_string(),
+                    to: "def222".to_string(),
+                },
+            ),
+            drift_outcome(
+                "bastion",
+                "bastion",
+                DriftCause::PathDependency {
+                    deps: vec!["mev".to_string()],
+                },
+            ),
+        ];
+
+        let findings = grouped_findings(&outcomes);
+
+        assert_eq!(findings.len(), 1);
+        assert!(
+            findings[0].contains("bastion"),
+            "the downstream writer must appear in the merged finding, never be suppressed: {}",
+            findings[0]
+        );
+        assert!(findings[0].contains("self"));
+    }
+
+    #[test]
+    fn grouped_findings_all_writers_current_produces_no_findings() {
+        // (e) Every writer Pass -> no findings at all, unchanged.
+        let outcomes = vec![
+            pass_outcome("self", "mev"),
+            pass_outcome("bastion", "bastion"),
+        ];
+        let findings = grouped_findings(&outcomes);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn grouped_findings_dirty_drift_never_grouped_with_another_dirty_writer() {
+        // `Dirty` is a property of one binary's own build, never a shared upstream
+        // cause — two independently-dirty writers must never be merged into one
+        // finding just because their cause variant matches.
+        let outcomes = vec![
+            drift_outcome("self", "mev", DriftCause::Dirty),
+            drift_outcome("bastion", "bastion", DriftCause::Dirty),
+        ];
+        let findings = grouped_findings(&outcomes);
+        assert_eq!(
+            findings.len(),
+            2,
+            "Dirty causes must never be grouped across writers"
+        );
+    }
+
+    #[test]
+    fn drift_group_key_own_source_keys_on_repo() {
+        let cause = DriftCause::OwnSource {
+            from: "a".to_string(),
+            to: "b".to_string(),
+        };
+        assert_eq!(drift_group_key("mev", &cause), Some("mev".to_string()));
+    }
+
+    #[test]
+    fn drift_group_key_single_path_dependency_keys_on_the_dependency_name() {
+        let cause = DriftCause::PathDependency {
+            deps: vec!["mev".to_string()],
+        };
+        assert_eq!(drift_group_key("bastion", &cause), Some("mev".to_string()));
+    }
+
+    #[test]
+    fn drift_group_key_multi_dependency_path_drift_is_never_grouped() {
+        let cause = DriftCause::PathDependency {
+            deps: vec!["mev".to_string(), "okf-core".to_string()],
+        };
+        assert_eq!(drift_group_key("bastion", &cause), None);
+    }
+
+    #[test]
+    fn drift_group_key_dirty_and_unknown_are_never_grouped() {
+        assert_eq!(drift_group_key("mev", &DriftCause::Dirty), None);
+        assert_eq!(drift_group_key("mev", &DriftCause::Unknown), None);
+    }
+
+    #[test]
+    fn rebuild_command_dedupes_and_sorts_repos() {
+        let cmd = rebuild_command(&[
+            "bastion".to_string(),
+            "mev".to_string(),
+            "bastion".to_string(),
+        ]);
+        assert_eq!(
+            cmd,
+            "cargo install --path core/bastion --force && cargo install --path core/mev --force"
         );
     }
 }
