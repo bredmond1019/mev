@@ -18,7 +18,11 @@ use std::path::Path;
 use super::{CheckOutcome, CheckStatus, ConformanceCtx, FactSide, compare_sides};
 use crate::brain::state::Epic;
 
-/// Repo-relative directory every index-row link target is resolved against.
+/// Documented default for the directory every index-row link target is resolved
+/// against, when `[epics] index_path` is left at its serde default. `resolve_link_target`
+/// itself never reads this — the base it uses is always derived from the configured
+/// `index_path` (see [`index_dir_components`]) so a relocated index directory resolves
+/// its rows correctly too, not just the file itself.
 const EPICS_DIR: &[&str] = &["core", "planning", "epics"];
 
 /// Canonicalize an epic's status for the comparison — absent becomes the empty string so
@@ -27,11 +31,31 @@ fn canonical_status(status: &Option<String>) -> String {
     status.clone().unwrap_or_default()
 }
 
-/// Resolve a markdown link target against [`EPICS_DIR`], honoring `..` segments, and
-/// return the resulting brain-root-relative path as a `/`-joined string (independent of
-/// the host OS's path separator, since it is compared against JSON string values).
-fn resolve_link_target(target: &str) -> String {
-    let mut components: Vec<&str> = EPICS_DIR.to_vec();
+/// Split the PARENT directory of a configured `index_path` (e.g.
+/// `"planning/epics/index.md"`) into repo-relative path components (e.g.
+/// `["planning", "epics"]`), for seeding [`resolve_link_target`]. Falls back to
+/// [`EPICS_DIR`] if `index_path` has no parent segment (defensive; the config's own
+/// default always has one).
+fn index_dir_components(index_rel: &str) -> Vec<&str> {
+    let mut components: Vec<&str> = index_rel
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    // Drop the file name itself, keeping only the containing directory.
+    components.pop();
+    if components.is_empty() {
+        EPICS_DIR.to_vec()
+    } else {
+        components
+    }
+}
+
+/// Resolve a markdown link target against `base` (the configured index doc's parent
+/// directory, from [`index_dir_components`]), honoring `..` segments, and return the
+/// resulting brain-root-relative path as a `/`-joined string (independent of the host
+/// OS's path separator, since it is compared against JSON string values).
+fn resolve_link_target(target: &str, base: &[&str]) -> String {
+    let mut components: Vec<&str> = base.to_vec();
     for part in target.split('/') {
         match part {
             "" | "." => {}
@@ -76,7 +100,7 @@ fn table_cells(line: &str) -> Vec<&str> {
 ///
 /// Only rows whose first column is a markdown link (`| [...` after trimming) are table
 /// data rows — the header row and the `|---|---|` separator are skipped naturally.
-fn parse_index_md(contents: &str, epics: &[Epic]) -> Vec<String> {
+fn parse_index_md(contents: &str, epics: &[Epic], base: &[&str]) -> Vec<String> {
     let mut items = Vec::new();
 
     for line in contents.lines() {
@@ -95,7 +119,7 @@ fn parse_index_md(contents: &str, epics: &[Epic]) -> Vec<String> {
         };
         let status = cols[2].trim_matches('`').to_string();
 
-        let resolved = resolve_link_target(target);
+        let resolved = resolve_link_target(target, base);
         let slug = epics
             .iter()
             .find(|e| e.plan.as_deref() == Some(resolved.as_str()))
@@ -161,8 +185,9 @@ pub fn run(ctx: &ConformanceCtx) -> CheckOutcome {
         );
     };
 
+    let base = index_dir_components(index_rel);
     let left_items = registry_items(epics);
-    let right_items = parse_index_md(&contents, epics);
+    let right_items = parse_index_md(&contents, epics, &base);
 
     let left = FactSide {
         label: "state.json epics[]".to_string(),
@@ -493,6 +518,67 @@ mod tests {
     }
 
     #[test]
+    fn relocated_index_row_linking_outside_epics_dir_resolves_correctly() {
+        // The exact regression: epics dir relocated to `planning/epics`, config's
+        // `index_path` updated to match, and a row linking ONE level out
+        // (`../roadmaps/x/roadmap.md`) — the shape reported by lane agentic-portfolio-a0.
+        // Resolved against the old hardcoded `core/planning/epics` const this becomes
+        // `core/planning/roadmaps/x/roadmap.md`, matches no registry `plan`, and falls
+        // back to the link stem `roadmap` — reproducing the reported drift. Resolved
+        // against the configured base it must match the registry's `plan` and PASS.
+        let root = crate::testsupport::unique_temp_dir("mev-conformance-epics-relocated-outside");
+        let index_dir = root.join("planning").join("epics");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        std::fs::write(
+            index_dir.join("index.md"),
+            "| Doc | Epic | Status | Repos |\n|---|---|---|---|\n\
+             | [roadmap.md](../roadmaps/x/roadmap.md) | **X** | `focused` | `brain` |\n",
+        )
+        .unwrap();
+        write_doc(&root, "planning/roadmaps/x/roadmap.md");
+        let ctx = ctx_with_index_path(
+            &root,
+            vec![epic("x", "focused", Some("planning/roadmaps/x/roadmap.md"))],
+            "planning/epics/index.md",
+        );
+
+        let outcome = run(&ctx);
+        assert_eq!(outcome.status, CheckStatus::Pass, "{:?}", outcome.findings);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn relocated_index_row_linking_inside_epics_dir_still_resolves() {
+        // The 19-rows-that-work-today control at the RELOCATED location: a row linking a
+        // sibling file inside the (relocated) epics dir must still resolve correctly.
+        let root = crate::testsupport::unique_temp_dir("mev-conformance-epics-relocated-inside");
+        let index_dir = root.join("planning").join("epics");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        std::fs::write(
+            index_dir.join("index.md"),
+            "| Doc | Epic | Status | Repos |\n|---|---|---|---|\n\
+             | [bastion-tui.md](bastion-tui.md) | **Bastion Console** | `paused` | `bastion` |\n",
+        )
+        .unwrap();
+        write_doc(&root, "planning/epics/bastion-tui.md");
+        let ctx = ctx_with_index_path(
+            &root,
+            vec![epic(
+                "bastion-tui",
+                "paused",
+                Some("planning/epics/bastion-tui.md"),
+            )],
+            "planning/epics/index.md",
+        );
+
+        let outcome = run(&ctx);
+        assert_eq!(outcome.status, CheckStatus::Pass, "{:?}", outcome.findings);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn missing_index_md_is_not_evaluable() {
         let root = crate::testsupport::unique_temp_dir("mev-conformance-epics-missing-index");
         std::fs::create_dir_all(&root).unwrap();
@@ -507,13 +593,41 @@ mod tests {
 
     #[test]
     fn resolve_link_target_handles_parent_dirs() {
+        let default_base = index_dir_components("core/planning/epics/index.md");
         assert_eq!(
-            resolve_link_target("../../../planning/bullet-proof-software/roadmap.md"),
+            resolve_link_target(
+                "../../../planning/bullet-proof-software/roadmap.md",
+                &default_base
+            ),
             "planning/bullet-proof-software/roadmap.md"
         );
         assert_eq!(
-            resolve_link_target("bastion-tui.md"),
+            resolve_link_target("bastion-tui.md", &default_base),
             "core/planning/epics/bastion-tui.md"
+        );
+    }
+
+    #[test]
+    fn resolve_link_target_follows_a_relocated_base() {
+        // The bug this task fixes: with the epics dir relocated to `planning/epics`, a
+        // row linking one level out (`../roadmaps/x/roadmap.md`) must resolve against
+        // THAT base, not against the old `core/planning/epics` const.
+        let relocated_base = index_dir_components("planning/epics/index.md");
+        assert_eq!(
+            resolve_link_target("../roadmaps/x/roadmap.md", &relocated_base),
+            "planning/roadmaps/x/roadmap.md"
+        );
+    }
+
+    #[test]
+    fn index_dir_components_strips_the_file_name() {
+        assert_eq!(
+            index_dir_components("core/planning/epics/index.md"),
+            vec!["core", "planning", "epics"]
+        );
+        assert_eq!(
+            index_dir_components("planning/epics/index.md"),
+            vec!["planning", "epics"]
         );
     }
 
