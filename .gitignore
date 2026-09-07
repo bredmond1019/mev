@@ -40,3 +40,4 @@ target/
 # already the same day D57 landed. Permitted cold-CI route back: RUSTC_WRAPPER together with
 # CARGO_INCREMENTAL=0, never a committed config file.
 .cargo/config.toml
+scripts/__pycache__/
