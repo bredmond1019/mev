@@ -108,6 +108,7 @@ mod tests {
 
     fn repo_entry(slug: &str) -> RepoEntry {
         RepoEntry {
+            non_vaulted_planning: false,
             public: false,
             slug: slug.to_string(),
             tier: "primary".to_string(),

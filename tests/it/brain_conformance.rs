@@ -501,6 +501,7 @@ fn surface_commit_all(dir: &Path) {
 /// because that helper is not (and should not become) part of the public surface.
 fn surface_repo_entry(slug: &str, repo_path: &str, public: bool) -> mev::brain::config::RepoEntry {
     mev::brain::config::RepoEntry {
+        non_vaulted_planning: false,
         slug: slug.to_string(),
         tier: "core".to_string(),
         repo_path: repo_path.to_string(),

@@ -851,6 +851,7 @@ mod tests {
                 ],
             },
             repos: vec![RepoEntry {
+                non_vaulted_planning: false,
                 public: false,
                 slug: "brain".to_string(),
                 tier: "primary".to_string(),
@@ -1070,6 +1071,7 @@ mod tests {
             },
             repos: vec![
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "brain".to_string(),
                     tier: "primary".to_string(),
@@ -1080,6 +1082,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "sub".to_string(),
                     tier: "core".to_string(),

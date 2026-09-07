@@ -479,6 +479,16 @@ pub struct RepoEntry {
     /// `true`.
     #[serde(default)]
     pub public: bool,
+    /// Whether this repo tracks `planning/` in place rather than through the
+    /// tier vault symlink. Read by engine-rs's worktree setup, which otherwise
+    /// installs a vault symlink into every new worktree and refuses any repo
+    /// whose `planning/` is a real tracked directory.
+    ///
+    /// FAIL-CLOSED: defaults to `false` — the vaulted arrangement, i.e. a
+    /// symlinked `planning/`. An entry that omits `non_vaulted_planning` is
+    /// treated as vaulted, so every existing `brain.toml` is unaffected.
+    #[serde(default)]
+    pub non_vaulted_planning: bool,
 }
 
 /// `[surface_allowlist]` section in `brain.toml`.
@@ -906,6 +916,51 @@ public = false
     }
 
     #[test]
+    fn repo_entry_non_vaulted_planning_defaults_false_when_key_absent() {
+        // FAIL-CLOSED: an entry that omits `non_vaulted_planning` must parse
+        // as vaulted (false) — the positive control that this field is
+        // additive and every existing brain.toml is unaffected. The fixture
+        // brain.toml's [[repos]] entries carry no `non_vaulted_planning` key.
+        let cfg = load_brain_config(&fixture_path()).expect("should parse fixture");
+        assert!(
+            cfg.repos.iter().all(|r| !r.non_vaulted_planning),
+            "every fixture repo entry omits `non_vaulted_planning` and must parse as false"
+        );
+    }
+
+    #[test]
+    fn repo_entry_non_vaulted_planning_true_parses_true() {
+        let toml = r#"
+[[repos]]
+slug = "mev"
+tier = "primary"
+repo_path = "core/mev"
+non_vaulted_planning = true
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert!(
+            cfg.repos[0].non_vaulted_planning,
+            "non_vaulted_planning = true must parse as true"
+        );
+    }
+
+    #[test]
+    fn repo_entry_non_vaulted_planning_false_parses_false() {
+        let toml = r#"
+[[repos]]
+slug = "brain"
+tier = "primary"
+repo_path = "."
+non_vaulted_planning = false
+"#;
+        let cfg: BrainConfig = toml::from_str(toml).expect("parse");
+        assert!(
+            !cfg.repos[0].non_vaulted_planning,
+            "non_vaulted_planning = false must parse as false"
+        );
+    }
+
+    #[test]
     fn surface_allowlist_empty_when_table_absent() {
         let cfg = load_brain_config(&fixture_path()).expect("should parse fixture");
         assert!(
@@ -1225,6 +1280,7 @@ enforce_blocks = true
 
     fn repo_entry(slug: &str, tier: &str, repo_path: &str) -> RepoEntry {
         RepoEntry {
+            non_vaulted_planning: false,
             public: false,
             slug: slug.to_string(),
             tier: tier.to_string(),
@@ -1252,6 +1308,7 @@ enforce_blocks = true
             contracts: Vec::new(),
             repos: vec![
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),

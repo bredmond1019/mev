@@ -337,6 +337,7 @@ mod tests {
         let repos = slugs
             .iter()
             .map(|slug| RepoEntry {
+                non_vaulted_planning: false,
                 public: false,
                 slug: slug.to_string(),
                 tier: String::new(),

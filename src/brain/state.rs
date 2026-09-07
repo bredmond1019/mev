@@ -5239,6 +5239,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
@@ -5249,6 +5250,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "alpha".to_string(),
                     tier: "core".to_string(),
@@ -5332,6 +5334,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
@@ -5342,6 +5345,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "core".to_string(),
                     tier: "_root".to_string(),
@@ -5352,6 +5356,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "alpha".to_string(),
                     tier: "core".to_string(),
@@ -5422,6 +5427,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
@@ -5432,6 +5438,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "re-rs".to_string(),
                     tier: "portfolio".to_string(),
@@ -5473,6 +5480,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
@@ -5483,6 +5491,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "alpha".to_string(),
                     tier: "core".to_string(),
@@ -5493,6 +5502,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "missing-repo".to_string(),
                     tier: "core".to_string(),
@@ -5596,6 +5606,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
@@ -5606,6 +5617,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "core".to_string(),
                     tier: "_root".to_string(),
@@ -5616,6 +5628,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "alpha".to_string(),
                     tier: "core".to_string(),
@@ -11548,6 +11561,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
@@ -11558,6 +11572,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "alpha".to_string(),
                     tier: "core".to_string(),
@@ -11568,6 +11583,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "beta".to_string(),
                     tier: "core".to_string(),
@@ -11578,6 +11594,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "gamma".to_string(),
                     tier: "portfolio".to_string(),
@@ -11647,6 +11664,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
@@ -11657,6 +11675,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "business".to_string(),
                     tier: "_root".to_string(),
@@ -12148,6 +12167,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "alpha".to_string(),
                     tier: "core".to_string(),
@@ -12158,6 +12178,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "beta".to_string(),
                     tier: "core".to_string(),
@@ -12168,6 +12189,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "alpha".to_string(),
                     tier: "core".to_string(),
@@ -12339,6 +12361,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),
@@ -12349,6 +12372,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "business".to_string(),
                     tier: "_root".to_string(),
@@ -12359,6 +12383,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "alpha".to_string(),
                     tier: "core".to_string(),
@@ -14332,6 +14357,7 @@ mod check_epics_tests {
     fn epic_config() -> BrainConfig {
         use crate::brain::config::{CrawlConfig, RepoEntry, VocabConfig};
         let entry = |slug: &str, tier: &str, path: &str| RepoEntry {
+            non_vaulted_planning: false,
             public: false,
             slug: slug.to_string(),
             tier: tier.to_string(),

@@ -1431,6 +1431,7 @@ fn make_config_with_repo(slug: &str, tier: &str) -> mev::brain::config::BrainCon
         vocab: VocabConfig::default(),
         crawl: CrawlConfig::default(),
         repos: vec![RepoEntry {
+            non_vaulted_planning: false,
             public: false,
             slug: slug.to_string(),
             tier: tier.to_string(),

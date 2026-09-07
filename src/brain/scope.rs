@@ -110,6 +110,7 @@ mod tests {
             crawl: CrawlConfig::default(),
             repos: vec![
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "brain".to_string(),
                     tier: "primary".to_string(),
@@ -120,6 +121,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "core".to_string(),
                     tier: "tier".to_string(),
@@ -130,6 +132,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "mev".to_string(),
                     tier: "primary".to_string(),
@@ -232,6 +235,7 @@ mod tests {
             carryover: Default::default(),
             repos: vec![
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "brain".to_string(),
                     repo_path: ".".to_string(),
@@ -242,6 +246,7 @@ mod tests {
                     prefix: None,
                 },
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "mev".to_string(),
                     repo_path: "core/mev".to_string(),

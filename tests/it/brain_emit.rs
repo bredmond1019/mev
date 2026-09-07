@@ -650,6 +650,7 @@ mod task3_planners {
             repos: entries
                 .iter()
                 .map(|(slug, tier)| RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: slug.to_string(),
                     tier: tier.to_string(),
@@ -1328,6 +1329,7 @@ mod task3_planners {
             attention: Default::default(),
             history: Default::default(),
             repos: vec![RepoEntry {
+                non_vaulted_planning: false,
                 public: false,
                 slug: slug.to_string(),
                 tier: tier.to_string(),
@@ -4424,6 +4426,7 @@ mod task2_render_unified_board {
             repos: entries
                 .iter()
                 .map(|(slug, tier)| RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: slug.to_string(),
                     tier: tier.to_string(),
@@ -4838,6 +4841,7 @@ mod task2_plan_hq_board {
             repos: entries
                 .iter()
                 .map(|(slug, tier)| RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: slug.to_string(),
                     tier: tier.to_string(),
@@ -5193,6 +5197,7 @@ mod task2_plan_unified_board {
             repos: entries
                 .iter()
                 .map(|(slug, tier)| RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: slug.to_string(),
                     tier: tier.to_string(),
@@ -5946,6 +5951,7 @@ mod task_yaml_frontmatter_drift_tests {
             attention: Default::default(),
             history: Default::default(),
             repos: vec![RepoEntry {
+                non_vaulted_planning: false,
                 public: false,
                 slug: "myrepo".to_string(),
                 tier: "core".to_string(),
@@ -7117,6 +7123,7 @@ mod attention_board {
 
     fn repo_entry(slug: &str, tier: &str) -> RepoEntry {
         RepoEntry {
+            non_vaulted_planning: false,
             public: false,
             slug: slug.to_string(),
             tier: tier.to_string(),
@@ -8458,6 +8465,7 @@ mod epic_emit {
             ]
             .iter()
             .map(|(slug, tier)| RepoEntry {
+                non_vaulted_planning: false,
                 public: false,
                 slug: slug.to_string(),
                 tier: tier.to_string(),
@@ -8994,6 +9002,7 @@ mod task2_scope_filter {
 
     fn repo_entry(slug: &str, tier: &str, repo_path: &str) -> RepoEntry {
         RepoEntry {
+            non_vaulted_planning: false,
             public: false,
             slug: slug.to_string(),
             tier: tier.to_string(),
@@ -9013,6 +9022,7 @@ mod task2_scope_filter {
         BrainConfig {
             repos: vec![
                 RepoEntry {
+                    non_vaulted_planning: false,
                     public: false,
                     slug: "brain".to_string(),
                     tier: "_root".to_string(),

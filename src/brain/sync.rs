@@ -307,6 +307,7 @@ mod tests {
             vocab: VocabConfig::default(),
             crawl: CrawlConfig::default(),
             repos: vec![RepoEntry {
+                non_vaulted_planning: false,
                 public: false,
                 slug: "test-repo".to_string(),
                 tier: "primary".to_string(),

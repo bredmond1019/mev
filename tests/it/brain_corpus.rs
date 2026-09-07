@@ -74,6 +74,7 @@ fn three_unit_config() -> BrainConfig {
         },
         repos: vec![
             RepoEntry {
+                non_vaulted_planning: false,
                 public: false,
                 slug: "brain".to_string(),
                 tier: "primary".to_string(),
@@ -84,6 +85,7 @@ fn three_unit_config() -> BrainConfig {
                 prefix: None,
             },
             RepoEntry {
+                non_vaulted_planning: false,
                 public: false,
                 slug: "core".to_string(),
                 tier: "tier".to_string(),
@@ -94,6 +96,7 @@ fn three_unit_config() -> BrainConfig {
                 prefix: None,
             },
             RepoEntry {
+                non_vaulted_planning: false,
                 public: false,
                 slug: "mev".to_string(),
                 tier: "primary".to_string(),

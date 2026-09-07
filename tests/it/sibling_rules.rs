@@ -128,6 +128,7 @@ fn mixed_kind_config() -> BrainConfig {
         crawl: CrawlConfig::default(),
         repos: vec![
             RepoEntry {
+                non_vaulted_planning: false,
                 public: false,
                 slug: "subbrain".to_string(),
                 tier: "core".to_string(),
@@ -138,6 +139,7 @@ fn mixed_kind_config() -> BrainConfig {
                 prefix: None,
             },
             RepoEntry {
+                non_vaulted_planning: false,
                 public: false,
                 slug: "leafalpha".to_string(),
                 tier: "core".to_string(),
