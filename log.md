@@ -11,6 +11,34 @@ related: [status]
 timestamp: "2026-09-04T05:31:55-03:00"
 ---
 
+## [run: 2026-09-07]
+
+### MV.20.A closed: liveness derived from the registry, not lifecycle frontmatter
+
+- **What:** Drove `MV.20.A` ("Liveness from the registry") to completion via `/sdlc-flow` — 3 of 3
+  tasks PASS, final verdict PASS. `discover_live_runs`/`compute_fleet_slot_view` now derive
+  `held-repo-busy` from lane-agents registry claims with a fresh heartbeat as the primary source
+  (deduplicated per-repo, first live claim wins), demoting `lifecycle:` frontmatter to a
+  `degraded: true` fallback used only when no registry claim names the repo. pid liveness is
+  trusted only when `pid_source: explicit` — a `PidSource::OwnProcess` ("self") record skips the
+  pid check and relies on `started_at` age alone. Slot staleness now reads okf-core's single
+  `COORD_STALE_TTL_SECONDS` instead of mev's own local 4h constant; `lease.rs`'s separate
+  `LEASE_STALE_THRESHOLD_SECONDS` (10800s) was deliberately left as-is — a different record kind
+  than the pid-keyed registry entries, mirroring `check_lane_agents.py`'s own TTL. Both modules'
+  docs were corrected to describe the new rule. `docs/architecture.md` patched to match.
+- All four harness gates green (fmt, clippy `-D warnings`, full `cargo test`, release build), plus
+  `scripts/check_consumers.sh` and the lockfile check, and the un-gateable live-tree `mev lanes`
+  invariant re-verified against the real corpus.
+- Next: pick up the next queued item in `planning/status.md`'s `next:` list — `MV.20.B` (mev's
+  guards move into the library) is the next block in this lane.
+
+```
+1755f92 docs: update docs for MV.20.A
+30fd33d feat: implement MV.20.A-task3
+c6249d7 feat: implement MV.20.A-task2
+418f84d feat: implement MV.20.A-task1
+```
+
 ## [run: 2026-09-04]
 
 ### Two lanes, seven blocks: surface-leak made trustworthy and five gate-honesty defects closed
