@@ -13,6 +13,36 @@ timestamp: "2026-09-04T05:31:55-03:00"
 
 ## [run: 2026-09-07]
 
+### MV.20.D closed: `mev add-operator-edge`
+
+- **What:** Drove `MV.20.D` ("`mev add-operator-edge`") to completion via `/sdlc-flow` — 3 of 3
+  tasks PASS, final verdict PASS. Task 1 extended `src/brain/operator.rs` with
+  `plan_add_operator_edge`, appending an `OperatorDep` to a named block's `depends_on` on the
+  existing `EmitPlan`/`apply_plan` path, refusing a duplicate slug on the same block, with
+  byte-for-byte round-trip tests (reused `E_BLOCK_BAD_KEY`/`E_BLOCK_NOT_FOUND`, added
+  `E_OPERATOR_EDGE_DUPLICATE_SLUG`). Task 2 added the guarded `add_operator_edge`/
+  `add_operator_edge_as` library entry-point pair (mirroring `create_block`/`create_block_as`),
+  proven reachable from an external crate via a new `tests/it/lib_add_operator_edge.rs` module.
+  Task 3 registered the `mev add-operator-edge <repo>:<id> --slug --exit --start [--what]
+  [--write]` CLI subcommand wired to the guarded entry point, verified `bastion validate-brain
+  --state` green after a write against a full HQ-tree copy, and exercised the duplicate-slug
+  refusal against a live corpus edge.
+- All harness gates green (fmt, clippy `-D warnings`, full `cargo test`, release build, consumer
+  checks, lockfile). Block flipped closed via `mev set-block-status mev:MV.20.D closed --write`
+  (deterministic route). `mev emit-state --write` reported `W_EMIT_SKIPPED_STALE_BINARY`
+  (toolchain drift: the installed `bastion`/`mev` binaries predate this run's own commits) —
+  derived surfaces were not regenerated this run; rebuild/reinstall before trusting any generated
+  surface.
+- Next: pick up from `planning/status.md`'s `next:` queue — nothing in this run's scope carried a
+  deviation worth a follow-up ticket.
+
+```
+8d9c979 docs: update docs for MV.20.D
+53d6fa8 feat: implement MV.20.D-task3
+a573272 feat: implement MV.20.D-task2
+b535726 feat: implement MV.20.D-task1
+```
+
 ### MV.20.B closed: mev's write guards move into the library
 
 - **What:** Drove `MV.20.B` ("mev's guards move into the library") to completion via `/sdlc-flow`
