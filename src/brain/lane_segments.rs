@@ -2783,4 +2783,124 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// `MV.20.C` Task 2 parity test: mev's `lease_windows` parser and
+    /// `base-template/.claude/workflows/lane.schema.json` must agree about the
+    /// `lease_windows` shape, since the two are hand-mirrored with no shared
+    /// dependency to enforce it (same class of drift risk as
+    /// `LaneDirectives`'s engine-rs mirror, documented on that type above). This is
+    /// the drift alarm: if either side changes the property's presence, its
+    /// `{repo, blocks}` item shape, or `additionalProperties`, this test fails.
+    ///
+    /// Locates the schema by walking up from this crate's own manifest directory to
+    /// `brain.toml` (`find_brain_root`), never a hardcoded relative path — this crate
+    /// can be built from a worktree or a differently-nested checkout, and a bare
+    /// `"../.."` silently reads the wrong tree (or none) in that case. Skips cleanly
+    /// (never fails) when `brain.toml` or the schema file is absent, matching this
+    /// repo's other live-corpus tests (e.g. `config::tests::live_corpus_*`) — a fresh
+    /// clone or hosted CI runner without the sibling HQ/base-template checkout must
+    /// not turn this into a spurious failure.
+    #[test]
+    fn live_corpus_lane_schema_agrees_with_mev_parser_about_lease_windows() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let brain_root = match crate::brain::config::find_brain_root(manifest_dir) {
+            Ok(root) => root,
+            Err(e) => {
+                eprintln!(
+                    "skipping live_corpus_lane_schema_agrees_with_mev_parser_about_lease_windows: \
+                     no brain.toml found walking up from {} ({e})",
+                    manifest_dir.display()
+                );
+                return;
+            }
+        };
+        let schema_path = brain_root.join("base-template/.claude/workflows/lane.schema.json");
+        if !schema_path.is_file() {
+            eprintln!(
+                "skipping live_corpus_lane_schema_agrees_with_mev_parser_about_lease_windows: \
+                 {} not found (checkout without the sibling base-template tree)",
+                schema_path.display()
+            );
+            return;
+        }
+
+        let schema_content = std::fs::read_to_string(&schema_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", schema_path.display()));
+        let schema: serde_json::Value = serde_json::from_str(&schema_content)
+            .unwrap_or_else(|e| panic!("{} is not valid JSON: {e}", schema_path.display()));
+
+        let lease_windows_prop = schema
+            .pointer("/properties/lease_windows")
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} has no properties.lease_windows — mev's parser accepts the key but the \
+                     schema does not declare it",
+                    schema_path.display()
+                )
+            });
+
+        assert_eq!(
+            lease_windows_prop.get("type").and_then(|v| v.as_str()),
+            Some("array"),
+            "lease_windows must be a JSON array in the schema, matching mev's \
+             Option<Vec<LeaseWindow>>"
+        );
+
+        let item_schema = lease_windows_prop
+            .pointer("/items")
+            .expect("lease_windows.items must be present");
+        assert_eq!(
+            item_schema
+                .get("additionalProperties")
+                .and_then(|v| v.as_bool()),
+            Some(false),
+            "lease_windows[] items must still be additionalProperties: false, matching mev's \
+             #[serde(deny_unknown_fields)] LeaseWindow"
+        );
+
+        let required: std::collections::HashSet<&str> = item_schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        let expected_required: std::collections::HashSet<&str> =
+            ["repo", "blocks"].into_iter().collect();
+        assert_eq!(
+            required, expected_required,
+            "lease_windows[] required fields must be exactly {{repo, blocks}}, matching \
+             mev's LeaseWindow struct fields"
+        );
+
+        let item_props: std::collections::HashSet<&str> = item_schema
+            .pointer("/properties")
+            .and_then(|v| v.as_object())
+            .map(|m| m.keys().map(|k| k.as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            item_props, expected_required,
+            "lease_windows[] properties must be exactly {{repo, blocks}} — LeaseWindow has no \
+             other fields"
+        );
+
+        // Round-trip a record built to exactly this schema shape through mev's own
+        // parser, so the assertion is not just about the schema's text but about
+        // mev's actual runtime behavior over a schema-conformant record.
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-schema-parity-lease-windows");
+        let json = r#"{"lane":"substrate","roadmap":"alpha","blocks":[{"id":"MV.ticket.a","origin_roadmap":"alpha","repo":"mev"}],"lease_windows":[{"repo":"mev","blocks":["MV.ticket.a"]}]}"#;
+        write(&dir, "planning/roadmaps/alpha/lane-substrate.json", json);
+        let (files, diags) = discover_lane_files(&dir);
+        assert!(
+            diags.is_empty(),
+            "a schema-conformant lease_windows record must parse cleanly, got {diags:?}"
+        );
+        assert_eq!(files.len(), 1);
+        assert!(
+            files[0]
+                .directives
+                .as_ref()
+                .is_some_and(|d| d.lease_windows.is_some()),
+            "the parsed lease_windows must be reachable via LaneFile::directives"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
