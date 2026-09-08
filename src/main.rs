@@ -754,6 +754,73 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         lock_dir: Option<PathBuf>,
     },
+    /// Author a new `{"type":"operator", ...}` `depends_on` edge on an EXISTING
+    /// block: `mev add-operator-edge <repo>:<id> --slug --exit --start [--what]`.
+    ///
+    /// This verb never creates the block — `create-block` does that. Naming a
+    /// block that does not resolve in the loaded corpus is refused, naming it,
+    /// the same shape as `create-block`'s dangling-dependency refusal.
+    ///
+    /// A block already carrying an operator edge with the same `--slug` is
+    /// refused, naming the slug and the block — refused on that block's own
+    /// edges only, since the same slug legitimately gates many different
+    /// blocks (it is a deliberate join key, `OperatorDep`'s doc comment).
+    ///
+    /// The write diffs ONLY the added edge lines: `apply_plan` reuses the same
+    /// serialization `create-block`/`set-block-status` already establish, so a
+    /// `state.json` carrying non-ASCII text round-trips byte-for-byte apart
+    /// from the new edge.
+    ///
+    /// Same driver contract as `create-block`/`set-block-status`: dry-run by
+    /// default, `--write` to apply, plus `--scope`/`--agent`/`--lock-dir` —
+    /// resolved identically to `emit-state`'s — and a `--write` that also
+    /// re-runs `emit-state --write` so the boards agree in the same
+    /// invocation. The written `OperatorDep` carries exactly its four fields
+    /// (`slug`, `exit`, `start`, optional `what`); `OP.<slug>` (D76) is
+    /// derived from `slug` alone, no second field is stored.
+    ///
+    /// Exit codes:
+    ///   0 — planned (dry-run) or applied
+    ///   1 — `E_BLOCK_BAD_KEY`, `E_BLOCK_NOT_FOUND`,
+    ///       `E_OPERATOR_EDGE_DUPLICATE_SLUG`, a write failure,
+    ///       `E_EMIT_UNKNOWN_SCOPE`, `E_EMIT_LOCK_HELD`, `E_QUIESCE_LEASE_HELD`,
+    ///       or a linked-worktree refusal
+    AddOperatorEdge {
+        /// Block key in `repo:id` form, e.g. `mev:MV.10.A`. The block must
+        /// already exist — this verb never creates one (`create-block` does).
+        key: String,
+        /// Kebab-case identifier, shared across every block this gate covers.
+        #[arg(long)]
+        slug: String,
+        /// The artifact whose existence ends the session.
+        #[arg(long)]
+        exit: String,
+        /// The command that starts the session, paste-ready.
+        #[arg(long)]
+        start: String,
+        /// Optional gloss: why this particular block is gated on it.
+        #[arg(long)]
+        what: Option<String>,
+        /// Path to search from when locating brain.toml. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Apply the edit. Without this the command prints what it would change.
+        #[arg(long)]
+        write: bool,
+        /// Limit the chained emit's regeneration to one repo's derived surfaces. Same
+        /// resolution as `create-block --scope` / `emit-state --scope`; an
+        /// unknown or blank slug exits with `E_EMIT_UNKNOWN_SCOPE`.
+        #[arg(long, value_name = "REPO")]
+        scope: Option<String>,
+        /// Calling agent's identity for the quiesce-lease self-exemption, consulted
+        /// only when `--write` mutates. See `emit-state --agent`.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Override the fleet lock directory the quiesce-lease check consults.
+        /// See `emit-state --lock-dir`.
+        #[arg(long, value_name = "PATH")]
+        lock_dir: Option<PathBuf>,
+    },
     /// Park an existing block into `backlog[]`: `create-block`'s inverse
     /// (MV.ticket.demote-block-to-backlog). Removes the target's
     /// `tracks[].blocks[]` row and appends a `backlog[]` entry carrying the
@@ -3790,6 +3857,91 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             report_doc("create-block", &root, write, cli.json, result)
+        }
+        Command::AddOperatorEdge {
+            key,
+            slug,
+            exit,
+            start,
+            what,
+            path,
+            write,
+            scope,
+            agent,
+            lock_dir,
+        } => {
+            // Same worktree guard as create-block/set-block-status: a --write here
+            // chains into emit-state, which resolves every repo's paths from
+            // brain.toml rather than CWD.
+            if write && mev::brain::config::is_linked_worktree(&path) {
+                eprintln!(
+                    "error: refusing to write from inside a linked git worktree ({}) — add-operator-edge chains into emit-state, which resolves derived-file paths from brain.toml, not CWD, so this would regenerate the MAIN checkout's files. Run from the main working tree instead.",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            let root = match mev::brain::config::find_brain_root(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let edge = okf_core::OperatorDep {
+                slug,
+                exit,
+                start,
+                what,
+            };
+            // Guard + lock: delegated entirely to `add_operator_edge_as` below,
+            // which applies the quiesce check and holds `<root>/.mev-emit.lock`
+            // for the duration of the write — main.rs does not evaluate the
+            // quiesce check or acquire the lock itself, so the guard runs
+            // exactly once.
+            // Resolve --scope the same way create-block / set-block-status / emit-state do.
+            let scope_deps = match &scope {
+                Some(slug) => {
+                    let config =
+                        match mev::brain::config::load_brain_config(&root.join("brain.toml")) {
+                            Ok(cfg) => cfg,
+                            Err(e) => {
+                                eprintln!("error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                    match config.scope_dependencies(slug) {
+                        Ok(deps) => Some(deps),
+                        Err(mev::brain::config::ScopeError::UnknownSlug { slug, valid_slugs }) => {
+                            eprintln!(
+                                "error [E_EMIT_UNKNOWN_SCOPE] unknown --scope slug '{slug}'; valid slugs: {}",
+                                valid_slugs.join(", ")
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                        Err(e) => {
+                            eprintln!("error [E_EMIT_UNKNOWN_SCOPE] {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+                None => None,
+            };
+            let result = mev::add_operator_edge_as(
+                &root,
+                &key,
+                &edge,
+                write,
+                scope_deps.as_ref(),
+                agent.as_deref(),
+                lock_dir.as_deref(),
+                &path,
+            );
+            if let Err(err) = &result
+                && print_guarded_write_error(err, "add-operator-edge")
+            {
+                return ExitCode::FAILURE;
+            }
+            report_doc("add-operator-edge", &root, write, cli.json, result)
         }
         Command::DemoteBlock {
             key,
