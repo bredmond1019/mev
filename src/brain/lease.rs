@@ -209,6 +209,65 @@ pub fn check_quiesce(lock_dir: &Path, repo: &str, agent: Option<&str>) -> Quiesc
     Quiesce::Clear
 }
 
+/// Resolve the fleet lock directory a write verb's `--agent`/`--lock-dir` options and
+/// [`check_quiesce`] both consult, per the SAME precedence
+/// `base-template/scripts/check_lane_agents.py::resolve_lock_dir` uses (do not
+/// re-derive this differently): explicit `--lock-dir`, else the `FLEET_LOCK_DIR`
+/// environment variable, else `<brain_root>/.fleet-locks` — the exact
+/// [`super::availability::FLEET_LOCK_SUBDIR`] constant `availability.rs` already
+/// defines for the sibling `.fleet-locks` fleet-lock-slot reader, so the two mechanisms
+/// can never silently disagree on which directory is "the" lock dir.
+///
+/// `MV.20.B` Task 1: relocated verbatim from `src/main.rs` so in-process library
+/// callers can resolve the same lock dir the CLI does.
+pub fn resolve_lock_dir(explicit: Option<&Path>, root: &Path) -> PathBuf {
+    if let Some(p) = explicit {
+        return p.to_path_buf();
+    }
+    if let Ok(env_dir) = std::env::var("FLEET_LOCK_DIR")
+        && !env_dir.is_empty()
+    {
+        return PathBuf::from(env_dir);
+    }
+    root.join(super::availability::FLEET_LOCK_SUBDIR)
+}
+
+/// Resolve which `[[repos]]` slug `dir` belongs to, for [`check_quiesce`]'s `repo`
+/// parameter — mirrors `check_lane_agents.py::resolve_own_repo`'s brain.toml-lookup
+/// path (no explicit `--repo` flag exists on mev's write verbs, so there is no
+/// "explicit" branch to mirror here): find the registered `[[repos]]` entry whose
+/// `repo_path` (joined onto `root`) canonicalizes to the same place as `dir`.
+///
+/// Returns `""` when the config can't be loaded or no entry matches — this is a
+/// fail-OPEN default for repo-scoped leases specifically (an unresolvable identity
+/// can never equal any real lease's `repo` field, so a `scope: repo` lease simply
+/// won't quiesce an unidentified caller). This does not weaken the primary guard: a
+/// `scope: fleet` lease quiesces regardless of `repo`, and that is the scope the
+/// incident this ticket fixes actually needed.
+///
+/// `MV.20.B` Task 1: relocated verbatim from `src/main.rs` so in-process library
+/// callers can resolve the same repo identity the CLI does.
+pub fn resolve_own_repo(root: &Path, dir: &Path) -> String {
+    let Ok(config) = super::config::load_brain_config(&root.join("brain.toml")) else {
+        return String::new();
+    };
+    let dir_canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    for entry in &config.repos {
+        let entry_path = if entry.repo_path.is_empty() || entry.repo_path == "." {
+            root.to_path_buf()
+        } else {
+            root.join(&entry.repo_path)
+        };
+        let entry_canon = entry_path
+            .canonicalize()
+            .unwrap_or_else(|_| entry_path.clone());
+        if entry_canon == dir_canon {
+            return entry.slug.clone();
+        }
+    }
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

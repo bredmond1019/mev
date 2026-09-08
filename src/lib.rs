@@ -1148,7 +1148,105 @@ pub fn complete_epic(root: &std::path::Path, slug: &str, write: bool) -> anyhow:
 ///
 /// See the `brain::blocks` module docs for why the write lives in mev at all
 /// (`bastion serve` is read-only per D25) and why `blocked` is not authorable.
+///
+/// `MV.20.B` Task 2: this is now a thin, PERMISSIVE wrapper over
+/// [`set_block_status_body`] — it checks the same two guards
+/// [`set_block_status_as`] enforces (the D71 operator gate and the quiesce lease),
+/// but a refusal here is only DOWNGRADED to a [`W_MEV_UNGUARDED_WRITER`] warning:
+/// the write still proceeds. This keeps every existing in-process caller (e.g.
+/// bastion's `mev::set_block_status(&root, key, status, write, None)` with no
+/// identity) compiling and behaving exactly as before, while making the bypass
+/// visible in any log. Callers that can supply a writer identity should use
+/// [`set_block_status_as`] instead, which actually refuses.
 pub fn set_block_status(
+    root: &std::path::Path,
+    key: &str,
+    status: &str,
+    write: bool,
+    scope: Option<&brain::config::ScopeDependencySet>,
+) -> anyhow::Result<Report> {
+    // `MV.20.B` Task 3: the guard is evaluated regardless of `write` — a dry run
+    // through this unguarded entry point is still evidence of a consumer that
+    // bypasses the guarded `*_as` counterpart, and the operator needs to see that
+    // in a log even when the call never intended to write. `write` still governs
+    // whether `set_block_status_body` actually touches disk, and the operator-gate
+    // portion of `set_block_status_refusal` stays internally gated on `write`
+    // (starting a block is meaningless in a dry run).
+    if let Some(refusal) = set_block_status_refusal(root, root, key, status, write, None, None) {
+        let mut report = Report::default();
+        warn_unguarded_writer("set-block-status", &refusal, root, &mut report);
+        let mut body_report = set_block_status_body(root, key, status, write, scope)?;
+        report.diagnostics.append(&mut body_report.diagnostics);
+        return Ok(report);
+    }
+    set_block_status_body(root, key, status, write, scope)
+}
+
+/// Guarded, identity-taking counterpart of [`set_block_status`] — an in-process
+/// consumer that can supply a writer identity should call this instead. Applies
+/// BOTH guards `set_block_status` only warns about: the D71 operator gate (when
+/// `status == "in_progress"`, matching what the CLI already gates at
+/// `main.rs:3722`) and the quiesce lease. A refusal is returned as `Err` carrying
+/// a [`GuardRefusal`] — never printed, never an `ExitCode`; the library does not
+/// own presentation. Holds `<root>/.mev-emit.lock` for the duration of the write
+/// (released on every exit path via [`brain::lock::LockGuard`]'s `Drop`) — the
+/// second of the two guards `close_block.rs` documents as CLI-only.
+///
+/// `agent`/`lock_dir` are the same `--agent`/`--lock-dir` inputs a CLI write verb
+/// resolves; `dir` is the directory `root` was resolved from, used by
+/// [`quiesce_refusal`] to derive this call's own repo identity.
+#[allow(clippy::too_many_arguments)]
+pub fn set_block_status_as(
+    root: &std::path::Path,
+    key: &str,
+    status: &str,
+    write: bool,
+    scope: Option<&brain::config::ScopeDependencySet>,
+    agent: Option<&str>,
+    lock_dir: Option<&std::path::Path>,
+    dir: &std::path::Path,
+) -> anyhow::Result<Report> {
+    if write
+        && let Some(refusal) =
+            set_block_status_refusal(root, dir, key, status, write, agent, lock_dir)
+    {
+        return Err(refusal.into());
+    }
+    let _lock = if write {
+        Some(brain::lock::acquire_lock(
+            root,
+            brain::lock::DEFAULT_LOCK_TIMEOUT,
+        )?)
+    } else {
+        None
+    };
+    set_block_status_body(root, key, status, write, scope)
+}
+
+/// Shared guard evaluation for [`set_block_status`] / [`set_block_status_as`]:
+/// the D71 operator gate first (matching the CLI's own check order at
+/// `main.rs:3612`), then the quiesce lease. `None` means clear to proceed.
+fn set_block_status_refusal(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    key: &str,
+    status: &str,
+    write: bool,
+    agent: Option<&str>,
+    lock_dir: Option<&std::path::Path>,
+) -> Option<GuardRefusal> {
+    if write
+        && status == "in_progress"
+        && let Some(true) = block_has_unmet_operator_gate(root, key)
+    {
+        return Some(GuardRefusal::OperatorGate {
+            key: key.to_string(),
+        });
+    }
+    quiesce_refusal(root, dir, agent, lock_dir).map(GuardRefusal::Quiesce)
+}
+
+fn set_block_status_body(
     root: &std::path::Path,
     key: &str,
     status: &str,
@@ -1251,7 +1349,60 @@ pub fn set_block_status(
 /// (`E_BLOCK_CREATE_*`) this can surface — every one of them returns a plan
 /// with zero actions, so a payload that fails any check writes nothing at
 /// all.
+///
+/// `MV.20.B` Task 2: thin, PERMISSIVE wrapper over [`create_block_body`] — same
+/// shape as [`set_block_status`]: a quiesce refusal is downgraded to a
+/// [`W_MEV_UNGUARDED_WRITER`] warning rather than blocking the write. Use
+/// [`create_block_as`] to actually refuse.
 pub fn create_block(
+    root: &std::path::Path,
+    payload: &brain::block_create::CreateBlockPayload,
+    write: bool,
+    scope: Option<&brain::config::ScopeDependencySet>,
+) -> anyhow::Result<Report> {
+    // `MV.20.B` Task 3: unconditional on `write`, same rationale as
+    // `set_block_status`'s wrapper — the warning names a bypassing consumer
+    // regardless of whether this particular call intends to write.
+    if let Some(held) = quiesce_refusal(root, root, None, None) {
+        let refusal = GuardRefusal::Quiesce(held);
+        let mut report = Report::default();
+        warn_unguarded_writer("create-block", &refusal, root, &mut report);
+        let mut body_report = create_block_body(root, payload, write, scope)?;
+        report.diagnostics.append(&mut body_report.diagnostics);
+        return Ok(report);
+    }
+    create_block_body(root, payload, write, scope)
+}
+
+/// Guarded, identity-taking counterpart of [`create_block`]. Applies the quiesce
+/// guard (create-block carries no operator-gate check — that guard is
+/// [`set_block_status_as`]'s alone, matching what the CLI gates today) and holds
+/// `<root>/.mev-emit.lock` for the duration of the write. See
+/// [`set_block_status_as`]'s doc comment for the parameter contract.
+pub fn create_block_as(
+    root: &std::path::Path,
+    payload: &brain::block_create::CreateBlockPayload,
+    write: bool,
+    scope: Option<&brain::config::ScopeDependencySet>,
+    agent: Option<&str>,
+    lock_dir: Option<&std::path::Path>,
+    dir: &std::path::Path,
+) -> anyhow::Result<Report> {
+    if write && let Some(held) = quiesce_refusal(root, dir, agent, lock_dir) {
+        return Err(GuardRefusal::Quiesce(held).into());
+    }
+    let _lock = if write {
+        Some(brain::lock::acquire_lock(
+            root,
+            brain::lock::DEFAULT_LOCK_TIMEOUT,
+        )?)
+    } else {
+        None
+    };
+    create_block_body(root, payload, write, scope)
+}
+
+fn create_block_body(
     root: &std::path::Path,
     payload: &brain::block_create::CreateBlockPayload,
     write: bool,
@@ -1360,7 +1511,49 @@ pub fn create_block(
 /// - `E_STATE_MALFORMED_JSON` / `E_EMIT_INCOMPLETE_CORPUS` — same corpus-completeness
 ///   guard as `set_block_status`: a gate can be shared across repos, so a partial
 ///   corpus could silently skip the failed-to-load repo's edges.
+///
+/// `MV.20.B` Task 2: thin, PERMISSIVE wrapper over [`close_operator_gate_body`] —
+/// same shape as [`set_block_status`]: a quiesce refusal is downgraded to a
+/// [`W_MEV_UNGUARDED_WRITER`] warning rather than blocking the write. Use
+/// [`close_operator_gate_as`] to actually refuse. Unlike the other three guarded
+/// verbs this one is not `write`-gated — every call writes (or is refused
+/// upstream by `exit_verified`) — so the quiesce check always applies here.
 pub fn close_operator_gate(
+    root: &std::path::Path,
+    slug: &str,
+    exit_verified: bool,
+) -> anyhow::Result<Report> {
+    if let Some(held) = quiesce_refusal(root, root, None, None) {
+        let refusal = GuardRefusal::Quiesce(held);
+        let mut report = Report::default();
+        warn_unguarded_writer("close-operator-gate", &refusal, root, &mut report);
+        let mut body_report = close_operator_gate_body(root, slug, exit_verified)?;
+        report.diagnostics.append(&mut body_report.diagnostics);
+        return Ok(report);
+    }
+    close_operator_gate_body(root, slug, exit_verified)
+}
+
+/// Guarded, identity-taking counterpart of [`close_operator_gate`]. Applies the
+/// quiesce guard (no operator-gate check — that guard is [`set_block_status_as`]'s
+/// alone) and holds `<root>/.mev-emit.lock` for the duration of the write. See
+/// [`set_block_status_as`]'s doc comment for the parameter contract.
+pub fn close_operator_gate_as(
+    root: &std::path::Path,
+    slug: &str,
+    exit_verified: bool,
+    agent: Option<&str>,
+    lock_dir: Option<&std::path::Path>,
+    dir: &std::path::Path,
+) -> anyhow::Result<Report> {
+    if let Some(held) = quiesce_refusal(root, dir, agent, lock_dir) {
+        return Err(GuardRefusal::Quiesce(held).into());
+    }
+    let _lock = brain::lock::acquire_lock(root, brain::lock::DEFAULT_LOCK_TIMEOUT)?;
+    close_operator_gate_body(root, slug, exit_verified)
+}
+
+fn close_operator_gate_body(
     root: &std::path::Path,
     slug: &str,
     exit_verified: bool,
@@ -1684,7 +1877,64 @@ fn require_fresh_env_set() -> bool {
 /// default and must remain byte-for-byte identical to this function's
 /// behaviour before `--scope` existed — `filter_plan_by_scope` is a no-op
 /// when `scope` is `None`.
+///
+/// `MV.20.B` Task 2: thin, PERMISSIVE wrapper over [`emit_state_body`]. This is the
+/// signature bastion calls in-process with no identity today
+/// (`mev::emit_state(&root, write, None)` at `brainval/mod.rs:277`) — a quiesce
+/// refusal here is downgraded to a [`W_MEV_UNGUARDED_WRITER`] warning rather than
+/// blocking the write, so that call site keeps compiling and behaving exactly as
+/// before. Use [`emit_state_as`] to actually refuse.
 pub fn emit_state(
+    root: &std::path::Path,
+    write: bool,
+    scope: Option<&brain::config::ScopeDependencySet>,
+) -> anyhow::Result<Report> {
+    // `MV.20.B` Task 3: unconditional on `write` — this is exactly the call site
+    // bastion's `run_emit_state` uses (`brainval/mod.rs:277`, still with `write`
+    // passed straight through from `--write`), and the un-gateable evidence that
+    // block relies on is bastion's DRY-RUN `emit-state` naming itself in this
+    // warning. Gating on `write` would hide the bypass on every dry run, which is
+    // most of bastion's real traffic. `write` still governs whether
+    // `emit_state_body` actually touches disk.
+    if let Some(held) = quiesce_refusal(root, root, None, None) {
+        let refusal = GuardRefusal::Quiesce(held);
+        let mut report = Report::default();
+        warn_unguarded_writer("emit-state", &refusal, root, &mut report);
+        let mut body_report = emit_state_body(root, write, scope)?;
+        report.diagnostics.append(&mut body_report.diagnostics);
+        return Ok(report);
+    }
+    emit_state_body(root, write, scope)
+}
+
+/// Guarded, identity-taking counterpart of [`emit_state`]. Applies the quiesce
+/// guard (`emit_state` carries no operator-gate check — that guard is
+/// [`set_block_status_as`]'s alone) and holds `<root>/.mev-emit.lock` for the
+/// duration of the write. See [`set_block_status_as`]'s doc comment for the
+/// parameter contract.
+pub fn emit_state_as(
+    root: &std::path::Path,
+    write: bool,
+    scope: Option<&brain::config::ScopeDependencySet>,
+    agent: Option<&str>,
+    lock_dir: Option<&std::path::Path>,
+    dir: &std::path::Path,
+) -> anyhow::Result<Report> {
+    if write && let Some(held) = quiesce_refusal(root, dir, agent, lock_dir) {
+        return Err(GuardRefusal::Quiesce(held).into());
+    }
+    let _lock = if write {
+        Some(brain::lock::acquire_lock(
+            root,
+            brain::lock::DEFAULT_LOCK_TIMEOUT,
+        )?)
+    } else {
+        None
+    };
+    emit_state_body(root, write, scope)
+}
+
+fn emit_state_body(
     root: &std::path::Path,
     write: bool,
     scope: Option<&brain::config::ScopeDependencySet>,
@@ -3559,6 +3809,200 @@ impl JsonReport {
     pub fn to_json(&self) -> anyhow::Result<String> {
         Ok(serde_json::to_string_pretty(self)?)
     }
+}
+
+/// Diagnostic code for a corpus-wide write refused because a sibling lane's exclusive
+/// lease declares a quiet window over this write — distinct from `E_EMIT_LOCK_HELD`
+/// (another writer is mid-write, retry shortly) because the remedy is the opposite: do
+/// NOT retry, wait for the lease to be released or contact the holding lane.
+/// `MV.20.B` Task 1: relocated from `src/main.rs` so an in-process library caller can
+/// match on it too.
+pub const E_QUIESCE_LEASE_HELD: &str = "E_QUIESCE_LEASE_HELD";
+
+/// Diagnostic code for a write refused because the target block carries an unmet
+/// `operator` `depends_on` edge (D71) and no override was supplied. `MV.20.B` Task 1:
+/// previously only a string literal inside `main.rs`'s `set-block-status` handler;
+/// promoted to a named public constant so a consumer can match on it instead of
+/// re-typing the string.
+pub const E_BLOCK_OPERATOR_GATED: &str = "E_BLOCK_OPERATOR_GATED";
+
+/// Returns whether the block named by `key` (`repo:id`) currently carries an unmet
+/// `operator` `depends_on` entry — the check behind `set-block-status`'s D71
+/// operator gate.
+///
+/// `None` means "could not determine" (bad key shape, `brain.toml` not found, the
+/// block not found, or a `state.json` failed to load) — callers must treat that as
+/// "don't gate" and let the normal `set-block-status` path surface the real error
+/// (`E_BLOCK_BAD_KEY` / `E_CONFIG_NOT_FOUND` / `E_BLOCK_NOT_FOUND` / etc.), never as
+/// an implicit pass on the gate.
+///
+/// `MV.20.B` Task 1: relocated from `src/main.rs` (previously private, forcing
+/// engine-rs's `CloseBlockNode` to reimplement it by hand — see
+/// `engine-core/src/workflows/sdlc_flow/close_block.rs`'s header) and made `pub` so
+/// that consumer can call this copy instead.
+pub fn block_has_unmet_operator_gate(root: &std::path::Path, key: &str) -> Option<bool> {
+    use brain::config::find_brain_config;
+    use brain::state::{BlockedBy, discover_state_files, load_state};
+
+    let (repo_slug, block_id) = key.split_once(':')?;
+    let config = find_brain_config(root).ok()?;
+    let (sources, _diags) = discover_state_files(root, &config);
+    for src in &sources {
+        if src.repo_slug != repo_slug {
+            continue;
+        }
+        let Ok(file) = load_state(&src.abs_path) else {
+            continue;
+        };
+        for track in &file.tracks {
+            for block in &track.blocks {
+                if block.id == block_id {
+                    return Some(
+                        block
+                            .depends_on
+                            .iter()
+                            .any(|d| matches!(d, BlockedBy::Operator { .. })),
+                    );
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Decide whether a write against `root` (resolved from `dir`) is quiesced by a
+/// sibling lane's exclusive lease, without printing or exiting — the library owns the
+/// decision, the CLI owns presentation. Returns `Some(HeldLease)` naming the holder
+/// when the write must be refused, `None` when clear to proceed.
+///
+/// `agent` and `lock_dir` are the same `--agent`/`--lock-dir` inputs a write verb
+/// already resolved; `dir` is the directory `root` was resolved from, used to derive
+/// this call's own repo identity for the `scope: repo` / self-exemption rules in
+/// [`brain::lease::check_quiesce`].
+///
+/// `MV.20.B` Task 1: this is the refusal DECISION previously inlined in
+/// `src/main.rs`'s `refuse_if_quiesced`; that function now calls this and keeps only
+/// the message formatting and `ExitCode` translation.
+pub fn quiesce_refusal(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    agent: Option<&str>,
+    lock_dir: Option<&std::path::Path>,
+) -> Option<brain::lease::HeldLease> {
+    let resolved_lock_dir = brain::lease::resolve_lock_dir(lock_dir, root);
+    let repo = brain::lease::resolve_own_repo(root, dir);
+    match brain::lease::check_quiesce(&resolved_lock_dir, &repo, agent) {
+        brain::lease::Quiesce::Clear => None,
+        brain::lease::Quiesce::Held(held) => Some(held),
+    }
+}
+
+/// Why a guarded `*_as` entry point ([`emit_state_as`], [`set_block_status_as`],
+/// [`create_block_as`], [`close_operator_gate_as`]) refused its write, without
+/// printing or choosing an exit code — the library owns the decision, the CLI (or
+/// a permissive legacy wrapper) owns presentation and behaviour.
+///
+/// `MV.20.B` Task 2. Implements [`std::error::Error`] so it round-trips through
+/// `anyhow::Error` (via `?`/`.into()`/`From`) and back out again via
+/// `anyhow::Error::downcast`/`downcast_ref` — which is exactly how each legacy
+/// wrapper (e.g. [`set_block_status`]) tells "the guard would have refused this"
+/// apart from a genuine underlying write failure.
+#[derive(Debug, Clone)]
+pub enum GuardRefusal {
+    /// [`E_QUIESCE_LEASE_HELD`] — a sibling lane's exclusive lease quiesces this
+    /// write.
+    Quiesce(brain::lease::HeldLease),
+    /// [`E_BLOCK_OPERATOR_GATED`] — the target block carries an unmet `operator`
+    /// `depends_on` edge (D71).
+    OperatorGate {
+        /// The `repo:id` block key that carries the unmet gate.
+        key: String,
+    },
+}
+
+impl GuardRefusal {
+    /// The diagnostic code this refusal corresponds to — [`E_QUIESCE_LEASE_HELD`]
+    /// or [`E_BLOCK_OPERATOR_GATED`].
+    pub fn code(&self) -> &'static str {
+        match self {
+            GuardRefusal::Quiesce(_) => E_QUIESCE_LEASE_HELD,
+            GuardRefusal::OperatorGate { .. } => E_BLOCK_OPERATOR_GATED,
+        }
+    }
+}
+
+impl std::fmt::Display for GuardRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GuardRefusal::Quiesce(held) => write!(
+                f,
+                "[{}] lane '{}' (agent '{}') holds a {}-scope exclusive lease at {}",
+                E_QUIESCE_LEASE_HELD,
+                held.lane,
+                held.agent,
+                held.scope,
+                held.path.display()
+            ),
+            GuardRefusal::OperatorGate { key } => write!(
+                f,
+                "[{}] block '{key}' carries an unmet operator depends_on edge",
+                E_BLOCK_OPERATOR_GATED
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GuardRefusal {}
+
+/// Diagnostic code emitted by a legacy write entry point (`emit_state`,
+/// `set_block_status`, `create_block`, `close_operator_gate`) when the write it
+/// just performed would have been refused by its guarded `*_as` counterpart.
+///
+/// `MV.20.B` Task 2: the guards Task 1 moved into the library are enforced ONLY
+/// by the identity-taking `*_as` entry points — the plain functions keep today's
+/// permissive behaviour (no refusal, no compile break for an existing consumer
+/// such as bastion's `mev::emit_state(&root, write, None)` call at
+/// `brainval/mod.rs:277`) but surface every bypass here, naming the calling
+/// binary, so it is visible in any log from the day this lands. Deliberately NOT
+/// gated — see the block record's `why` and `out_of_scope`.
+pub const W_MEV_UNGUARDED_WRITER: &str = "W_MEV_UNGUARDED_WRITER";
+
+/// The calling binary's name, for [`W_MEV_UNGUARDED_WRITER`]'s payload — derived
+/// from [`std::env::current_exe`]'s file stem, never from anything the caller
+/// passes in (a caller able to name itself correctly is a caller that should have
+/// used the guarded `*_as` entry point instead). Falls back to `"unknown"` when
+/// the current executable's path cannot be resolved or has no file-stem
+/// component.
+fn calling_binary_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Emit [`W_MEV_UNGUARDED_WRITER`] for a legacy write entry point (`verb`, e.g.
+/// `"emit-state"`) that just bypassed the guard `refusal` describes. Pushes a
+/// [`Severity::Warning`] [`Diagnostic`] onto `report` (so a consumer that only
+/// inspects the returned [`Report`] still sees it) AND prints to stderr via
+/// `eprintln!` (so a consumer that only captures stderr, or discards the
+/// `Report`, still sees it too) — the same dual channel every other diagnostic in
+/// this crate's CLI-facing verbs uses.
+fn warn_unguarded_writer(
+    verb: &str,
+    refusal: &GuardRefusal,
+    root: &std::path::Path,
+    report: &mut Report,
+) {
+    let binary = calling_binary_name();
+    let message = format!(
+        "[{W_MEV_UNGUARDED_WRITER}] '{verb}' bypassed a guard that would have refused this \
+         write ({refusal}) — called in-process by '{binary}' with no writer identity. Use \
+         the guarded `*_as` entry point instead to have this refused rather than warned."
+    );
+    eprintln!("warning {message}");
+    report
+        .diagnostics
+        .push(Diagnostic::warning(root, verb, message));
 }
 
 #[cfg(test)]

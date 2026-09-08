@@ -13,6 +13,41 @@ timestamp: "2026-09-04T05:31:55-03:00"
 
 ## [run: 2026-09-07]
 
+### MV.20.B closed: mev's write guards move into the library
+
+- **What:** Drove `MV.20.B` ("mev's guards move into the library") to completion via `/sdlc-flow`
+  — 3 of 3 tasks PASS, final verdict PASS. Task 1 relocated the quiesce/operator-gate primitives
+  (`block_has_unmet_operator_gate`, `E_QUIESCE_LEASE_HELD`, `E_BLOCK_OPERATOR_GATED`) out of
+  `main.rs` into `lib.rs` as `pub` items, with `resolve_lock_dir`/`resolve_own_repo` moved into
+  `src/brain/lease.rs`, pure relocation with byte-identical refusal text. Task 2 added identity-
+  taking `emit_state_as`/`set_block_status_as`/`create_block_as`/`close_operator_gate_as` entry
+  points that enforce both guards plus the `.mev-emit.lock`, while the legacy signatures became
+  permissive wrappers that downgrade a would-be refusal to a `W_MEV_UNGUARDED_WRITER` warning
+  naming the calling binary (a deliberate red-team-B2 decision, not an oversight — a refusing
+  wrapper would break engine-rs's `CloseBlockNode` before EN.15.B lands). Task 3 rewired
+  `main.rs`'s CLI verbs onto the guarded `*_as` entry points (removing the CLI's own now-redundant
+  quiesce check and lock acquisition to avoid a self-deadlock) via a new
+  `print_guarded_write_error` mapper that preserves refusal text/exit codes; no CLI write path
+  emits the warning any more. Mid-task-3 fix: the plain wrappers' guard evaluation was gated on
+  `write`, which made the block's own "dry run still warns" acceptance criterion unsatisfiable —
+  removed that gating so the quiesce check (and warning) runs regardless of `write`.
+- All harness gates green across every task (fmt, clippy `-D warnings`, nextest fast pass; full
+  `cargo test` deferred to `/sdlc-flow`'s end review per tasks.json override). New hermetic tests
+  added in `tests/it/lib_guard_relocation.rs` and `tests/it/lib_guard_entry_points.rs`.
+- `mev emit-state --write` after this run reported `W_EMIT_SKIPPED_STALE_BINARY` (toolchain
+  drift: the installed `mev` binary predates this run's own commits) — derived surfaces
+  (focus/boards/project caches) were NOT regenerated this run; rebuild/reinstall `mev` and re-run
+  before trusting any generated surface.
+- Next: pick up the next queued item in `planning/status.md`'s `next:` list — `MV.20.C` (Lane
+  records accept a lease window) or `MV.20.D` (`mev add-operator-edge`, currently blocked).
+
+```
+e5934eb feat: implement MV.20.B-task3
+b69d1f2 feat: implement MV.20.B-task2
+8f46ca8 feat: implement MV.20.B-task1
+```
+## [run: 2026-09-07]
+
 ### MV.20.A closed: liveness derived from the registry, not lifecycle frontmatter
 
 - **What:** Drove `MV.20.A` ("Liveness from the registry") to completion via `/sdlc-flow` — 3 of 3

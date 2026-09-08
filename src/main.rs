@@ -5,68 +5,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use mev::E_QUIESCE_LEASE_HELD;
 use mev::Severity;
 use mev::theme;
-
-/// Diagnostic code for a corpus-wide write refused because a sibling lane's exclusive
-/// lease declares a quiet window over this write — distinct from `E_EMIT_LOCK_HELD`
-/// (another writer is mid-write, retry shortly) because the remedy is the opposite: do
-/// NOT retry, wait for the lease to be released or contact the holding lane.
-/// `MV.ticket.write-verbs-ignore-the-quiesce-lease` Task 2.
-const E_QUIESCE_LEASE_HELD: &str = "E_QUIESCE_LEASE_HELD";
-
-/// Resolve the fleet lock directory a write verb's `--agent`/`--lock-dir` options and
-/// the quiesce-lease check both consult, per the SAME precedence
-/// `base-template/scripts/check_lane_agents.py::resolve_lock_dir` uses (do not
-/// re-derive this differently): explicit `--lock-dir`, else the `FLEET_LOCK_DIR`
-/// environment variable, else `<brain_root>/.fleet-locks` — the exact
-/// [`mev::brain::availability::FLEET_LOCK_SUBDIR`] constant `availability.rs` already
-/// defines for the sibling `.fleet-locks` fleet-lock-slot reader, so the two mechanisms
-/// can never silently disagree on which directory is "the" lock dir.
-fn resolve_lock_dir(explicit: Option<&std::path::Path>, root: &std::path::Path) -> PathBuf {
-    if let Some(p) = explicit {
-        return p.to_path_buf();
-    }
-    if let Ok(env_dir) = std::env::var("FLEET_LOCK_DIR")
-        && !env_dir.is_empty()
-    {
-        return PathBuf::from(env_dir);
-    }
-    root.join(mev::brain::availability::FLEET_LOCK_SUBDIR)
-}
-
-/// Resolve which `[[repos]]` slug `dir` belongs to, for the quiesce check's `repo`
-/// parameter — mirrors `check_lane_agents.py::resolve_own_repo`'s brain.toml-lookup
-/// path (no explicit `--repo` flag exists on mev's write verbs, so there is no
-/// "explicit" branch to mirror here): find the registered `[[repos]]` entry whose
-/// `repo_path` (joined onto `root`) canonicalizes to the same place as `dir`.
-///
-/// Returns `""` when the config can't be loaded or no entry matches — this is a
-/// fail-OPEN default for repo-scoped leases specifically (an unresolvable identity
-/// can never equal any real lease's `repo` field, so a `scope: repo` lease simply
-/// won't quiesce an unidentified caller). This does not weaken the primary guard: a
-/// `scope: fleet` lease quiesces regardless of `repo`, and that is the scope the
-/// incident this ticket fixes actually needed.
-fn resolve_own_repo(root: &std::path::Path, dir: &std::path::Path) -> String {
-    let Ok(config) = mev::brain::config::load_brain_config(&root.join("brain.toml")) else {
-        return String::new();
-    };
-    let dir_canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    for entry in &config.repos {
-        let entry_path = if entry.repo_path.is_empty() || entry.repo_path == "." {
-            root.to_path_buf()
-        } else {
-            root.join(&entry.repo_path)
-        };
-        let entry_canon = entry_path
-            .canonicalize()
-            .unwrap_or_else(|_| entry_path.clone());
-        if entry_canon == dir_canon {
-            return entry.slug.clone();
-        }
-    }
-    String::new()
-}
 
 /// Consult the quiesce-lease store immediately before a write verb would take
 /// `<root>/.mev-emit.lock`, and print + return a refusal (`Some`) when a sibling
@@ -84,26 +25,70 @@ fn refuse_if_quiesced(
     lock_dir: Option<&std::path::Path>,
     verb: &str,
 ) -> Option<ExitCode> {
-    let resolved_lock_dir = resolve_lock_dir(lock_dir, root);
-    let repo = resolve_own_repo(root, dir);
-    match mev::brain::lease::check_quiesce(&resolved_lock_dir, &repo, agent) {
-        mev::brain::lease::Quiesce::Clear => None,
-        mev::brain::lease::Quiesce::Held(held) => {
-            eprintln!(
-                "error [{E_QUIESCE_LEASE_HELD}] refusing to {verb}: lane '{}' (agent '{}') holds \
-                 a {}-scope exclusive lease at {} — this is a declared quiet window, a different \
-                 condition from E_EMIT_LOCK_HELD (contention; retry shortly). Do NOT retry: wait \
-                 for the lease to be released, or contact the holding lane — or, if you ARE the \
-                 holding lane, re-run with `--agent <holder>` naming that agent. Nothing was \
-                 written.",
-                held.lane,
-                held.agent,
-                held.scope,
-                held.path.display()
-            );
-            Some(ExitCode::FAILURE)
+    let held = mev::quiesce_refusal(root, dir, agent, lock_dir)?;
+    eprintln!(
+        "error [{E_QUIESCE_LEASE_HELD}] refusing to {verb}: lane '{}' (agent '{}') holds \
+         a {}-scope exclusive lease at {} — this is a declared quiet window, a different \
+         condition from E_EMIT_LOCK_HELD (contention; retry shortly). Do NOT retry: wait \
+         for the lease to be released, or contact the holding lane — or, if you ARE the \
+         holding lane, re-run with `--agent <holder>` naming that agent. Nothing was \
+         written.",
+        held.lane,
+        held.agent,
+        held.scope,
+        held.path.display()
+    );
+    Some(ExitCode::FAILURE)
+}
+
+/// `MV.20.B` Task 3: main.rs's write verbs with an `*_as` counterpart
+/// (`emit-state`, `set-block-status`, `create-block`, `close-operator-gate`) now
+/// delegate BOTH guard evaluation and `<root>/.mev-emit.lock` acquisition to that
+/// counterpart, so a refusal or lock-contention error surfaces from the library
+/// as a plain `anyhow::Error` instead of an `ExitCode` main.rs chose itself. This
+/// maps such an error back onto the exact diagnostic-coded stderr text the CLI
+/// printed before Task 3 (verified byte-for-byte against `git show
+/// main:src/main.rs` for the quiesce-lease case), so moving the call site does
+/// not change observable output. `verb` names the CLI command, matching
+/// `refuse_if_quiesced`'s own `verb` parameter.
+///
+/// Returns `true` when this printed a specific message — the caller should
+/// return `ExitCode::FAILURE` without also printing a redundant generic
+/// `error: {err:#}` line. Returns `false` for any other error, leaving the
+/// caller's existing generic fallback in place.
+fn print_guarded_write_error(err: &anyhow::Error, verb: &str) -> bool {
+    if let Some(refusal) = err.downcast_ref::<mev::GuardRefusal>() {
+        match refusal {
+            mev::GuardRefusal::Quiesce(held) => {
+                eprintln!(
+                    "error [{E_QUIESCE_LEASE_HELD}] refusing to {verb}: lane '{}' (agent '{}') holds \
+                     a {}-scope exclusive lease at {} — this is a declared quiet window, a different \
+                     condition from E_EMIT_LOCK_HELD (contention; retry shortly). Do NOT retry: wait \
+                     for the lease to be released, or contact the holding lane — or, if you ARE the \
+                     holding lane, re-run with `--agent <holder>` naming that agent. Nothing was \
+                     written.",
+                    held.lane,
+                    held.agent,
+                    held.scope,
+                    held.path.display()
+                );
+            }
+            mev::GuardRefusal::OperatorGate { key } => {
+                eprintln!(
+                    "error [{}] refusing to start '{key}': it carries an \
+                     unmet operator depends_on edge. Pass --force-operator-gate (human-only, \
+                     refused on non-TTY stdin) to override.",
+                    mev::E_BLOCK_OPERATOR_GATED
+                );
+            }
         }
+        return true;
     }
+    if let Some(lock_err) = err.downcast_ref::<mev::brain::lock::LockError>() {
+        eprintln!("error [E_EMIT_LOCK_HELD] {lock_err}");
+        return true;
+    }
+    false
 }
 
 /// `--scope` mode for `mev emit-block-graph`. Maps onto
@@ -2102,45 +2087,6 @@ fn doc_read_json(path: &std::path::Path) -> Result<serde_json::Value, ExitCode> 
     })
 }
 
-/// Returns whether the block named by `key` (`repo:id`) currently carries an unmet
-/// `operator` `depends_on` entry — the check behind `set-block-status`'s D71
-/// operator gate.
-///
-/// `None` means "could not determine" (bad key shape, `brain.toml` not found, the
-/// block not found, or a `state.json` failed to load) — callers must treat that as
-/// "don't gate" and let the normal `set-block-status` path surface the real error
-/// (`E_BLOCK_BAD_KEY` / `E_CONFIG_NOT_FOUND` / `E_BLOCK_NOT_FOUND` / etc.), never as
-/// an implicit pass on the gate.
-fn block_has_unmet_operator_gate(root: &std::path::Path, key: &str) -> Option<bool> {
-    use mev::brain::config::find_brain_config;
-    use mev::brain::state::{BlockedBy, discover_state_files, load_state};
-
-    let (repo_slug, block_id) = key.split_once(':')?;
-    let config = find_brain_config(root).ok()?;
-    let (sources, _diags) = discover_state_files(root, &config);
-    for src in &sources {
-        if src.repo_slug != repo_slug {
-            continue;
-        }
-        let Ok(file) = load_state(&src.abs_path) else {
-            continue;
-        };
-        for track in &file.tracks {
-            for block in &track.blocks {
-                if block.id == block_id {
-                    return Some(
-                        block
-                            .depends_on
-                            .iter()
-                            .any(|d| matches!(d, BlockedBy::Operator { .. })),
-                    );
-                }
-            }
-        }
-    }
-    None
-}
-
 /// Shared reporting tail for every `mev doc ...` verb: print diagnostics (or a `--json`
 /// envelope), then a `<label> <mode> <root>: N error(s), M warning(s)` summary, and translate
 /// the report's failure state into the process exit code.
@@ -3497,45 +3443,10 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            // Quiesce check: only --write mutates, so only --write is gated.
-            if write
-                && let Some(exit) = refuse_if_quiesced(
-                    &root,
-                    &path,
-                    agent.as_deref(),
-                    lock_dir.as_deref(),
-                    "emit-state --write",
-                )
-            {
-                return exit;
-            }
-            // Advisory lock: only --write mutates derived files, so only --write needs
-            // mutual exclusion. Dry-run stays lock-free (it never touches disk). The
-            // guard is held for the rest of this match arm and releases on every exit
-            // path (success or error) via Drop.
-            let _lock_guard = if write {
-                match mev::brain::lock::acquire_lock(&root, mev::brain::lock::DEFAULT_LOCK_TIMEOUT)
-                {
-                    Ok(guard) => Some(guard),
-                    Err(mev::brain::lock::LockError::Held {
-                        holder_pid,
-                        lock_path,
-                        waited_secs,
-                    }) => {
-                        eprintln!(
-                            "error [E_EMIT_LOCK_HELD] another emit-state --write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
-                            lock_path.display()
-                        );
-                        return ExitCode::FAILURE;
-                    }
-                    Err(e) => {
-                        eprintln!("error [E_EMIT_LOCK_HELD] {e}");
-                        return ExitCode::FAILURE;
-                    }
-                }
-            } else {
-                None
-            };
+            // Guard + lock: `MV.20.B` Task 3 delegates both to `emit_state_as`
+            // below, which applies the quiesce check and holds
+            // `<root>/.mev-emit.lock` for the duration of the write — main.rs no
+            // longer evaluates either itself, so the guard runs exactly once.
             let scope_deps = match &scope {
                 Some(slug) => {
                     let config =
@@ -3563,7 +3474,14 @@ fn main() -> ExitCode {
                 }
                 None => None,
             };
-            match mev::emit_state(&root, write, scope_deps.as_ref()) {
+            match mev::emit_state_as(
+                &root,
+                write,
+                scope_deps.as_ref(),
+                agent.as_deref(),
+                lock_dir.as_deref(),
+                &path,
+            ) {
                 Ok(report) => {
                     if cli.json {
                         let envelope = mev::JsonReport::new("brain-emit", &root, &report);
@@ -3594,7 +3512,9 @@ fn main() -> ExitCode {
                     }
                 }
                 Err(err) => {
-                    eprintln!("error: {err:#}");
+                    if !print_guarded_write_error(&err, "emit-state --write") {
+                        eprintln!("error: {err:#}");
+                    }
                     ExitCode::FAILURE
                 }
             }
@@ -3719,55 +3639,23 @@ fn main() -> ExitCode {
             if write
                 && status == "in_progress"
                 && !force_operator_gate
-                && let Some(true) = block_has_unmet_operator_gate(&root, &key)
+                && let Some(true) = mev::block_has_unmet_operator_gate(&root, &key)
             {
                 eprintln!(
-                    "error [E_BLOCK_OPERATOR_GATED] refusing to start '{key}': it carries an \
+                    "error [{}] refusing to start '{key}': it carries an \
                      unmet operator depends_on edge. Pass --force-operator-gate (human-only, \
-                     refused on non-TTY stdin) to override."
+                     refused on non-TTY stdin) to override.",
+                    mev::E_BLOCK_OPERATOR_GATED
                 );
                 return ExitCode::FAILURE;
             }
-            // Quiesce check: only --write mutates, so only --write is gated.
-            if write
-                && let Some(exit) = refuse_if_quiesced(
-                    &root,
-                    &path,
-                    agent.as_deref(),
-                    lock_dir.as_deref(),
-                    "set-block-status",
-                )
-            {
-                return exit;
-            }
-            // Advisory lock, same contract as emit-state: only --write mutates the
-            // corpus, so only --write needs mutual exclusion. This command writes an
-            // *authored* field and then chains into emit-state, so racing it against a
-            // concurrent emit would let the derived views be regenerated mid-edit.
-            // Released via Drop on every exit path below.
-            let _lock_guard = if write {
-                match mev::brain::lock::acquire_lock(&root, mev::brain::lock::DEFAULT_LOCK_TIMEOUT)
-                {
-                    Ok(guard) => Some(guard),
-                    Err(mev::brain::lock::LockError::Held {
-                        holder_pid,
-                        lock_path,
-                        waited_secs,
-                    }) => {
-                        eprintln!(
-                            "error [E_EMIT_LOCK_HELD] another write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
-                            lock_path.display()
-                        );
-                        return ExitCode::FAILURE;
-                    }
-                    Err(e) => {
-                        eprintln!("error [E_EMIT_LOCK_HELD] {e}");
-                        return ExitCode::FAILURE;
-                    }
-                }
-            } else {
-                None
-            };
+            // Guard + lock: `MV.20.B` Task 3 delegates both to
+            // `set_block_status_as` below, which applies the D71 operator gate
+            // and the quiesce check and holds `<root>/.mev-emit.lock` for the
+            // duration of the write — main.rs no longer evaluates the quiesce
+            // check or acquires the lock itself, so each guard runs exactly
+            // once. The `--force-operator-gate` early return above still owns
+            // the human-only override for the common (non-forced) case.
             // Resolve --scope the same way Command::EmitState does: one resolution
             // path serves both verbs, and config.scope_dependencies() is the only
             // implementation of it in the diff.
@@ -3798,13 +3686,22 @@ fn main() -> ExitCode {
                 }
                 None => None,
             };
-            report_doc(
-                "set-block-status",
+            let result = mev::set_block_status_as(
                 &root,
+                &key,
+                &status,
                 write,
-                cli.json,
-                mev::set_block_status(&root, &key, &status, write, scope_deps.as_ref()),
-            )
+                scope_deps.as_ref(),
+                agent.as_deref(),
+                lock_dir.as_deref(),
+                &path,
+            );
+            if let Err(err) = &result
+                && print_guarded_write_error(err, "set-block-status")
+            {
+                return ExitCode::FAILURE;
+            }
+            report_doc("set-block-status", &root, write, cli.json, result)
         }
         Command::CreateBlock {
             from,
@@ -3846,44 +3743,10 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            // Quiesce check: only --write mutates, so only --write is gated.
-            if write
-                && let Some(exit) = refuse_if_quiesced(
-                    &root,
-                    &path,
-                    agent.as_deref(),
-                    lock_dir.as_deref(),
-                    "create-block",
-                )
-            {
-                return exit;
-            }
-            // Advisory lock, same contract as set-block-status: only --write
-            // mutates the corpus, so only --write needs mutual exclusion. Released
-            // via Drop on every exit path below.
-            let _lock_guard = if write {
-                match mev::brain::lock::acquire_lock(&root, mev::brain::lock::DEFAULT_LOCK_TIMEOUT)
-                {
-                    Ok(guard) => Some(guard),
-                    Err(mev::brain::lock::LockError::Held {
-                        holder_pid,
-                        lock_path,
-                        waited_secs,
-                    }) => {
-                        eprintln!(
-                            "error [E_EMIT_LOCK_HELD] another write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
-                            lock_path.display()
-                        );
-                        return ExitCode::FAILURE;
-                    }
-                    Err(e) => {
-                        eprintln!("error [E_EMIT_LOCK_HELD] {e}");
-                        return ExitCode::FAILURE;
-                    }
-                }
-            } else {
-                None
-            };
+            // Guard + lock: `MV.20.B` Task 3 delegates both to `create_block_as`
+            // below, which applies the quiesce check and holds
+            // `<root>/.mev-emit.lock` for the duration of the write — main.rs no
+            // longer evaluates the quiesce check or acquires the lock itself.
             // Resolve --scope the same way set-block-status / emit-state do.
             let scope_deps = match &scope {
                 Some(slug) => {
@@ -3912,13 +3775,21 @@ fn main() -> ExitCode {
                 }
                 None => None,
             };
-            report_doc(
-                "create-block",
+            let result = mev::create_block_as(
                 &root,
+                &payload,
                 write,
-                cli.json,
-                mev::create_block(&root, &payload, write, scope_deps.as_ref()),
-            )
+                scope_deps.as_ref(),
+                agent.as_deref(),
+                lock_dir.as_deref(),
+                &path,
+            );
+            if let Err(err) = &result
+                && print_guarded_write_error(err, "create-block")
+            {
+                return ExitCode::FAILURE;
+            }
+            report_doc("create-block", &root, write, cli.json, result)
         }
         Command::DemoteBlock {
             key,
@@ -4142,49 +4013,25 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            // Quiesce check: this verb has no dry-run, so the check always runs
-            // (verified-or-refused is already this verb's vocabulary — a quiesce
-            // refusal is simply another refusal, not a new dry-run path).
-            if let Some(exit) = refuse_if_quiesced(
+            // Guard + lock: `MV.20.B` Task 3 delegates both to
+            // `close_operator_gate_as` below, which applies the quiesce check
+            // (this verb has no dry-run, so it always runs) and holds
+            // `<root>/.mev-emit.lock` for the duration of the write — main.rs no
+            // longer evaluates the quiesce check or acquires the lock itself.
+            let result = mev::close_operator_gate_as(
                 &root,
-                &path,
+                &slug,
+                exit_verified,
                 agent.as_deref(),
                 lock_dir.as_deref(),
-                "close-operator-gate",
-            ) {
-                return exit;
+                &path,
+            );
+            if let Err(err) = &result
+                && print_guarded_write_error(err, "close-operator-gate")
+            {
+                return ExitCode::FAILURE;
             }
-            // Advisory lock, same contract as every other authored-state writer: this
-            // always mutates (there is no dry-run mode), so the lock is always taken.
-            // Released via Drop on every exit path below.
-            let _lock_guard = match mev::brain::lock::acquire_lock(
-                &root,
-                mev::brain::lock::DEFAULT_LOCK_TIMEOUT,
-            ) {
-                Ok(guard) => guard,
-                Err(mev::brain::lock::LockError::Held {
-                    holder_pid,
-                    lock_path,
-                    waited_secs,
-                }) => {
-                    eprintln!(
-                        "error [E_EMIT_LOCK_HELD] another write (pid {holder_pid}) holds the lock at {} after waiting {waited_secs}s; retry once it finishes.",
-                        lock_path.display()
-                    );
-                    return ExitCode::FAILURE;
-                }
-                Err(e) => {
-                    eprintln!("error [E_EMIT_LOCK_HELD] {e}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            report_doc(
-                "close-operator-gate",
-                &root,
-                true,
-                cli.json,
-                mev::close_operator_gate(&root, &slug, exit_verified),
-            )
+            report_doc("close-operator-gate", &root, true, cli.json, result)
         }
         Command::NormalizeOpSlugs {
             path,
