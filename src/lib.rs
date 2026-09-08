@@ -1491,6 +1491,159 @@ fn create_block_body(
     Ok(report)
 }
 
+/// Author a new operator `depends_on` edge on an existing block
+/// (`mev add-operator-edge <repo>:<id> --slug --exit --start [--what]`).
+///
+/// `MV.20.D` Task 2: the fifth guarded pair on `MV.20.B`'s `*_as` contract,
+/// mirroring [`create_block`]/[`create_block_as`] exactly — this verb carries no
+/// operator-gate check (that guard belongs to [`set_block_status_as`] alone), so
+/// only the quiesce lease applies. Thin, PERMISSIVE wrapper over
+/// [`add_operator_edge_body`]: a quiesce refusal here is only DOWNGRADED to a
+/// [`W_MEV_UNGUARDED_WRITER`] warning — the write still proceeds. Use
+/// [`add_operator_edge_as`] to actually refuse.
+///
+/// Dry-run by default: without `write` the proposed edge is reported and
+/// nothing on disk is touched. `key` is `repo:id`; `edge` is the caller's
+/// already-built [`okf_core::OperatorDep`] — see
+/// [`brain::operator::plan_add_operator_edge`] for the full diagnostic
+/// catalogue (`E_BLOCK_BAD_KEY`, `E_BLOCK_NOT_FOUND`,
+/// `E_OPERATOR_EDGE_DUPLICATE_SLUG`) this can surface.
+pub fn add_operator_edge(
+    root: &std::path::Path,
+    key: &str,
+    edge: &okf_core::OperatorDep,
+    write: bool,
+    scope: Option<&brain::config::ScopeDependencySet>,
+) -> anyhow::Result<Report> {
+    // Unconditional on `write`, same rationale as `create_block`'s wrapper — the
+    // warning names a bypassing consumer regardless of whether this particular
+    // call intends to write.
+    if let Some(held) = quiesce_refusal(root, root, None, None) {
+        let refusal = GuardRefusal::Quiesce(held);
+        let mut report = Report::default();
+        warn_unguarded_writer("add-operator-edge", &refusal, root, &mut report);
+        let mut body_report = add_operator_edge_body(root, key, edge, write, scope)?;
+        report.diagnostics.append(&mut body_report.diagnostics);
+        return Ok(report);
+    }
+    add_operator_edge_body(root, key, edge, write, scope)
+}
+
+/// Guarded, identity-taking counterpart of [`add_operator_edge`]. Applies the
+/// quiesce guard (this verb carries no operator-gate check — that guard is
+/// [`set_block_status_as`]'s alone) and holds `<root>/.mev-emit.lock` for the
+/// duration of the write. See [`set_block_status_as`]'s doc comment for the
+/// parameter contract.
+#[allow(clippy::too_many_arguments)]
+pub fn add_operator_edge_as(
+    root: &std::path::Path,
+    key: &str,
+    edge: &okf_core::OperatorDep,
+    write: bool,
+    scope: Option<&brain::config::ScopeDependencySet>,
+    agent: Option<&str>,
+    lock_dir: Option<&std::path::Path>,
+    dir: &std::path::Path,
+) -> anyhow::Result<Report> {
+    if write && let Some(held) = quiesce_refusal(root, dir, agent, lock_dir) {
+        return Err(GuardRefusal::Quiesce(held).into());
+    }
+    let _lock = if write {
+        Some(brain::lock::acquire_lock(
+            root,
+            brain::lock::DEFAULT_LOCK_TIMEOUT,
+        )?)
+    } else {
+        None
+    };
+    add_operator_edge_body(root, key, edge, write, scope)
+}
+
+fn add_operator_edge_body(
+    root: &std::path::Path,
+    key: &str,
+    edge: &okf_core::OperatorDep,
+    write: bool,
+    scope: Option<&brain::config::ScopeDependencySet>,
+) -> anyhow::Result<Report> {
+    use brain::config::find_brain_config;
+    use brain::emit::apply_plan;
+    use brain::operator::plan_add_operator_edge;
+    use brain::state::{StateLoadError, discover_state_files, load_state};
+
+    let mut report = Report::default();
+
+    let config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    let (sources, discovery_diags) = discover_state_files(root, &config);
+    report.diagnostics.extend(discovery_diags);
+
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    let mut load_failed = false;
+    for src in &sources {
+        match load_state(&src.abs_path) {
+            Ok(file) => loaded.push((src.clone(), file)),
+            Err(StateLoadError::Parse { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("state.json is not valid JSON or does not match the schema: {source}"),
+                ));
+            }
+            Err(StateLoadError::Io { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("could not read state.json: {source}"),
+                ));
+            }
+        }
+    }
+
+    // Same completeness guard as create_block/set_block_status: the target block
+    // may live in the repo that failed to load, and the --write path chains into
+    // emit-state, which must never regenerate cross-repo derived views from a
+    // partial corpus.
+    if write && load_failed {
+        report.diagnostics.push(Diagnostic::error(
+            root,
+            "E_EMIT_INCOMPLETE_CORPUS",
+            "refusing to write: at least one state.json failed to load, so the target block may \
+             be unresolvable and the chained emit-state would regenerate cross-repo views from a \
+             partial corpus"
+                .to_string(),
+        ));
+        return Ok(report);
+    }
+
+    let plan = plan_add_operator_edge(key, edge, &config, &loaded);
+
+    let had_actions = !plan.actions.is_empty();
+    report.diagnostics.extend(apply_plan(&plan, write));
+
+    // Regenerate derived views so focus/boards agree with the authored edge,
+    // reusing the same chained emit-state path set_block_status/create_block
+    // already establish — no second emit behaviour is introduced.
+    if write && had_actions && !report.is_failure() {
+        let emit = emit_state(root, true, scope)?;
+        report.diagnostics.extend(emit.diagnostics);
+    }
+
+    Ok(report)
+}
+
 /// Close an operator gate fleet-wide (`mev close-operator-gate <slug> --exit-verified`).
 ///
 /// Removes every `depends_on` `{type:"operator", slug: <slug>}` entry across every

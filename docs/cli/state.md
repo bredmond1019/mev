@@ -30,6 +30,7 @@ then re-derive. A hand-edit is overwritten on the next run and looks like data l
 | [`state-history`](#state-history-path---restore-seq) | Lists, and can restore, the revisions `emit-state` records |
 | [`set-block-status`](#set-block-status-repoid-status-path---write---force-operator-gate---scope-slug) | Flips one block's authored `status`, then re-derives |
 | [`create-block`](#create-block---from-file-path---write---scope-slug) | Files a new block/ticket/chore record, then re-derives |
+| [`add-operator-edge`](#add-operator-edge-repoid---slug---exit---start---what) | Authors a new `operator` `depends_on` edge on an EXISTING block, then re-derives |
 | [`demote-block`](#demote-block-repoid-path---write---scope-slug) | Parks an existing block into `backlog[]`, record intact — `create-block`'s inverse |
 | [`promote-block`](#promote-block-repoid-path---write---scope-slug) | Restores a `parked` backlog entry back into `tracks[]` — `demote-block`'s inverse |
 | [`manifest`](#manifest---pretty-path) | Emits a JSON manifest of every file in the corpus |
@@ -50,6 +51,9 @@ mev set-block-status mev:MV.1.A closed --write
 
 # File a new block/ticket/chore record from a JSON payload, which also re-derives
 mev create-block --from payload.json --write
+
+# Gate an EXISTING block on an operator session, which also re-derives
+mev add-operator-edge mev:MV.10.A --slug approval-gate --exit "artifact exists" --start "run this" --write
 
 # Park an existing block into backlog[] — its planning/blocks/<ID>.json record is untouched
 mev demote-block mev:MV.10.A --write
@@ -746,6 +750,67 @@ Exit codes: `0` planned (dry-run) or applied · `1` unreadable/unparseable `--fr
 | `E_EMIT_LOCK_HELD` | another mev write holds the brain-root advisory lock |
 | `E_QUIESCE_LEASE_HELD` | a sibling lane's exclusive lease declares a quiet window; do not retry — see [Quiesce lease on `--write`](#quiesce-lease-on---write---agent---lock-dir) |
 | `E_EMIT_UNKNOWN_SCOPE` | `--scope` names a slug with no matching `[[repos]]` entry in `brain.toml`; the message names every valid slug |
+
+---
+
+### `add-operator-edge <repo:id> --slug <slug> --exit <exit> --start <start> [--what <text>] [path] [--write] [--scope <slug>]`
+
+Author a new `{"type":"operator", ...}` `depends_on` edge on an **existing** block —
+`mev add-operator-edge mev:MV.10.A --slug approval-gate --exit "artifact exists" --start "run this"`.
+
+**This verb never creates the block** — `create-block` above does that. Naming a `repo:id` that
+does not resolve in the loaded corpus is refused, the same shape as `create-block`'s
+dangling-dependency refusal. Same dry-run/`--write`/`--scope` driver contract as
+`create-block`/`set-block-status`, plus `--agent`/`--lock-dir` for the quiesce lease.
+
+**The four edge fields arrive as flags, not a JSON payload** (unlike `create-block`, whose 15-field
+block record is unusable as shell arguments): `--slug` (kebab-case, shared across every block this
+gate covers — it is the deliberate cross-block join key `OP.<slug>` (D76) is derived from),
+`--exit` (the artifact whose existence ends the session), `--start` (the paste-ready command that
+starts it), and optional `--what` (why *this* block is gated on it). The written `OperatorDep`
+carries exactly those four fields; no second field backs `OP.<slug>` — it comes from `slug` alone.
+
+**A block already carrying an operator edge with the same `--slug` is refused**, naming both the
+slug and the block — refused on that block's own edges only. The same slug legitimately gates many
+different blocks at once (that is the whole point of a join key), so this is *not* a corpus-wide
+uniqueness check.
+
+**Dry-run by default**, exactly like `create-block`/`set-block-status`: without `--write` the
+proposed edge prints and not a byte is touched. A successful `--write` takes the same advisory
+lock, then runs `emit-state --write` so the boards show the new gate in the same invocation. The
+write diffs only the added edge lines — `apply_plan` reuses the same serialization
+`create-block`/`set-block-status` already establish, so a `state.json` carrying non-ASCII text
+round-trips byte-for-byte apart from the new edge.
+
+**`--scope <slug>` narrows only the chained `emit-state` regeneration**, identically to
+`create-block --scope` — the edge itself is always written to exactly the target block's own
+`state.json` regardless of scope.
+
+```bash
+# See what add-operator-edge would write (dry run — writes nothing)
+mev add-operator-edge mev:MV.10.A --slug approval-gate --exit "artifact exists" --start "run this"
+
+# Author it, and regenerate every derived view
+mev add-operator-edge mev:MV.10.A --slug approval-gate --exit "artifact exists" --start "run this" --write
+
+# Author it, regenerating only the target repo's own derived surfaces
+mev add-operator-edge mev:MV.10.A --slug approval-gate --exit "artifact exists" --start "run this" --write --scope mev
+```
+
+Exit codes: `0` planned (dry-run) or applied · `1` `E_BLOCK_BAD_KEY`, `E_BLOCK_NOT_FOUND`,
+`E_OPERATOR_EDGE_DUPLICATE_SLUG`, a write failure, `E_EMIT_UNKNOWN_SCOPE`, `E_EMIT_LOCK_HELD`,
+`E_QUIESCE_LEASE_HELD`, or a linked-worktree refusal.
+
+| Diagnostic | Cause |
+|---|---|
+| `E_BLOCK_BAD_KEY` | `key` is not `repo:id` form (block ids are only unique within a repo, so an unqualified id is never guessed) |
+| `E_BLOCK_NOT_FOUND` | no loaded `state.json` owns that `repo:id` |
+| `E_OPERATOR_EDGE_DUPLICATE_SLUG` | the named block already carries an operator edge with this exact `--slug` — refused on that block's own edges only; the same slug on a *different* block is fine |
+| `E_EMIT_LOCK_HELD` | another mev write holds the brain-root advisory lock |
+| `E_QUIESCE_LEASE_HELD` | a sibling lane's exclusive lease declares a quiet window; do not retry — see [Quiesce lease on `--write`](#quiesce-lease-on---write---agent---lock-dir) |
+| `E_EMIT_UNKNOWN_SCOPE` | `--scope` names a slug with no matching `[[repos]]` entry in `brain.toml`; the message names every valid slug |
+
+Every diagnostic returns a plan with zero actions — nothing is ever partially written.
 
 ---
 

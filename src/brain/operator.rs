@@ -53,6 +53,20 @@ pub const E_APPROVAL_UNKNOWN: &str = "E_APPROVAL_UNKNOWN";
 /// the stored `digest` on (any of) the matching edge(s) — the alarm, per D71.
 pub const E_APPROVAL_DIGEST_MISMATCH: &str = "E_APPROVAL_DIGEST_MISMATCH";
 
+/// Diagnostic code for `mev add-operator-edge <repo>:<id>` naming a key that is not
+/// `repo:id` shape. Shared literal with [`crate::brain::blocks::plan_set_block_status`]
+/// and [`crate::brain::block_create`] — one code, one meaning, fleet-wide.
+pub const E_BLOCK_BAD_KEY: &str = "E_BLOCK_BAD_KEY";
+/// Diagnostic code for `mev add-operator-edge <repo>:<id>` naming a block that does
+/// not exist in the loaded corpus. Shared literal with
+/// [`crate::brain::blocks::plan_set_block_status`] and [`crate::brain::block_create`].
+pub const E_BLOCK_NOT_FOUND: &str = "E_BLOCK_NOT_FOUND";
+/// Diagnostic code for `mev add-operator-edge` refusing a duplicate operator slug
+/// already present on the SAME block's `depends_on`. The same slug legitimately
+/// appears on many *different* blocks (that is the join key `OperatorDep`'s doc
+/// comment describes) — this refusal is scoped to the one named block only.
+pub const E_OPERATOR_EDGE_DUPLICATE_SLUG: &str = "E_OPERATOR_EDGE_DUPLICATE_SLUG";
+
 /// Diagnostic code for `mev normalize-op-slugs` refusing the entire run because two
 /// distinct current slugs would normalize onto the same target — merging two
 /// separate gates into one identity is worse than leaving both stuttering, so the
@@ -507,6 +521,129 @@ pub fn plan_reject(
     plan
 }
 
+/// Split a `repo:id` block key into its two halves.
+///
+/// Returns `None` when there is no `':'`, or when either half is empty. Splits
+/// on the *first* `':'` so a block id containing a colon still resolves.
+///
+/// Mirrors [`crate::brain::blocks::split_key`] exactly (that one is private to
+/// its own module) — one behavior, kept in sync rather than shared, because
+/// this task's `files` scope is `src/brain/operator.rs` only.
+fn split_key(key: &str) -> Option<(&str, &str)> {
+    let (repo, id) = key.split_once(':')?;
+    if repo.is_empty() || id.is_empty() {
+        return None;
+    }
+    Some((repo, id))
+}
+
+/// Plan `mev add-operator-edge <repo>:<id> --slug --exit --start [--what]`:
+/// author a new `{"type":"operator", ...}` `depends_on` edge on one existing
+/// block.
+///
+/// Mutates a working copy of `files`, so the caller's slice — and any dry-run
+/// caller — is untouched, exactly like [`plan_close_operator_gate`] and
+/// [`plan_set_block_status`](crate::brain::blocks::plan_set_block_status). Emits
+/// at most one [`crate::brain::emit::EmitAction`] — the single file that owns
+/// the named block.
+///
+/// `key` is `repo:id`, the same form `plan_set_block_status` and
+/// `global_status_map` already use — block ids are only unique within a repo,
+/// so a bare id is rejected rather than guessed at. `edge` is the caller's
+/// already-built [`okf_core::OperatorDep`]; no second local struct is defined
+/// for the payload.
+///
+/// Diagnostics:
+/// - [`E_BLOCK_BAD_KEY`] — `key` is not `repo:id` shape.
+/// - [`E_BLOCK_NOT_FOUND`] — no loaded state file owns that `repo:id`.
+/// - [`E_OPERATOR_EDGE_DUPLICATE_SLUG`] — the named block ALREADY carries an
+///   operator edge with this exact `slug`. Refused on the block's own edges
+///   only: the same slug legitimately appears on many different blocks (the
+///   join key `OperatorDep`'s doc comment describes), so a corpus-wide slug
+///   uniqueness check would be the wrong rule.
+///
+/// `config` is accepted (unused beyond signature parity with the block/epic
+/// planners) so this function's call shape matches its siblings.
+pub fn plan_add_operator_edge(
+    key: &str,
+    edge: &OperatorDep,
+    _config: &BrainConfig,
+    files: &[(StateSource, StateFile)],
+) -> EmitPlan {
+    let mut plan = EmitPlan::default();
+    let here = std::path::Path::new(".");
+
+    // 1. Key shape. Block ids are only unique within a repo — never guess.
+    let Some((repo_slug, block_id)) = split_key(key) else {
+        plan.diagnostics.push(Diagnostic::error(
+            here,
+            E_BLOCK_BAD_KEY,
+            format!(
+                "block key '{key}' is not in 'repo:id' form (e.g. 'mev:MV.10.A'); block ids are \
+                 only unique within a repo, so an unqualified id is ambiguous and is not guessed"
+            ),
+        ));
+        return plan;
+    };
+
+    // 2. Resolve the block across every loaded file's tracks[].blocks[].
+    let mut found: Option<(usize, usize, usize)> = None;
+    for (fi, (src, file)) in files.iter().enumerate() {
+        if src.repo_slug != repo_slug {
+            continue;
+        }
+        for (ti, track) in file.tracks.iter().enumerate() {
+            for (bi, block) in track.blocks.iter().enumerate() {
+                if block.id == block_id {
+                    found = Some((fi, ti, bi));
+                }
+            }
+        }
+    }
+
+    let Some((fi, ti, bi)) = found else {
+        plan.diagnostics.push(Diagnostic::error(
+            here,
+            E_BLOCK_NOT_FOUND,
+            format!("block '{key}' not found — no loaded state file owns that repo:id"),
+        ));
+        return plan;
+    };
+
+    // 3. Refuse a duplicate slug on THIS block's own edges only — a corpus-wide
+    //    check would be wrong, since the slug is deliberately a shared join key.
+    let already = files[fi].1.tracks[ti].blocks[bi]
+        .depends_on
+        .iter()
+        .any(|d| matches!(d, BlockedBy::Operator(OperatorDep { slug: s, .. }) if s == &edge.slug));
+    if already {
+        plan.diagnostics.push(Diagnostic::error(
+            here,
+            E_OPERATOR_EDGE_DUPLICATE_SLUG,
+            format!(
+                "block '{key}' already carries an operator edge with slug '{}' — refusing to \
+                 add a duplicate; the same slug on a DIFFERENT block is fine, since it is a \
+                 deliberate join key across blocks",
+                edge.slug
+            ),
+        ));
+        return plan;
+    }
+
+    // 4. Mutate a working copy and plan the single write.
+    let mut work: Vec<(StateSource, StateFile)> = files.to_vec();
+    work[fi].1.tracks[ti].blocks[bi]
+        .depends_on
+        .push(BlockedBy::Operator(edge.clone()));
+
+    let note = format!("add-operator-edge '{key}' (slug '{}')", edge.slug);
+    if let Some(action) = action_for(&work[fi].0, &work[fi].1, note) {
+        plan.actions.push(action);
+    }
+
+    plan
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -825,5 +962,241 @@ mod tests {
                 .contains("\"slug\": \"operator-x\"")
         );
         assert!(plan.actions[0].new_content.contains("\"slug\": \"x\""));
+    }
+
+    // -- plan_add_operator_edge ---------------------------------------------
+
+    fn edge(slug: &str) -> OperatorDep {
+        OperatorDep {
+            slug: slug.to_string(),
+            exit: "planning/handoff.md".to_string(),
+            start: format!("/begin-session {slug}"),
+            what: None,
+        }
+    }
+
+    #[test]
+    fn appends_an_edge_to_a_block_with_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "mev", &[("MV.1.A", &[])])];
+        let plan = plan_add_operator_edge(
+            "mev:MV.1.A",
+            &edge("session-new"),
+            &config_with(&["mev"]),
+            &files,
+        );
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+        assert_eq!(plan.actions.len(), 1, "expected one action: {plan:?}");
+        assert!(
+            plan.actions[0]
+                .new_content
+                .contains("\"slug\": \"session-new\"")
+        );
+    }
+
+    #[test]
+    fn appends_to_a_block_that_already_has_a_different_slug() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(
+            dir.path(),
+            "mev",
+            &[("MV.1.A", &["session-existing"])],
+        )];
+        let plan = plan_add_operator_edge(
+            "mev:MV.1.A",
+            &edge("session-new"),
+            &config_with(&["mev"]),
+            &files,
+        );
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+        assert_eq!(plan.actions.len(), 1, "{plan:?}");
+        assert!(plan.actions[0].new_content.contains("session-existing"));
+        assert!(plan.actions[0].new_content.contains("session-new"));
+    }
+
+    #[test]
+    fn refuses_a_duplicate_slug_on_the_same_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "mev", &[("MV.1.A", &["session-dup"])])];
+        let plan = plan_add_operator_edge(
+            "mev:MV.1.A",
+            &edge("session-dup"),
+            &config_with(&["mev"]),
+            &files,
+        );
+        assert!(plan.actions.is_empty(), "expected no actions: {plan:?}");
+        assert_eq!(plan.diagnostics.len(), 1);
+        assert_eq!(plan.diagnostics[0].locator, E_OPERATOR_EDGE_DUPLICATE_SLUG);
+        assert!(plan.diagnostics[0].message.contains("session-dup"));
+        assert!(plan.diagnostics[0].message.contains("MV.1.A"));
+    }
+
+    #[test]
+    fn same_slug_on_a_different_block_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(
+            dir.path(),
+            "mev",
+            &[("MV.1.A", &["session-shared"]), ("MV.1.B", &[])],
+        )];
+        let plan = plan_add_operator_edge(
+            "mev:MV.1.B",
+            &edge("session-shared"),
+            &config_with(&["mev"]),
+            &files,
+        );
+        assert!(
+            plan.diagnostics.is_empty(),
+            "a shared slug across DIFFERENT blocks must be accepted: {:?}",
+            plan.diagnostics
+        );
+        assert_eq!(plan.actions.len(), 1, "{plan:?}");
+    }
+
+    #[test]
+    fn unknown_key_shape_is_bad_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "mev", &[("MV.1.A", &[])])];
+        let plan =
+            plan_add_operator_edge("MV.1.A", &edge("session-x"), &config_with(&["mev"]), &files);
+        assert!(plan.actions.is_empty());
+        assert_eq!(plan.diagnostics.len(), 1);
+        assert_eq!(plan.diagnostics[0].locator, E_BLOCK_BAD_KEY);
+    }
+
+    #[test]
+    fn missing_block_names_it_and_plans_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "mev", &[("MV.1.A", &[])])];
+        let plan = plan_add_operator_edge(
+            "mev:MV.9.Z",
+            &edge("session-x"),
+            &config_with(&["mev"]),
+            &files,
+        );
+        assert!(plan.actions.is_empty());
+        assert_eq!(plan.diagnostics.len(), 1);
+        assert_eq!(plan.diagnostics[0].locator, E_BLOCK_NOT_FOUND);
+        assert!(plan.diagnostics[0].message.contains("mev:MV.9.Z"));
+    }
+
+    #[test]
+    fn planning_without_applying_never_mutates_the_callers_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "mev", &[("MV.1.A", &[])])];
+        let before = serde_json::to_string(&files[0].1).unwrap();
+        let _plan = plan_add_operator_edge(
+            "mev:MV.1.A",
+            &edge("session-x"),
+            &config_with(&["mev"]),
+            &files,
+        );
+        let after = serde_json::to_string(&files[0].1).unwrap();
+        assert_eq!(
+            before, after,
+            "planning must never mutate the caller's slice"
+        );
+    }
+
+    /// This block's real deliverable: appending one edge to a fixture carrying
+    /// an em dash and a non-ASCII character leaves every line except the added
+    /// edge lines byte-identical. Asserted on the diff itself — a naive
+    /// round-trip parses fine and still rewrites the whole file (the
+    /// `ensure_ascii=True` failure mode this task exists to avoid).
+    #[test]
+    fn round_trip_touches_only_the_added_edge_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let abs_path = dir.path().join("mev-state.json");
+
+        // Block A carries an em dash and a non-ASCII character and sits BEFORE
+        // the target block B, so if anything upstream of the edit point is
+        // reformatted (the ensure_ascii=True failure mode), the prefix
+        // assertion below catches it.
+        let raw = r#"{ "repo": "mev", "kind": "project", "updated": "2026-08-01",
+  "focus": { "now": [], "next": [], "blocked": [] },
+  "tracks": [{ "title": "P1", "blocks": [
+    { "id": "MV.1.A", "title": "Café — planning session", "status": "open", "wave": 1, "depends_on": [] },
+    { "id": "MV.1.B", "title": "Target", "status": "open", "wave": 1, "depends_on": [] }
+  ] }] }"#;
+        let file: StateFile = serde_json::from_str(raw).expect("fixture state.json");
+        let mut original = serde_json::to_string_pretty(&file).unwrap();
+        original.push('\n');
+        std::fs::write(&abs_path, &original).unwrap();
+
+        let src = StateSource {
+            repo_slug: "mev".to_string(),
+            abs_path,
+            expected_kind: "project",
+        };
+        let files = vec![(src, file)];
+
+        let plan = plan_add_operator_edge(
+            "mev:MV.1.B",
+            &edge("session-round-trip"),
+            &config_with(&["mev"]),
+            &files,
+        );
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+        assert_eq!(plan.actions.len(), 1, "{plan:?}");
+        let new_content = &plan.actions[0].new_content;
+
+        // The unicode content must survive completely untouched, and appear
+        // exactly once (no accidental re-escaping / duplication).
+        assert_eq!(
+            original.matches("Café — planning session").count(),
+            1,
+            "sanity: fixture actually contains the unicode/em-dash text"
+        );
+        assert_eq!(
+            new_content.matches("Café — planning session").count(),
+            1,
+            "the em dash and non-ASCII text must survive byte-identical, not be \
+             re-escaped or duplicated"
+        );
+        assert!(
+            !new_content.contains("\\u2014") && !new_content.contains("\\u00e9"),
+            "em dash / non-ASCII must never be escaped (the ensure_ascii=True failure mode)"
+        );
+
+        // Line-level diff: find the single line that diverges (block B's
+        // `"depends_on": []`), and assert EVERYTHING before it and EVERYTHING
+        // after the insertion is byte-identical between old and new.
+        let old_lines: Vec<&str> = original.lines().collect();
+        let new_lines: Vec<&str> = new_content.lines().collect();
+        assert!(
+            new_lines.len() > old_lines.len(),
+            "expected the plan to add lines for the new edge"
+        );
+        let added = new_lines.len() - old_lines.len();
+
+        let divergence = old_lines
+            .iter()
+            .zip(new_lines.iter())
+            .position(|(o, n)| o != n)
+            .expect("old and new content must diverge somewhere");
+
+        assert_eq!(
+            &old_lines[..divergence],
+            &new_lines[..divergence],
+            "every line before the edit point must be byte-identical"
+        );
+        assert!(
+            old_lines[divergence].contains("\"depends_on\": []"),
+            "the edit must land on block B's empty depends_on line, got: {}",
+            old_lines[divergence]
+        );
+
+        // Everything from just after the edit point to end-of-file must also
+        // be byte-identical, shifted by exactly `added` lines.
+        let old_suffix = &old_lines[divergence + 1..];
+        let new_suffix = &new_lines[new_lines.len() - old_suffix.len()..];
+        assert_eq!(
+            old_suffix, new_suffix,
+            "every line after the inserted edge must be byte-identical"
+        );
+        assert!(
+            (4..=10).contains(&added),
+            "expected roughly one small edge object's worth of new lines, got {added}"
+        );
     }
 }
