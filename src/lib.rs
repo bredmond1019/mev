@@ -1165,9 +1165,14 @@ pub fn set_block_status(
     write: bool,
     scope: Option<&brain::config::ScopeDependencySet>,
 ) -> anyhow::Result<Report> {
-    if write
-        && let Some(refusal) = set_block_status_refusal(root, root, key, status, write, None, None)
-    {
+    // `MV.20.B` Task 3: the guard is evaluated regardless of `write` — a dry run
+    // through this unguarded entry point is still evidence of a consumer that
+    // bypasses the guarded `*_as` counterpart, and the operator needs to see that
+    // in a log even when the call never intended to write. `write` still governs
+    // whether `set_block_status_body` actually touches disk, and the operator-gate
+    // portion of `set_block_status_refusal` stays internally gated on `write`
+    // (starting a block is meaningless in a dry run).
+    if let Some(refusal) = set_block_status_refusal(root, root, key, status, write, None, None) {
         let mut report = Report::default();
         warn_unguarded_writer("set-block-status", &refusal, root, &mut report);
         let mut body_report = set_block_status_body(root, key, status, write, scope)?;
@@ -1355,7 +1360,10 @@ pub fn create_block(
     write: bool,
     scope: Option<&brain::config::ScopeDependencySet>,
 ) -> anyhow::Result<Report> {
-    if write && let Some(held) = quiesce_refusal(root, root, None, None) {
+    // `MV.20.B` Task 3: unconditional on `write`, same rationale as
+    // `set_block_status`'s wrapper — the warning names a bypassing consumer
+    // regardless of whether this particular call intends to write.
+    if let Some(held) = quiesce_refusal(root, root, None, None) {
         let refusal = GuardRefusal::Quiesce(held);
         let mut report = Report::default();
         warn_unguarded_writer("create-block", &refusal, root, &mut report);
@@ -1881,7 +1889,14 @@ pub fn emit_state(
     write: bool,
     scope: Option<&brain::config::ScopeDependencySet>,
 ) -> anyhow::Result<Report> {
-    if write && let Some(held) = quiesce_refusal(root, root, None, None) {
+    // `MV.20.B` Task 3: unconditional on `write` — this is exactly the call site
+    // bastion's `run_emit_state` uses (`brainval/mod.rs:277`, still with `write`
+    // passed straight through from `--write`), and the un-gateable evidence that
+    // block relies on is bastion's DRY-RUN `emit-state` naming itself in this
+    // warning. Gating on `write` would hide the bypass on every dry run, which is
+    // most of bastion's real traffic. `write` still governs whether
+    // `emit_state_body` actually touches disk.
+    if let Some(held) = quiesce_refusal(root, root, None, None) {
         let refusal = GuardRefusal::Quiesce(held);
         let mut report = Report::default();
         warn_unguarded_writer("emit-state", &refusal, root, &mut report);

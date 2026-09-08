@@ -328,6 +328,119 @@ fn emit_state_wrapper_downgrades_the_quiesce_refusal_to_a_warning_and_writes_any
     );
 }
 
+// `MV.20.B` Task 3: the wrapper's guard evaluation is unconditional on `write` —
+// bastion's own `emit-state` (no `--write`) is the un-gateable evidence this
+// block relies on (D64), so the warning must still fire on a dry run through the
+// same `mev::emit_state(&root, write, None)` call site. Gating the check on
+// `write` would hide the bypass on exactly the invocation bastion runs most.
+#[test]
+fn emit_state_wrapper_warns_on_a_dry_run_too() {
+    let root = temp_dir("emit-wrapper-quiesced-dry-run");
+    write_full_fixture(&root);
+    let lock_dir = root.join(".fleet-locks");
+    write_exclusive_lease(&lock_dir, "other-lane", "other-agent", "alpha", "fleet");
+
+    let report = mev::emit_state(&root, false, None)
+        .expect("the legacy wrapper must never refuse, dry run or not");
+
+    let warnings: Vec<&mev::Diagnostic> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == mev::Severity::Warning)
+        .collect();
+    assert!(
+        warnings
+            .iter()
+            .any(|d| d.message.contains(mev::W_MEV_UNGUARDED_WRITER)),
+        "a dry-run call through the unguarded wrapper is still evidence of a bypassing \
+         consumer and must warn; got diagnostics: {:#?}",
+        report.diagnostics
+    );
+}
+
+// `MV.20.B` Task 3: same fix, `create_block`'s wrapper.
+#[test]
+fn create_block_wrapper_warns_on_a_dry_run_too() {
+    let root = temp_dir("create-block-wrapper-quiesced-dry-run");
+    write_full_fixture(&root);
+    let lock_dir = root.join(".fleet-locks");
+    write_exclusive_lease(&lock_dir, "other-lane", "other-agent", "alpha", "fleet");
+
+    use mev::brain::block_create::{AcceptanceCriterion, BlockFiles, CreateBlockPayload};
+    let payload = CreateBlockPayload {
+        id: "AL.1.C".to_string(),
+        repo: "alpha".to_string(),
+        kind: "block".to_string(),
+        title: "New block".to_string(),
+        description: "A block used only in a test fixture.".to_string(),
+        what: "Does the thing the test needs done.".to_string(),
+        why: "Because the test needs a legal payload to create.".to_string(),
+        sdlc_workflow: "task".to_string(),
+        model: "sonnet".to_string(),
+        phase: Some(1),
+        initiative: None,
+        workflow_rationale: None,
+        origin: None,
+        files: BlockFiles::default(),
+        interfaces: Vec::new(),
+        out_of_scope: vec!["Everything else.".to_string()],
+        acceptance_criteria: vec![AcceptanceCriterion::Simple("It works.".to_string())],
+        testing_strategy: None,
+        validation_commands: Vec::new(),
+        depends_on: Vec::new(),
+        carryover_context: Vec::new(),
+        related: Vec::new(),
+        notes: None,
+        forward_looking: false,
+        epics: vec!["test-epic".to_string()],
+    };
+
+    let report = mev::create_block(&root, &payload, false, None)
+        .expect("the legacy wrapper must never refuse, dry run or not");
+
+    let warnings: Vec<&mev::Diagnostic> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == mev::Severity::Warning)
+        .collect();
+    assert!(
+        warnings
+            .iter()
+            .any(|d| d.message.contains(mev::W_MEV_UNGUARDED_WRITER)),
+        "a dry-run call through the unguarded wrapper is still evidence of a bypassing \
+         consumer and must warn; got diagnostics: {:#?}",
+        report.diagnostics
+    );
+}
+
+// `MV.20.B` Task 3: same fix, `set_block_status`'s wrapper — the quiesce half
+// (not the operator-gate half, which stays internally gated on `write` since
+// starting a block is meaningless in a dry run).
+#[test]
+fn set_block_status_wrapper_warns_on_a_dry_run_too() {
+    let root = temp_dir("sbs-wrapper-quiesced-dry-run");
+    write_full_fixture(&root);
+    let lock_dir = root.join(".fleet-locks");
+    write_exclusive_lease(&lock_dir, "other-lane", "other-agent", "alpha", "fleet");
+
+    let report = mev::set_block_status(&root, "alpha:AL.1.A", "deferred", false, None)
+        .expect("the legacy wrapper must never refuse, dry run or not");
+
+    let warnings: Vec<&mev::Diagnostic> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == mev::Severity::Warning)
+        .collect();
+    assert!(
+        warnings
+            .iter()
+            .any(|d| d.message.contains(mev::W_MEV_UNGUARDED_WRITER)),
+        "a dry-run call through the unguarded wrapper is still evidence of a bypassing \
+         consumer and must warn; got diagnostics: {:#?}",
+        report.diagnostics
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Additivity: `W_MEV_UNGUARDED_WRITER` is a stable, reachable public constant.
 // ---------------------------------------------------------------------------
