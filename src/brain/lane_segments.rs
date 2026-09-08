@@ -131,15 +131,46 @@ pub struct LaneDirectives {
     pub budget: Option<LaneBudget>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclusive_repos: Option<Vec<String>>,
+    /// Per-block lease windows (`MV.20.C` Task 1) — block-scoped exclusivity, a
+    /// sibling of [`Self::exclusive_repos`] rather than a polymorphic replacement of
+    /// it. `exclusive_repos` still means whole-lane exclusivity for its whole chain;
+    /// a `lease_windows` entry narrows that to the specific blocks it names. Purely
+    /// additive: every existing reader of `exclusive_repos` is unaffected by this
+    /// field's presence or absence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_windows: Option<Vec<LeaseWindow>>,
 }
 
 impl LaneDirectives {
-    /// `true` iff none of the three fields is set — the signal the record-to-struct
+    /// `true` iff none of the four fields is set — the signal the record-to-struct
     /// mapping in [`collect_lane_files_in`] uses to collapse an all-absent result down
     /// to `None` rather than an empty `Some`.
     fn is_empty(&self) -> bool {
-        self.held_until.is_none() && self.budget.is_none() && self.exclusive_repos.is_none()
+        self.held_until.is_none()
+            && self.budget.is_none()
+            && self.exclusive_repos.is_none()
+            && self.lease_windows.is_none()
     }
+}
+
+/// One per-block lease window: `repo` holds exclusivity only for the block ids listed
+/// in `blocks`, rather than for the lane's whole chain (contrast
+/// [`LaneDirectives::exclusive_repos`]). `deny_unknown_fields` to match its siblings
+/// ([`LaneRecordBlock`], [`LaneBudget`]) — an unrecognised key here is a loud parse
+/// error, not a silently dropped one.
+///
+/// Every block id named in `blocks` must appear in the same lane record's own
+/// top-level `blocks[]` array — see [`E_LANE_LEASE_WINDOW_UNKNOWN_BLOCK`]. A window
+/// naming a block the lane does not run is unenforceable, so it is reported as an
+/// error that names the offending block id.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseWindow {
+    /// Repo slug this window grants exclusivity over.
+    pub repo: String,
+    /// Block ids (from this same lane record's `blocks[]`) this exclusivity is
+    /// scoped to.
+    pub blocks: Vec<String>,
 }
 
 /// The `budget` directive's parsed value — see [`LaneDirectives`] for the grammar.
@@ -166,6 +197,15 @@ pub struct LaneBudget {
 /// invalid JSON. Named and never silently skipped: a malformed record still ends up
 /// nowhere in the derived output, so a diagnostic is the only way its author finds out.
 const E_LANE_RECORD_MALFORMED: &str = "E_LANE_RECORD_MALFORMED";
+
+/// Error code on a diagnostic produced when a `lease_windows` entry names a block id
+/// that is absent from that same lane record's own top-level `blocks[]` array. Such a
+/// window is unenforceable — the lane never runs that block — so it is reported by
+/// name rather than silently accepted or silently dropped. Non-fatal to the record as
+/// a whole: the record still parses and is still returned from
+/// [`collect_lane_files_in`], exactly like the other diagnostics this module reports
+/// alongside a successfully-parsed record (see [`W_LANE_BLOCK_UNREGISTERED`]).
+const E_LANE_LEASE_WINDOW_UNKNOWN_BLOCK: &str = "E_LANE_LEASE_WINDOW_UNKNOWN_BLOCK";
 
 /// Warning code on a diagnostic produced when a roadmap directory (identified by a
 /// `roadmap.md` at its top level) has no `lane-<name>.json` record at all. This is the
@@ -229,6 +269,11 @@ struct LaneRecord {
     isolation: Option<String>,
     #[serde(default)]
     exclusive_repos: Option<Vec<String>>,
+    /// Per-block lease windows (`MV.20.C` Task 1) — see [`LeaseWindow`]. A sibling of
+    /// `exclusive_repos`, not a replacement: both may be present at once, and
+    /// `exclusive_repos`' meaning is unchanged by this field's existence.
+    #[serde(default)]
+    lease_windows: Option<Vec<LeaseWindow>>,
     #[serde(default)]
     #[allow(dead_code)]
     // authored lane metadata with no state.json representation; not consumed by derivation
@@ -454,11 +499,31 @@ fn collect_lane_files_in(
             }
         };
 
+        if let Some(lease_windows) = &record.lease_windows {
+            let known_block_ids: HashSet<&str> =
+                record.blocks.iter().map(|b| b.id.as_str()).collect();
+            for window in lease_windows {
+                for block_id in &window.blocks {
+                    if !known_block_ids.contains(block_id.as_str()) {
+                        diags.push(Diagnostic::error(
+                            &path,
+                            E_LANE_LEASE_WINDOW_UNKNOWN_BLOCK,
+                            format!(
+                                "lane '{lane}': lease_windows names block '{block_id}' (repo '{}') which is not in this lane record's blocks[]",
+                                window.repo
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
         let directives = {
             let d = LaneDirectives {
                 held_until: record.held_until.clone(),
                 budget: record.budget.clone(),
                 exclusive_repos: record.exclusive_repos.clone(),
+                lease_windows: record.lease_windows.clone(),
             };
             if d.is_empty() { None } else { Some(d) }
         };
@@ -2433,11 +2498,13 @@ mod tests {
             held_until: None,
             budget: None,
             exclusive_repos: None,
+            lease_windows: None,
         };
         let empty_repos = LaneDirectives {
             held_until: None,
             budget: None,
             exclusive_repos: Some(Vec::new()),
+            lease_windows: None,
         };
         assert_ne!(
             none_repos, empty_repos,
@@ -2473,6 +2540,7 @@ mod tests {
                 not_with: vec!["other-repo".to_string()],
             }),
             exclusive_repos: Some(vec!["mev".to_string(), "base-template".to_string()]),
+            lease_windows: None,
         };
         let got = serde_json::to_string(&directives).unwrap();
         let expected = r#"{"held_until":"2026-09-01","budget":{"heavy":true,"not_with":["other-repo"]},"exclusive_repos":["mev","base-template"]}"#;
@@ -2488,6 +2556,7 @@ mod tests {
             held_until: None,
             budget: None,
             exclusive_repos: None,
+            lease_windows: None,
         };
         let got = serde_json::to_string(&directives).unwrap();
         assert_eq!(
@@ -2541,6 +2610,7 @@ mod tests {
                     not_with: vec!["other-repo".to_string()],
                 }),
                 exclusive_repos: Some(vec!["mev".to_string()]),
+                lease_windows: None,
             }),
         };
         let got = serde_json::to_string(&pos).unwrap();
@@ -2571,5 +2641,266 @@ mod tests {
             "origin_roadmap has no skip_serializing_if — it must serialize as null when absent; \
              directives DOES have skip_serializing_if — it must be omitted entirely, not emitted as null"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // `MV.20.C` Task 1 — `lease_windows`, a per-block lease window sibling to
+    // `exclusive_repos`.
+    //
+    // The observed_red for this task (captured before this change, against the
+    // unmodified deny_unknown_fields parser) is recorded in
+    // `planning/orchestration-run/coordination-layer-port/notes.md` under
+    // `## MV.20.C observed_red`: a record carrying a `lease_windows` key failed with
+    // `unknown field \`lease_windows\`, expected one of ...` — the exact
+    // `E_LANE_RECORD_MALFORMED` failure this test suite now proves fixed.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn lease_windows_record_parses_and_is_reachable_via_discover_lane_files() {
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-lease-windows-parse");
+        let json = r#"{"lane":"substrate","roadmap":"alpha","blocks":[{"id":"MV.ticket.a","origin_roadmap":"alpha","repo":"mev"},{"id":"BT.ticket.b","origin_roadmap":"alpha","repo":"base-template"}],"lease_windows":[{"repo":"mev","blocks":["MV.ticket.a"]}]}"#;
+        write(&dir, "planning/roadmaps/alpha/lane-substrate.json", json);
+
+        let (files, diags) = discover_lane_files(&dir);
+        assert!(
+            diags.is_empty(),
+            "a lease_windows entry naming a real block must not produce a diagnostic, got {diags:?}"
+        );
+        assert_eq!(files.len(), 1);
+        let directives = files[0]
+            .directives
+            .as_ref()
+            .expect("lease_windows must produce Some(directives), never None");
+        assert_eq!(
+            directives.lease_windows,
+            Some(vec![LeaseWindow {
+                repo: "mev".to_string(),
+                blocks: vec!["MV.ticket.a".to_string()],
+            }]),
+            "the parsed lease_windows must be reachable from LaneFile::directives — the same \
+             path both `mev emit-state` and `mev lanes` read"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exclusive_repos_string_form_still_parses_unchanged_alongside_lease_windows_absent() {
+        // The live lane-integrity.json fixture: exclusive_repos as a bare Vec<String>,
+        // no lease_windows key at all. Must still parse and still mean whole-lane
+        // exclusivity — lease_windows being entirely absent must not change that.
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-exclusive-repos-string-form");
+        let json = r#"{"lane":"integrity","roadmap":"alpha","blocks":[{"id":"MV.ticket.a","origin_roadmap":"alpha","repo":"mev"}],"exclusive_repos":["base-template"]}"#;
+        write(&dir, "planning/roadmaps/alpha/lane-integrity.json", json);
+
+        let (files, diags) = discover_lane_files(&dir);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        assert_eq!(files.len(), 1);
+        let directives = files[0].directives.as_ref().expect("Some(directives)");
+        assert_eq!(
+            directives.exclusive_repos,
+            Some(vec!["base-template".to_string()]),
+            "the string form of exclusive_repos must still parse and still mean whole-lane exclusivity"
+        );
+        assert_eq!(
+            directives.lease_windows, None,
+            "lease_windows must be None when the record never authored the key"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exclusive_repos_and_lease_windows_can_coexist_on_the_same_record() {
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-both-directives-coexist");
+        let json = r#"{"lane":"substrate","roadmap":"alpha","blocks":[{"id":"MV.ticket.a","origin_roadmap":"alpha","repo":"mev"}],"exclusive_repos":["base-template"],"lease_windows":[{"repo":"mev","blocks":["MV.ticket.a"]}]}"#;
+        write(&dir, "planning/roadmaps/alpha/lane-substrate.json", json);
+
+        let (files, diags) = discover_lane_files(&dir);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+        let directives = files[0].directives.as_ref().unwrap();
+        assert_eq!(
+            directives.exclusive_repos,
+            Some(vec!["base-template".to_string()]),
+            "exclusive_repos' meaning is unchanged by lease_windows' presence"
+        );
+        assert!(directives.lease_windows.is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lease_window_naming_absent_block_is_an_error_naming_the_block_and_lane() {
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-lease-window-unknown-block");
+        // "MV.ticket.ghost" is not in this record's own blocks[].
+        let json = r#"{"lane":"substrate","roadmap":"alpha","blocks":[{"id":"MV.ticket.a","origin_roadmap":"alpha","repo":"mev"}],"lease_windows":[{"repo":"mev","blocks":["MV.ticket.ghost"]}]}"#;
+        write(&dir, "planning/roadmaps/alpha/lane-substrate.json", json);
+
+        let (files, diags) = discover_lane_files(&dir);
+        // Non-fatal to the record itself — it still parses and is still returned.
+        assert_eq!(
+            files.len(),
+            1,
+            "a lease-window validation error must not drop the record"
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic, got {diags:?}"
+        );
+        assert_eq!(diags[0].locator, E_LANE_LEASE_WINDOW_UNKNOWN_BLOCK);
+        assert!(
+            diags[0].message.contains("MV.ticket.ghost"),
+            "the diagnostic message must name the offending block id, got: {}",
+            diags[0].message
+        );
+        assert!(
+            diags[0].message.contains("substrate"),
+            "the diagnostic message must name the lane, got: {}",
+            diags[0].message
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lease_windows_key_never_triggers_deny_unknown_fields_error() {
+        // Documents this task's observed_red (captured before the fix, in
+        // planning/orchestration-run/coordination-layer-port/notes.md): a record
+        // carrying `lease_windows` failed with E_LANE_RECORD_MALFORMED against the
+        // pre-change deny_unknown_fields parser. This pins the post-fix behaviour
+        // that must never regress back into that failure.
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-lease-windows-not-malformed");
+        let json = r#"{"lane":"substrate","roadmap":"alpha","blocks":[{"id":"MV.ticket.a","origin_roadmap":"alpha","repo":"mev"}],"lease_windows":[{"repo":"mev","blocks":["MV.ticket.a"]}]}"#;
+        write(&dir, "planning/roadmaps/alpha/lane-substrate.json", json);
+
+        let (files, diags) = discover_lane_files(&dir);
+        assert!(
+            !diags.iter().any(|d| d.locator == E_LANE_RECORD_MALFORMED),
+            "lease_windows must never trigger E_LANE_RECORD_MALFORMED post-fix, got {diags:?}"
+        );
+        assert_eq!(files.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `MV.20.C` Task 2 parity test: mev's `lease_windows` parser and
+    /// `base-template/.claude/workflows/lane.schema.json` must agree about the
+    /// `lease_windows` shape, since the two are hand-mirrored with no shared
+    /// dependency to enforce it (same class of drift risk as
+    /// `LaneDirectives`'s engine-rs mirror, documented on that type above). This is
+    /// the drift alarm: if either side changes the property's presence, its
+    /// `{repo, blocks}` item shape, or `additionalProperties`, this test fails.
+    ///
+    /// Locates the schema by walking up from this crate's own manifest directory to
+    /// `brain.toml` (`find_brain_root`), never a hardcoded relative path — this crate
+    /// can be built from a worktree or a differently-nested checkout, and a bare
+    /// `"../.."` silently reads the wrong tree (or none) in that case. Skips cleanly
+    /// (never fails) when `brain.toml` or the schema file is absent, matching this
+    /// repo's other live-corpus tests (e.g. `config::tests::live_corpus_*`) — a fresh
+    /// clone or hosted CI runner without the sibling HQ/base-template checkout must
+    /// not turn this into a spurious failure.
+    #[test]
+    fn live_corpus_lane_schema_agrees_with_mev_parser_about_lease_windows() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let brain_root = match crate::brain::config::find_brain_root(manifest_dir) {
+            Ok(root) => root,
+            Err(e) => {
+                eprintln!(
+                    "skipping live_corpus_lane_schema_agrees_with_mev_parser_about_lease_windows: \
+                     no brain.toml found walking up from {} ({e})",
+                    manifest_dir.display()
+                );
+                return;
+            }
+        };
+        let schema_path = brain_root.join("base-template/.claude/workflows/lane.schema.json");
+        if !schema_path.is_file() {
+            eprintln!(
+                "skipping live_corpus_lane_schema_agrees_with_mev_parser_about_lease_windows: \
+                 {} not found (checkout without the sibling base-template tree)",
+                schema_path.display()
+            );
+            return;
+        }
+
+        let schema_content = std::fs::read_to_string(&schema_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", schema_path.display()));
+        let schema: serde_json::Value = serde_json::from_str(&schema_content)
+            .unwrap_or_else(|e| panic!("{} is not valid JSON: {e}", schema_path.display()));
+
+        let lease_windows_prop = schema
+            .pointer("/properties/lease_windows")
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} has no properties.lease_windows — mev's parser accepts the key but the \
+                     schema does not declare it",
+                    schema_path.display()
+                )
+            });
+
+        assert_eq!(
+            lease_windows_prop.get("type").and_then(|v| v.as_str()),
+            Some("array"),
+            "lease_windows must be a JSON array in the schema, matching mev's \
+             Option<Vec<LeaseWindow>>"
+        );
+
+        let item_schema = lease_windows_prop
+            .pointer("/items")
+            .expect("lease_windows.items must be present");
+        assert_eq!(
+            item_schema
+                .get("additionalProperties")
+                .and_then(|v| v.as_bool()),
+            Some(false),
+            "lease_windows[] items must still be additionalProperties: false, matching mev's \
+             #[serde(deny_unknown_fields)] LeaseWindow"
+        );
+
+        let required: std::collections::HashSet<&str> = item_schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        let expected_required: std::collections::HashSet<&str> =
+            ["repo", "blocks"].into_iter().collect();
+        assert_eq!(
+            required, expected_required,
+            "lease_windows[] required fields must be exactly {{repo, blocks}}, matching \
+             mev's LeaseWindow struct fields"
+        );
+
+        let item_props: std::collections::HashSet<&str> = item_schema
+            .pointer("/properties")
+            .and_then(|v| v.as_object())
+            .map(|m| m.keys().map(|k| k.as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            item_props, expected_required,
+            "lease_windows[] properties must be exactly {{repo, blocks}} — LeaseWindow has no \
+             other fields"
+        );
+
+        // Round-trip a record built to exactly this schema shape through mev's own
+        // parser, so the assertion is not just about the schema's text but about
+        // mev's actual runtime behavior over a schema-conformant record.
+        let dir = crate::testsupport::unique_temp_dir("mev-lane-schema-parity-lease-windows");
+        let json = r#"{"lane":"substrate","roadmap":"alpha","blocks":[{"id":"MV.ticket.a","origin_roadmap":"alpha","repo":"mev"}],"lease_windows":[{"repo":"mev","blocks":["MV.ticket.a"]}]}"#;
+        write(&dir, "planning/roadmaps/alpha/lane-substrate.json", json);
+        let (files, diags) = discover_lane_files(&dir);
+        assert!(
+            diags.is_empty(),
+            "a schema-conformant lease_windows record must parse cleanly, got {diags:?}"
+        );
+        assert_eq!(files.len(), 1);
+        assert!(
+            files[0]
+                .directives
+                .as_ref()
+                .is_some_and(|d| d.lease_windows.is_some()),
+            "the parsed lease_windows must be reachable via LaneFile::directives"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

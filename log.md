@@ -13,6 +13,28 @@ timestamp: "2026-09-04T05:31:55-03:00"
 
 ## [run: 2026-09-07]
 
+### MV.20.C closed: Lane records accept a lease window
+
+- **What:** Drove `MV.20.C` ("Lane records accept a lease window") to completion via `/sdlc-flow`
+  — 2 of 2 tasks PASS, final verdict PASS. Task 1 gave `LaneRecord`/`LaneDirectives`
+  (`src/brain/lane_segments.rs`) an optional `lease_windows: [{repo, blocks}]` sibling key to the
+  existing `exclusive_repos: Vec<String>` form, with unknown-block validation naming the offending
+  block and lane as a non-fatal diagnostic (matching the existing `W_LANE_BLOCK_UNREGISTERED`
+  pattern) rather than a hard parse failure. Task 2 added a live-corpus parity test pinning mev's
+  `lease_windows` parser against base-template's `lane.schema.json`, updated
+  `check_lane_records.py` and `lane.schema.json` to accept both forms, and rewrote this roadmap's
+  own `lane-engine.json` to the window form. Full authoritative gate suite (fmt, clippy `-D
+  warnings`, `cargo test`, release build) plus the three un-gateable checks all pass.
+- **Decisions:** the window shape is a purely additive sibling key (`lease_windows`), not a
+  polymorphic `exclusive_repos`, so the existing `Option<Vec<String>>` type and its meaning in all
+  three consumers stay untouched, per the block's own out-of-scope constraint; validation of
+  block-membership inside a window pushes a diagnostic rather than failing the parse, consistent
+  with the module's other post-parse checks.
+- Next: `MV.20.D` is already closed (`mev add-operator-edge`); resume from the frontier per
+  `pick-the-next-block`.
+
+## [run: 2026-09-07]
+
 ### MV.20.D closed: `mev add-operator-edge`
 
 - **What:** Drove `MV.20.D` ("`mev add-operator-edge`") to completion via `/sdlc-flow` — 3 of 3
