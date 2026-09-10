@@ -1,12 +1,12 @@
 {
-  "version": "88e82a837ec3afdcbeeae9d068c0bed2e0eaf6a1",
+  "version": "83dfc26b0c278e96af3c7a8a8b4fa09bb5c90492",
   "generated": "2026-09-10",
   "files": {
     ".claude/commands/update-task.md": "47afa30cf2e5593c9b39b974d360f9f0f1b1ff6a5e30cc2f525042f283cd8720",
     ".claude/commands/backlog-ticket.md": "300b15c584866e1beb86e6b12ae9aa1941f0373b94da635da39030970514c925",
     ".claude/commands/sync-downstream-harness.md": "dcfa7290c20e673d66740a1f589141e7900a0f3b9981b74539754b920d3f3998",
     ".claude/commands/sync-brain-skills.md": "15748fadfebcb3113f0b1732437ef1edacb234afaa8ab6c2077ce1f9a6e4bf70",
-    ".claude/commands/begin-orchestration.md": "5ec67c9de5d98df84f06eedb1eb56f2fdf9941bd7d0c43efb3c4eba54c97dd60",
+    ".claude/commands/begin-orchestration.md": "026edc2d80cf43aa4e5584deb9f856d92bc8e25631eac74bb69bca348fbf6d8c",
     ".claude/commands/init-worktree.md": "13b346ee43f95211d50b166471cfb1699240f8b53150bf03193d0041cc18d372",
     ".claude/commands/wrap-up.md": "05120ab2cc998db585c4b8c6c8d86d82b9637bc4d4677dc398c4cb15f1ddd3cd",
     ".claude/commands/archive.md": "819f1741a1da482e8a577dee4f13da0c4721516e6d476308754441afe0b2ef3f",
