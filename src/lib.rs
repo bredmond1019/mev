@@ -1491,6 +1491,499 @@ fn create_block_body(
     Ok(report)
 }
 
+// ---------------------------------------------------------------------------
+// graduate_carryover / graduate_carryover_as — `mev create-block --from
+// <file> --graduate-carryover <repo>:<slug>` (MV.ticket.create-block-graduates-
+// a-carryover, Task 2)
+// ---------------------------------------------------------------------------
+
+/// Turn a gating `carryover[]` entry into a tracked block in one atomic write
+/// (`mev create-block --from <file> --graduate-carryover <repo>:<slug>`).
+///
+/// Same shape as [`create_block`]/[`plan_graduate_carryover`][pgc]: resolve
+/// `brain.toml`, discover + load every `state.json`, refuse to write against
+/// an incomplete corpus, plan via [`brain::block_create::plan_graduate_carryover`],
+/// then apply — the new block record, every `Blocking` target's edge (state.json
+/// and its `planning/blocks/<id>.json` record, when present), the carryover's
+/// own removal and its archive row — before re-running [`emit_state`] so the
+/// derived surfaces agree with the graduation in the same invocation.
+///
+/// Dry-run by default: without `write` the proposed plan is reported (one
+/// `W_EMIT_DRY_RUN` diagnostic per planned file write, plus one warning per
+/// `edges_added`/`edges_skipped` entry) and nothing on disk is touched.
+///
+/// PERMISSIVE wrapper — same shape as [`create_block`]: a quiesce refusal is
+/// downgraded to a [`W_MEV_UNGUARDED_WRITER`] warning rather than blocking
+/// the write. Use [`graduate_carryover_as`] to actually refuse.
+///
+/// [pgc]: brain::block_create::plan_graduate_carryover
+pub fn graduate_carryover(
+    root: &std::path::Path,
+    payload: &brain::block_create::CreateBlockPayload,
+    carryover_key: &str,
+    write: bool,
+    scope: Option<&brain::config::ScopeDependencySet>,
+) -> anyhow::Result<Report> {
+    if let Some(held) = quiesce_refusal(root, root, None, None) {
+        let refusal = GuardRefusal::Quiesce(held);
+        let mut report = Report::default();
+        warn_unguarded_writer("create-block", &refusal, root, &mut report);
+        let mut body_report = graduate_carryover_body(root, payload, carryover_key, write, scope)?;
+        report.diagnostics.append(&mut body_report.diagnostics);
+        return Ok(report);
+    }
+    graduate_carryover_body(root, payload, carryover_key, write, scope)
+}
+
+/// Guarded, identity-taking counterpart of [`graduate_carryover`]. Applies the
+/// quiesce guard (this verb carries no operator-gate check — that guard is
+/// [`set_block_status_as`]'s alone) and holds `<root>/.mev-emit.lock` for the
+/// duration of the write. See [`set_block_status_as`]'s doc comment for the
+/// parameter contract.
+#[allow(clippy::too_many_arguments)]
+pub fn graduate_carryover_as(
+    root: &std::path::Path,
+    payload: &brain::block_create::CreateBlockPayload,
+    carryover_key: &str,
+    write: bool,
+    scope: Option<&brain::config::ScopeDependencySet>,
+    agent: Option<&str>,
+    lock_dir: Option<&std::path::Path>,
+    dir: &std::path::Path,
+) -> anyhow::Result<Report> {
+    if write && let Some(held) = quiesce_refusal(root, dir, agent, lock_dir) {
+        return Err(GuardRefusal::Quiesce(held).into());
+    }
+    let _lock = if write {
+        Some(brain::lock::acquire_lock(
+            root,
+            brain::lock::DEFAULT_LOCK_TIMEOUT,
+        )?)
+    } else {
+        None
+    };
+    graduate_carryover_body(root, payload, carryover_key, write, scope)
+}
+
+/// Find the `]` that matches the `[` at byte offset `open` in `content`,
+/// skipping bracket characters that occur inside quoted strings (respecting
+/// `\"` escapes) — a plain `content[open..].find(']')` would stop at the
+/// first `]` inside, say, a `what` string that happens to contain a literal
+/// bracket.
+fn find_matching_bracket(content: &str, open: usize) -> anyhow::Result<usize> {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in content[open..].char_indices() {
+        let pos = open + i;
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(pos);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(anyhow::anyhow!(
+        "unterminated array starting at byte offset {open}"
+    ))
+}
+
+/// Surgically insert `dep` into a `planning/blocks/<id>.json` record's
+/// `depends_on` array as a block edge — `{"type":"block","repo":...,
+/// "id":...,"why":...}`, the exact key mapping
+/// [`brain::block_create`]'s private `depends_on_for_record` uses for a
+/// `BlockedBy::Block` edge — matching the surrounding two-space
+/// `serde_json::to_string_pretty` indentation exactly (a `serde_json::Value`
+/// round trip would alphabetize every key in the record: mev's `serde_json`
+/// dependency carries no `preserve_order` feature).
+///
+/// Returns `Ok(None)` when the array already carries a block edge naming the
+/// same `(repo, id)` — no edit needed, so the caller writes nothing and the
+/// record stays byte-identical. `content` must parse as a JSON object; a
+/// record with no `depends_on` key gets one inserted as the last key before
+/// the closing brace, and an empty `"depends_on": []` is expanded in place.
+fn insert_depends_on_block_edge(
+    content: &str,
+    dep: &okf_core::BlockDep,
+) -> anyhow::Result<Option<String>> {
+    let parsed: serde_json::Value = serde_json::from_str(content)
+        .map_err(|e| anyhow::anyhow!("record is not valid JSON: {e}"))?;
+    let already_present = parsed
+        .get("depends_on")
+        .and_then(|v| v.as_array())
+        .is_some_and(|arr| {
+            arr.iter().any(|e| {
+                e.get("type").and_then(|t| t.as_str()) == Some("block")
+                    && e.get("repo").and_then(|r| r.as_str()) == Some(dep.repo.as_str())
+                    && e.get("id").and_then(|i| i.as_str()) == Some(dep.id.as_str())
+            })
+        });
+    if already_present {
+        return Ok(None);
+    }
+
+    let why_field = match &dep.what {
+        Some(w) if !w.is_empty() => format!(",\n      \"why\": {}", serde_json::to_string(w)?),
+        _ => String::new(),
+    };
+    let element = format!(
+        "{{\n      \"type\": \"block\",\n      \"repo\": {},\n      \"id\": {}{}\n    }}",
+        serde_json::to_string(&dep.repo)?,
+        serde_json::to_string(&dep.id)?,
+        why_field
+    );
+
+    if let Some(key_pos) = content.find("\"depends_on\"") {
+        let colon_rel = content[key_pos..]
+            .find(':')
+            .ok_or_else(|| anyhow::anyhow!("malformed 'depends_on' key"))?;
+        let colon_pos = key_pos + colon_rel;
+        let bracket_rel = content[colon_pos..]
+            .find('[')
+            .ok_or_else(|| anyhow::anyhow!("'depends_on' value is not an array"))?;
+        let open = colon_pos + bracket_rel;
+        let close = find_matching_bracket(content, open)?;
+        let inner_trimmed = content[open + 1..close].trim_end();
+        let new_inner = if inner_trimmed.is_empty() {
+            format!("\n    {element}\n  ")
+        } else {
+            format!("{inner_trimmed},\n    {element}\n  ")
+        };
+        let mut new_content = String::with_capacity(content.len() + new_inner.len());
+        new_content.push_str(&content[..open + 1]);
+        new_content.push_str(&new_inner);
+        new_content.push_str(&content[close..]);
+        Ok(Some(new_content))
+    } else {
+        let close_brace = content
+            .rfind('}')
+            .ok_or_else(|| anyhow::anyhow!("record has no closing brace"))?;
+        let before = content[..close_brace].trim_end();
+        let new_content = format!(
+            "{before},\n  \"depends_on\": [\n    {element}\n  ]\n{}",
+            &content[close_brace..]
+        );
+        Ok(Some(new_content))
+    }
+}
+
+fn graduate_carryover_body(
+    root: &std::path::Path,
+    payload: &brain::block_create::CreateBlockPayload,
+    carryover_key: &str,
+    write: bool,
+    scope: Option<&brain::config::ScopeDependencySet>,
+) -> anyhow::Result<Report> {
+    use brain::block_create::plan_graduate_carryover;
+    use brain::config::find_brain_config;
+    use brain::emit::{EmitAction, EmitPlan, apply_plan};
+    use brain::state::{StateLoadError, discover_state_files, load_state};
+
+    let mut report = Report::default();
+
+    let _config = match find_brain_config(root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            report.diagnostics.push(Diagnostic::error(
+                root,
+                "E_CONFIG_NOT_FOUND",
+                format!("brain.toml not found or unreadable: {e}"),
+            ));
+            return Ok(report);
+        }
+    };
+
+    let (sources, discovery_diags) = discover_state_files(root, &_config);
+    report.diagnostics.extend(discovery_diags);
+
+    let mut loaded: Vec<(brain::state::StateSource, brain::state::StateFile)> = Vec::new();
+    let mut load_failed = false;
+    for src in &sources {
+        match load_state(&src.abs_path) {
+            Ok(file) => loaded.push((src.clone(), file)),
+            Err(StateLoadError::Parse { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("state.json is not valid JSON or does not match the schema: {source}"),
+                ));
+            }
+            Err(StateLoadError::Io { source, .. }) => {
+                load_failed = true;
+                report.diagnostics.push(Diagnostic::error(
+                    &src.abs_path,
+                    "E_STATE_MALFORMED_JSON",
+                    format!("could not read state.json: {source}"),
+                ));
+            }
+        }
+    }
+
+    // Same completeness guard as create_block_body: a partial corpus makes
+    // both dependency resolution and classify_blocked_by_edge's status map
+    // untrustworthy — the carryover, a target, or the created block's own
+    // repo could be the one that failed to load.
+    if write && load_failed {
+        report.diagnostics.push(Diagnostic::error(
+            root,
+            "E_EMIT_INCOMPLETE_CORPUS",
+            "refusing to write: at least one state.json failed to load, so dependency \
+             resolution, blocking classification and the chained emit-state would run \
+             against a partial corpus"
+                .to_string(),
+        ));
+        return Ok(report);
+    }
+
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+
+    let gplan = plan_graduate_carryover(payload, carryover_key, &loaded, &today);
+
+    if gplan
+        .plan
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == Severity::Error)
+    {
+        report.diagnostics.extend(gplan.plan.diagnostics);
+        return Ok(report);
+    }
+
+    // Resolve each repo's root directory (parent of `planning/`) once, for
+    // both the record-edit paths below and the archive path — same
+    // derivation `build_create_block_outcome` uses for the new record.
+    let repo_root_for = |repo_slug: &str| -> Option<std::path::PathBuf> {
+        loaded
+            .iter()
+            .find(|(src, _)| src.repo_slug == repo_slug)
+            .and_then(|(src, _)| {
+                src.abs_path
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .map(std::path::Path::to_path_buf)
+            })
+    };
+
+    // Build the full ordered EmitPlan: archive, new block record, edited
+    // target records, then state.json files — mirroring
+    // `carryover::dispose_repo`'s archive-first ordering rationale: an
+    // archived-but-not-yet-edited record/edge is merely redundant, while a
+    // removed carryover with no archive row is the data loss this ordering
+    // exists to prevent.
+    let mut full_plan = EmitPlan {
+        diagnostics: gplan.plan.diagnostics.clone(),
+        ..EmitPlan::default()
+    };
+
+    if let Some((carryover_src, row)) = &gplan.archive {
+        let archive_path = brain::carryover::archive_path_for(&carryover_src.abs_path);
+        let mut new_content = std::fs::read_to_string(&archive_path).unwrap_or_default();
+        let line = serde_json::to_string(row)
+            .map_err(|e| anyhow::anyhow!("failed to serialize archive row: {e}"))?;
+        new_content.push_str(&line);
+        new_content.push('\n');
+        full_plan.actions.push(EmitAction {
+            path: archive_path,
+            new_content,
+            note: format!(
+                "archive graduated carryover '{carryover_key}' (reason promoted, evidence \
+                 'graduated to block {}')",
+                gplan.created_key
+            ),
+        });
+    }
+
+    // `gplan.plan.actions` carries the new block's own record write plus
+    // exactly one merged EmitAction per distinct state.json path touched
+    // (see `GraduationPlan::plan`'s doc comment) — split them back apart so
+    // the record can be ordered ahead of the record edits below and the
+    // state.json writes can be ordered last.
+    let record_action_index = gplan
+        .plan
+        .actions
+        .iter()
+        .position(|a| a.path.file_name() != Some(std::ffi::OsStr::new("state.json")));
+    let mut state_actions: Vec<EmitAction> = Vec::new();
+    for (i, action) in gplan.plan.actions.into_iter().enumerate() {
+        if Some(i) == record_action_index {
+            full_plan.actions.push(action);
+        } else {
+            state_actions.push(action);
+        }
+    }
+
+    // Record edits: a surgical text insertion into each target's existing
+    // `planning/blocks/<id>.json`, when that record exists on disk. A
+    // target with no record on disk is not an error — `plan_graduate_carryover`
+    // still moved the state.json edge, which is the edge the gate enforces.
+    for (target_repo, target_id, dep) in &gplan.record_edits {
+        let Some(repo_root) = repo_root_for(target_repo) else {
+            continue;
+        };
+        let record_path = repo_root.join(format!("planning/blocks/{target_id}.json"));
+        let Ok(existing) = std::fs::read_to_string(&record_path) else {
+            continue;
+        };
+        match insert_depends_on_block_edge(&existing, dep) {
+            Ok(Some(new_content)) => {
+                full_plan.actions.push(EmitAction {
+                    path: record_path,
+                    new_content,
+                    note: format!(
+                        "add depends_on edge to '{target_repo}:{target_id}' record \
+                         (graduated from carryover '{carryover_key}')"
+                    ),
+                });
+            }
+            Ok(None) => {
+                // Already present in the record — nothing to do.
+            }
+            Err(e) => {
+                full_plan.diagnostics.push(Diagnostic::error(
+                    &record_path,
+                    "E_BLOCK_GRADUATE_RECORD_EDIT_FAILED",
+                    format!("failed to edit record for '{target_repo}:{target_id}': {e}"),
+                ));
+            }
+        }
+    }
+
+    // state.json writes last.
+    full_plan.actions.extend(state_actions);
+
+    if !write {
+        report.diagnostics.extend(apply_plan(&full_plan, false));
+        for target in &gplan.edges_added {
+            report.diagnostics.push(Diagnostic::warning(
+                root,
+                "I_BLOCK_GRADUATE_EDGE_ADDED",
+                format!(
+                    "would add depends_on edge on '{target}' -> '{}'",
+                    gplan.created_key
+                ),
+            ));
+        }
+        for (label, verdict) in &gplan.edges_skipped {
+            report.diagnostics.push(Diagnostic::warning(
+                root,
+                "W_BLOCK_GRADUATE_EDGE_SKIPPED",
+                format!("edge on '{label}' not moved: verdict {verdict:?}"),
+            ));
+        }
+        return Ok(report);
+    }
+
+    if full_plan
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == Severity::Error)
+    {
+        // A record-edit failure above — nothing has been written to disk
+        // yet (the write loop below has not started), so this is a clean
+        // refusal, not a partial write.
+        report.diagnostics.extend(full_plan.diagnostics);
+        return Ok(report);
+    }
+
+    // `write == true`: apply the ordered plan by hand (rather than
+    // `apply_plan`, which writes each action independently), capturing every
+    // file's prior bytes — or its prior absence — before writing it, so a
+    // mid-apply IO failure can best-effort revert every file already written
+    // this call. Mirrors `carryover::dispose_repo`'s ordering rationale,
+    // extended from two files to N.
+    let mut written: Vec<(std::path::PathBuf, Option<Vec<u8>>)> = Vec::new();
+    let mut write_failed = false;
+    for action in &full_plan.actions {
+        let prior = std::fs::read(&action.path).ok();
+        match brain::emit::write_atomic(&action.path, action.new_content.as_bytes()) {
+            Ok(()) => {
+                written.push((action.path.clone(), prior));
+                report.diagnostics.push(Diagnostic::warning(
+                    &action.path,
+                    "I_EMIT_WROTE",
+                    format!("wrote: {}", action.note),
+                ));
+            }
+            Err(e) => {
+                report.diagnostics.push(Diagnostic::error(
+                    &action.path,
+                    "E_EMIT_WRITE_FAILED",
+                    format!("failed to write {}: {e}", action.path.display()),
+                ));
+                write_failed = true;
+                break;
+            }
+        }
+    }
+
+    if write_failed {
+        // Best-effort revert, most-recently-written file first, so a
+        // half-applied graduation never leaves a state.json edge dangling
+        // without its matching record edit or archive row (archive was
+        // written first, so it is the last to be reverted).
+        for (path, prior) in written.into_iter().rev() {
+            let revert_result = match &prior {
+                Some(bytes) => brain::emit::write_atomic(&path, bytes),
+                None => std::fs::remove_file(&path),
+            };
+            if revert_result.is_err() {
+                report.diagnostics.push(Diagnostic::error(
+                    &path,
+                    "E_EMIT_WRITE_FAILED",
+                    format!(
+                        "revert ALSO FAILED for {} — manual check required",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+        return Ok(report);
+    }
+
+    for target in &gplan.edges_added {
+        report.diagnostics.push(Diagnostic::warning(
+            root,
+            "I_BLOCK_GRADUATE_EDGE_ADDED",
+            format!(
+                "added depends_on edge on '{target}' -> '{}'",
+                gplan.created_key
+            ),
+        ));
+    }
+    for (label, verdict) in &gplan.edges_skipped {
+        report.diagnostics.push(Diagnostic::warning(
+            root,
+            "W_BLOCK_GRADUATE_EDGE_SKIPPED",
+            format!("edge on '{label}' not moved: verdict {verdict:?}"),
+        ));
+    }
+
+    // Regenerate derived views exactly once, matching create_block_body.
+    let emit = emit_state(root, true, scope)?;
+    report.diagnostics.extend(emit.diagnostics);
+
+    Ok(report)
+}
+
 /// Author a new operator `depends_on` edge on an existing block
 /// (`mev add-operator-edge <repo>:<id> --slug --exit --start [--what]`).
 ///

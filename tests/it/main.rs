@@ -21,6 +21,7 @@ mod approve_reject;
 mod attention_queue;
 mod blocks_driver;
 mod brain_block_create;
+mod brain_block_graduate;
 mod brain_block_graph;
 mod brain_block_records_fixtures;
 mod brain_carryover;

@@ -57,14 +57,21 @@
 //! - [`VALID_SDLC_WORKFLOWS`]: `none` | `patch` | `task` | `run` | `flow`
 //! - [`VALID_MODELS`]: `sonnet` | `gemini-pro` | `gemini-flash` | `either`
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::Diagnostic;
+use crate::brain::carryover::{
+    BlockedByEdgeClassification, EdgeBlockVerdict, classify_blocked_by_edge,
+};
 use crate::brain::emit::{EmitAction, EmitPlan};
-use crate::brain::state::{Backlog, BlockedBy, Origin, StateFile, StateSource, Track, TrackBlock};
+use crate::brain::state::{
+    ApprovalDep, Backlog, BlockDep, BlockedBy, Carryover, ExternalDep, OperatorDep, Origin,
+    StateFile, StateSource, Track, TrackBlock, block_status_map,
+};
 
 /// Legal `kind` values — which producer authored the record and how it is
 /// scheduled.
@@ -718,13 +725,76 @@ pub fn plan_create_block(
     today: &str,
 ) -> EmitPlan {
     let mut plan = EmitPlan::default();
+
+    let outcome = match build_create_block_outcome(payload, files, today) {
+        Ok(outcome) => outcome,
+        Err(diags) => {
+            plan.diagnostics = diags;
+            return plan;
+        }
+    };
+
+    // Plan the state.json write.
+    let note = format!(
+        "create block '{}:{}' (wave {})",
+        payload.repo, payload.id, outcome.wave
+    );
+    if let Some(action) =
+        crate::brain::epics::action_for(&files[outcome.target_index].0, &outcome.work_file, note)
+    {
+        plan.actions.push(action);
+    }
+
+    // Plan the block record write.
+    plan.actions.push(outcome.record_action);
+
+    plan
+}
+
+/// The result of planning a new block/ticket/chore's creation, one step short
+/// of an [`EmitPlan`] — the shared core [`plan_create_block`] and
+/// [`plan_graduate_carryover`] both build on, so the two can never plan a
+/// record or a `tracks[].blocks[]` registration differently.
+///
+/// [`plan_create_block`] turns this straight into two [`EmitAction`]s.
+/// [`plan_graduate_carryover`] instead merges `work_file` with further
+/// mutations (edge additions, the carryover's own removal) onto the SAME
+/// target `StateFile` before serializing it, so a carryover graduating into
+/// its own repo's block is written by exactly one `state.json` action, not
+/// two competing ones.
+struct CreateBlockOutcome {
+    /// Index into the caller's `files` slice this block was filed against.
+    target_index: usize,
+    /// The target repo's `StateFile`, cloned and mutated with the new
+    /// `tracks[].blocks[]` registration appended. Not yet serialized — a
+    /// caller who needs to merge further mutations onto the same file does
+    /// so before calling [`crate::brain::epics::action_for`] itself.
+    work_file: StateFile,
+    /// The wave allocated to the new block, echoed back only for the plan
+    /// note's wording.
+    wave: i64,
+    /// The new `planning/blocks/<id>.json` record's own write — always a
+    /// distinct path from any `state.json`, so it never needs merging.
+    record_action: EmitAction,
+}
+
+/// Shared core of [`plan_create_block`] and [`plan_graduate_carryover`]:
+/// validate the payload, resolve the target repo, refuse a duplicate id or a
+/// dangling `depends_on` edge, allocate the wave, and build both the mutated
+/// target `StateFile` and the new block record's own write — everything
+/// [`plan_create_block`] does today, `Err` carrying the exact diagnostics it
+/// returns on refusal (each still a zero-action outcome for the caller).
+fn build_create_block_outcome(
+    payload: &CreateBlockPayload,
+    files: &[(StateSource, StateFile)],
+    today: &str,
+) -> Result<CreateBlockOutcome, Vec<Diagnostic>> {
     let record_path = record_repo_path(payload);
 
     // 1. Pure payload validation, unchanged from task 1.
     let payload_diags = validate_payload(payload);
     if !payload_diags.is_empty() {
-        plan.diagnostics = payload_diags;
-        return plan;
+        return Err(payload_diags);
     }
 
     // 2. Resolve the target repo among loaded corpus files.
@@ -736,7 +806,7 @@ pub fn plan_create_block(
             .iter()
             .map(|(src, _)| src.repo_slug.as_str())
             .collect();
-        plan.diagnostics.push(Diagnostic::error(
+        return Err(vec![Diagnostic::error(
             &record_path,
             E_BLOCK_CREATE_UNKNOWN_REPO,
             format!(
@@ -744,8 +814,7 @@ pub fn plan_create_block(
                 payload.repo,
                 known.join(", ")
             ),
-        ));
-        return plan;
+        )]);
     };
 
     // 3. An existing id is a no-op refusal, never an overwrite.
@@ -755,7 +824,7 @@ pub fn plan_create_block(
         .iter()
         .any(|t| t.blocks.iter().any(|b| b.id == payload.id));
     if already_exists {
-        plan.diagnostics.push(Diagnostic::error(
+        return Err(vec![Diagnostic::error(
             &record_path,
             E_BLOCK_CREATE_EXISTS,
             format!(
@@ -763,19 +832,19 @@ pub fn plan_create_block(
                  files new blocks",
                 payload.id, payload.repo
             ),
-        ));
-        return plan;
+        )]);
     }
 
     // 4. Every block-type depends_on edge must resolve somewhere in the
     //    loaded corpus. Collect every dangling edge, not just the first, so
     //    a caller sees the whole problem in one round trip (same discipline
     //    as validate_payload).
+    let mut dangling_diags = Vec::new();
     for edge in &payload.depends_on {
         if let BlockedBy::Block(dep) = edge
             && !dependency_resolves(&dep.repo, &dep.id, files)
         {
-            plan.diagnostics.push(Diagnostic::error(
+            dangling_diags.push(Diagnostic::error(
                 &record_path,
                 E_BLOCK_CREATE_DANGLING_DEPENDENCY,
                 format!(
@@ -786,8 +855,8 @@ pub fn plan_create_block(
             ));
         }
     }
-    if !plan.diagnostics.is_empty() {
-        return plan;
+    if !dangling_diags.is_empty() {
+        return Err(dangling_diags);
     }
 
     // 5. Wave allocation, per the two rules this block's ACs pin.
@@ -811,17 +880,7 @@ pub fn plan_create_block(
     let track_block = build_track_block(payload, wave, today);
     work_file.tracks[track_index].blocks.push(track_block);
 
-    // 7. Plan the state.json write.
-    let note = format!(
-        "create block '{}:{}' (wave {wave})",
-        payload.repo, payload.id
-    );
-    if let Some(action) = crate::brain::epics::action_for(&files[target_index].0, &work_file, note)
-    {
-        plan.actions.push(action);
-    }
-
-    // 8. Plan the block record write, resolved next to the target repo's
+    // 7. Build the block record write, resolved next to the target repo's
     //    own state.json (its abs_path is <repo_root>/planning/state.json).
     let repo_root = files[target_index]
         .0
@@ -834,13 +893,315 @@ pub fn plan_create_block(
     let mut record_content =
         serde_json::to_string_pretty(&record).expect("block record always serializes");
     record_content.push('\n');
-    plan.actions.push(EmitAction {
+    let record_action = EmitAction {
         path: repo_root.join(&record_path),
         new_content: record_content,
         note: format!("file new block record '{}'", payload.id),
-    });
+    };
 
-    plan
+    Ok(CreateBlockOutcome {
+        target_index,
+        work_file,
+        wave,
+        record_action,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// plan_graduate_carryover — `mev create-block --graduate-carryover <repo>:<slug>`
+// (MV.ticket.create-block-graduates-a-carryover, Task 1)
+// ---------------------------------------------------------------------------
+
+/// Diagnostic code: `--graduate-carryover <repo>:<slug>` names a key that is
+/// malformed, or resolves to no loaded `carryover[]` entry.
+pub const E_BLOCK_CREATE_UNKNOWN_CARRYOVER: &str = "E_BLOCK_CREATE_UNKNOWN_CARRYOVER";
+/// Diagnostic code: the payload's `origin` is present and does not name the
+/// exact carryover being graduated (`{"type":"carryover","slug":<slug>}`).
+pub const E_BLOCK_CREATE_ORIGIN_MISMATCH: &str = "E_BLOCK_CREATE_ORIGIN_MISMATCH";
+
+/// The result of planning `mev create-block --from <payload> --graduate-carryover
+/// <repo>:<slug>` — everything [`plan_create_block`] plans for the new block,
+/// plus the edge transfer onto every `Blocking` target of the carryover's
+/// `blocks[]`, the carryover's own removal, and the archive row that records
+/// the disposal.
+///
+/// Pure — takes no filesystem; the caller (task 2's `graduate_carryover_body`)
+/// turns [`Self::record_edits`] into a surgical text edit of each target's
+/// `planning/blocks/<id>.json`, and [`Self::archive`] into one appended
+/// `planning/carryover-archive.jsonl` line.
+#[derive(Debug)]
+pub struct GraduationPlan {
+    /// The new block's own record write, plus exactly one merged `state.json`
+    /// [`EmitAction`] per distinct path touched (the created block's repo,
+    /// every repo holding a `Blocking` target, and the carryover's own repo —
+    /// collapsed to one action apiece when two or more of those are the same
+    /// file). Diagnostics carried here are refusals: an `Err`-shaped plan
+    /// (any diagnostic present) means zero actions were planned at all.
+    pub plan: EmitPlan,
+    /// `"<payload.repo>:<payload.id>"` — the key of the block being created,
+    /// echoed back for callers that only have the plan, not the payload.
+    pub created_key: String,
+    /// Target keys (`"{repo}:{id}"`) that gained the new block edge.
+    pub edges_added: Vec<String>,
+    /// Every non-`Blocking` `blocks[]` edge, labeled and paired with the
+    /// verdict [`classify_blocked_by_edge`] gave it — reported, never acted
+    /// on.
+    pub edges_skipped: Vec<(String, EdgeBlockVerdict)>,
+    /// `(target repo, target id, edge)` for every target whose
+    /// `planning/blocks/<id>.json` record must also gain the edge — the lib
+    /// layer applies each as a surgical insertion into that record's
+    /// `depends_on` array.
+    pub record_edits: Vec<(String, String, BlockDep)>,
+    /// The carryover's own `state.json` source (so the caller knows which
+    /// repo's `carryover-archive.jsonl` to append to) and the archive row to
+    /// append — `None` only when the plan refused before resolving the
+    /// carryover.
+    pub archive: Option<(StateSource, okf_core::CarryoverArchiveRow)>,
+}
+
+/// A human-readable label for one `blocks[]` edge, for [`GraduationPlan`]'s
+/// `edges_added`/`edges_skipped` — the resolved `"{repo}:{id}"` target key for
+/// a [`BlockedBy::Block`] edge, or the same `external:`/`OP.`-prefixed labels
+/// [`crate::brain::carryover`]'s own reporting already uses for the three
+/// node-less edge kinds, so a caller never sees a bare empty string.
+fn edge_label(edge: &BlockedBy, classification: &BlockedByEdgeClassification) -> String {
+    if let Some(key) = &classification.target_key {
+        return key.clone();
+    }
+    match edge {
+        BlockedBy::External(ExternalDep { what }) => format!("external:{what}"),
+        BlockedBy::Operator(OperatorDep { slug, .. }) => okf_core::op_id(slug),
+        BlockedBy::Approval(ApprovalDep { slug, .. }) => okf_core::op_id(slug),
+        BlockedBy::Block(_) => {
+            unreachable!("a Block edge's classification always carries a target_key")
+        }
+    }
+}
+
+/// Locate one block's position in the loaded corpus by `(repo, id)` — same
+/// linear scan [`plan_demote_block`]/[`plan_promote_block`] already use, kept
+/// local here since this planner needs it against a plain `files` slice, not
+/// a `repo:id` key string.
+fn locate_block(
+    files: &[(StateSource, StateFile)],
+    repo: &str,
+    id: &str,
+) -> Option<(usize, usize, usize)> {
+    for (fi, (src, file)) in files.iter().enumerate() {
+        if src.repo_slug != repo {
+            continue;
+        }
+        for (ti, track) in file.tracks.iter().enumerate() {
+            for (bi, block) in track.blocks.iter().enumerate() {
+                if block.id == id {
+                    return Some((fi, ti, bi));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Plan `mev create-block --from <payload> --graduate-carryover <repo>:<slug>`:
+/// everything [`plan_create_block`] plans for `payload`, composed with moving
+/// every `Blocking` edge off the named carryover entry onto the newly created
+/// block, removing the carryover entry, and archiving it with
+/// `reason: promoted`.
+///
+/// `today` is `YYYY-MM-DD`, injected by the caller, matching every other
+/// planner in this module.
+///
+/// Diagnostics (each returns a [`GraduationPlan`] with zero actions and
+/// `archive: None` — nothing is ever partially planned):
+/// - [`E_BLOCK_CREATE_UNKNOWN_CARRYOVER`] — `carryover_key` is not
+///   `repo:slug`, names a repo with no loaded `state.json`, or names a slug
+///   absent from that repo's `carryover[]`.
+/// - [`E_BLOCK_CREATE_ORIGIN_MISMATCH`] — `payload.origin` is present and
+///   does not name `{"type":"carryover","slug":<slug>}` exactly (an absent
+///   origin is filled with that value instead of refused).
+/// - Every diagnostic [`build_create_block_outcome`] (== [`plan_create_block`])
+///   can raise, checked next, over the origin-filled payload.
+///
+/// On success, every `Blocking` `blocks[]` edge (per
+/// [`classify_blocked_by_edge`] against [`block_status_map`] — the same
+/// classifier `mev carryover --would-block` and the `MV.16.C` gating set use,
+/// so this planner can never move an edge the gate does not also enforce)
+/// gains `{"type":"block","repo":<created repo>,"id":<created id>,
+/// "what":"graduated from carryover <repo>:<slug>"}` on its `depends_on`,
+/// once — an edge already present is not duplicated, and is silently left
+/// alone rather than reported. Every other verdict
+/// (`Closed`/`Wontfix`/`Unresolvable`/`NoNodeTarget`) is reported in
+/// [`GraduationPlan::edges_skipped`] and left untouched.
+pub fn plan_graduate_carryover(
+    payload: &CreateBlockPayload,
+    carryover_key: &str,
+    files: &[(StateSource, StateFile)],
+    today: &str,
+) -> GraduationPlan {
+    let here = Path::new(".");
+    let mut out = GraduationPlan {
+        plan: EmitPlan::default(),
+        created_key: format!("{}:{}", payload.repo, payload.id),
+        edges_added: Vec::new(),
+        edges_skipped: Vec::new(),
+        record_edits: Vec::new(),
+        archive: None,
+    };
+
+    // 1. Resolve `<repo>:<slug>` among loaded carryover[] entries.
+    let Some((carryover_repo, carryover_slug)) = split_repo_id_key(carryover_key) else {
+        out.plan.diagnostics.push(Diagnostic::error(
+            here,
+            E_BLOCK_CREATE_UNKNOWN_CARRYOVER,
+            format!(
+                "carryover key '{carryover_key}' is not in 'repo:slug' form (e.g. \
+                 'mev:some-carryover-slug')"
+            ),
+        ));
+        return out;
+    };
+    let Some(carryover_file_index) = files
+        .iter()
+        .position(|(src, _)| src.repo_slug == carryover_repo)
+    else {
+        out.plan.diagnostics.push(Diagnostic::error(
+            here,
+            E_BLOCK_CREATE_UNKNOWN_CARRYOVER,
+            format!("no loaded repo is named '{carryover_repo}'"),
+        ));
+        return out;
+    };
+    let Some(carryover_entry_index) = files[carryover_file_index]
+        .1
+        .carryover
+        .iter()
+        .position(|c| c.slug == carryover_slug)
+    else {
+        out.plan.diagnostics.push(Diagnostic::error(
+            here,
+            E_BLOCK_CREATE_UNKNOWN_CARRYOVER,
+            format!("no carryover[] entry named '{carryover_slug}' in repo '{carryover_repo}'"),
+        ));
+        return out;
+    };
+    let carryover_entry: Carryover =
+        files[carryover_file_index].1.carryover[carryover_entry_index].clone();
+
+    // 2. origin: fill when absent, refuse when it names anything else.
+    let expected_origin = json!({"type": "carryover", "slug": carryover_slug});
+    let mut effective_payload = payload.clone();
+    match &payload.origin {
+        None => effective_payload.origin = Some(expected_origin),
+        Some(origin) if origin == &expected_origin => {}
+        Some(origin) => {
+            out.plan.diagnostics.push(Diagnostic::error(
+                here,
+                E_BLOCK_CREATE_ORIGIN_MISMATCH,
+                format!(
+                    "payload origin {origin} does not name the carryover being graduated \
+                     (expected {expected_origin})"
+                ),
+            ));
+            return out;
+        }
+    }
+
+    // 3. Everything plan_create_block does today, unchanged.
+    let outcome = match build_create_block_outcome(&effective_payload, files, today) {
+        Ok(outcome) => outcome,
+        Err(diags) => {
+            out.plan.diagnostics = diags;
+            return out;
+        }
+    };
+
+    // 4. Classify every blocks[] edge and move the Blocking ones.
+    let status_map = block_status_map(files);
+    let created_edge = BlockDep {
+        repo: payload.repo.clone(),
+        id: payload.id.clone(),
+        what: Some(format!(
+            "graduated from carryover {carryover_repo}:{carryover_slug}"
+        )),
+    };
+
+    let mut work_files: HashMap<usize, StateFile> = HashMap::new();
+    work_files.insert(outcome.target_index, outcome.work_file);
+
+    for edge in &carryover_entry.blocks {
+        let classification = classify_blocked_by_edge(carryover_repo, edge, &status_map);
+        if !classification.is_blocking() {
+            out.edges_skipped
+                .push((edge_label(edge, &classification), classification.verdict));
+            continue;
+        }
+
+        // Blocking is only ever returned for a Block edge (see
+        // classify_blocked_by_edge's contract).
+        let BlockedBy::Block(dep) = edge else {
+            unreachable!("EdgeBlockVerdict::Blocking is only produced for a Block edge");
+        };
+        let target_repo = if dep.repo.is_empty() {
+            carryover_repo
+        } else {
+            dep.repo.as_str()
+        };
+        let Some((fi, ti, bi)) = locate_block(files, target_repo, &dep.id) else {
+            // A Blocking verdict means the target resolved in status_map,
+            // which is built from these same `files` — this branch is
+            // unreachable in practice, but if it ever diverges, skip rather
+            // than plan a mutation against a target we cannot locate.
+            continue;
+        };
+
+        let target_file = work_files.entry(fi).or_insert_with(|| files[fi].1.clone());
+        let already_has_edge = target_file.tracks[ti].blocks[bi]
+            .depends_on
+            .iter()
+            .any(|e| matches!(e, BlockedBy::Block(d) if d.repo == created_edge.repo && d.id == created_edge.id));
+        if !already_has_edge {
+            target_file.tracks[ti].blocks[bi]
+                .depends_on
+                .push(BlockedBy::Block(created_edge.clone()));
+            out.edges_added.push(format!("{target_repo}:{}", dep.id));
+            out.record_edits.push((
+                target_repo.to_string(),
+                dep.id.clone(),
+                created_edge.clone(),
+            ));
+        }
+    }
+
+    // 5. Remove the entry from carryover[] and build the archive row.
+    let carryover_work = work_files
+        .entry(carryover_file_index)
+        .or_insert_with(|| files[carryover_file_index].1.clone());
+    carryover_work.carryover.remove(carryover_entry_index);
+
+    let archive_row = okf_core::CarryoverArchiveRow {
+        entry: carryover_entry,
+        disposed_at: today.to_string(),
+        reason: okf_core::DisposalReason::Promoted,
+        reconstructed: false,
+        evidence: Some(format!("graduated to block {}", out.created_key)),
+        amends: None,
+    };
+    out.archive = Some((files[carryover_file_index].0.clone(), archive_row));
+
+    // 6. Emit one action per touched state.json (merged when the same file
+    //    was touched by more than one of the above steps).
+    for (fi, file) in &work_files {
+        let note = format!(
+            "graduate carryover '{carryover_key}' into block '{}'",
+            out.created_key
+        );
+        if let Some(action) = crate::brain::epics::action_for(&files[*fi].0, file, note) {
+            out.plan.actions.push(action);
+        }
+    }
+    out.plan.actions.push(outcome.record_action);
+
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -2560,5 +2921,525 @@ mod planning_tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
+    }
+
+    // -----------------------------------------------------------------
+    // plan_graduate_carryover (MV.ticket.create-block-graduates-a-carryover,
+    // Task 1)
+    // -----------------------------------------------------------------
+
+    /// One state file for `repo` with `tracks: [{"title": "Targets", ...}]`,
+    /// each block carrying an explicit authored `status` — [`file_for`]
+    /// hardcodes `"open"`, but these tests need `in_progress`/`deferred`/
+    /// `closed`/`wontfix` targets to exercise every [`EdgeBlockVerdict`].
+    fn file_with_block_statuses(
+        dir: &Path,
+        repo: &str,
+        blocks: &[(&str, &str)],
+    ) -> (StateSource, StateFile) {
+        let abs_path = dir.join(repo).join("planning").join("state.json");
+        std::fs::create_dir_all(abs_path.parent().unwrap()).unwrap();
+
+        let block_json: Vec<String> = blocks
+            .iter()
+            .map(|(id, status)| {
+                format!(r#"{{ "id": "{id}", "title": "{id}", "status": "{status}" }}"#)
+            })
+            .collect();
+        let raw = format!(
+            r#"{{ "repo": "{repo}", "kind": "project", "updated": "2026-09-01",
+  "focus": {{ "now": [], "next": [], "blocked": [] }},
+  "tracks": [{{ "title": "Targets", "blocks": [{}] }}] }}"#,
+            block_json.join(",\n")
+        );
+        let file: StateFile = serde_json::from_str(&raw).expect("fixture state.json");
+
+        let mut content = serde_json::to_string_pretty(&file).unwrap();
+        content.push('\n');
+        std::fs::write(&abs_path, content).unwrap();
+
+        let src = StateSource {
+            repo_slug: repo.to_string(),
+            abs_path,
+            expected_kind: "project",
+        };
+        (src, file)
+    }
+
+    /// A carryover entry with a given `slug`/`repo`/`blocks[]` — every other
+    /// field defaulted, since these tests only exercise `blocks[]`
+    /// classification and archival.
+    fn carryover_with_blocks(slug: &str, repo: &str, blocks: Vec<BlockedBy>) -> Carryover {
+        Carryover {
+            slug: slug.to_string(),
+            scope: crate::brain::state::CarryoverScope {
+                repo: Some(repo.to_string()),
+                ..Default::default()
+            },
+            text: "A carryover entry used only in a graduation-planning test.".to_string(),
+            created: "2026-09-01".to_string(),
+            blocks,
+            ..Default::default()
+        }
+    }
+
+    fn block_edge(repo: &str, id: &str) -> BlockedBy {
+        BlockedBy::Block(BlockDep {
+            repo: repo.to_string(),
+            id: id.to_string(),
+            what: None,
+        })
+    }
+
+    /// A minimal legal `--from` payload targeting `(repo, id)`, otherwise
+    /// identical to [`legal_block_payload`].
+    fn graduate_payload(repo: &str, id: &str) -> CreateBlockPayload {
+        let mut p = legal_block_payload();
+        p.repo = repo.to_string();
+        p.id = id.to_string();
+        p
+    }
+
+    #[test]
+    fn malformed_carryover_key_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "mev", &[])];
+        let payload = graduate_payload("mev", "MV.99.NEW");
+        let plan = plan_graduate_carryover(&payload, "not-a-repo-slug-pair", &files, "2026-09-02");
+        assert!(
+            plan.plan
+                .diagnostics
+                .iter()
+                .any(|d| d.locator == E_BLOCK_CREATE_UNKNOWN_CARRYOVER),
+            "{:?}",
+            plan.plan.diagnostics
+        );
+        assert!(plan.plan.actions.is_empty());
+        assert!(plan.archive.is_none());
+    }
+
+    #[test]
+    fn unknown_carryover_repo_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![file_for(dir.path(), "mev", &[])];
+        let payload = graduate_payload("mev", "MV.99.NEW");
+        let plan = plan_graduate_carryover(&payload, "ghost-repo:some-slug", &files, "2026-09-02");
+        assert!(
+            plan.plan
+                .diagnostics
+                .iter()
+                .any(|d| d.locator == E_BLOCK_CREATE_UNKNOWN_CARRYOVER),
+            "{:?}",
+            plan.plan.diagnostics
+        );
+        assert!(plan.plan.actions.is_empty());
+    }
+
+    #[test]
+    fn unknown_carryover_slug_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, mut file) = file_for(dir.path(), "mev", &[]);
+        file.carryover
+            .push(carryover_with_blocks("real-slug", "mev", vec![]));
+        let files = vec![(src, file)];
+        let payload = graduate_payload("mev", "MV.99.NEW");
+        let plan = plan_graduate_carryover(&payload, "mev:ghost-slug", &files, "2026-09-02");
+        assert!(
+            plan.plan
+                .diagnostics
+                .iter()
+                .any(|d| d.locator == E_BLOCK_CREATE_UNKNOWN_CARRYOVER),
+            "{:?}",
+            plan.plan.diagnostics
+        );
+        assert!(plan.plan.actions.is_empty());
+    }
+
+    #[test]
+    fn absent_origin_is_filled_with_the_carryover_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, mut file) = file_for(dir.path(), "mev", &[]);
+        file.carryover
+            .push(carryover_with_blocks("some-slug", "mev", vec![]));
+        let files = vec![(src, file)];
+        let payload = graduate_payload("mev", "MV.99.NEW");
+        assert!(payload.origin.is_none());
+
+        let plan = plan_graduate_carryover(&payload, "mev:some-slug", &files, "2026-09-02");
+        assert!(
+            plan.plan.diagnostics.is_empty(),
+            "{:?}",
+            plan.plan.diagnostics
+        );
+
+        let record_action = plan
+            .plan
+            .actions
+            .iter()
+            .find(|a| a.path.ends_with("MV.99.NEW.json"))
+            .expect("a block record action");
+        let record_json: serde_json::Value =
+            serde_json::from_str(&record_action.new_content).unwrap();
+        assert_eq!(record_json["origin"]["type"], "carryover");
+        assert_eq!(record_json["origin"]["slug"], "some-slug");
+    }
+
+    #[test]
+    fn origin_naming_a_different_slug_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, mut file) = file_for(dir.path(), "mev", &[]);
+        file.carryover
+            .push(carryover_with_blocks("some-slug", "mev", vec![]));
+        let files = vec![(src, file)];
+        let mut payload = graduate_payload("mev", "MV.99.NEW");
+        payload.origin = Some(json!({"type": "carryover", "slug": "other-slug"}));
+
+        let plan = plan_graduate_carryover(&payload, "mev:some-slug", &files, "2026-09-02");
+        assert!(
+            plan.plan
+                .diagnostics
+                .iter()
+                .any(|d| d.locator == E_BLOCK_CREATE_ORIGIN_MISMATCH),
+            "{:?}",
+            plan.plan.diagnostics
+        );
+        assert!(plan.plan.actions.is_empty());
+    }
+
+    #[test]
+    fn origin_naming_a_different_type_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, mut file) = file_for(dir.path(), "mev", &[]);
+        file.carryover
+            .push(carryover_with_blocks("some-slug", "mev", vec![]));
+        let files = vec![(src, file)];
+        let mut payload = graduate_payload("mev", "MV.99.NEW");
+        payload.origin = Some(json!({"type": "backlog", "slug": "some-slug"}));
+
+        let plan = plan_graduate_carryover(&payload, "mev:some-slug", &files, "2026-09-02");
+        assert!(
+            plan.plan
+                .diagnostics
+                .iter()
+                .any(|d| d.locator == E_BLOCK_CREATE_ORIGIN_MISMATCH),
+            "{:?}",
+            plan.plan.diagnostics
+        );
+        assert!(plan.plan.actions.is_empty());
+    }
+
+    #[test]
+    fn origin_matching_the_carryover_exactly_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, mut file) = file_for(dir.path(), "mev", &[]);
+        file.carryover
+            .push(carryover_with_blocks("some-slug", "mev", vec![]));
+        let files = vec![(src, file)];
+        let mut payload = graduate_payload("mev", "MV.99.NEW");
+        payload.origin = Some(json!({"type": "carryover", "slug": "some-slug"}));
+
+        let plan = plan_graduate_carryover(&payload, "mev:some-slug", &files, "2026-09-02");
+        assert!(
+            plan.plan.diagnostics.is_empty(),
+            "{:?}",
+            plan.plan.diagnostics
+        );
+    }
+
+    #[test]
+    fn blocking_targets_gain_the_edge_every_other_verdict_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, mut file) = file_with_block_statuses(
+            dir.path(),
+            "mev",
+            &[
+                ("MV.OPEN", "open"),
+                ("MV.PROG", "in_progress"),
+                ("MV.DEFER", "deferred"),
+                ("MV.CLOSED", "closed"),
+                ("MV.WONTFIX", "wontfix"),
+            ],
+        );
+        file.carryover.push(carryover_with_blocks(
+            "graduating-slug",
+            "mev",
+            vec![
+                block_edge("mev", "MV.OPEN"),
+                block_edge("mev", "MV.PROG"),
+                block_edge("mev", "MV.DEFER"),
+                block_edge("mev", "MV.CLOSED"),
+                block_edge("mev", "MV.WONTFIX"),
+                block_edge("mev", "MV.GHOST"),
+                BlockedBy::External(ExternalDep {
+                    what: "some external thing".to_string(),
+                }),
+            ],
+        ));
+        let files = vec![(src, file)];
+        let payload = graduate_payload("mev", "MV.99.NEW");
+
+        let plan = plan_graduate_carryover(&payload, "mev:graduating-slug", &files, "2026-09-02");
+        assert!(
+            plan.plan.diagnostics.is_empty(),
+            "{:?}",
+            plan.plan.diagnostics
+        );
+
+        let mut added = plan.edges_added.clone();
+        added.sort();
+        assert_eq!(
+            added,
+            vec![
+                "mev:MV.DEFER".to_string(),
+                "mev:MV.OPEN".to_string(),
+                "mev:MV.PROG".to_string(),
+            ]
+        );
+
+        let skipped: HashMap<String, EdgeBlockVerdict> =
+            plan.edges_skipped.iter().cloned().collect();
+        assert_eq!(
+            skipped.get("mev:MV.CLOSED"),
+            Some(&EdgeBlockVerdict::Closed)
+        );
+        assert_eq!(
+            skipped.get("mev:MV.WONTFIX"),
+            Some(&EdgeBlockVerdict::Wontfix)
+        );
+        assert_eq!(
+            skipped.get("mev:MV.GHOST"),
+            Some(&EdgeBlockVerdict::Unresolvable)
+        );
+        assert_eq!(
+            skipped.get("external:some external thing"),
+            Some(&EdgeBlockVerdict::NoNodeTarget)
+        );
+
+        assert_eq!(plan.record_edits.len(), 3, "{:?}", plan.record_edits);
+    }
+
+    /// Inversion (D8/testing discipline): assert the target lacks the edge in
+    /// the input corpus, plan, then assert the planned `state.json` content
+    /// carries it — never a committed-red assertion.
+    #[test]
+    fn inversion_edge_absent_before_planning_present_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, mut file) = file_with_block_statuses(dir.path(), "mev", &[("MV.HELD", "open")]);
+        assert!(
+            file.tracks[0].blocks[0].depends_on.is_empty(),
+            "precondition: target starts with no depends_on edges"
+        );
+        file.carryover.push(carryover_with_blocks(
+            "inv-slug",
+            "mev",
+            vec![block_edge("mev", "MV.HELD")],
+        ));
+        let files = vec![(src, file)];
+        let payload = graduate_payload("mev", "MV.99.NEW");
+
+        let plan = plan_graduate_carryover(&payload, "mev:inv-slug", &files, "2026-09-02");
+        assert!(
+            plan.plan.diagnostics.is_empty(),
+            "{:?}",
+            plan.plan.diagnostics
+        );
+
+        let state_action = plan
+            .plan
+            .actions
+            .iter()
+            .find(|a| a.path.ends_with("state.json"))
+            .expect("a state.json action");
+        let parsed: serde_json::Value = serde_json::from_str(&state_action.new_content).unwrap();
+        let target = parsed["tracks"][0]["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["id"] == "MV.HELD")
+            .expect("target block present");
+        let deps = target["depends_on"]
+            .as_array()
+            .expect("depends_on present after planning");
+        assert!(
+            deps.iter().any(|d| d["id"] == "MV.99.NEW"),
+            "expected the created block's edge on the target, got {target}"
+        );
+    }
+
+    #[test]
+    fn a_target_already_carrying_the_edge_is_not_duplicated() {
+        let dir = tempfile::tempdir().unwrap();
+        let abs_path = dir.path().join("mev").join("planning").join("state.json");
+        std::fs::create_dir_all(abs_path.parent().unwrap()).unwrap();
+        let raw = r#"{
+            "repo": "mev", "kind": "project", "updated": "2026-09-01",
+            "focus": {"now": [], "next": [], "blocked": []},
+            "tracks": [
+                {"title": "Targets", "blocks": [
+                    {"id": "MV.OPEN", "title": "MV.OPEN", "status": "open",
+                     "depends_on": [{"type": "block", "repo": "mev", "id": "MV.99.NEW"}]}
+                ]}
+            ]
+        }"#;
+        let file: StateFile = serde_json::from_str(raw).unwrap();
+        let mut content = serde_json::to_string_pretty(&file).unwrap();
+        content.push('\n');
+        std::fs::write(&abs_path, content).unwrap();
+        let src = StateSource {
+            repo_slug: "mev".to_string(),
+            abs_path,
+            expected_kind: "project",
+        };
+        let mut file = file;
+        file.carryover.push(carryover_with_blocks(
+            "dup-slug",
+            "mev",
+            vec![block_edge("mev", "MV.OPEN")],
+        ));
+        let files = vec![(src, file)];
+
+        let payload = graduate_payload("mev", "MV.99.NEW");
+        let plan = plan_graduate_carryover(&payload, "mev:dup-slug", &files, "2026-09-02");
+        assert!(
+            plan.plan.diagnostics.is_empty(),
+            "{:?}",
+            plan.plan.diagnostics
+        );
+        assert!(
+            plan.edges_added.is_empty(),
+            "expected no new edge since one already exists: {:?}",
+            plan.edges_added
+        );
+        assert!(plan.record_edits.is_empty());
+    }
+
+    #[test]
+    fn same_repo_carryover_and_target_produce_exactly_one_state_json_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, mut file) = file_with_block_statuses(dir.path(), "mev", &[("MV.HELD", "open")]);
+        file.carryover.push(carryover_with_blocks(
+            "one-repo-slug",
+            "mev",
+            vec![block_edge("mev", "MV.HELD")],
+        ));
+        let files = vec![(src, file)];
+        let payload = graduate_payload("mev", "MV.99.NEW");
+
+        let plan = plan_graduate_carryover(&payload, "mev:one-repo-slug", &files, "2026-09-02");
+        assert!(
+            plan.plan.diagnostics.is_empty(),
+            "{:?}",
+            plan.plan.diagnostics
+        );
+
+        let state_actions: Vec<_> = plan
+            .plan
+            .actions
+            .iter()
+            .filter(|a| a.path.ends_with("state.json"))
+            .collect();
+        assert_eq!(state_actions.len(), 1, "{:?}", plan.plan.actions);
+        let content = &state_actions[0].new_content;
+        assert!(
+            content.contains("MV.99.NEW"),
+            "missing new block: {content}"
+        );
+        assert!(
+            content.contains("MV.HELD"),
+            "missing held target: {content}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(content).unwrap();
+        assert_eq!(
+            parsed["carryover"].as_array().map(Vec::len),
+            Some(0),
+            "carryover entry should be removed: {content}"
+        );
+    }
+
+    #[test]
+    fn archive_row_carries_entry_verbatim_reason_promoted_and_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, mut file) = file_for(dir.path(), "mev", &[]);
+        let entry = carryover_with_blocks("archive-slug", "mev", vec![]);
+        file.carryover.push(entry.clone());
+        let files = vec![(src, file)];
+        let payload = graduate_payload("mev", "MV.99.NEW");
+
+        let plan = plan_graduate_carryover(&payload, "mev:archive-slug", &files, "2026-09-02");
+        assert!(
+            plan.plan.diagnostics.is_empty(),
+            "{:?}",
+            plan.plan.diagnostics
+        );
+        let (archive_src, row) = plan.archive.expect("an archive row");
+        assert_eq!(archive_src.repo_slug, "mev");
+        assert_eq!(row.entry.slug, entry.slug);
+        assert_eq!(row.entry.text, entry.text);
+        assert_eq!(row.reason, okf_core::DisposalReason::Promoted);
+        assert!(!row.reconstructed);
+        assert_eq!(
+            row.evidence.as_deref(),
+            Some("graduated to block mev:MV.99.NEW")
+        );
+    }
+
+    /// Differential test: the `edges_added` set must equal exactly the set of
+    /// target keys `classify_blocked_by_edge` marks `Blocking` on the same
+    /// fixture — the whole point of delegating classification to it.
+    #[test]
+    fn edges_added_equals_classify_blocked_by_edge_blocking_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, mut file) = file_with_block_statuses(
+            dir.path(),
+            "mev",
+            &[
+                ("MV.A", "open"),
+                ("MV.B", "in_progress"),
+                ("MV.C", "deferred"),
+                ("MV.D", "closed"),
+                ("MV.E", "wontfix"),
+            ],
+        );
+        let carryover_blocks = vec![
+            block_edge("mev", "MV.A"),
+            block_edge("mev", "MV.B"),
+            block_edge("mev", "MV.C"),
+            block_edge("mev", "MV.D"),
+            block_edge("mev", "MV.E"),
+            block_edge("mev", "MV.GHOST"),
+            BlockedBy::External(ExternalDep {
+                what: "external thing".to_string(),
+            }),
+        ];
+        file.carryover.push(carryover_with_blocks(
+            "diff-slug",
+            "mev",
+            carryover_blocks.clone(),
+        ));
+        let files = vec![(src, file)];
+
+        let status_map = block_status_map(&files);
+        let expected_blocking: std::collections::HashSet<String> = carryover_blocks
+            .iter()
+            .filter_map(|edge| {
+                let classification = classify_blocked_by_edge("mev", edge, &status_map);
+                if classification.is_blocking() {
+                    classification.target_key
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let payload = graduate_payload("mev", "MV.99.NEW");
+        let plan = plan_graduate_carryover(&payload, "mev:diff-slug", &files, "2026-09-02");
+        assert!(
+            plan.plan.diagnostics.is_empty(),
+            "{:?}",
+            plan.plan.diagnostics
+        );
+
+        let actual: std::collections::HashSet<String> = plan.edges_added.into_iter().collect();
+        assert_eq!(actual, expected_blocking);
     }
 }
