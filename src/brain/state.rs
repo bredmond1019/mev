@@ -4133,7 +4133,8 @@ pub fn check_focus_drift(
             ids(&derived.deferred),
         ]
     } else {
-        let derived = derive_focus(src, file, graph, files, None);
+        let gating = crate::brain::carryover::carryover_gating_from_config(config, files);
+        let derived = derive_focus(src, file, graph, files, Some(&gating));
         [
             derived.now.clone(),
             derived.next.clone(),
@@ -4460,7 +4461,8 @@ pub fn derive_rollup(
             let child = resolve_repo_state_file(files, &entry.slug);
 
             if let Some((src, file)) = child {
-                let derived = derive_focus(src, file, graph, files, None);
+                let gating = crate::brain::carryover::carryover_gating_from_config(config, files);
+                let derived = derive_focus(src, file, graph, files, Some(&gating));
 
                 // Build a title lookup from this child's tracks[].
                 let mut title_map: std::collections::HashMap<String, String> =
@@ -4646,6 +4648,8 @@ pub fn derive_brain_focus(
         TierScope::All => true,
     });
 
+    let gating = crate::brain::carryover::carryover_gating_from_config(config, files);
+
     let mut now: Vec<Block> = Vec::new();
     let mut next: Vec<Block> = Vec::new();
     let mut blocked: Vec<Block> = Vec::new();
@@ -4662,7 +4666,7 @@ pub fn derive_brain_focus(
             continue;
         };
 
-        let derived = derive_focus(src, file, graph, files, None);
+        let derived = derive_focus(src, file, graph, files, Some(&gating));
 
         // Index this child's tracks[] for the title/priority/due/epics lookups.
         let index = track_block_index(file);
@@ -4725,7 +4729,7 @@ pub fn derive_brain_focus(
     // children via the same seen_* sets. A brain with empty own tracks[] folds
     // nothing here (derive_focus short-circuits to DerivedFocus::default()),
     // so this is a byte-identical no-op for the pure tier sub-brains.
-    let self_derived = derive_focus(self_src, self_file, graph, files, None);
+    let self_derived = derive_focus(self_src, self_file, graph, files, Some(&gating));
     let self_slug = &self_src.repo_slug;
 
     // Index the self file's own tracks[] for the same lookups.

@@ -2151,9 +2151,10 @@ fn derived_focus_for(
     file: &StateFile,
     graph: &StateGraph,
     files: &[(StateSource, StateFile)],
+    gating: Option<&std::collections::BTreeMap<String, crate::brain::carryover::RepoGatingReport>>,
 ) -> Focus {
     let idx = id_index(file);
-    let d = derive_focus(src, file, graph, files, None);
+    let d = derive_focus(src, file, graph, files, gating);
     let title_of = |id: &str| idx.get(id).map(|(t, ..)| t.clone()).unwrap_or_default();
     let priority_of = |id: &str| idx.get(id).and_then(|(_, _, p, _)| *p);
     let due_of = |id: &str| idx.get(id).and_then(|(_, _, _, d)| d.clone());
@@ -2256,13 +2257,14 @@ pub fn plan_state_json(
     config: &BrainConfig,
 ) -> EmitPlan {
     let mut plan = EmitPlan::default();
+    let gating = crate::brain::carryover::carryover_gating_from_config(config, files);
 
     for (src, file) in files {
         let mut derived = file.clone();
 
         match file.kind.as_str() {
             "project" => {
-                derived.focus = derived_focus_for(src, file, graph, files);
+                derived.focus = derived_focus_for(src, file, graph, files, Some(&gating));
             }
             "brain" => {
                 let scope = tier_scope_for(file, config);
@@ -2423,8 +2425,9 @@ fn render_focus_line(
     file: &StateFile,
     graph: &StateGraph,
     files: &[(StateSource, StateFile)],
+    gating: Option<&std::collections::BTreeMap<String, crate::brain::carryover::RepoGatingReport>>,
 ) -> String {
-    let focus = derived_focus_for(src, file, graph, files);
+    let focus = derived_focus_for(src, file, graph, files, gating);
 
     let summarize = |blocks: &[Block]| -> String {
         if blocks.is_empty() {
@@ -2618,6 +2621,7 @@ pub fn plan_project_caches(
     config: &BrainConfig,
 ) -> EmitPlan {
     let mut plan = EmitPlan::default();
+    let gating = crate::brain::carryover::carryover_gating_from_config(config, files);
 
     for (src, file) in files {
         if file.kind != "project" {
@@ -2646,7 +2650,7 @@ pub fn plan_project_caches(
             }
         };
 
-        let focus_line = render_focus_line(src, file, graph, files);
+        let focus_line = render_focus_line(src, file, graph, files, Some(&gating));
 
         let spliced = match splice_generated(&original, markers::PROJECT_CACHE, &focus_line) {
             Ok(c) => c,
@@ -3590,10 +3594,11 @@ pub fn plan_status_frontmatter(
     config: &BrainConfig,
 ) -> EmitPlan {
     let mut plan = EmitPlan::default();
+    let gating = crate::brain::carryover::carryover_gating_from_config(config, files);
 
     for (src, file) in files {
         let focus = if file.kind == "project" {
-            derived_focus_for(src, file, graph, files)
+            derived_focus_for(src, file, graph, files, Some(&gating))
         } else if file.kind == "brain" {
             let scope = tier_scope_for(file, config);
             derive_brain_focus(src, file, &scope, config, graph, files)
