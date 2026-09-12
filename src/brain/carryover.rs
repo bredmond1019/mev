@@ -4890,10 +4890,55 @@ pub fn build_carryover_gating_sets(
     enforce_blocks: bool,
     max_gates_per_repo: usize,
 ) -> BTreeMap<String, RepoGatingReport> {
-    let mut result: BTreeMap<String, RepoGatingReport> = BTreeMap::new();
     if !enforce_blocks {
-        return result;
+        return BTreeMap::new();
     }
+    let candidates: Vec<GatingCandidateEntry<'_>> = entries
+        .iter()
+        .map(|entry| GatingCandidateEntry {
+            repo: entry.repo.as_str(),
+            slug: entry.slug.as_str(),
+            blocks: &entry.blocks,
+            enforce: entry.enforce,
+        })
+        .collect();
+    build_carryover_gates_core(&candidates, block_status, max_gates_per_repo)
+}
+
+/// One candidate carryover entry's gating-relevant fields — (owner repo,
+/// slug, `blocks[]`, `enforce`) — the exact tuple [`build_carryover_gates_core`]
+/// needs, independent of whether it came from a fully-evaluated
+/// [`CarryoverVerdict`] ([`build_carryover_gating_sets`]) or read straight off
+/// a loaded [`StateFile`]'s `carryover[]` with no predicate evaluation at all
+/// ([`carryover_gating_from_config`]). Borrowing rather than cloning keeps
+/// both callers cheap: `carryover_gating_from_config` runs on every
+/// `emit-state`/`frontier`/`lanes`/`blocks` call, not just `mev carryover`.
+struct GatingCandidateEntry<'a> {
+    repo: &'a str,
+    slug: &'a str,
+    blocks: &'a [BlockedBy],
+    enforce: Option<bool>,
+}
+
+/// The shared dedup/cap core behind both [`build_carryover_gating_sets`] and
+/// [`carryover_gating_from_config`] — extracted so the two paths can never
+/// classify or cap a `blocks[]` edge differently. Callers decide whether
+/// `enforce_blocks` is on BEFORE calling this (an off flag must return an
+/// empty map without even loading candidates); this core always applies
+/// full enforcement to whatever `entries` it is given.
+///
+/// See [`build_carryover_gating_sets`]'s doc comment for the dedup/cap
+/// contract this implements verbatim: per-entry `enforce: Some(false)`
+/// suppression, `classify_blocked_by_edge`-only classification (only
+/// `Blocking` edges contribute a candidate), discovery-order dedup by
+/// target key, and a per-target-repo `max_gates_per_repo` cap that reports
+/// (never silently drops) any excess via `cap_exceeded`.
+fn build_carryover_gates_core(
+    entries: &[GatingCandidateEntry<'_>],
+    block_status: &HashMap<String, Option<String>>,
+    max_gates_per_repo: usize,
+) -> BTreeMap<String, RepoGatingReport> {
+    let mut result: BTreeMap<String, RepoGatingReport> = BTreeMap::new();
 
     // First pass: dedupe candidate gates by target key, in deterministic
     // discovery order, recording which entry's edge first named each one.
@@ -4905,8 +4950,8 @@ pub fn build_carryover_gating_sets(
             continue;
         }
         let owner = format!("{}:{}", entry.repo, entry.slug);
-        for edge in &entry.blocks {
-            let classification = classify_blocked_by_edge(&entry.repo, edge, block_status);
+        for edge in entry.blocks {
+            let classification = classify_blocked_by_edge(entry.repo, edge, block_status);
             if classification.verdict != EdgeBlockVerdict::Blocking {
                 continue;
             }
@@ -4959,6 +5004,56 @@ pub fn build_carryover_gating_sets(
     }
 
     result
+}
+
+/// Builds the per-repo carryover gating set directly from `config` and the
+/// already-loaded corpus `files` — the entry point every production
+/// readiness derivation (`MV.ticket.carryover-gating-reaches-derived-surfaces`)
+/// wires in, in place of the `None` every caller passes today.
+///
+/// Deliberately NOT built on [`evaluate_carryover`]: that function runs
+/// `clears_when` predicate evaluation (including, on some paths, command
+/// execution) to decide `cleared`/`actionable`/`not-evaluable` lanes that
+/// this gate has no use for. This builder instead reads each file's
+/// `carryover[]` directly — owner repo is the file's own `repo_slug` (the
+/// same value `evaluate_carryover` assigns to `CarryoverVerdict.repo`), and
+/// the entry's own `slug`, `blocks[]` and `enforce` — and delegates
+/// classification, dedup and capping to the exact same
+/// [`build_carryover_gates_core`] that [`build_carryover_gating_sets`] uses,
+/// so the two can never disagree on which targets are gated. No predicate
+/// evaluation, no command execution, and no filesystem reads beyond `files`
+/// (the block-status map is derived from `files` alone via
+/// [`crate::brain::state::block_status_map`]).
+///
+/// Returns an empty map immediately — without iterating any file's
+/// `carryover[]` — when `config.carryover.enforce_blocks` is `false`. An
+/// absent `[carryover]` table already yields `enforce_blocks: false` via
+/// [`crate::brain::config::CarryoverConfig`]'s `Default`, so an absent table
+/// and an explicit `enforce_blocks = false` behave identically here.
+pub fn carryover_gating_from_config(
+    config: &crate::brain::config::BrainConfig,
+    files: &[(StateSource, StateFile)],
+) -> BTreeMap<String, RepoGatingReport> {
+    if !config.carryover.enforce_blocks {
+        return BTreeMap::new();
+    }
+    let block_status = crate::brain::state::block_status_map(files);
+    let candidates: Vec<GatingCandidateEntry<'_>> = files
+        .iter()
+        .flat_map(|(src, file)| {
+            file.carryover.iter().map(move |item| GatingCandidateEntry {
+                repo: src.repo_slug.as_str(),
+                slug: item.slug.as_str(),
+                blocks: &item.blocks,
+                enforce: item.enforce,
+            })
+        })
+        .collect();
+    build_carryover_gates_core(
+        &candidates,
+        &block_status,
+        config.carryover.max_gates_per_repo,
+    )
 }
 
 /// `EdgeBlockVerdict` as the short label used by both renderers.
@@ -5313,6 +5408,7 @@ pub fn filter_carryover_entries_by_grep(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::brain::config::{BrainConfig, CarryoverConfig};
     use crate::brain::state::carryover_kind_from_str;
     use okf_core::CarryoverScope;
 
@@ -9911,6 +10007,201 @@ mod tests {
         assert_eq!(
             gate.owner, "mev:first",
             "the first-discovered entry should be recorded as owner"
+        );
+    }
+
+    // -- carryover_gating_from_config (MV.ticket.carryover-gating-reaches-
+    // derived-surfaces, task 1) ----------------------------------------------
+
+    /// Like [`item`], but with `blocks[]`/`enforce` set — the two fields
+    /// [`item`] leaves at their `Default` (empty/`None`) and this section's
+    /// fixtures need.
+    fn item_with_blocks(slug: &str, blocks: Vec<BlockedBy>, enforce: Option<bool>) -> Carryover {
+        Carryover {
+            blocks,
+            enforce,
+            ..item(slug, "deferred", None, vec![], "2020-01-01", None, None)
+        }
+    }
+
+    fn config_with_enforcement(enforce_blocks: bool, max_gates_per_repo: usize) -> BrainConfig {
+        BrainConfig {
+            carryover: CarryoverConfig {
+                enforce_blocks,
+                max_gates_per_repo,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn config_gating_empty_when_enforce_blocks_false() {
+        let files = vec![(
+            src("other"),
+            state_file(
+                "other",
+                vec![("OT.1.A", "open")],
+                vec![item_with_blocks(
+                    "gate",
+                    vec![block_edge("other", "OT.1.A")],
+                    None,
+                )],
+            ),
+        )];
+        let config = config_with_enforcement(false, 10);
+        let gating = carryover_gating_from_config(&config, &files);
+        assert!(
+            gating.is_empty(),
+            "enforce_blocks=false must yield an empty gating map without \
+             iterating any carryover entry"
+        );
+    }
+
+    #[test]
+    fn config_gating_empty_when_carryover_table_absent() {
+        // No `[carryover]` table at all -> `CarryoverConfig::default()` ->
+        // `enforce_blocks: false`, exercised via the real toml parse path
+        // rather than constructed by hand, so an absent table and an
+        // explicit `enforce_blocks = false` are proven to behave identically
+        // at this call site too.
+        let config: BrainConfig = toml::from_str("").expect("empty toml parses to defaults");
+        assert!(!config.carryover.enforce_blocks);
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![("MV.1.A", "open")],
+                vec![item_with_blocks(
+                    "gate",
+                    vec![block_edge("mev", "MV.1.A")],
+                    None,
+                )],
+            ),
+        )];
+        let gating = carryover_gating_from_config(&config, &files);
+        assert!(gating.is_empty());
+    }
+
+    #[test]
+    fn config_gating_cap_zero_and_enforce_false_entry_hold_nothing() {
+        let files = vec![(
+            src("mev"),
+            state_file(
+                "mev",
+                vec![("MV.1.A", "open"), ("MV.2.A", "open")],
+                vec![
+                    item_with_blocks("capped", vec![block_edge("mev", "MV.1.A")], None),
+                    item_with_blocks("opted-out", vec![block_edge("mev", "MV.2.A")], Some(false)),
+                ],
+            ),
+        )];
+
+        // Cap 0: the candidate is reported but nothing is applied.
+        let capped = carryover_gating_from_config(&config_with_enforcement(true, 0), &files);
+        let capped_report = &capped["mev"];
+        assert_eq!(capped_report.candidate_count, 1);
+        assert_eq!(capped_report.applied_count, 0);
+        assert!(capped_report.gates.is_empty());
+        assert!(capped_report.cap_exceeded);
+
+        // Cap high enough: the opted-out entry still contributes nothing.
+        let gating = carryover_gating_from_config(&config_with_enforcement(true, 10), &files);
+        let report = &gating["mev"];
+        assert_eq!(
+            report.candidate_count, 1,
+            "the enforce:false entry's edge must never become a candidate"
+        );
+        assert!(!report.gates.contains_key("mev:MV.2.A"));
+        assert!(report.gates.contains_key("mev:MV.1.A"));
+    }
+
+    /// Differential test (the task's central acceptance criterion): on a
+    /// matrix fixture covering open, in_progress, deferred (all `Blocking`),
+    /// closed, wontfix (both non-gating), and an `enforce: false` opt-out,
+    /// `carryover_gating_from_config` must equal, key-for-key and
+    /// owner-for-owner, `build_carryover_gating_sets` fed from
+    /// `evaluate_carryover` on the exact same files.
+    #[test]
+    fn config_gating_agrees_with_build_carryover_gating_sets_on_matrix_fixture() {
+        let files = vec![
+            (
+                src("other"),
+                state_file(
+                    "other",
+                    vec![
+                        ("OT.1.A", "open"),
+                        ("OT.2.A", "in_progress"),
+                        ("OT.3.A", "deferred"),
+                        ("OT.4.A", "closed"),
+                        ("OT.5.A", "wontfix"),
+                        ("OT.6.A", "open"),
+                    ],
+                    vec![],
+                ),
+            ),
+            (
+                src("mev"),
+                state_file(
+                    "mev",
+                    vec![],
+                    vec![
+                        item_with_blocks("gate-open", vec![block_edge("other", "OT.1.A")], None),
+                        item_with_blocks(
+                            "gate-in-progress",
+                            vec![block_edge("other", "OT.2.A")],
+                            None,
+                        ),
+                        item_with_blocks(
+                            "gate-deferred",
+                            vec![block_edge("other", "OT.3.A")],
+                            None,
+                        ),
+                        item_with_blocks("gate-closed", vec![block_edge("other", "OT.4.A")], None),
+                        item_with_blocks("gate-wontfix", vec![block_edge("other", "OT.5.A")], None),
+                        item_with_blocks(
+                            "gate-opted-out",
+                            vec![block_edge("other", "OT.6.A")],
+                            Some(false),
+                        ),
+                    ],
+                ),
+            ),
+        ];
+
+        let status = crate::brain::state::block_status_map(&files);
+        let report = evaluate_carryover(
+            &files,
+            &status,
+            Path::new("/fake/brain"),
+            &HashMap::new(),
+            "2026-08-01",
+            &thresholds(),
+            None,
+            false,
+            COMMAND_EXEC_TIMEOUT,
+        );
+        let expected = build_carryover_gating_sets(&report.entries, &status, true, 10);
+
+        let config = config_with_enforcement(true, 10);
+        let actual = carryover_gating_from_config(&config, &files);
+
+        assert_eq!(
+            actual, expected,
+            "carryover_gating_from_config must agree key-for-key and \
+             owner-for-owner with build_carryover_gating_sets fed from \
+             evaluate_carryover"
+        );
+        // Sanity: the differential equality above isn't vacuous.
+        let other_report = &expected["other"];
+        assert_eq!(other_report.candidate_count, 3, "open/in_progress/deferred");
+        assert!(other_report.gates.contains_key("other:OT.1.A"));
+        assert!(other_report.gates.contains_key("other:OT.2.A"));
+        assert!(other_report.gates.contains_key("other:OT.3.A"));
+        assert!(!other_report.gates.contains_key("other:OT.4.A"), "closed");
+        assert!(!other_report.gates.contains_key("other:OT.5.A"), "wontfix");
+        assert!(
+            !other_report.gates.contains_key("other:OT.6.A"),
+            "enforce:false opt-out"
         );
     }
 
