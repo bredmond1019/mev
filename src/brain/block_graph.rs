@@ -241,7 +241,10 @@ pub fn build_block_graph_export(
         .collect();
 
     let eff_priorities = effective_priorities(graph, files);
-    let ready_set: HashSet<String> = ready_order(graph, files, None).into_iter().collect();
+    let gating = crate::brain::carryover::carryover_gating_from_config(config, files);
+    let ready_set: HashSet<String> = ready_order(graph, files, Some(&gating))
+        .into_iter()
+        .collect();
 
     let cycle_paths_list = cycle_paths(graph);
     let cycles: Vec<Vec<String>> = cycle_paths_list.iter().map(|c| c.keys.clone()).collect();
@@ -258,7 +261,7 @@ pub fn build_block_graph_export(
     let mut blocked_map: HashMap<String, u32> = HashMap::new();
     let mut deferred_set: HashSet<String> = HashSet::new();
     for (src, file) in files {
-        let focus = derive_focus(src, file, graph, files, None);
+        let focus = derive_focus(src, file, graph, files, Some(&gating));
         let prefix = &src.repo_slug;
         now_set.extend(focus.now.iter().map(|id| format!("{prefix}:{id}")));
         next_set.extend(focus.next.iter().map(|id| format!("{prefix}:{id}")));

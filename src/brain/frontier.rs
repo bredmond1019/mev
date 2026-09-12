@@ -503,6 +503,7 @@ pub fn plan_frontier(root: &Path, loaded: &[(StateSource, StateFile)]) -> EmitPl
     };
     let export = build_block_graph_export(root, &config, &graph, loaded, &scope);
     let lane_file_count = lane_files.len();
+    let gating = crate::brain::carryover::carryover_gating_from_config(&config, loaded);
 
     assemble_frontier_plan(
         root,
@@ -512,6 +513,7 @@ pub fn plan_frontier(root: &Path, loaded: &[(StateSource, StateFile)]) -> EmitPl
         &export,
         lane_file_count,
         plan,
+        Some(&gating),
     )
 }
 
@@ -522,6 +524,7 @@ pub fn plan_frontier(root: &Path, loaded: &[(StateSource, StateFile)]) -> EmitPl
 /// call site always builds `export` with `max_nodes: usize::MAX`, under which
 /// `truncated` can never actually be `true`, so exercising that branch end-to-end
 /// through `plan_frontier` itself is not possible.
+#[allow(clippy::too_many_arguments)]
 fn assemble_frontier_plan(
     root: &Path,
     loaded: &[(StateSource, StateFile)],
@@ -530,6 +533,7 @@ fn assemble_frontier_plan(
     export: &BlockGraphExport,
     lane_file_count: usize,
     mut plan: EmitPlan,
+    gating: Option<&BTreeMap<String, RepoGatingReport>>,
 ) -> EmitPlan {
     use crate::brain::state::effective_priorities;
 
@@ -539,7 +543,7 @@ fn assemble_frontier_plan(
     }
 
     let effective = effective_priorities(graph, loaded);
-    let frontier = compute_frontier(lane_positions, graph, loaded, &effective, None);
+    let frontier = compute_frontier(lane_positions, graph, loaded, &effective, gating);
 
     let entry_count = frontier.entries.len();
     let gate_count = frontier.gate_ranks.len();
@@ -1244,6 +1248,7 @@ mod tests {
             &truncated_export,
             1,
             EmitPlan::default(),
+            None,
         );
 
         assert!(

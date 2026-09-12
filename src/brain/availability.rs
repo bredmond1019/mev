@@ -1325,7 +1325,8 @@ pub fn plan_availability(root: &Path, loaded: &[(StateSource, StateFile)]) -> Em
     }
 
     let effective = effective_priorities(&graph, loaded);
-    let frontier = compute_frontier(&lane_positions, &graph, loaded, &effective, None);
+    let gating = crate::brain::carryover::carryover_gating_from_config(&config, loaded);
+    let frontier = compute_frontier(&lane_positions, &graph, loaded, &effective, Some(&gating));
 
     let (live_runs, live_run_diags) = discover_live_runs(root, &config.repos);
     plan.diagnostics.extend(live_run_diags);

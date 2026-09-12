@@ -709,6 +709,28 @@ combination as above.
 `--would-block` above only previews. `MV.16.C` is the enforcement it previews: a `brain.toml`
 `[carryover]` section that, when turned on, makes a `carryover[].blocks[]` edge actually hold the
 block it names, in the same derivation every generated board and both validators read.
+`MV.ticket.carryover-gating-reaches-derived-surfaces` wired that gating set into every surface that
+derives readiness from it, so `enforce_blocks = true` now actually holds the named block on:
+
+- **emit-state's focus lanes and generated boards** — `derive_rollup`, `derive_brain_focus` and the
+  per-file focus `plan_state_json`/`plan_project_caches` write list a held block under `blocked`,
+  never `next`.
+- **`validate-brain --state`'s focus-drift check** — `check_focus_drift` derives the same gating set
+  the writer used, so a state file whose stored focus reflects the gate reports no drift, and one
+  whose stored focus does not reflect it does.
+- **the block-graph export** (`emit-block-graph`, and `bastion`'s serve board/block-graph handlers,
+  which call it with unchanged signatures) — `build_block_graph_export`'s `ready_order` and per-file
+  `derive_focus` exclude a held block from ready.
+- **`mev frontier`** — a held block reports `startable: false` with `carryover:{repo}:{slug}` in
+  `unmet_gates`.
+- **`mev lanes`** — a held block's segment is not reported available.
+- **`mev blocks`** — a held block reports `startable: false`, even when it sits in no lane record
+  (`blocks_brain` computes this independently of `compute_frontier`, since a lane-scoped derivation
+  alone would miss a gated block with no lane at all).
+
+Every one of these renders the hold as `carryover:{repo}:{slug}` — the same string
+`--would-block`'s own edge classification produces — and every one is byte-identical to the flag
+being off (or `[carryover]` being absent) when `enforce_blocks = false`.
 
 ```toml
 [carryover]
@@ -723,7 +745,8 @@ max_gates_per_repo = 10 # default: 10
 
 **An absent `[carryover]` table is not a degraded mode — it is identical to `enforce_blocks =
 false`.** Shipping this section and flipping it on for the real corpus are different acts: this
-block ships the mechanism only. Turning it on for the fleet is HQ's `HQ.7.C`, gated behind an
+block ships the mechanism and wires it into every surface named above. Turning it on for the real
+corpus and installing the rebuilt binary is a separate, deliberate act — HQ's `HQ.7.C`, gated behind an
 install-closure edge and an operator approval, because an older installed `mev` binary silently
 ignores an unknown `enforce_blocks` key (`BrainConfig` deliberately has no `deny_unknown_fields` —
 closing that is a separate, fleet-wide change, out of scope here) and the Mini's nightly

@@ -11,6 +11,52 @@ related: [status]
 timestamp: "2026-09-04T05:31:55-03:00"
 ---
 
+## [run: 2026-09-12]
+
+### MV.ticket.carryover-gating-reaches-derived-surfaces closed: `enforce_blocks` now holds blocks everywhere, not just `--would-block`
+
+- **What:** Drove `MV.ticket.carryover-gating-reaches-derived-surfaces` to completion via
+  `/sdlc-flow` — 4 of 4 tasks PASS, final verdict PASS. MV.16.C had shipped the carryover
+  gating mechanism, but every production call site passed `gating: None`, so turning
+  `[carryover] enforce_blocks` on changed nothing except the `--would-block` header. This spec
+  wires the flag through. Task 1 added `carryover_gating_from_config` (plus a shared
+  `build_carryover_gates_core`) in `src/brain/carryover.rs`, deriving the per-repo gating set
+  directly from `BrainConfig` + loaded state files with no predicate evaluation, differentially
+  tested against `build_carryover_gating_sets`. Task 2 wired that builder into the emit-state
+  writer (`plan_state_json`, `plan_project_caches`, `plan_status_frontmatter`, `derive_rollup`,
+  `derive_brain_focus`) and `check_focus_drift` together in one task, so writer and checker can
+  never disagree. Task 3 extended the wiring to every readiness query surface —
+  `build_block_graph_export`, `frontier_brain`, `lanes_brain`, `blocks_brain`, and
+  `plan_frontier`/`plan_availability` — so a gated open block is held on every derived surface,
+  not only emit-state. Task 4 corrected `docs/cli/carryover.md` and `docs/brain-toml.md`, which
+  had described `enforce_blocks` as mechanism-only, to name every surface it now actually holds.
+  No public function signatures changed; all changes thread gating through functions that
+  already hold `&BrainConfig`. All four harness gates green across every task (fmt, clippy
+  `-D warnings`, cargo test, release build, consumer compile check).
+- **Decisions:** gating derived per config-holding caller (not once globally) to keep bastion/
+  engine-rs compiling against unchanged signatures; `plan_status_frontmatter`'s
+  `derived_focus_for` call was gated too, a third caller beyond the two the task text named by
+  example; `blocks_brain`'s own separately-computed `startable` formula needed its own direct
+  gating-map lookup since it never called `compute_frontier`/`derive_focus` at all.
+  Next: wrap-up flipped `state.json`'s `MV.ticket.carryover-gating-reaches-derived-surfaces` to
+  `closed` via `mev set-block-status --write` (deterministic route, exit 0); `mev emit-state
+  --write` ran but reported `W_EMIT_SKIPPED_STALE_BINARY` (installed binary built from
+  `1e249a71ed1a` vs. current source `2272b1150be3`) and skipped derived-surface regeneration —
+  the authored state.json edit landed regardless. HQ.7.C (install-closure) rebuilds and flips
+  the real corpus's `enforce_blocks` on; `MV.ticket.create-block-graduates-a-carryover` is next
+  in the six-block sequence this spec's `notes` describe.
+
+```
+2272b11 feat: implement "MV.ticket.carryover-gating-reaches-derived-surfaces-task4
+759d534 feat: implement "MV.ticket.carryover-gating-reaches-derived-surfaces-task3
+4376973 feat: implement MV.ticket.carryover-gating-reaches-derived-surfaces-task2
+b5e97d8 feat: implement MV.ticket.carryover-gating-reaches-derived-surfaces-task1
+1e249a7 chore(harness): sync base-template — write-okf-markdown: document index.md row-shape convention (filename-as-link-text, table vs bullet)
+f48b228 chore(harness): sync base-template — surface decide-yourself + four-artifact rules up front in begin-orchestration
+a22ee53 chore(harness): sync base-template — sync stop-or-continue rule 10 rewrite + engine updates across fleet
+a8c7237 chore(harness): sync base-template — sync all commands/harness across fleet
+```
+
 ## [run: 2026-09-07]
 
 ### MV.20.C closed: Lane records accept a lease window
