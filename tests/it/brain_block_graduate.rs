@@ -703,3 +703,102 @@ fn graduating_within_one_repo_applies_every_mutation() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// (8) CLI: `mev create-block --from <payload> --graduate-carryover <repo:slug>
+//     <root>` without --write — dry-run over the real binary, matching the
+//     pattern in tests/it/force_operator_gate.rs (env!("CARGO_BIN_EXE_mev")).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_dry_run_prints_plan_and_leaves_fixture_byte_identical() {
+    let dir = temp_dir("cli-dry-run");
+    write_corpus(&dir);
+
+    let before_alpha_state = read_raw(&dir, "repos/alpha/planning/state.json");
+    let before_beta_state = read_raw(&dir, "repos/beta/planning/state.json");
+    let before_al_record = read_raw(&dir, "repos/alpha/planning/blocks/AL.1.A.json");
+
+    let payload = graduating_payload("BE.9.A", "beta");
+    let payload_path = dir.join("payload.json");
+    fs::write(
+        &payload_path,
+        serde_json::to_string_pretty(&payload).unwrap(),
+    )
+    .unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mev"))
+        .arg("create-block")
+        .arg("--from")
+        .arg(&payload_path)
+        .arg("--graduate-carryover")
+        .arg("alpha:leftover-thing")
+        .arg(&dir)
+        .current_dir(&dir)
+        .output()
+        .expect("failed to spawn mev binary");
+
+    assert!(
+        output.status.success(),
+        "dry-run CLI invocation should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("BE.9.A") || stdout.contains("beta"),
+        "plan output should name the created block; got: {stdout}"
+    );
+    assert!(
+        stdout.contains("AL.1.A") || stdout.contains("alpha"),
+        "plan output should name the added edge's target; got: {stdout}"
+    );
+
+    assert_eq!(
+        before_alpha_state,
+        read_raw(&dir, "repos/alpha/planning/state.json"),
+        "CLI dry-run must not touch alpha's state.json"
+    );
+    assert_eq!(
+        before_beta_state,
+        read_raw(&dir, "repos/beta/planning/state.json"),
+        "CLI dry-run must not touch beta's state.json"
+    );
+    assert_eq!(
+        before_al_record,
+        read_raw(&dir, "repos/alpha/planning/blocks/AL.1.A.json"),
+        "CLI dry-run must not touch the held target's record"
+    );
+    assert!(
+        !exists(&dir, "repos/beta/planning/blocks/BE.9.A.json"),
+        "CLI dry-run must not write the new block record"
+    );
+    assert!(
+        !exists(&dir, "repos/alpha/planning/carryover-archive.jsonl"),
+        "CLI dry-run must not create the archive file"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// (9) CLI: `create-block --help` lists --graduate-carryover (source-built
+//     stand-in for the installed-binary acceptance criterion — installing the
+//     binary fleet-wide is HQ.7.C's job, not this task's).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_help_lists_graduate_carryover_flag() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mev"))
+        .arg("create-block")
+        .arg("--help")
+        .output()
+        .expect("failed to spawn mev binary");
+
+    assert!(output.status.success(), "--help should exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--graduate-carryover"),
+        "create-block --help must list --graduate-carryover; got: {stdout}"
+    );
+}

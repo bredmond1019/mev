@@ -722,18 +722,37 @@ enum Command {
     /// with an empty list — a block created with no epic shows up on no
     /// per-epic board.
     ///
+    /// `--graduate-carryover <repo>:<slug>` turns a gating `carryover[]` entry
+    /// into this block in one atomic write: the block is created with
+    /// `origin: {"type":"carryover","slug":<slug>}` (filled in when the
+    /// payload has none; a payload naming a different origin is refused),
+    /// every `Blocking` target of the carryover's `blocks[]` edges (open,
+    /// in_progress or deferred — the same classification `mev carryover
+    /// --would-block` uses) gains a `depends_on` edge onto the new block in
+    /// both its `state.json` and its `planning/blocks/<id>.json` record when
+    /// one exists, and the carryover entry is removed and archived with
+    /// reason `promoted`. Closed/wontfix/unresolvable/non-block edges add
+    /// nothing and are reported. Dry-run by default, same as plain
+    /// `create-block`.
+    ///
     /// Exit codes:
     ///   0 — planned (dry-run) or applied
     ///   1 — unreadable/unparseable `--from` file, any `E_BLOCK_CREATE_*` payload or
     ///       plan diagnostic (out-of-vocabulary `kind`/`sdlc_workflow`/`model`,
     ///       missing `epics`, empty `out_of_scope`/`acceptance_criteria`, an unknown
-    ///       target repo, an existing id, a dangling `depends_on` target), a write
-    ///       failure, E_EMIT_UNKNOWN_SCOPE, E_EMIT_LOCK_HELD, E_QUIESCE_LEASE_HELD,
-    ///       or a linked-worktree refusal
+    ///       target repo, an existing id, a dangling `depends_on` target,
+    ///       `E_BLOCK_CREATE_UNKNOWN_CARRYOVER`, `E_BLOCK_CREATE_ORIGIN_MISMATCH`),
+    ///       a write failure, E_EMIT_UNKNOWN_SCOPE, E_EMIT_LOCK_HELD,
+    ///       E_QUIESCE_LEASE_HELD, or a linked-worktree refusal
     CreateBlock {
         /// Path to the JSON payload — see `CreateBlockPayload`.
         #[arg(long, value_name = "FILE")]
         from: PathBuf,
+        /// Turn a gating `carryover[]` entry into this block in one atomic
+        /// write instead of filing a plain block. `<REPO:SLUG>` names the
+        /// carryover to graduate — see the command's doc comment above.
+        #[arg(long, value_name = "REPO:SLUG")]
+        graduate_carryover: Option<String>,
         /// Path to search from when locating brain.toml. Defaults to the current directory.
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -3772,6 +3791,7 @@ fn main() -> ExitCode {
         }
         Command::CreateBlock {
             from,
+            graduate_carryover,
             path,
             write,
             scope,
@@ -3842,15 +3862,27 @@ fn main() -> ExitCode {
                 }
                 None => None,
             };
-            let result = mev::create_block_as(
-                &root,
-                &payload,
-                write,
-                scope_deps.as_ref(),
-                agent.as_deref(),
-                lock_dir.as_deref(),
-                &path,
-            );
+            let result = match &graduate_carryover {
+                Some(carryover_key) => mev::graduate_carryover_as(
+                    &root,
+                    &payload,
+                    carryover_key,
+                    write,
+                    scope_deps.as_ref(),
+                    agent.as_deref(),
+                    lock_dir.as_deref(),
+                    &path,
+                ),
+                None => mev::create_block_as(
+                    &root,
+                    &payload,
+                    write,
+                    scope_deps.as_ref(),
+                    agent.as_deref(),
+                    lock_dir.as_deref(),
+                    &path,
+                ),
+            };
             if let Err(err) = &result
                 && print_guarded_write_error(err, "create-block")
             {
