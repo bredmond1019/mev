@@ -8,10 +8,28 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-09-04T05:31:55-03:00"
+timestamp: "2026-09-12T14:55:38-03:00"
 ---
 
 ## [run: 2026-09-12]
+
+### carryovers-can-block lane closed: both `fleet-integrity` blocks merged, corpus and consumer gates verified
+
+- **What:** Ran `/begin-orchestration --run carryovers-can-block --blocks
+  MV.ticket.carryover-gating-reaches-derived-surfaces MV.ticket.create-block-graduates-a-carryover`
+  end to end, then `/close-out`. Both blocks passed via `/sdlc-flow` (PRs #61, #62); merged both by
+  hand after discovering `bredmond1019/mev` has GitHub auto-merge disabled at the repo-settings
+  level (`--auto-merge` silently no-op'd on both). Ran the downstream consumer check (rule 9):
+  `bastion` and `engine-rs` both cold-compile clean against the changed public surface
+  (`src/brain/carryover.rs`, `src/brain/block_create.rs`, `src/lib.rs`). All four
+  `bastion validate-brain` flags: 0 errors. Full close-out gate suite (fmt, clippy, `cargo test`,
+  release build, cargo-audit, `check_consumers.sh`, `test_check_consumers.sh`,
+  `test_locked_lockfile.sh`, emoji gate) all green.
+- **Why:** Two `fleet-integrity` tickets closing an enforcement gap (carryover gating not reaching
+  most readiness surfaces) and adding the graduation verb `/orchestrate` needs when a chain block
+  is held by a carryover.
+- **Refs:** `planning/orchestration-run/carryovers-can-block/{notes.md,review.md,verification-ledger.{json,md}}`,
+  `planning/handoff.md`.
 
 ### MV.ticket.create-block-graduates-a-carryover closed: `mev create-block --graduate-carryover` turns a gating carryover into a tracked block
 
