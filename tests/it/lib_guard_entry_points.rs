@@ -505,3 +505,190 @@ fn set_block_status_as_contends_on_the_emit_lock_rather_than_overwriting() {
     // Refused-by-contention means untouched.
     assert_eq!(alpha_block_status(&root, "AL.1.A"), "open");
 }
+
+// ---------------------------------------------------------------------------
+// `graduate_carryover_as` — the guard cases matching `add_operator_edge_as`'s
+// (the closest existing sibling: like `create_block_as`, this verb carries
+// no operator-gate check, only the quiesce lease and the emit lock).
+// `MV.ticket.create-block-graduates-a-carryover`, Task 2.
+// ---------------------------------------------------------------------------
+
+/// A second `alpha` fixture, additive to [`write_alpha_state`] (never
+/// mutated — other tests in this file depend on its exact shape): the same
+/// two seed blocks, plus a `carryover[]` entry whose `blocks[]` edge gates
+/// `AL.1.A`, so `graduate_carryover_as` has something real to graduate.
+fn write_alpha_state_with_carryover(root: &Path) {
+    let state = serde_json::json!({
+        "repo": "alpha",
+        "kind": "project",
+        "updated": "2026-09-12",
+        "focus": { "now": [], "next": [], "blocked": [] },
+        "tracks": [
+            {
+                "title": "Phase 1",
+                "blocks": [
+                    { "id": "AL.1.A", "title": "Plain block", "status": "open", "wave": 1 }
+                ]
+            }
+        ],
+        "carryover": [
+            {
+                "slug": "leftover-thing",
+                "scope": { "repo": "alpha", "tier": null, "cross_repo": null },
+                "kind": "deferred",
+                "text": "A carryover entry used only by this fixture.",
+                "created": "2026-09-12",
+                "blocks": [
+                    { "type": "block", "repo": "alpha", "id": "AL.1.A" }
+                ]
+            }
+        ]
+    });
+    write_json(root, "repos/alpha/planning/state.json", &state);
+}
+
+fn write_full_fixture_with_carryover(root: &Path) {
+    write_brain_toml(root);
+    write_hq_state(root);
+    write_alpha_state_with_carryover(root);
+}
+
+fn alpha_carryover_slugs(root: &Path) -> Vec<String> {
+    let raw = fs::read_to_string(root.join("repos/alpha/planning/state.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    value["carryover"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|c| c["slug"].as_str().unwrap().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn graduation_payload(id: &str) -> mev::brain::block_create::CreateBlockPayload {
+    use mev::brain::block_create::{AcceptanceCriterion, BlockFiles, CreateBlockPayload};
+    CreateBlockPayload {
+        id: id.to_string(),
+        repo: "alpha".to_string(),
+        kind: "block".to_string(),
+        title: "Graduated block".to_string(),
+        description: "A block graduated from a carryover in a guard-entry-point test.".to_string(),
+        what: "Does the thing the test needs done.".to_string(),
+        why: "Because the test needs a legal payload to create.".to_string(),
+        sdlc_workflow: "task".to_string(),
+        model: "sonnet".to_string(),
+        phase: Some(1),
+        initiative: None,
+        workflow_rationale: None,
+        origin: None,
+        files: BlockFiles::default(),
+        interfaces: Vec::new(),
+        out_of_scope: vec!["Everything else.".to_string()],
+        acceptance_criteria: vec![AcceptanceCriterion::Simple("It works.".to_string())],
+        testing_strategy: None,
+        validation_commands: Vec::new(),
+        depends_on: Vec::new(),
+        carryover_context: Vec::new(),
+        related: Vec::new(),
+        notes: None,
+        forward_looking: false,
+        epics: vec!["test-epic".to_string()],
+    }
+}
+
+#[test]
+fn graduate_carryover_as_refuses_under_a_foreign_exclusive_lease() {
+    let root = temp_dir("graduate-as-quiesced");
+    write_full_fixture_with_carryover(&root);
+    let lock_dir = root.join(".fleet-locks");
+    write_exclusive_lease(&lock_dir, "other-lane", "other-agent", "alpha", "fleet");
+
+    let payload = graduation_payload("AL.9.H");
+    let err = mev::graduate_carryover_as(
+        &root,
+        &payload,
+        "alpha:leftover-thing",
+        true,
+        None,
+        Some("me"),
+        Some(&lock_dir),
+        &root,
+    )
+    .expect_err("a foreign exclusive lease must refuse graduate_carryover_as");
+    let refusal = err
+        .downcast_ref::<mev::GuardRefusal>()
+        .expect("refusal must be a GuardRefusal, not a generic write error");
+    assert_eq!(refusal.code(), mev::E_QUIESCE_LEASE_HELD);
+    match refusal {
+        mev::GuardRefusal::Quiesce(held) => {
+            assert_eq!(held.lane, "other-lane");
+            assert_eq!(held.agent, "other-agent");
+        }
+        other => panic!("expected Quiesce, got {other:?}"),
+    }
+
+    // Refused means untouched: the carryover is still there.
+    assert_eq!(alpha_carryover_slugs(&root), vec!["leftover-thing"]);
+}
+
+#[test]
+fn graduate_carryover_as_self_exemption_still_applies() {
+    let root = temp_dir("graduate-as-self-exempt");
+    write_full_fixture_with_carryover(&root);
+    let lock_dir = root.join(".fleet-locks");
+    write_exclusive_lease(&lock_dir, "my-lane", "me", "alpha", "fleet");
+
+    let payload = graduation_payload("AL.9.I");
+    let report = mev::graduate_carryover_as(
+        &root,
+        &payload,
+        "alpha:leftover-thing",
+        true,
+        None,
+        Some("me"),
+        Some(&lock_dir),
+        &root,
+    )
+    .expect("the lease holder's own agent must not be refused by its own lease");
+    assert!(
+        !report.is_failure(),
+        "diagnostics: {:#?}",
+        report.diagnostics
+    );
+
+    // The graduation actually ran: the carryover is gone.
+    assert!(alpha_carryover_slugs(&root).is_empty());
+}
+
+#[test]
+fn graduate_carryover_as_contends_on_the_emit_lock_rather_than_overwriting() {
+    let root = temp_dir("graduate-as-lock-contend");
+    write_full_fixture_with_carryover(&root);
+
+    let _held = mev::brain::lock::acquire_lock(&root, Duration::from_secs(1))
+        .expect("this test must be able to take the lock uncontended first");
+
+    let payload = graduation_payload("AL.9.J");
+    let err = mev::graduate_carryover_as(
+        &root,
+        &payload,
+        "alpha:leftover-thing",
+        true,
+        None,
+        None,
+        None,
+        &root,
+    )
+    .expect_err("a held emit lock must contend, not silently overwrite");
+    let lock_err = err
+        .downcast_ref::<mev::brain::lock::LockError>()
+        .expect("the contention must surface as an E_EMIT_LOCK_HELD-shaped LockError");
+    assert!(
+        matches!(lock_err, mev::brain::lock::LockError::Held { .. }),
+        "expected LockError::Held, got {lock_err:?}"
+    );
+
+    // Refused-by-contention means untouched.
+    assert_eq!(alpha_carryover_slugs(&root), vec!["leftover-thing"]);
+}

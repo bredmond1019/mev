@@ -13,6 +13,31 @@ timestamp: "2026-09-04T05:31:55-03:00"
 
 ## [run: 2026-09-12]
 
+### MV.ticket.create-block-graduates-a-carryover closed: `mev create-block --graduate-carryover` turns a gating carryover into a tracked block
+
+- **What:** Drove `MV.ticket.create-block-graduates-a-carryover` to completion via `/sdlc-flow`
+  — 3 of 3 tasks PASS, final verdict PASS. This is the verb `/orchestrate` calls when a chain
+  block is held by a carryover gate, so the chain resolves the finding as a tracked ticket
+  instead of stopping. Task 1 added the pure planner `plan_graduate_carryover` (plus the
+  `GraduationPlan` type and `E_BLOCK_CREATE_UNKNOWN_CARRYOVER`/`E_BLOCK_CREATE_ORIGIN_MISMATCH`
+  diagnostics) to `src/brain/block_create.rs`, composing `plan_create_block` (refactored into a
+  shared `build_create_block_outcome` helper) with edge-transfer, carryover removal, and
+  archive-row construction; 17 new unit tests cover unknown/malformed carryover keys, origin
+  fill/mismatch, per-verdict edge classification, and a differential test against
+  `classify_blocked_by_edge`'s Blocking set. Task 2 added `graduate_carryover`/
+  `graduate_carryover_as` to `src/lib.rs`, applying the plan under one lock: an archive-first
+  ordered write with best-effort revert on failure, surgical `depends_on` record edits via a
+  hand-rolled bracket-matching text scanner, and one chained `emit_state`; guard tests were
+  added to `tests/it/lib_guard_entry_points.rs`. Task 3 wired `--graduate-carryover <REPO:SLUG>`
+  into `mev create-block` on `src/main.rs`, documented it in `docs/cli/state.md`, and added
+  CLI dry-run/`--help` coverage to `tests/it/brain_block_graduate.rs`.
+- **Decisions:** `plan_create_block`'s public signature and behavior are unchanged — all 33
+  pre-existing tests still pass; `GraduationPlan.plan.actions` carries both the merged per-path
+  `state.json` action(s) and the new block's own record action, mirroring `plan_create_block`'s
+  two-action output; the record-edit scanner handles only mev's own fixed serde_json
+  pretty-print shape rather than a general JSON-editing crate.
+- Next: pull the next item from `planning/status.md`'s `next:` queue.
+
 ### MV.ticket.carryover-gating-reaches-derived-surfaces closed: `enforce_blocks` now holds blocks everywhere, not just `--would-block`
 
 - **What:** Drove `MV.ticket.carryover-gating-reaches-derived-surfaces` to completion via

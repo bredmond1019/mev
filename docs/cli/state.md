@@ -666,7 +666,7 @@ any error-severity diagnostic or a write failure.
 
 ---
 
-### `create-block --from <file> [path] [--write] [--scope <slug>]`
+### `create-block --from <file> [path] [--write] [--scope <slug>] [--graduate-carryover <repo:slug>]`
 
 File a **new** block, ticket, or chore: write `planning/blocks/<BlockID>.json` plus its matching
 `tracks[].blocks[]` registration in the target repo's `state.json`. The creation counterpart to
@@ -750,6 +750,55 @@ Exit codes: `0` planned (dry-run) or applied · `1` unreadable/unparseable `--fr
 | `E_EMIT_LOCK_HELD` | another mev write holds the brain-root advisory lock |
 | `E_QUIESCE_LEASE_HELD` | a sibling lane's exclusive lease declares a quiet window; do not retry — see [Quiesce lease on `--write`](#quiesce-lease-on---write---agent---lock-dir) |
 | `E_EMIT_UNKNOWN_SCOPE` | `--scope` names a slug with no matching `[[repos]]` entry in `brain.toml`; the message names every valid slug |
+
+#### `--graduate-carryover <repo:slug>` — turn a gating carryover into this block
+
+`--graduate-carryover <repo>:<slug>` turns an existing gating `carryover[]` entry into the block
+this `--from` payload describes, in one atomic write — the verb `/orchestrate` calls when a chain
+block is held by a carryover gate, so the run resolves the finding as a tracked ticket instead of
+stopping.
+
+**What it does**, once the carryover resolves:
+
+- The block is created exactly as plain `create-block` would, except its `origin` is
+  `{"type":"carryover","slug":<slug>}` — filled in automatically when the payload's `origin` is
+  absent.
+- Every `blocks[]` edge on the carryover is classified with the same `classify_blocked_by_edge`
+  logic `mev carryover --would-block` uses. Each **Blocking** target (status `open`, `in_progress`
+  or `deferred`) gains `{"type":"block","repo":<new repo>,"id":<new id>,"what":"graduated from
+  carryover <repo>:<slug>"}` in its `state.json` `depends_on`, and the same edge (keyed `why`) in
+  its `planning/blocks/<id>.json` record when that record exists. A target already carrying the
+  edge is not given a second one.
+- Edges onto a `closed` or `wontfix` block, an unresolvable key, or a non-`block` edge add nothing
+  and are each reported with their verdict.
+- The carryover entry is removed from `carryover[]` and one row is appended to that repo's
+  `planning/carryover-archive.jsonl`: the entry verbatim, `reason: promoted`,
+  `reconstructed: false`, `evidence: "graduated to block <repo>:<id>"` — the existing archive
+  vocabulary, so `--dispose`'s summary already counts it under `promoted`.
+
+**What is skipped and reported**: any target the classifier does not mark Blocking (closed,
+wontfix, unresolvable, or an edge that is not a `block` edge) — named in the plan output with its
+verdict, with no mutation.
+
+**Refusals** (write nothing, same as any other `create-block` refusal):
+
+| Diagnostic | Cause |
+|---|---|
+| `E_BLOCK_CREATE_UNKNOWN_CARRYOVER` | `<repo>:<slug>` is malformed, or names no loaded `carryover[]` entry |
+| `E_BLOCK_CREATE_ORIGIN_MISMATCH` | the payload's `origin` is present and names a different type or slug than the carryover being graduated |
+
+**Dry-run by default**, exactly like plain `create-block`: without `--write` the full plan prints —
+the block that would be created, every edge that would be added, and every edge that would be
+skipped with its verdict — and not a byte on disk changes. `--write` takes the same advisory lock
+and runs one chained `emit-state --write` after every file is written.
+
+```bash
+# See what graduating "alpha:leftover-thing" into a new ticket would do (dry run)
+mev create-block --from payload.json --graduate-carryover alpha:leftover-thing ~/Dev/agentic-portfolio
+
+# Graduate it for real: create the block, move every Blocking edge, archive the carryover
+mev create-block --from payload.json --graduate-carryover alpha:leftover-thing ~/Dev/agentic-portfolio --write
+```
 
 ---
 
