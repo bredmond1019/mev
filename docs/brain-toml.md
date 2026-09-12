@@ -234,14 +234,19 @@ the spelling against the tables above rather than trusting that a key took effec
 
 ## `[carryover]`
 
-Block-level startability enforcement knob for `carryover[].blocks[]` edges (`MV.16.C`). When on, a
-block named by a carryover entry's `blocks[]` is held out of `next`/the frontier even if its own
-`depends_on` is fully met — see `docs/cli.md`'s `[carryover]` subsection for the full mechanism
-(the three escape hatches, the cap-exceeded reporting, and `--would-block`'s enforcement header).
+Block-level startability enforcement knob for `carryover[].blocks[]` edges (`MV.16.C`,
+`MV.ticket.carryover-gating-reaches-derived-surfaces`). When on, a block named by a carryover
+entry's `blocks[]` is held out of readiness — rendered `carryover:{repo}:{slug}` — on every derived
+surface that reads it: emit-state's focus lanes and generated boards, `validate-brain --state`'s
+focus-drift check, the block-graph export (`emit-block-graph`, and `bastion`'s serve board/
+block-graph handlers), `mev frontier`, `mev lanes`, and `mev blocks` — even if the block's own
+`depends_on` is fully met. See `docs/cli/carryover.md`'s `[carryover]` subsection for the full
+mechanism (the three escape hatches, the cap-exceeded reporting, and `--would-block`'s enforcement
+header).
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `enforce_blocks` | bool | `false` | Whether `carryover[].blocks[]` edges actually hold their target block out of readiness. Off by default; flipping it on for the real corpus is a separate operator decision (HQ.7.C), not this section landing. |
+| `enforce_blocks` | bool | `false` | Whether `carryover[].blocks[]` edges actually hold their target block out of readiness on every derived surface listed above. Off by default; flipping it on for the real corpus and installing the rebuilt binary is a separate operator decision (HQ.7.C), not this section landing. |
 | `max_gates_per_repo` | integer | `10` | Cap on how many carryover-sourced gates apply per target repo per derivation pass; excess candidates are reported (`cap_exceeded`), never silently applied. |
 
 ```toml
