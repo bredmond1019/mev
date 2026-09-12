@@ -3124,12 +3124,13 @@ pub fn frontier_brain(root: &std::path::Path) -> anyhow::Result<brain::frontier:
     ensure_untruncated(&export).map_err(|d| anyhow::anyhow!("{}", d.message))?;
 
     let effective = brain::state::effective_priorities(&graph, &loaded);
+    let gating = brain::carryover::carryover_gating_from_config(&config, &loaded);
     Ok(compute_frontier(
         &lane_positions,
         &graph,
         &loaded,
         &effective,
-        None,
+        Some(&gating),
     ))
 }
 
@@ -3190,7 +3191,8 @@ pub fn lanes_brain(
     ensure_untruncated(&export).map_err(|d| anyhow::anyhow!("{}", d.message))?;
 
     let effective = brain::state::effective_priorities(&graph, &loaded);
-    let frontier = compute_frontier(&lane_positions, &graph, &loaded, &effective, None);
+    let gating = brain::carryover::carryover_gating_from_config(&config, &loaded);
+    let frontier = compute_frontier(&lane_positions, &graph, &loaded, &effective, Some(&gating));
 
     let (live_runs, _live_run_diags) = discover_live_runs(root, &config.repos);
     let all_segments = discover_segments(&lane_positions);
@@ -3323,6 +3325,13 @@ pub fn blocks_brain(
             .unwrap_or_else(|| "open".to_string())
     };
 
+    let gating = brain::carryover::carryover_gating_from_config(&config, &loaded);
+    let is_gated = |key: &str| -> bool {
+        key.split_once(':')
+            .and_then(|(repo, _)| gating.get(repo))
+            .is_some_and(|report| report.gates.contains_key(key))
+    };
+
     let mut blocks: Vec<BlockInfo> = Vec::with_capacity(graph.nodes.len());
     for node in &graph.nodes {
         let status = status_of(&node.key);
@@ -3330,6 +3339,7 @@ pub fn blocks_brain(
         let priority = track_block.and_then(|b| b.priority);
         let fleet_correctness = track_block.and_then(|b| b.fleet_correctness.clone());
         let startable = status != "closed"
+            && !is_gated(&node.key)
             && track_block.is_some_and(|b| {
                 b.depends_on.iter().all(|dep| match dep {
                     BlockedBy::Block(BlockDep { repo, id, .. }) => {
