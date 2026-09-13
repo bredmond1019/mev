@@ -117,6 +117,95 @@ fn write_corpus(root: &Path) {
     );
 }
 
+/// One repo, `alpha`: a terminal `wontfix` head (`AL.1.A`) with no `depends_on`, and a
+/// second block (`AL.1.B`) that depends on it. Regression fixture for the bug where
+/// `blocks_brain`'s `startable` derivation checked `status != "closed"` directly
+/// instead of `brain::state::is_terminal_block_status`, so a `wontfix` block (which
+/// satisfies a `{type:block}` dependency exactly like `closed`) both reported itself
+/// as startable AND never unblocked its dependents.
+fn write_wontfix_corpus(root: &Path) {
+    write_brain_toml(root);
+
+    write_json(
+        root,
+        "planning/state.json",
+        &serde_json::json!({
+            "repo": "hq",
+            "kind": "brain",
+            "updated": "2026-08-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "repos": [],
+            "cross_repo": []
+        }),
+    );
+
+    write_json(
+        root,
+        "repos/alpha/planning/state.json",
+        &serde_json::json!({
+            "repo": "alpha",
+            "kind": "project",
+            "updated": "2026-08-29",
+            "focus": { "now": [], "next": [], "blocked": [] },
+            "repos": [],
+            "cross_repo": [],
+            "tracks": [{
+                "title": "Phase 1",
+                "blocks": [
+                    { "id": "AL.1.A", "title": "Wontfix head", "status": "wontfix", "priority": 1 },
+                    {
+                        "id": "AL.1.B", "title": "Depends on the wontfix head", "status": "open",
+                        "priority": 1,
+                        "depends_on": [{"type": "block", "repo": "alpha", "id": "AL.1.A"}]
+                    }
+                ]
+            }]
+        }),
+    );
+}
+
+#[test]
+fn wontfix_block_is_never_reported_startable() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_wontfix_corpus(root);
+
+    let result = mev::blocks_brain(root, &mev::BlockQuery::default(), false, false, None)
+        .expect("driver runs over a well-formed corpus");
+
+    let al1a = result
+        .blocks
+        .iter()
+        .find(|r| r.key == "alpha:AL.1.A")
+        .expect("expected a row for alpha:AL.1.A");
+    assert!(
+        !al1a.startable,
+        "a wontfix block must never report startable — it is terminal, not runnable; \
+         got {al1a:?}"
+    );
+}
+
+#[test]
+fn dependent_of_a_wontfix_block_is_startable() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_wontfix_corpus(root);
+
+    let result = mev::blocks_brain(root, &mev::BlockQuery::default(), false, false, None)
+        .expect("driver runs over a well-formed corpus");
+
+    let al1b = result
+        .blocks
+        .iter()
+        .find(|r| r.key == "alpha:AL.1.B")
+        .expect("expected a row for alpha:AL.1.B");
+    assert!(
+        al1b.startable,
+        "a block depending on a wontfix predecessor must be startable — wontfix \
+         satisfies a {{type:block}} dependency exactly like closed; got {al1b:?}"
+    );
+}
+
 #[test]
 fn repo_filter_narrows_the_result_set_on_its_own() {
     let dir = tempfile::tempdir().unwrap();

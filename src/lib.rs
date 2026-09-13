@@ -3831,12 +3831,14 @@ pub fn blocks_brain(
         let track_block = track_index.get(node.key.as_str());
         let priority = track_block.and_then(|b| b.priority);
         let fleet_correctness = track_block.and_then(|b| b.fleet_correctness.clone());
-        let startable = status != "closed"
+        let startable = !brain::state::is_terminal_block_status(Some(status.as_str()))
             && !is_gated(&node.key)
             && track_block.is_some_and(|b| {
                 b.depends_on.iter().all(|dep| match dep {
                     BlockedBy::Block(BlockDep { repo, id, .. }) => {
-                        status_of(&format!("{repo}:{id}")) == "closed"
+                        brain::state::is_terminal_block_status(Some(
+                            status_of(&format!("{repo}:{id}")).as_str(),
+                        ))
                     }
                     BlockedBy::Operator(_) | BlockedBy::Approval(_) | BlockedBy::External(_) => {
                         false
