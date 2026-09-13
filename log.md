@@ -8,8 +8,37 @@ project: mev
 status: active
 keywords: [work log, development history, session entries, block completion]
 related: [status]
-timestamp: "2026-09-12T14:55:38-03:00"
+timestamp: "2026-09-13T00:00:00-03:00"
 ---
+
+## [run: 2026-09-13]
+
+### `mev blocks --startable` surfaced `wontfix` blocks; fixed the shared terminal-status check it skipped
+
+- **What:** Operator ran `mev blocks --repo engine-rs --startable` and found `wontfix`-status
+  blocks in the result set. Traced to `blocks_brain`'s startable derivation in `src/lib.rs`
+  (~line 3834), which computed `status != "closed"` directly instead of going through
+  `brain::state::is_terminal_block_status` — the shared helper `ready_order`/`derive_focus`/
+  `check_status_consistency` already use so this class of drift cannot happen. The same gap meant
+  a block whose only `depends_on` target was `wontfix` never read as unblocked, since the
+  dependency-satisfaction check had the identical `== "closed"` comparison. Fixed both call sites
+  to use `is_terminal_block_status`, added two regression tests in `tests/it/blocks_driver.rs`
+  building a real on-disk corpus (`wontfix_block_is_never_reported_startable`,
+  `dependent_of_a_wontfix_block_is_startable`). All harness gates green (fmt, clippy `-D
+  warnings`, full `cargo test` — 1406 unit + 791 integration, release build, `check_consumers.sh`
+  — bastion + engine-rs both pass). Rebuilt and reinstalled `mev` on PATH, then rebuilt+reinstalled
+  `bastion` (the only binary carrying `engine-rs` code onto this machine, since engine-rs ships no
+  standalone binary) so neither installed binary is stale against the fix —
+  `mev conformance --check toolchain-freshness` reports 0 drift for both. Verified live: none of
+  engine-rs's 9 `wontfix` blocks appear in `--startable` post-fix. Filed and closed
+  `MV.ticket.startable-derivation-ignores-wontfix` via `mev create-block` /
+  `mev set-block-status ... closed --write` in the same session, since the defect was found, fixed
+  and verified end to end rather than left open.
+- **Why:** A query verb whose whole purpose is "what can I start next" must never surface work
+  that is explicitly marked won't-fix — that's not a filtering preference, it's the verb
+  disagreeing with the corpus's own terminal-status contract, and it silently stalled any chain
+  behind a `wontfix` block.
+- **Refs:** mev commit `ff9aa07` (code fix), HQ vault commit `e6257ccb1` (ticket filed + closed).
 
 ## [run: 2026-09-12]
 
